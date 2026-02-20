@@ -1,0 +1,472 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Human Service API",
+    "description": "Scrapes and caches a person's online presence (websites, LinkedIn, blog, etc.) to provide writing context for AI content generation.",
+    "version": "0.1.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "Service-to-service API key"
+      }
+    },
+    "schemas": {
+      "CreateProfileResponse": {
+        "type": "object",
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/HumanProfile"
+          }
+        },
+        "required": [
+          "profile"
+        ]
+      },
+      "HumanProfile": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "appId": {
+            "type": "string"
+          },
+          "orgId": {
+            "type": "string",
+            "nullable": true
+          },
+          "userId": {
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "type": "string"
+          },
+          "urls": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scrapedPages": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "$ref": "#/components/schemas/ScrapedPage"
+            }
+          },
+          "maxPages": {
+            "type": "integer"
+          },
+          "writingStyle": {
+            "type": "string",
+            "nullable": true
+          },
+          "bio": {
+            "type": "string",
+            "nullable": true
+          },
+          "topics": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "tone": {
+            "type": "string",
+            "nullable": true
+          },
+          "vocabulary": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastScrapedAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "cacheTtlHours": {
+            "type": "integer"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "appId",
+          "orgId",
+          "userId",
+          "name",
+          "urls",
+          "scrapedPages",
+          "maxPages",
+          "writingStyle",
+          "bio",
+          "topics",
+          "tone",
+          "vocabulary",
+          "lastScrapedAt",
+          "cacheTtlHours",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "ScrapedPage": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "scrapedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "title",
+          "content",
+          "scrapedAt"
+        ]
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "CreateProfileRequest": {
+        "type": "object",
+        "properties": {
+          "appId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "urls": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uri"
+            },
+            "minItems": 1
+          },
+          "maxPages": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "cacheTtlHours": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "appId",
+          "runId",
+          "name",
+          "urls"
+        ]
+      },
+      "GetProfileResponse": {
+        "type": "object",
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/HumanProfile"
+          },
+          "isStale": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "profile"
+        ]
+      },
+      "ScrapeResponse": {
+        "type": "object",
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/HumanProfile"
+          },
+          "pagesScraped": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "profile",
+          "pagesScraped"
+        ]
+      },
+      "ScrapeRequest": {
+        "type": "object",
+        "properties": {
+          "appId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "keySource": {
+            "type": "string",
+            "enum": [
+              "app",
+              "byok"
+            ]
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "maxPages": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "forceRefresh": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "appId",
+          "runId",
+          "keySource"
+        ]
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "service"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/profiles": {
+      "post": {
+        "summary": "Create or update a profile",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProfileRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Profile created or updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateProfileResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/profiles/{orgId}": {
+      "get": {
+        "summary": "Get cached profile",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "orgId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "required": true,
+            "name": "appId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Profile found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetProfileResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Profile not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/profiles/{orgId}/scrape": {
+      "post": {
+        "summary": "Trigger scrape and AI extraction",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "orgId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScrapeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Scrape completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScrapeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Profile not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "responses": {
+          "200": {
+            "description": "Service is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
