@@ -13,7 +13,7 @@ export async function resolveApiKey(
     const endpoint =
       keySource === "app"
         ? `${KEY_SERVICE_URL}/internal/app-keys/${provider}/decrypt?appId=${encodeURIComponent(appId)}`
-        : `${KEY_SERVICE_URL}/internal/keys/${provider}/decrypt?clerkOrgId=${encodeURIComponent(orgId || "")}`;
+        : `${KEY_SERVICE_URL}/internal/keys/${provider}/decrypt?orgId=${encodeURIComponent(orgId || "")}`;
 
     const res = await fetch(endpoint, {
       headers: { "x-api-key": KEY_SERVICE_API_KEY },
