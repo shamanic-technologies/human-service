@@ -161,7 +161,7 @@ router.post("/profiles/:orgId/scrape", requireApiKey, async (req, res) => {
     // Create child run for cost tracking
     const childRunId = await createChildRun({
       appId,
-      clerkOrgId: orgId,
+      orgId,
       parentRunId: runId,
       taskName: "scrape-profile",
     });

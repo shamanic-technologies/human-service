@@ -3,7 +3,7 @@ const RUNS_SERVICE_API_KEY = process.env.RUNS_SERVICE_API_KEY;
 
 interface CreateRunParams {
   appId: string;
-  clerkOrgId: string;
+  orgId: string;
   parentRunId: string;
   taskName: string;
 }
@@ -26,7 +26,7 @@ export async function createChildRun(
         "X-API-Key": RUNS_SERVICE_API_KEY,
       },
       body: JSON.stringify({
-        clerkOrgId: params.clerkOrgId,
+        orgId: params.orgId,
         appId: params.appId,
         serviceName: "human",
         taskName: params.taskName,
