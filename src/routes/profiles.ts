@@ -33,7 +33,7 @@ router.post("/profiles", requireApiKey, async (req, res) => {
       .where(
         and(
           eq(humanProfiles.appId, appId),
-          orgId ? eq(humanProfiles.orgId, orgId) : undefined
+          eq(humanProfiles.orgId, orgId)
         )
       )
       .limit(1);
@@ -46,7 +46,7 @@ router.post("/profiles", requireApiKey, async (req, res) => {
         .set({
           name,
           urls,
-          userId: userId ?? existing[0].userId,
+          userId,
           ...(maxPages !== undefined ? { maxPages } : {}),
           ...(cacheTtlHours !== undefined ? { cacheTtlHours } : {}),
           updatedAt: new Date(),
@@ -81,9 +81,10 @@ router.post("/profiles", requireApiKey, async (req, res) => {
 router.get("/profiles/:orgId", requireApiKey, async (req, res) => {
   const { orgId } = req.params;
   const appId = req.query.appId as string;
+  const userId = req.query.userId as string;
 
-  if (!appId) {
-    res.status(400).json({ error: "appId query parameter is required" });
+  if (!appId || !userId) {
+    res.status(400).json({ error: "appId and userId query parameters are required" });
     return;
   }
 
@@ -126,7 +127,7 @@ router.post("/profiles/:orgId/scrape", requireApiKey, async (req, res) => {
     return;
   }
 
-  const { appId, runId, keySource, maxPages: maxPagesOverride, forceRefresh } =
+  const { appId, userId, runId, keySource, maxPages: maxPagesOverride, forceRefresh } =
     parsed.data;
 
   try {
@@ -168,34 +169,31 @@ router.post("/profiles/:orgId/scrape", requireApiKey, async (req, res) => {
 
     const effectiveMaxPages = maxPagesOverride ?? profile.maxPages;
 
-    // Resolve API keys
+    // Resolve API keys via key-service
     const firecrawlKey = await resolveApiKey(
       "firecrawl",
       keySource,
       appId,
-      parsed.data.orgId
+      orgId,
+      userId
     );
     const anthropicKey = await resolveApiKey(
       "anthropic",
       keySource,
       appId,
-      parsed.data.orgId
+      orgId,
+      userId
     );
-
-    // Fallback to env vars
-    const effectiveFirecrawlKey = firecrawlKey || process.env.FIRECRAWL_API_KEY;
-    const effectiveAnthropicKey =
-      anthropicKey || process.env.ANTHROPIC_API_KEY || "";
 
     // Scrape pages
     const scrapeResult = await scrapeUrls({
       urls: profile.urls,
       maxPages: effectiveMaxPages,
-      firecrawlApiKey: effectiveFirecrawlKey || undefined,
+      firecrawlApiKey: firecrawlKey || undefined,
     });
 
     // Track scraping costs
-    if (childRunId && effectiveFirecrawlKey && scrapeResult.pages.length > 0) {
+    if (childRunId && firecrawlKey && scrapeResult.pages.length > 0) {
       await addCosts(childRunId, [
         {
           costName: "firecrawl-scrape",
@@ -213,11 +211,11 @@ router.post("/profiles/:orgId/scrape", requireApiKey, async (req, res) => {
       vocabulary: profile.vocabulary,
     };
 
-    if (effectiveAnthropicKey && scrapeResult.pages.length > 0) {
+    if (anthropicKey && scrapeResult.pages.length > 0) {
       const extractionResult = await extractProfile(
         profile.name,
         scrapeResult.pages,
-        effectiveAnthropicKey
+        anthropicKey
       );
       extracted = {
         writingStyle: extractionResult.profile.writingStyle,

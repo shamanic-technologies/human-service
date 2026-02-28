@@ -166,15 +166,24 @@
             "type": "string",
             "minLength": 1
           },
-          "runId": {
+          "orgId": {
             "type": "string",
             "minLength": 1
           },
-          "orgId": {
-            "type": "string"
-          },
           "userId": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
+          },
+          "keySource": {
+            "type": "string",
+            "enum": [
+              "app",
+              "byok"
+            ]
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
           },
           "name": {
             "type": "string",
@@ -200,6 +209,9 @@
         },
         "required": [
           "appId",
+          "orgId",
+          "userId",
+          "keySource",
           "runId",
           "name",
           "urls"
@@ -241,7 +253,11 @@
             "type": "string",
             "minLength": 1
           },
-          "runId": {
+          "orgId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "userId": {
             "type": "string",
             "minLength": 1
           },
@@ -252,8 +268,9 @@
               "byok"
             ]
           },
-          "orgId": {
-            "type": "string"
+          "runId": {
+            "type": "string",
+            "minLength": 1
           },
           "maxPages": {
             "type": "integer",
@@ -266,8 +283,10 @@
         },
         "required": [
           "appId",
-          "runId",
-          "keySource"
+          "orgId",
+          "userId",
+          "keySource",
+          "runId"
         ]
       },
       "HealthResponse": {
@@ -357,6 +376,15 @@
             },
             "required": true,
             "name": "appId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "required": true,
+            "name": "userId",
             "in": "query"
           }
         ],
