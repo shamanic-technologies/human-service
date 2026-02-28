@@ -58,9 +58,10 @@ export const HumanProfileSchema = z
 export const CreateProfileRequestSchema = z
   .object({
     appId: z.string().min(1),
+    orgId: z.string().min(1),
+    userId: z.string().min(1),
+    keySource: z.enum(["app", "byok"]),
     runId: z.string().min(1),
-    orgId: z.string().optional(),
-    userId: z.string().optional(),
     name: z.string().min(1),
     urls: z.array(z.string().url()).min(1),
     maxPages: z.number().int().min(1).max(10).optional(),
@@ -117,7 +118,10 @@ registry.registerPath({
   security: [{ apiKey: [] }],
   request: {
     params: z.object({ orgId: z.string() }),
-    query: z.object({ appId: z.string().min(1) }),
+    query: z.object({
+      appId: z.string().min(1),
+      userId: z.string().min(1),
+    }),
   },
   responses: {
     200: {
@@ -139,9 +143,10 @@ registry.registerPath({
 export const ScrapeRequestSchema = z
   .object({
     appId: z.string().min(1),
-    runId: z.string().min(1),
+    orgId: z.string().min(1),
+    userId: z.string().min(1),
     keySource: z.enum(["app", "byok"]),
-    orgId: z.string().optional(),
+    runId: z.string().min(1),
     maxPages: z.number().int().min(1).max(10).optional(),
     forceRefresh: z.boolean().optional(),
   })

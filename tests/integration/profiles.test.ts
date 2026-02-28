@@ -31,8 +31,10 @@ describe("Profile endpoints", () => {
         .set(headers)
         .send({
           appId: "test-app",
-          runId: "run-1",
           orgId: "org-1",
+          userId: "user-1",
+          keySource: "app",
+          runId: "run-1",
           name: "Kevin Lourd",
           urls: ["https://kevinlourd.com"],
         });
@@ -42,6 +44,7 @@ describe("Profile endpoints", () => {
       expect(res.body.profile.urls).toEqual(["https://kevinlourd.com"]);
       expect(res.body.profile.appId).toBe("test-app");
       expect(res.body.profile.orgId).toBe("org-1");
+      expect(res.body.profile.userId).toBe("user-1");
       expect(res.body.profile.maxPages).toBe(3);
     });
 
@@ -58,8 +61,10 @@ describe("Profile endpoints", () => {
         .set(headers)
         .send({
           appId: "test-app",
-          runId: "run-1",
           orgId: "org-1",
+          userId: "user-1",
+          keySource: "app",
+          runId: "run-1",
           name: "New Name",
           urls: ["https://new.com"],
           maxPages: 5,
@@ -77,7 +82,26 @@ describe("Profile endpoints", () => {
         .set(headers)
         .send({
           appId: "test-app",
+          orgId: "org-1",
+          userId: "user-1",
+          keySource: "app",
           runId: "run-1",
+          urls: ["https://example.com"],
+        });
+
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects missing orgId", async () => {
+      const res = await request(app)
+        .post("/profiles")
+        .set(headers)
+        .send({
+          appId: "test-app",
+          userId: "user-1",
+          keySource: "app",
+          runId: "run-1",
+          name: "Test",
           urls: ["https://example.com"],
         });
 
@@ -89,6 +113,9 @@ describe("Profile endpoints", () => {
         .post("/profiles")
         .send({
           appId: "test-app",
+          orgId: "org-1",
+          userId: "user-1",
+          keySource: "app",
           runId: "run-1",
           name: "Test",
           urls: ["https://example.com"],
@@ -112,7 +139,7 @@ describe("Profile endpoints", () => {
       const res = await request(app)
         .get("/profiles/org-1")
         .set(headers)
-        .query({ appId: "test-app" });
+        .query({ appId: "test-app", userId: "user-1" });
 
       expect(res.status).toBe(200);
       expect(res.body.profile.name).toBe("Kevin");
@@ -136,7 +163,7 @@ describe("Profile endpoints", () => {
       const res = await request(app)
         .get("/profiles/org-1")
         .set(headers)
-        .query({ appId: "test-app" });
+        .query({ appId: "test-app", userId: "user-1" });
 
       expect(res.status).toBe(200);
       expect(res.body.isStale).toBe(true);
@@ -146,12 +173,12 @@ describe("Profile endpoints", () => {
       const res = await request(app)
         .get("/profiles/nonexistent")
         .set(headers)
-        .query({ appId: "test-app" });
+        .query({ appId: "test-app", userId: "user-1" });
 
       expect(res.status).toBe(404);
     });
 
-    it("requires appId query param", async () => {
+    it("requires appId and userId query params", async () => {
       const res = await request(app)
         .get("/profiles/org-1")
         .set(headers);
@@ -185,8 +212,10 @@ describe("Profile endpoints", () => {
         .set(headers)
         .send({
           appId: "test-app",
-          runId: "run-1",
+          orgId: "org-1",
+          userId: "user-1",
           keySource: "app",
+          runId: "run-1",
         });
 
       expect(res.status).toBe(200);
@@ -200,8 +229,10 @@ describe("Profile endpoints", () => {
         .set(headers)
         .send({
           appId: "test-app",
-          runId: "run-1",
+          orgId: "nonexistent",
+          userId: "user-1",
           keySource: "app",
+          runId: "run-1",
         });
 
       expect(res.status).toBe(404);
@@ -220,8 +251,10 @@ describe("Profile endpoints", () => {
         .set(headers)
         .send({
           appId: "test-app",
-          runId: "run-1",
+          orgId: "org-1",
+          userId: "user-1",
           keySource: "invalid",
+          runId: "run-1",
         });
 
       expect(res.status).toBe(400);

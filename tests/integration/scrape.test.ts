@@ -28,9 +28,11 @@ vi.mock("../../src/services/runs.js", () => ({
 
 import { scrapeUrls } from "../../src/services/scraper.js";
 import { extractProfile } from "../../src/services/extractor.js";
+import { resolveApiKey } from "../../src/services/keys.js";
 
 const mockScrapeUrls = vi.mocked(scrapeUrls);
 const mockExtractProfile = vi.mocked(extractProfile);
+const mockResolveApiKey = vi.mocked(resolveApiKey);
 
 describe("Scrape integration", () => {
   const app = createTestApp();
@@ -86,19 +88,22 @@ describe("Scrape integration", () => {
       outputTokens: 300,
     });
 
-    // Set ANTHROPIC_API_KEY for extraction
-    process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
+    // Mock key-service returning an anthropic key
+    mockResolveApiKey.mockImplementation(async (provider) => {
+      if (provider === "anthropic") return "test-anthropic-key";
+      return null;
+    });
 
     const res = await request(app)
       .post("/profiles/org-1/scrape")
       .set(headers)
       .send({
         appId: "test-app",
-        runId: "run-1",
+        orgId: "org-1",
+        userId: "user-1",
         keySource: "app",
+        runId: "run-1",
       });
-
-    process.env.ANTHROPIC_API_KEY = "";
 
     expect(res.status).toBe(200);
     expect(res.body.pagesScraped).toBe(2);
@@ -146,8 +151,10 @@ describe("Scrape integration", () => {
       .set(headers)
       .send({
         appId: "test-app",
-        runId: "run-1",
+        orgId: "org-1",
+        userId: "user-1",
         keySource: "app",
+        runId: "run-1",
         forceRefresh: true,
       });
 
@@ -176,8 +183,10 @@ describe("Scrape integration", () => {
       .set(headers)
       .send({
         appId: "test-app",
-        runId: "run-1",
+        orgId: "org-1",
+        userId: "user-1",
         keySource: "app",
+        runId: "run-1",
         maxPages: 5,
       });
 
@@ -187,7 +196,7 @@ describe("Scrape integration", () => {
     );
   });
 
-  it("never scrapes when profile was never scraped before", async () => {
+  it("scrapes when profile was never scraped before", async () => {
     await insertProfile({
       appId: "test-app",
       orgId: "org-1",
@@ -203,8 +212,10 @@ describe("Scrape integration", () => {
       .set(headers)
       .send({
         appId: "test-app",
-        runId: "run-1",
+        orgId: "org-1",
+        userId: "user-1",
         keySource: "app",
+        runId: "run-1",
       });
 
     expect(res.status).toBe(200);
