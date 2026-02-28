@@ -2,7 +2,8 @@ import express from "express";
 import cors from "cors";
 import healthRoutes from "../../src/routes/health.js";
 import openapiRoutes from "../../src/routes/openapi.js";
-import profileRoutes from "../../src/routes/profiles.js";
+import humanRoutes from "../../src/routes/humans.js";
+import methodologyRoutes from "../../src/routes/methodology.js";
 
 export function createTestApp() {
   const app = express();
@@ -11,7 +12,8 @@ export function createTestApp() {
 
   app.use(healthRoutes);
   app.use(openapiRoutes);
-  app.use(profileRoutes);
+  app.use(humanRoutes);
+  app.use(methodologyRoutes);
 
   app.use((_req: express.Request, res: express.Response) => {
     res.status(404).json({ error: "Not found" });

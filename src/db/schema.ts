@@ -6,35 +6,60 @@ import {
   integer,
   jsonb,
   index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
-export const humanProfiles = pgTable(
-  "human_profiles",
+// --- Multi-tenant registry (mirrors brand-service) ---
+
+export const orgs = pgTable(
+  "orgs",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-
-    // Ownership
     appId: text("app_id").notNull(),
-    orgId: text("org_id"),
-    userId: text("user_id"),
+    orgId: text("org_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+  },
+  (table) => [uniqueIndex("idx_orgs_app_org_id").on(table.appId, table.orgId)]
+);
+
+export const users = pgTable(
+  "users",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgInternalId: uuid("org_internal_id")
+      .references(() => orgs.id, { onDelete: "cascade" })
+      .notNull(),
+    userId: text("user_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_users_org_user").on(table.orgInternalId, table.userId),
+  ]
+);
+
+// --- Primary entity ---
+
+export const humans = pgTable(
+  "humans",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgInternalId: uuid("org_internal_id")
+      .references(() => orgs.id, { onDelete: "cascade" })
+      .notNull(),
 
     // Identity
     name: text("name").notNull(),
-    urls: text("urls").array().notNull(),
-
-    // Scraped data (cached)
-    scrapedPages: jsonb("scraped_pages").$type<ScrapedPage[]>(),
-    maxPages: integer("max_pages").notNull().default(3),
-
-    // AI-extracted profile
-    writingStyle: text("writing_style"),
+    slug: text("slug").notNull(),
     bio: text("bio"),
-    topics: text("topics").array(),
-    tone: text("tone"),
-    vocabulary: text("vocabulary"),
+    expertise: text("expertise").array(),
+    knownFor: text("known_for"),
+    imageUrl: text("image_url"),
 
-    lastScrapedAt: timestamp("last_scraped_at", { withTimezone: true }),
-    cacheTtlHours: integer("cache_ttl_hours").notNull().default(24),
+    // Scraping input
+    urls: text("urls").array().notNull(),
+    maxPages: integer("max_pages").notNull().default(10),
 
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -43,15 +68,61 @@ export const humanProfiles = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (table) => [index("idx_profiles_app_org").on(table.appId, table.orgId)]
+  (table) => [
+    uniqueIndex("idx_humans_org_slug").on(table.orgInternalId, table.slug),
+    index("idx_humans_org").on(table.orgInternalId),
+  ]
 );
 
-export interface ScrapedPage {
-  url: string;
-  title: string;
-  content: string;
-  scrapedAt: string;
+// --- Rich AI-extracted methodology (1:1 with humans, cached with TTL) ---
+
+export interface Framework {
+  name: string;
+  description: string;
+  applicationContext: string;
 }
 
-export type HumanProfile = typeof humanProfiles.$inferSelect;
-export type NewHumanProfile = typeof humanProfiles.$inferInsert;
+export interface ToneProfile {
+  register: string;
+  pace: string;
+  vocabulary: string;
+  perspective: string;
+  examples: string[];
+}
+
+export interface PersuasionStyle {
+  primary: string;
+  techniques: string[];
+  callToAction: string;
+}
+
+export const humanMethodologies = pgTable(
+  "human_methodologies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    humanId: uuid("human_id")
+      .references(() => humans.id, { onDelete: "cascade" })
+      .notNull()
+      .unique(),
+
+    frameworks: jsonb("frameworks").$type<Framework[]>(),
+    strategicPatterns: text("strategic_patterns").array(),
+    toneOfVoice: jsonb("tone_of_voice").$type<ToneProfile>(),
+    persuasionStyle: jsonb("persuasion_style").$type<PersuasionStyle>(),
+    contentSignatures: text("content_signatures").array(),
+    avoids: text("avoids").array(),
+
+    extractionModel: text("extraction_model"),
+    sourceUrls: text("source_urls").array(),
+    extractedAt: timestamp("extracted_at", { withTimezone: true }).defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("idx_methodologies_human").on(table.humanId)]
+);

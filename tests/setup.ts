@@ -6,3 +6,5 @@ process.env.RUNS_SERVICE_URL = "";
 process.env.RUNS_SERVICE_API_KEY = "";
 process.env.KEY_SERVICE_URL = "";
 process.env.KEY_SERVICE_API_KEY = "";
+process.env.SCRAPING_SERVICE_URL = "";
+process.env.SCRAPING_SERVICE_API_KEY = "";

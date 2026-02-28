@@ -4,7 +4,8 @@ const RUNS_SERVICE_API_KEY = process.env.RUNS_SERVICE_API_KEY;
 interface CreateRunParams {
   appId: string;
   orgId: string;
-  parentRunId: string;
+  userId?: string;
+  parentRunId?: string;
   taskName: string;
 }
 
@@ -13,7 +14,7 @@ interface CostItem {
   quantity: number;
 }
 
-export async function createChildRun(
+export async function createRun(
   params: CreateRunParams
 ): Promise<string | null> {
   if (!RUNS_SERVICE_URL || !RUNS_SERVICE_API_KEY) return null;
@@ -27,8 +28,9 @@ export async function createChildRun(
       },
       body: JSON.stringify({
         orgId: params.orgId,
+        userId: params.userId,
         appId: params.appId,
-        serviceName: "human",
+        serviceName: "human-service",
         taskName: params.taskName,
         parentRunId: params.parentRunId,
       }),
