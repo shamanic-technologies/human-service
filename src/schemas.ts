@@ -22,76 +22,111 @@ export const ErrorSchema = z
   })
   .openapi("Error");
 
-export const ScrapedPageSchema = z
-  .object({
-    url: z.string(),
-    title: z.string(),
-    content: z.string(),
-    scrapedAt: z.string(),
-  })
-  .openapi("ScrapedPage");
+// --- Sub-types (methodology) ---
 
-export const HumanProfileSchema = z
+export const FrameworkSchema = z
+  .object({
+    name: z.string(),
+    description: z.string(),
+    applicationContext: z.string(),
+  })
+  .openapi("Framework");
+
+export const ToneProfileSchema = z
+  .object({
+    register: z.string(),
+    pace: z.string(),
+    vocabulary: z.string(),
+    perspective: z.string(),
+    examples: z.array(z.string()),
+  })
+  .openapi("ToneProfile");
+
+export const PersuasionStyleSchema = z
+  .object({
+    primary: z.string(),
+    techniques: z.array(z.string()),
+    callToAction: z.string(),
+  })
+  .openapi("PersuasionStyle");
+
+// --- Human ---
+
+export const HumanSchema = z
   .object({
     id: z.string().uuid(),
-    appId: z.string(),
-    orgId: z.string().nullable(),
-    userId: z.string().nullable(),
     name: z.string(),
-    urls: z.array(z.string()),
-    scrapedPages: z.array(ScrapedPageSchema).nullable(),
-    maxPages: z.number().int(),
-    writingStyle: z.string().nullable(),
+    slug: z.string(),
     bio: z.string().nullable(),
-    topics: z.array(z.string()).nullable(),
-    tone: z.string().nullable(),
-    vocabulary: z.string().nullable(),
-    lastScrapedAt: z.string().nullable(),
-    cacheTtlHours: z.number().int(),
+    expertise: z.array(z.string()).nullable(),
+    knownFor: z.string().nullable(),
+    imageUrl: z.string().nullable(),
     createdAt: z.string(),
     updatedAt: z.string(),
   })
-  .openapi("HumanProfile");
+  .openapi("Human");
 
-// --- POST /profiles ---
+// --- Methodology ---
 
-export const CreateProfileRequestSchema = z
+export const MethodologySchema = z
+  .object({
+    humanId: z.string().uuid(),
+    frameworks: z.array(FrameworkSchema).nullable(),
+    strategicPatterns: z.array(z.string()).nullable(),
+    toneOfVoice: ToneProfileSchema.nullable(),
+    persuasionStyle: PersuasionStyleSchema.nullable(),
+    contentSignatures: z.array(z.string()).nullable(),
+    avoids: z.array(z.string()).nullable(),
+    extractionModel: z.string().nullable(),
+    extractedAt: z.string().nullable(),
+  })
+  .openapi("Methodology");
+
+// --- POST /humans (upsert) ---
+
+export const UpsertHumanRequestSchema = z
   .object({
     appId: z.string().min(1),
     orgId: z.string().min(1),
     userId: z.string().min(1),
-    keySource: z.enum(["app", "byok"]),
-    runId: z.string().min(1),
     name: z.string().min(1),
+    slug: z
+      .string()
+      .min(1)
+      .regex(/^[a-z0-9-]+$/, "slug must be lowercase alphanumeric with hyphens"),
     urls: z.array(z.string().url()).min(1),
-    maxPages: z.number().int().min(1).max(10).optional(),
-    cacheTtlHours: z.number().int().min(1).optional(),
+    bio: z.string().optional(),
+    expertise: z.array(z.string()).optional(),
+    knownFor: z.string().optional(),
+    imageUrl: z.string().url().optional(),
+    maxPages: z.number().int().min(1).max(20).optional(),
   })
-  .openapi("CreateProfileRequest");
+  .openapi("UpsertHumanRequest");
 
-export const CreateProfileResponseSchema = z
+export const UpsertHumanResponseSchema = z
   .object({
-    profile: HumanProfileSchema,
+    human: HumanSchema,
+    created: z.boolean(),
   })
-  .openapi("CreateProfileResponse");
+  .openapi("UpsertHumanResponse");
 
 registry.registerPath({
   method: "post",
-  path: "/profiles",
-  summary: "Create or update a profile",
+  path: "/humans",
+  summary: "Create or update a human expert",
   security: [{ apiKey: [] }],
   request: {
     body: {
       content: {
-        "application/json": { schema: CreateProfileRequestSchema },
+        "application/json": { schema: UpsertHumanRequestSchema },
       },
     },
   },
   responses: {
     200: {
-      description: "Profile created or updated",
+      description: "Human created or updated",
       content: {
-        "application/json": { schema: CreateProfileResponseSchema },
+        "application/json": { schema: UpsertHumanResponseSchema },
       },
     },
     400: {
@@ -102,81 +137,138 @@ registry.registerPath({
   },
 });
 
-// --- GET /profiles/:orgId ---
+// --- GET /humans ---
 
-export const GetProfileResponseSchema = z
+export const ListHumansResponseSchema = z
   .object({
-    profile: HumanProfileSchema,
-    isStale: z.boolean().optional(),
+    humans: z.array(HumanSchema),
   })
-  .openapi("GetProfileResponse");
+  .openapi("ListHumansResponse");
 
 registry.registerPath({
   method: "get",
-  path: "/profiles/{orgId}",
-  summary: "Get cached profile",
+  path: "/humans",
+  summary: "List humans for an org",
   security: [{ apiKey: [] }],
   request: {
-    params: z.object({ orgId: z.string() }),
     query: z.object({
       appId: z.string().min(1),
-      userId: z.string().min(1),
+      orgId: z.string().min(1),
     }),
   },
   responses: {
     200: {
-      description: "Profile found",
+      description: "Humans found",
       content: {
-        "application/json": { schema: GetProfileResponseSchema },
+        "application/json": { schema: ListHumansResponseSchema },
+      },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+// --- GET /humans/:id ---
+
+export const GetHumanResponseSchema = z
+  .object({
+    human: HumanSchema,
+  })
+  .openapi("GetHumanResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/humans/{id}",
+  summary: "Get human by ID",
+  security: [{ apiKey: [] }],
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+  },
+  responses: {
+    200: {
+      description: "Human found",
+      content: {
+        "application/json": { schema: GetHumanResponseSchema },
       },
     },
     404: {
-      description: "Profile not found",
+      description: "Human not found",
       content: { "application/json": { schema: ErrorSchema } },
     },
     401: { description: "Unauthorized" },
   },
 });
 
-// --- POST /profiles/:orgId/scrape ---
+// --- GET /humans/:id/methodology ---
 
-export const ScrapeRequestSchema = z
+export const GetMethodologyResponseSchema = z
+  .object({
+    methodology: MethodologySchema,
+    isExpired: z.boolean().optional(),
+  })
+  .openapi("GetMethodologyResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/humans/{id}/methodology",
+  summary: "Get cached methodology for a human",
+  security: [{ apiKey: [] }],
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+  },
+  responses: {
+    200: {
+      description: "Methodology found",
+      content: {
+        "application/json": { schema: GetMethodologyResponseSchema },
+      },
+    },
+    404: {
+      description: "Methodology not found",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+// --- POST /humans/:id/extract ---
+
+export const ExtractRequestSchema = z
   .object({
     appId: z.string().min(1),
     orgId: z.string().min(1),
     userId: z.string().min(1),
-    keySource: z.enum(["app", "byok"]),
-    runId: z.string().min(1),
-    maxPages: z.number().int().min(1).max(10).optional(),
+    keySource: z.enum(["app", "byok", "platform"]),
+    runId: z.string().optional(),
     forceRefresh: z.boolean().optional(),
   })
-  .openapi("ScrapeRequest");
+  .openapi("ExtractRequest");
 
-export const ScrapeResponseSchema = z
+export const ExtractResponseSchema = z
   .object({
-    profile: HumanProfileSchema,
+    human: HumanSchema,
+    methodology: MethodologySchema,
     pagesScraped: z.number().int(),
   })
-  .openapi("ScrapeResponse");
+  .openapi("ExtractResponse");
 
 registry.registerPath({
   method: "post",
-  path: "/profiles/{orgId}/scrape",
-  summary: "Trigger scrape and AI extraction",
+  path: "/humans/{id}/extract",
+  summary: "Trigger scrape and AI methodology extraction",
   security: [{ apiKey: [] }],
   request: {
-    params: z.object({ orgId: z.string() }),
+    params: z.object({ id: z.string().uuid() }),
     body: {
       content: {
-        "application/json": { schema: ScrapeRequestSchema },
+        "application/json": { schema: ExtractRequestSchema },
       },
     },
   },
   responses: {
     200: {
-      description: "Scrape completed",
+      description: "Extraction completed",
       content: {
-        "application/json": { schema: ScrapeResponseSchema },
+        "application/json": { schema: ExtractResponseSchema },
       },
     },
     400: {
@@ -184,7 +276,7 @@ registry.registerPath({
       content: { "application/json": { schema: ErrorSchema } },
     },
     404: {
-      description: "Profile not found",
+      description: "Human not found",
       content: { "application/json": { schema: ErrorSchema } },
     },
     401: { description: "Unauthorized" },

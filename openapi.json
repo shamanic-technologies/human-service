@@ -20,83 +20,52 @@
       }
     },
     "schemas": {
-      "CreateProfileResponse": {
+      "UpsertHumanResponse": {
         "type": "object",
         "properties": {
-          "profile": {
-            "$ref": "#/components/schemas/HumanProfile"
+          "human": {
+            "$ref": "#/components/schemas/Human"
+          },
+          "created": {
+            "type": "boolean"
           }
         },
         "required": [
-          "profile"
+          "human",
+          "created"
         ]
       },
-      "HumanProfile": {
+      "Human": {
         "type": "object",
         "properties": {
           "id": {
             "type": "string",
             "format": "uuid"
           },
-          "appId": {
-            "type": "string"
-          },
-          "orgId": {
-            "type": "string",
-            "nullable": true
-          },
-          "userId": {
-            "type": "string",
-            "nullable": true
-          },
           "name": {
             "type": "string"
           },
-          "urls": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "scrapedPages": {
-            "type": "array",
-            "nullable": true,
-            "items": {
-              "$ref": "#/components/schemas/ScrapedPage"
-            }
-          },
-          "maxPages": {
-            "type": "integer"
-          },
-          "writingStyle": {
-            "type": "string",
-            "nullable": true
+          "slug": {
+            "type": "string"
           },
           "bio": {
             "type": "string",
             "nullable": true
           },
-          "topics": {
+          "expertise": {
             "type": "array",
             "nullable": true,
             "items": {
               "type": "string"
             }
           },
-          "tone": {
+          "knownFor": {
             "type": "string",
             "nullable": true
           },
-          "vocabulary": {
+          "imageUrl": {
             "type": "string",
             "nullable": true
-          },
-          "lastScrapedAt": {
-            "type": "string",
-            "nullable": true
-          },
-          "cacheTtlHours": {
-            "type": "integer"
           },
           "createdAt": {
             "type": "string"
@@ -107,45 +76,14 @@
         },
         "required": [
           "id",
-          "appId",
-          "orgId",
-          "userId",
           "name",
-          "urls",
-          "scrapedPages",
-          "maxPages",
-          "writingStyle",
+          "slug",
           "bio",
-          "topics",
-          "tone",
-          "vocabulary",
-          "lastScrapedAt",
-          "cacheTtlHours",
+          "expertise",
+          "knownFor",
+          "imageUrl",
           "createdAt",
           "updatedAt"
-        ]
-      },
-      "ScrapedPage": {
-        "type": "object",
-        "properties": {
-          "url": {
-            "type": "string"
-          },
-          "title": {
-            "type": "string"
-          },
-          "content": {
-            "type": "string"
-          },
-          "scrapedAt": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "url",
-          "title",
-          "content",
-          "scrapedAt"
         ]
       },
       "Error": {
@@ -159,7 +97,7 @@
           "error"
         ]
       },
-      "CreateProfileRequest": {
+      "UpsertHumanRequest": {
         "type": "object",
         "properties": {
           "appId": {
@@ -174,20 +112,14 @@
             "type": "string",
             "minLength": 1
           },
-          "keySource": {
-            "type": "string",
-            "enum": [
-              "app",
-              "byok"
-            ]
-          },
-          "runId": {
-            "type": "string",
-            "minLength": 1
-          },
           "name": {
             "type": "string",
             "minLength": 1
+          },
+          "slug": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[a-z0-9-]+$"
           },
           "urls": {
             "type": "array",
@@ -197,56 +129,231 @@
             },
             "minItems": 1
           },
+          "bio": {
+            "type": "string"
+          },
+          "expertise": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "knownFor": {
+            "type": "string"
+          },
+          "imageUrl": {
+            "type": "string",
+            "format": "uri"
+          },
           "maxPages": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 10
-          },
-          "cacheTtlHours": {
-            "type": "integer",
-            "minimum": 1
+            "maximum": 20
           }
         },
         "required": [
           "appId",
           "orgId",
           "userId",
-          "keySource",
-          "runId",
           "name",
+          "slug",
           "urls"
         ]
       },
-      "GetProfileResponse": {
+      "ListHumansResponse": {
         "type": "object",
         "properties": {
-          "profile": {
-            "$ref": "#/components/schemas/HumanProfile"
+          "humans": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Human"
+            }
+          }
+        },
+        "required": [
+          "humans"
+        ]
+      },
+      "GetHumanResponse": {
+        "type": "object",
+        "properties": {
+          "human": {
+            "$ref": "#/components/schemas/Human"
+          }
+        },
+        "required": [
+          "human"
+        ]
+      },
+      "GetMethodologyResponse": {
+        "type": "object",
+        "properties": {
+          "methodology": {
+            "$ref": "#/components/schemas/Methodology"
           },
-          "isStale": {
+          "isExpired": {
             "type": "boolean"
           }
         },
         "required": [
-          "profile"
+          "methodology"
         ]
       },
-      "ScrapeResponse": {
+      "Methodology": {
         "type": "object",
         "properties": {
-          "profile": {
-            "$ref": "#/components/schemas/HumanProfile"
+          "humanId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "frameworks": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "$ref": "#/components/schemas/Framework"
+            }
+          },
+          "strategicPatterns": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "toneOfVoice": {
+            "$ref": "#/components/schemas/ToneProfile"
+          },
+          "persuasionStyle": {
+            "$ref": "#/components/schemas/PersuasionStyle"
+          },
+          "contentSignatures": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "avoids": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "extractionModel": {
+            "type": "string",
+            "nullable": true
+          },
+          "extractedAt": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "humanId",
+          "frameworks",
+          "strategicPatterns",
+          "toneOfVoice",
+          "persuasionStyle",
+          "contentSignatures",
+          "avoids",
+          "extractionModel",
+          "extractedAt"
+        ]
+      },
+      "Framework": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "applicationContext": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "applicationContext"
+        ]
+      },
+      "ToneProfile": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "register": {
+            "type": "string"
+          },
+          "pace": {
+            "type": "string"
+          },
+          "vocabulary": {
+            "type": "string"
+          },
+          "perspective": {
+            "type": "string"
+          },
+          "examples": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "register",
+          "pace",
+          "vocabulary",
+          "perspective",
+          "examples"
+        ]
+      },
+      "PersuasionStyle": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "primary": {
+            "type": "string"
+          },
+          "techniques": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "callToAction": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "primary",
+          "techniques",
+          "callToAction"
+        ]
+      },
+      "ExtractResponse": {
+        "type": "object",
+        "properties": {
+          "human": {
+            "$ref": "#/components/schemas/Human"
+          },
+          "methodology": {
+            "$ref": "#/components/schemas/Methodology"
           },
           "pagesScraped": {
             "type": "integer"
           }
         },
         "required": [
-          "profile",
+          "human",
+          "methodology",
           "pagesScraped"
         ]
       },
-      "ScrapeRequest": {
+      "ExtractRequest": {
         "type": "object",
         "properties": {
           "appId": {
@@ -265,17 +372,12 @@
             "type": "string",
             "enum": [
               "app",
-              "byok"
+              "byok",
+              "platform"
             ]
           },
           "runId": {
-            "type": "string",
-            "minLength": 1
-          },
-          "maxPages": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 10
+            "type": "string"
           },
           "forceRefresh": {
             "type": "boolean"
@@ -285,8 +387,7 @@
           "appId",
           "orgId",
           "userId",
-          "keySource",
-          "runId"
+          "keySource"
         ]
       },
       "HealthResponse": {
@@ -308,9 +409,9 @@
     "parameters": {}
   },
   "paths": {
-    "/profiles": {
+    "/humans": {
       "post": {
-        "summary": "Create or update a profile",
+        "summary": "Create or update a human expert",
         "security": [
           {
             "apiKey": []
@@ -320,18 +421,18 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateProfileRequest"
+                "$ref": "#/components/schemas/UpsertHumanRequest"
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Profile created or updated",
+            "description": "Human created or updated",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CreateProfileResponse"
+                  "$ref": "#/components/schemas/UpsertHumanResponse"
                 }
               }
             }
@@ -350,25 +451,15 @@
             "description": "Unauthorized"
           }
         }
-      }
-    },
-    "/profiles/{orgId}": {
+      },
       "get": {
-        "summary": "Get cached profile",
+        "summary": "List humans for an org",
         "security": [
           {
             "apiKey": []
           }
         ],
         "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "required": true,
-            "name": "orgId",
-            "in": "path"
-          },
           {
             "schema": {
               "type": "string",
@@ -384,17 +475,53 @@
               "minLength": 1
             },
             "required": true,
-            "name": "userId",
+            "name": "orgId",
             "in": "query"
           }
         ],
         "responses": {
           "200": {
-            "description": "Profile found",
+            "description": "Humans found",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/GetProfileResponse"
+                  "$ref": "#/components/schemas/ListHumansResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/humans/{id}": {
+      "get": {
+        "summary": "Get human by ID",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Human found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetHumanResponse"
                 }
               }
             }
@@ -403,7 +530,7 @@
             "description": "Unauthorized"
           },
           "404": {
-            "description": "Profile not found",
+            "description": "Human not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -415,9 +542,9 @@
         }
       }
     },
-    "/profiles/{orgId}/scrape": {
-      "post": {
-        "summary": "Trigger scrape and AI extraction",
+    "/humans/{id}/methodology": {
+      "get": {
+        "summary": "Get cached methodology for a human",
         "security": [
           {
             "apiKey": []
@@ -426,10 +553,57 @@
         "parameters": [
           {
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             },
             "required": true,
-            "name": "orgId",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Methodology found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetMethodologyResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Methodology not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/humans/{id}/extract": {
+      "post": {
+        "summary": "Trigger scrape and AI methodology extraction",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
             "in": "path"
           }
         ],
@@ -437,18 +611,18 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ScrapeRequest"
+                "$ref": "#/components/schemas/ExtractRequest"
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Scrape completed",
+            "description": "Extraction completed",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ScrapeResponse"
+                  "$ref": "#/components/schemas/ExtractResponse"
                 }
               }
             }
@@ -467,7 +641,7 @@
             "description": "Unauthorized"
           },
           "404": {
-            "description": "Profile not found",
+            "description": "Human not found",
             "content": {
               "application/json": {
                 "schema": {

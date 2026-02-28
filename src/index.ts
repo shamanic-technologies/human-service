@@ -4,7 +4,8 @@ import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { db } from "./db/index.js";
 import healthRoutes from "./routes/health.js";
 import openapiRoutes from "./routes/openapi.js";
-import profileRoutes from "./routes/profiles.js";
+import humanRoutes from "./routes/humans.js";
+import methodologyRoutes from "./routes/methodology.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,7 +15,8 @@ app.use(express.json());
 
 app.use(healthRoutes);
 app.use(openapiRoutes);
-app.use(profileRoutes);
+app.use(humanRoutes);
+app.use(methodologyRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
