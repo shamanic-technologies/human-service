@@ -4,7 +4,6 @@ import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import {
   cleanTestData,
   closeDb,
-  insertOrg,
   insertHuman,
 } from "../helpers/test-db.js";
 
@@ -23,9 +22,6 @@ afterAll(async () => {
 describe("POST /humans", () => {
   it("creates a new human", async () => {
     const res = await request(app).post("/humans").set(headers).send({
-      appId: "test-app",
-      orgId: "org-1",
-      userId: "user-1",
       name: "Jane Expert",
       slug: "jane-expert",
       urls: ["https://jane.example.com"],
@@ -41,9 +37,6 @@ describe("POST /humans", () => {
   it("updates an existing human with the same slug", async () => {
     // First create
     await request(app).post("/humans").set(headers).send({
-      appId: "test-app",
-      orgId: "org-1",
-      userId: "user-1",
       name: "Jane Expert",
       slug: "jane-expert",
       urls: ["https://jane.example.com"],
@@ -51,9 +44,6 @@ describe("POST /humans", () => {
 
     // Then update
     const res = await request(app).post("/humans").set(headers).send({
-      appId: "test-app",
-      orgId: "org-1",
-      userId: "user-1",
       name: "Jane Expert Updated",
       slug: "jane-expert",
       urls: ["https://jane.example.com", "https://jane.blog.com"],
@@ -68,9 +58,6 @@ describe("POST /humans", () => {
 
   it("rejects invalid slug format", async () => {
     const res = await request(app).post("/humans").set(headers).send({
-      appId: "test-app",
-      orgId: "org-1",
-      userId: "user-1",
       name: "Jane Expert",
       slug: "INVALID SLUG!",
       urls: ["https://jane.example.com"],
@@ -81,8 +68,7 @@ describe("POST /humans", () => {
 
   it("rejects missing required fields", async () => {
     const res = await request(app).post("/humans").set(headers).send({
-      appId: "test-app",
-      // missing orgId, userId, name, slug, urls
+      // missing name, slug, urls
     });
 
     expect(res.status).toBe(400);
@@ -90,9 +76,6 @@ describe("POST /humans", () => {
 
   it("rejects empty urls array", async () => {
     const res = await request(app).post("/humans").set(headers).send({
-      appId: "test-app",
-      orgId: "org-1",
-      userId: "user-1",
       name: "Jane Expert",
       slug: "jane-expert",
       urls: [],
@@ -103,9 +86,6 @@ describe("POST /humans", () => {
 
   it("returns 401 without API key", async () => {
     const res = await request(app).post("/humans").send({
-      appId: "test-app",
-      orgId: "org-1",
-      userId: "user-1",
       name: "Jane Expert",
       slug: "jane-expert",
       urls: ["https://jane.example.com"],
@@ -113,32 +93,38 @@ describe("POST /humans", () => {
 
     expect(res.status).toBe(401);
   });
+
+  it("returns 400 without identity headers", async () => {
+    const res = await request(app)
+      .post("/humans")
+      .set({ "X-API-Key": "test-api-key", "Content-Type": "application/json" })
+      .send({
+        name: "Jane Expert",
+        slug: "jane-expert",
+        urls: ["https://jane.example.com"],
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("x-org-id");
+  });
 });
 
 describe("GET /humans", () => {
   it("lists humans for an org", async () => {
     // Create two humans
     await request(app).post("/humans").set(headers).send({
-      appId: "test-app",
-      orgId: "org-1",
-      userId: "user-1",
       name: "Jane Expert",
       slug: "jane-expert",
       urls: ["https://jane.example.com"],
     });
 
     await request(app).post("/humans").set(headers).send({
-      appId: "test-app",
-      orgId: "org-1",
-      userId: "user-1",
       name: "John Guru",
       slug: "john-guru",
       urls: ["https://john.example.com"],
     });
 
-    const res = await request(app)
-      .get("/humans?appId=test-app&orgId=org-1")
-      .set(headers);
+    const res = await request(app).get("/humans").set(headers);
 
     expect(res.status).toBe(200);
     expect(res.body.humans).toHaveLength(2);
@@ -146,44 +132,45 @@ describe("GET /humans", () => {
 
   it("returns empty array for unknown org", async () => {
     const res = await request(app)
-      .get("/humans?appId=test-app&orgId=nonexistent")
-      .set(headers);
+      .get("/humans")
+      .set({
+        ...headers,
+        "x-org-id": "00000000-0000-0000-0000-999999999999",
+      });
 
     expect(res.status).toBe(200);
     expect(res.body.humans).toEqual([]);
   });
 
-  it("returns 400 without required query params", async () => {
-    const res = await request(app).get("/humans").set(headers);
+  it("returns 400 without identity headers", async () => {
+    const res = await request(app)
+      .get("/humans")
+      .set({ "X-API-Key": "test-api-key" });
 
     expect(res.status).toBe(400);
   });
 
   it("isolates humans between orgs", async () => {
     await request(app).post("/humans").set(headers).send({
-      appId: "test-app",
-      orgId: "org-1",
-      userId: "user-1",
       name: "Jane Expert",
       slug: "jane-expert",
       urls: ["https://jane.example.com"],
     });
 
-    await request(app).post("/humans").set(headers).send({
-      appId: "test-app",
-      orgId: "org-2",
-      userId: "user-2",
+    const org2Headers = {
+      ...headers,
+      "x-org-id": "00000000-0000-0000-0000-000000000099",
+      "x-user-id": "00000000-0000-0000-0000-000000000098",
+    };
+
+    await request(app).post("/humans").set(org2Headers).send({
       name: "John Guru",
       slug: "john-guru",
       urls: ["https://john.example.com"],
     });
 
-    const org1 = await request(app)
-      .get("/humans?appId=test-app&orgId=org-1")
-      .set(headers);
-    const org2 = await request(app)
-      .get("/humans?appId=test-app&orgId=org-2")
-      .set(headers);
+    const org1 = await request(app).get("/humans").set(headers);
+    const org2 = await request(app).get("/humans").set(org2Headers);
 
     expect(org1.body.humans).toHaveLength(1);
     expect(org1.body.humans[0].name).toBe("Jane Expert");
@@ -195,9 +182,6 @@ describe("GET /humans", () => {
 describe("GET /humans/:id", () => {
   it("returns a human by ID", async () => {
     const createRes = await request(app).post("/humans").set(headers).send({
-      appId: "test-app",
-      orgId: "org-1",
-      userId: "user-1",
       name: "Jane Expert",
       slug: "jane-expert",
       urls: ["https://jane.example.com"],

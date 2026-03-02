@@ -1,49 +1,30 @@
 import { Router } from "express";
 import { and, eq } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { humans, orgs } from "../db/schema.js";
-import { requireApiKey } from "../middleware/auth.js";
+import { humans } from "../db/schema.js";
+import { requireApiKey, requireIdentity } from "../middleware/auth.js";
 import { UpsertHumanRequestSchema } from "../schemas.js";
-import { getOrCreateOrg, getOrCreateUser } from "../services/org-resolver.js";
 
 const router = Router();
 
 // POST /humans — Upsert a human expert
-router.post("/humans", requireApiKey, async (req, res) => {
+router.post("/humans", requireApiKey, requireIdentity, async (req, res) => {
   const parsed = UpsertHumanRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
     return;
   }
 
-  const {
-    appId,
-    orgId,
-    userId,
-    name,
-    slug,
-    urls,
-    bio,
-    expertise,
-    knownFor,
-    imageUrl,
-    maxPages,
-  } = parsed.data;
+  const { orgId } = res.locals as { orgId: string };
+  const { name, slug, urls, bio, expertise, knownFor, imageUrl, maxPages } =
+    parsed.data;
 
   try {
-    const orgInternalId = await getOrCreateOrg(appId, orgId);
-    await getOrCreateUser(orgInternalId, userId);
-
-    // Upsert by (orgInternalId, slug)
+    // Upsert by (orgId, slug)
     const existing = await db
       .select()
       .from(humans)
-      .where(
-        and(
-          eq(humans.orgInternalId, orgInternalId),
-          eq(humans.slug, slug)
-        )
-      )
+      .where(and(eq(humans.orgId, orgId), eq(humans.slug, slug)))
       .limit(1);
 
     let human;
@@ -69,7 +50,7 @@ router.post("/humans", requireApiKey, async (req, res) => {
       const [inserted] = await db
         .insert(humans)
         .values({
-          orgInternalId,
+          orgId,
           name,
           slug,
           urls,
@@ -92,34 +73,14 @@ router.post("/humans", requireApiKey, async (req, res) => {
 });
 
 // GET /humans — List humans for an org
-router.get("/humans", requireApiKey, async (req, res) => {
-  const appId = req.query.appId as string;
-  const orgId = req.query.orgId as string;
-
-  if (!appId || !orgId) {
-    res
-      .status(400)
-      .json({ error: "appId and orgId query parameters are required" });
-    return;
-  }
+router.get("/humans", requireApiKey, requireIdentity, async (req, res) => {
+  const { orgId } = res.locals as { orgId: string };
 
   try {
-    // Find org
-    const [org] = await db
-      .select({ id: orgs.id })
-      .from(orgs)
-      .where(and(eq(orgs.appId, appId), eq(orgs.orgId, orgId)))
-      .limit(1);
-
-    if (!org) {
-      res.json({ humans: [] });
-      return;
-    }
-
     const results = await db
       .select()
       .from(humans)
-      .where(eq(humans.orgInternalId, org.id));
+      .where(eq(humans.orgId, orgId));
 
     res.json({ humans: results.map(serializeHuman) });
   } catch (err) {

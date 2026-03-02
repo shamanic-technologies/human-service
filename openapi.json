@@ -100,18 +100,6 @@
       "UpsertHumanRequest": {
         "type": "object",
         "properties": {
-          "appId": {
-            "type": "string",
-            "minLength": 1
-          },
-          "orgId": {
-            "type": "string",
-            "minLength": 1
-          },
-          "userId": {
-            "type": "string",
-            "minLength": 1
-          },
           "name": {
             "type": "string",
             "minLength": 1
@@ -152,9 +140,6 @@
           }
         },
         "required": [
-          "appId",
-          "orgId",
-          "userId",
           "name",
           "slug",
           "urls"
@@ -356,39 +341,13 @@
       "ExtractRequest": {
         "type": "object",
         "properties": {
-          "appId": {
-            "type": "string",
-            "minLength": 1
-          },
-          "orgId": {
-            "type": "string",
-            "minLength": 1
-          },
-          "userId": {
-            "type": "string",
-            "minLength": 1
-          },
-          "keySource": {
-            "type": "string",
-            "enum": [
-              "app",
-              "byok",
-              "platform"
-            ]
-          },
-          "runId": {
+          "parentRunId": {
             "type": "string"
           },
           "forceRefresh": {
             "type": "boolean"
           }
-        },
-        "required": [
-          "appId",
-          "orgId",
-          "userId",
-          "keySource"
-        ]
+        }
       },
       "HealthResponse": {
         "type": "object",
@@ -415,6 +374,30 @@
         "security": [
           {
             "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal user UUID from client-service",
+            "name": "x-user-id",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -463,20 +446,24 @@
           {
             "schema": {
               "type": "string",
-              "minLength": 1
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
             },
             "required": true,
-            "name": "appId",
-            "in": "query"
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
           },
           {
             "schema": {
               "type": "string",
-              "minLength": 1
+              "format": "uuid",
+              "description": "Internal user UUID from client-service"
             },
             "required": true,
-            "name": "orgId",
-            "in": "query"
+            "description": "Internal user UUID from client-service",
+            "name": "x-user-id",
+            "in": "header"
           }
         ],
         "responses": {
@@ -605,6 +592,28 @@
             "required": true,
             "name": "id",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal user UUID from client-service",
+            "name": "x-user-id",
+            "in": "header"
           }
         ],
         "requestBody": {

@@ -26,5 +26,7 @@ export function getAuthHeaders() {
   return {
     "X-API-Key": "test-api-key",
     "Content-Type": "application/json",
+    "x-org-id": "00000000-0000-0000-0000-000000000001",
+    "x-user-id": "00000000-0000-0000-0000-000000000002",
   };
 }

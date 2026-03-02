@@ -9,45 +9,13 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
-// --- Multi-tenant registry (mirrors brand-service) ---
-
-export const orgs = pgTable(
-  "orgs",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    appId: text("app_id").notNull(),
-    orgId: text("org_id").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
-  },
-  (table) => [uniqueIndex("idx_orgs_app_org_id").on(table.appId, table.orgId)]
-);
-
-export const users = pgTable(
-  "users",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    orgInternalId: uuid("org_internal_id")
-      .references(() => orgs.id, { onDelete: "cascade" })
-      .notNull(),
-    userId: text("user_id").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
-  },
-  (table) => [
-    uniqueIndex("idx_users_org_user").on(table.orgInternalId, table.userId),
-  ]
-);
-
 // --- Primary entity ---
 
 export const humans = pgTable(
   "humans",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    orgInternalId: uuid("org_internal_id")
-      .references(() => orgs.id, { onDelete: "cascade" })
-      .notNull(),
+    orgId: text("org_id").notNull(),
 
     // Identity
     name: text("name").notNull(),
@@ -69,8 +37,8 @@ export const humans = pgTable(
       .defaultNow(),
   },
   (table) => [
-    uniqueIndex("idx_humans_org_slug").on(table.orgInternalId, table.slug),
-    index("idx_humans_org").on(table.orgInternalId),
+    uniqueIndex("idx_humans_org_slug").on(table.orgId, table.slug),
+    index("idx_humans_org").on(table.orgId),
   ]
 );
 
