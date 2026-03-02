@@ -4,13 +4,13 @@ import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import {
   cleanTestData,
   closeDb,
-  insertOrg,
   insertHuman,
   insertMethodology,
 } from "../helpers/test-db.js";
 
 const app = createTestApp();
 const headers = getAuthHeaders();
+const TEST_ORG_ID = "00000000-0000-0000-0000-000000000001";
 
 beforeEach(async () => {
   await cleanTestData();
@@ -23,9 +23,8 @@ afterAll(async () => {
 
 describe("GET /humans/:id/methodology", () => {
   it("returns cached methodology", async () => {
-    const org = await insertOrg({ appId: "test-app", orgId: "org-1" });
     const human = await insertHuman({
-      orgInternalId: org.id,
+      orgId: TEST_ORG_ID,
       name: "Jane Expert",
       slug: "jane-expert",
       urls: ["https://jane.example.com"],
@@ -81,9 +80,8 @@ describe("GET /humans/:id/methodology", () => {
   });
 
   it("flags expired methodology", async () => {
-    const org = await insertOrg({ appId: "test-app", orgId: "org-1" });
     const human = await insertHuman({
-      orgInternalId: org.id,
+      orgId: TEST_ORG_ID,
       name: "Jane Expert",
       slug: "jane-expert",
       urls: ["https://jane.example.com"],
@@ -107,9 +105,8 @@ describe("GET /humans/:id/methodology", () => {
   });
 
   it("returns 404 when no methodology exists", async () => {
-    const org = await insertOrg({ appId: "test-app", orgId: "org-1" });
     const human = await insertHuman({
-      orgInternalId: org.id,
+      orgId: TEST_ORG_ID,
       name: "Jane Expert",
       slug: "jane-expert",
       urls: ["https://jane.example.com"],
@@ -136,20 +133,14 @@ describe("POST /humans/:id/extract", () => {
     const res = await request(app)
       .post("/humans/00000000-0000-0000-0000-000000000000/extract")
       .set(headers)
-      .send({
-        appId: "test-app",
-        orgId: "org-1",
-        userId: "user-1",
-        keySource: "app",
-      });
+      .send({});
 
     expect(res.status).toBe(404);
   });
 
-  it("rejects missing required fields", async () => {
-    const org = await insertOrg({ appId: "test-app", orgId: "org-1" });
+  it("returns 400 without identity headers", async () => {
     const human = await insertHuman({
-      orgInternalId: org.id,
+      orgId: TEST_ORG_ID,
       name: "Jane Expert",
       slug: "jane-expert",
       urls: ["https://jane.example.com"],
@@ -157,41 +148,16 @@ describe("POST /humans/:id/extract", () => {
 
     const res = await request(app)
       .post(`/humans/${human.id}/extract`)
-      .set(headers)
-      .send({
-        appId: "test-app",
-        // missing orgId, userId, keySource
-      });
+      .set({ "X-API-Key": "test-api-key", "Content-Type": "application/json" })
+      .send({});
 
     expect(res.status).toBe(400);
-  });
-
-  it("rejects invalid keySource", async () => {
-    const org = await insertOrg({ appId: "test-app", orgId: "org-1" });
-    const human = await insertHuman({
-      orgInternalId: org.id,
-      name: "Jane Expert",
-      slug: "jane-expert",
-      urls: ["https://jane.example.com"],
-    });
-
-    const res = await request(app)
-      .post(`/humans/${human.id}/extract`)
-      .set(headers)
-      .send({
-        appId: "test-app",
-        orgId: "org-1",
-        userId: "user-1",
-        keySource: "invalid",
-      });
-
-    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("x-org-id");
   });
 
   it("returns cached methodology when not expired and no forceRefresh", async () => {
-    const org = await insertOrg({ appId: "test-app", orgId: "org-1" });
     const human = await insertHuman({
-      orgInternalId: org.id,
+      orgId: TEST_ORG_ID,
       name: "Jane Expert",
       slug: "jane-expert",
       urls: ["https://jane.example.com"],
@@ -216,12 +182,7 @@ describe("POST /humans/:id/extract", () => {
     const res = await request(app)
       .post(`/humans/${human.id}/extract`)
       .set(headers)
-      .send({
-        appId: "test-app",
-        orgId: "org-1",
-        userId: "user-1",
-        keySource: "app",
-      });
+      .send({});
 
     expect(res.status).toBe(200);
     expect(res.body.pagesScraped).toBe(0);
@@ -231,12 +192,7 @@ describe("POST /humans/:id/extract", () => {
   it("returns 401 without API key", async () => {
     const res = await request(app)
       .post("/humans/00000000-0000-0000-0000-000000000000/extract")
-      .send({
-        appId: "test-app",
-        orgId: "org-1",
-        userId: "user-1",
-        keySource: "app",
-      });
+      .send({});
 
     expect(res.status).toBe(401);
   });

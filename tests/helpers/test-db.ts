@@ -1,31 +1,18 @@
 import { db } from "../../src/db/index.js";
-import { orgs, users, humans, humanMethodologies } from "../../src/db/schema.js";
+import { humans, humanMethodologies } from "../../src/db/schema.js";
 import { sql } from "../../src/db/index.js";
 
 export async function cleanTestData() {
   await db.delete(humanMethodologies);
   await db.delete(humans);
-  await db.delete(users);
-  await db.delete(orgs);
 }
 
 export async function closeDb() {
   await sql.end();
 }
 
-export async function insertOrg(data: {
-  appId: string;
-  orgId: string;
-}) {
-  const [org] = await db
-    .insert(orgs)
-    .values({ appId: data.appId, orgId: data.orgId })
-    .returning();
-  return org;
-}
-
 export async function insertHuman(data: {
-  orgInternalId: string;
+  orgId: string;
   name: string;
   slug: string;
   urls: string[];
@@ -38,7 +25,7 @@ export async function insertHuman(data: {
   const [human] = await db
     .insert(humans)
     .values({
-      orgInternalId: data.orgInternalId,
+      orgId: data.orgId,
       name: data.name,
       slug: data.slug,
       urls: data.urls,

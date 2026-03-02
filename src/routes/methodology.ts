@@ -2,7 +2,7 @@ import { Router } from "express";
 import { eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { humans, humanMethodologies } from "../db/schema.js";
-import { requireApiKey } from "../middleware/auth.js";
+import { requireApiKey, requireIdentity } from "../middleware/auth.js";
 import { ExtractRequestSchema } from "../schemas.js";
 import { resolveApiKey } from "../services/keys.js";
 import { createRun, addCosts, completeRun } from "../services/runs.js";
@@ -60,6 +60,7 @@ router.get(
 router.post(
   "/humans/:id/extract",
   requireApiKey,
+  requireIdentity,
   async (req, res) => {
     const { id } = req.params;
     const parsed = ExtractRequestSchema.safeParse(req.body);
@@ -69,8 +70,8 @@ router.post(
       return;
     }
 
-    const { appId, orgId, userId, keySource, runId, forceRefresh } =
-      parsed.data;
+    const { orgId, userId } = res.locals as { orgId: string; userId: string };
+    const { parentRunId, forceRefresh } = parsed.data;
 
     try {
       const [human] = await db
@@ -108,24 +109,22 @@ router.post(
 
       // Create run for cost tracking
       const childRunId = await createRun({
-        appId,
         orgId,
         userId,
-        parentRunId: runId,
+        parentRunId,
         taskName: "methodology-extraction",
       });
 
       const callerContext = { method: "POST", path: `/humans/${id}/extract` };
 
-      // Resolve Anthropic key
-      const anthropicKey = await resolveApiKey(
+      // Resolve Anthropic key (key-service decides source)
+      const resolved = await resolveApiKey(
         "anthropic",
-        keySource,
-        { appId, orgId },
+        { orgId, userId },
         callerContext
       );
 
-      const tracking = { orgId, parentRunId: runId, userId, keySource };
+      const tracking = { orgId, parentRunId, userId };
 
       // Discover URLs via scraping-service
       const allUrls: string[] = [];
@@ -152,23 +151,25 @@ router.post(
 
       // AI extraction
       let extractedData = null;
-      if (anthropicKey && pages.length > 0) {
+      if (resolved?.key && pages.length > 0) {
         const extraction = await extractMethodology(
           human.name,
           pages,
-          anthropicKey
+          resolved.key
         );
         extractedData = extraction.data;
 
-        // Track AI costs
+        // Track AI costs with costSource from key-service
         if (childRunId) {
           await addCosts(childRunId, [
             {
               costName: "anthropic-sonnet-4-20250514-tokens-input",
+              costSource: resolved.keySource,
               quantity: extraction.inputTokens,
             },
             {
               costName: "anthropic-sonnet-4-20250514-tokens-output",
+              costSource: resolved.keySource,
               quantity: extraction.outputTokens,
             },
           ]);
@@ -204,7 +205,7 @@ router.post(
         persuasionStyle: extractedData?.persuasionStyle ?? null,
         contentSignatures: extractedData?.contentSignatures ?? null,
         avoids: extractedData?.avoids ?? null,
-        extractionModel: anthropicKey ? "claude-sonnet-4-20250514" : null,
+        extractionModel: resolved?.key ? "claude-sonnet-4-20250514" : null,
         sourceUrls,
         extractedAt: new Date(),
         expiresAt,

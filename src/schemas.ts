@@ -14,6 +14,11 @@ registry.registerComponent("securitySchemes", "apiKey", {
   description: "Service-to-service API key",
 });
 
+const identityHeaders = z.object({
+  "x-org-id": z.string().uuid().openapi({ description: "Internal org UUID from client-service" }),
+  "x-user-id": z.string().uuid().openapi({ description: "Internal user UUID from client-service" }),
+});
+
 // --- Shared schemas ---
 
 export const ErrorSchema = z
@@ -86,9 +91,6 @@ export const MethodologySchema = z
 
 export const UpsertHumanRequestSchema = z
   .object({
-    appId: z.string().min(1),
-    orgId: z.string().min(1),
-    userId: z.string().min(1),
     name: z.string().min(1),
     slug: z
       .string()
@@ -116,6 +118,7 @@ registry.registerPath({
   summary: "Create or update a human expert",
   security: [{ apiKey: [] }],
   request: {
+    headers: identityHeaders,
     body: {
       content: {
         "application/json": { schema: UpsertHumanRequestSchema },
@@ -151,10 +154,7 @@ registry.registerPath({
   summary: "List humans for an org",
   security: [{ apiKey: [] }],
   request: {
-    query: z.object({
-      appId: z.string().min(1),
-      orgId: z.string().min(1),
-    }),
+    headers: identityHeaders,
   },
   responses: {
     200: {
@@ -234,11 +234,7 @@ registry.registerPath({
 
 export const ExtractRequestSchema = z
   .object({
-    appId: z.string().min(1),
-    orgId: z.string().min(1),
-    userId: z.string().min(1),
-    keySource: z.enum(["app", "byok", "platform"]),
-    runId: z.string().optional(),
+    parentRunId: z.string().optional(),
     forceRefresh: z.boolean().optional(),
   })
   .openapi("ExtractRequest");
@@ -257,6 +253,7 @@ registry.registerPath({
   summary: "Trigger scrape and AI methodology extraction",
   security: [{ apiKey: [] }],
   request: {
+    headers: identityHeaders,
     params: z.object({ id: z.string().uuid() }),
     body: {
       content: {

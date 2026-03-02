@@ -5,7 +5,6 @@ interface ScrapingTracking {
   orgId?: string;
   parentRunId?: string;
   userId?: string;
-  keySource?: "app" | "byok" | "platform";
 }
 
 export interface MapResult {
@@ -72,7 +71,6 @@ export async function scrapePage(
         sourceOrgId: tracking.orgId,
         parentRunId: tracking.parentRunId,
         userId: tracking.userId,
-        keySource: tracking.keySource,
       }),
     });
 
