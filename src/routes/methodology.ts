@@ -16,6 +16,7 @@ const router = Router();
 router.get(
   "/humans/:id/methodology",
   requireApiKey,
+  requireIdentity,
   async (req, res) => {
     const { id } = req.params;
 
@@ -70,8 +71,8 @@ router.post(
       return;
     }
 
-    const { orgId, userId } = res.locals as { orgId: string; userId: string };
-    const { parentRunId, forceRefresh } = parsed.data;
+    const { orgId, userId, runId } = res.locals as { orgId: string; userId: string; runId: string };
+    const { forceRefresh } = parsed.data;
 
     try {
       const [human] = await db
@@ -107,11 +108,11 @@ router.post(
         }
       }
 
-      // Create run for cost tracking
+      // Create our own run with the caller's runId as parent
       const childRunId = await createRun({
         orgId,
         userId,
-        parentRunId,
+        parentRunId: runId,
         taskName: "methodology-extraction",
       });
 
@@ -124,7 +125,8 @@ router.post(
         callerContext
       );
 
-      const tracking = { orgId, parentRunId, userId };
+      // Pass our own runId downstream (not the one we received)
+      const tracking = { orgId, runId: childRunId ?? undefined, userId };
 
       // Discover URLs via scraping-service
       const allUrls: string[] = [];

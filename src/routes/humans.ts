@@ -90,7 +90,7 @@ router.get("/humans", requireApiKey, requireIdentity, async (req, res) => {
 });
 
 // GET /humans/:id — Get human by ID
-router.get("/humans/:id", requireApiKey, async (req, res) => {
+router.get("/humans/:id", requireApiKey, requireIdentity, async (req, res) => {
   const { id } = req.params;
 
   try {

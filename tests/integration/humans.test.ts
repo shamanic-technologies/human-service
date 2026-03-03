@@ -105,7 +105,7 @@ describe("POST /humans", () => {
       });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain("x-org-id");
+    expect(res.body.error).toContain("x-run-id");
   });
 });
 
@@ -208,5 +208,14 @@ describe("GET /humans/:id", () => {
       .set(headers);
 
     expect(res.status).toBe(404);
+  });
+
+  it("returns 400 without identity headers", async () => {
+    const res = await request(app)
+      .get("/humans/00000000-0000-0000-0000-000000000000")
+      .set({ "X-API-Key": "test-api-key" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("x-run-id");
   });
 });
