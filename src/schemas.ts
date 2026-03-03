@@ -17,6 +17,7 @@ registry.registerComponent("securitySchemes", "apiKey", {
 const identityHeaders = z.object({
   "x-org-id": z.string().uuid().openapi({ description: "Internal org UUID from client-service" }),
   "x-user-id": z.string().uuid().openapi({ description: "Internal user UUID from client-service" }),
+  "x-run-id": z.string().uuid().openapi({ description: "Caller's run ID — used as parentRunId when creating this service's own run" }),
 });
 
 // --- Shared schemas ---
@@ -181,6 +182,7 @@ registry.registerPath({
   summary: "Get human by ID",
   security: [{ apiKey: [] }],
   request: {
+    headers: identityHeaders,
     params: z.object({ id: z.string().uuid() }),
   },
   responses: {
@@ -213,6 +215,7 @@ registry.registerPath({
   summary: "Get cached methodology for a human",
   security: [{ apiKey: [] }],
   request: {
+    headers: identityHeaders,
     params: z.object({ id: z.string().uuid() }),
   },
   responses: {
@@ -234,7 +237,6 @@ registry.registerPath({
 
 export const ExtractRequestSchema = z
   .object({
-    parentRunId: z.string().optional(),
     forceRefresh: z.boolean().optional(),
   })
   .openapi("ExtractRequest");

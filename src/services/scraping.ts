@@ -3,7 +3,7 @@ const SCRAPING_SERVICE_API_KEY = process.env.SCRAPING_SERVICE_API_KEY;
 
 interface ScrapingTracking {
   orgId?: string;
-  parentRunId?: string;
+  runId?: string;
   userId?: string;
 }
 
@@ -26,13 +26,13 @@ export async function mapSiteUrls(
       headers: {
         "Content-Type": "application/json",
         "X-API-Key": SCRAPING_SERVICE_API_KEY,
+        ...(tracking.runId ? { "x-run-id": tracking.runId } : {}),
+        ...(tracking.orgId ? { "x-org-id": tracking.orgId } : {}),
+        ...(tracking.userId ? { "x-user-id": tracking.userId } : {}),
       },
       body: JSON.stringify({
         url,
         limit,
-        sourceOrgId: tracking.orgId,
-        parentRunId: tracking.parentRunId,
-        userId: tracking.userId,
       }),
     });
 
@@ -64,13 +64,13 @@ export async function scrapePage(
       headers: {
         "Content-Type": "application/json",
         "X-API-Key": SCRAPING_SERVICE_API_KEY,
+        ...(tracking.runId ? { "x-run-id": tracking.runId } : {}),
+        ...(tracking.orgId ? { "x-org-id": tracking.orgId } : {}),
+        ...(tracking.userId ? { "x-user-id": tracking.userId } : {}),
       },
       body: JSON.stringify({
         url,
         sourceService: "human-service",
-        sourceOrgId: tracking.orgId,
-        parentRunId: tracking.parentRunId,
-        userId: tracking.userId,
       }),
     });
 

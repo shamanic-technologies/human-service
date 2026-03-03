@@ -28,5 +28,6 @@ export function getAuthHeaders() {
     "Content-Type": "application/json",
     "x-org-id": "00000000-0000-0000-0000-000000000001",
     "x-user-id": "00000000-0000-0000-0000-000000000002",
+    "x-run-id": "00000000-0000-0000-0000-000000000003",
   };
 }
