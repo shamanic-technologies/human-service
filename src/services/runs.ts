@@ -1,9 +1,12 @@
 const RUNS_SERVICE_URL = process.env.RUNS_SERVICE_URL;
 const RUNS_SERVICE_API_KEY = process.env.RUNS_SERVICE_API_KEY;
 
-interface CreateRunParams {
+interface IdentityContext {
   orgId: string;
   userId: string;
+}
+
+interface CreateRunParams extends IdentityContext {
   parentRunId?: string;
   taskName: string;
 }
@@ -25,13 +28,13 @@ export async function createRun(
       headers: {
         "Content-Type": "application/json",
         "X-API-Key": RUNS_SERVICE_API_KEY,
+        "x-org-id": params.orgId,
+        "x-user-id": params.userId,
+        ...(params.parentRunId ? { "x-run-id": params.parentRunId } : {}),
       },
       body: JSON.stringify({
-        orgId: params.orgId,
-        userId: params.userId,
         serviceName: "human-service",
         taskName: params.taskName,
-        parentRunId: params.parentRunId,
       }),
     });
 
@@ -45,7 +48,8 @@ export async function createRun(
 
 export async function addCosts(
   runId: string,
-  items: CostItem[]
+  items: CostItem[],
+  identity: IdentityContext
 ): Promise<void> {
   if (!RUNS_SERVICE_URL || !RUNS_SERVICE_API_KEY) return;
 
@@ -55,6 +59,9 @@ export async function addCosts(
       headers: {
         "Content-Type": "application/json",
         "X-API-Key": RUNS_SERVICE_API_KEY,
+        "x-org-id": identity.orgId,
+        "x-user-id": identity.userId,
+        "x-run-id": runId,
       },
       body: JSON.stringify({ items }),
     });
@@ -65,7 +72,8 @@ export async function addCosts(
 
 export async function completeRun(
   runId: string,
-  status: "completed" | "failed"
+  status: "completed" | "failed",
+  identity: IdentityContext
 ): Promise<void> {
   if (!RUNS_SERVICE_URL || !RUNS_SERVICE_API_KEY) return;
 
@@ -75,6 +83,9 @@ export async function completeRun(
       headers: {
         "Content-Type": "application/json",
         "X-API-Key": RUNS_SERVICE_API_KEY,
+        "x-org-id": identity.orgId,
+        "x-user-id": identity.userId,
+        "x-run-id": runId,
       },
       body: JSON.stringify({ status }),
     });

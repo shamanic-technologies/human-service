@@ -13,21 +13,20 @@ export interface ResolvedKey {
 
 export async function resolveApiKey(
   provider: string,
-  params: { orgId: string; userId: string },
+  params: { orgId: string; userId: string; runId: string },
   callerContext: CallerContext
 ): Promise<ResolvedKey | null> {
   if (!KEY_SERVICE_URL || !KEY_SERVICE_API_KEY) return null;
 
   try {
-    const qs = new URLSearchParams({
-      orgId: params.orgId,
-      userId: params.userId,
-    });
-    const endpoint = `${KEY_SERVICE_URL}/keys/${provider}/decrypt?${qs}`;
+    const endpoint = `${KEY_SERVICE_URL}/keys/${provider}/decrypt`;
 
     const res = await fetch(endpoint, {
       headers: {
         "x-api-key": KEY_SERVICE_API_KEY,
+        "x-org-id": params.orgId,
+        "x-user-id": params.userId,
+        "x-run-id": params.runId,
         "x-caller-service": "human",
         "x-caller-method": callerContext.method,
         "x-caller-path": callerContext.path,
