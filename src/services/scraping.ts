@@ -2,9 +2,9 @@ const SCRAPING_SERVICE_URL = process.env.SCRAPING_SERVICE_URL;
 const SCRAPING_SERVICE_API_KEY = process.env.SCRAPING_SERVICE_API_KEY;
 
 interface ScrapingTracking {
-  orgId?: string;
-  runId?: string;
-  userId?: string;
+  orgId: string;
+  userId: string;
+  runId: string;
 }
 
 export interface MapResult {
@@ -26,9 +26,9 @@ export async function mapSiteUrls(
       headers: {
         "Content-Type": "application/json",
         "X-API-Key": SCRAPING_SERVICE_API_KEY,
-        ...(tracking.runId ? { "x-run-id": tracking.runId } : {}),
-        ...(tracking.orgId ? { "x-org-id": tracking.orgId } : {}),
-        ...(tracking.userId ? { "x-user-id": tracking.userId } : {}),
+        "x-org-id": tracking.orgId,
+        "x-user-id": tracking.userId,
+        "x-run-id": tracking.runId,
       },
       body: JSON.stringify({
         url,
@@ -64,9 +64,9 @@ export async function scrapePage(
       headers: {
         "Content-Type": "application/json",
         "X-API-Key": SCRAPING_SERVICE_API_KEY,
-        ...(tracking.runId ? { "x-run-id": tracking.runId } : {}),
-        ...(tracking.orgId ? { "x-org-id": tracking.orgId } : {}),
-        ...(tracking.userId ? { "x-user-id": tracking.userId } : {}),
+        "x-org-id": tracking.orgId,
+        "x-user-id": tracking.userId,
+        "x-run-id": tracking.runId,
       },
       body: JSON.stringify({
         url,

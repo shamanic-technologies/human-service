@@ -118,15 +118,18 @@ router.post(
 
       const callerContext = { method: "POST", path: `/humans/${id}/extract` };
 
+      // Use our child run ID for downstream calls (not the caller's run ID)
+      const effectiveRunId = childRunId ?? runId;
+
       // Resolve Anthropic key (key-service decides source)
       const resolved = await resolveApiKey(
         "anthropic",
-        { orgId, userId },
+        { orgId, userId, runId: effectiveRunId },
         callerContext
       );
 
       // Pass our own runId downstream (not the one we received)
-      const tracking = { orgId, runId: childRunId ?? undefined, userId };
+      const tracking = { orgId, userId, runId: effectiveRunId };
 
       // Discover URLs via scraping-service
       const allUrls: string[] = [];
@@ -174,7 +177,7 @@ router.post(
               costSource: resolved.keySource,
               quantity: extraction.outputTokens,
             },
-          ]);
+          ], { orgId, userId });
         }
       }
 
@@ -238,7 +241,7 @@ router.post(
       }
 
       if (childRunId) {
-        await completeRun(childRunId, "completed");
+        await completeRun(childRunId, "completed", { orgId, userId });
       }
 
       // Re-fetch human to get updated fields
