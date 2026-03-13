@@ -406,6 +406,36 @@
             "description": "Caller's run ID — used as parentRunId when creating this service's own run",
             "name": "x-run-id",
             "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Campaign ID — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Campaign ID — injected by workflow-service on DAG calls",
+            "name": "x-campaign-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Brand ID — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Brand ID — injected by workflow-service on DAG calls",
+            "name": "x-brand-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Workflow name — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Workflow name — injected by workflow-service on DAG calls",
+            "name": "x-workflow-name",
+            "in": "header"
           }
         ],
         "requestBody": {
@@ -483,6 +513,36 @@
             "description": "Caller's run ID — used as parentRunId when creating this service's own run",
             "name": "x-run-id",
             "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Campaign ID — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Campaign ID — injected by workflow-service on DAG calls",
+            "name": "x-campaign-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Brand ID — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Brand ID — injected by workflow-service on DAG calls",
+            "name": "x-brand-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Workflow name — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Workflow name — injected by workflow-service on DAG calls",
+            "name": "x-workflow-name",
+            "in": "header"
           }
         ],
         "responses": {
@@ -551,6 +611,36 @@
             "required": true,
             "description": "Caller's run ID — used as parentRunId when creating this service's own run",
             "name": "x-run-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Campaign ID — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Campaign ID — injected by workflow-service on DAG calls",
+            "name": "x-campaign-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Brand ID — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Brand ID — injected by workflow-service on DAG calls",
+            "name": "x-brand-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Workflow name — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Workflow name — injected by workflow-service on DAG calls",
+            "name": "x-workflow-name",
             "in": "header"
           }
         ],
@@ -631,6 +721,36 @@
             "description": "Caller's run ID — used as parentRunId when creating this service's own run",
             "name": "x-run-id",
             "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Campaign ID — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Campaign ID — injected by workflow-service on DAG calls",
+            "name": "x-campaign-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Brand ID — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Brand ID — injected by workflow-service on DAG calls",
+            "name": "x-brand-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Workflow name — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Workflow name — injected by workflow-service on DAG calls",
+            "name": "x-workflow-name",
+            "in": "header"
           }
         ],
         "responses": {
@@ -709,6 +829,36 @@
             "required": true,
             "description": "Caller's run ID — used as parentRunId when creating this service's own run",
             "name": "x-run-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Campaign ID — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Campaign ID — injected by workflow-service on DAG calls",
+            "name": "x-campaign-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Brand ID — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Brand ID — injected by workflow-service on DAG calls",
+            "name": "x-brand-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Workflow name — injected by workflow-service on DAG calls"
+            },
+            "required": false,
+            "description": "Workflow name — injected by workflow-service on DAG calls",
+            "name": "x-workflow-name",
             "in": "header"
           }
         ],

@@ -2,7 +2,7 @@ import { Router } from "express";
 import { eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { humans, humanMethodologies } from "../db/schema.js";
-import { requireApiKey, requireIdentity } from "../middleware/auth.js";
+import { requireApiKey, requireIdentity, getWorkflowTracking } from "../middleware/auth.js";
 import { ExtractRequestSchema } from "../schemas.js";
 import { resolveApiKey } from "../services/keys.js";
 import { createRun, addCosts, completeRun } from "../services/runs.js";
@@ -72,6 +72,7 @@ router.post(
     }
 
     const { orgId, userId, runId } = res.locals as { orgId: string; userId: string; runId: string };
+    const workflowTracking = getWorkflowTracking(res.locals);
     const { forceRefresh } = parsed.data;
 
     try {
@@ -114,6 +115,7 @@ router.post(
         userId,
         parentRunId: runId,
         taskName: "methodology-extraction",
+        workflowTracking,
       });
 
       const callerContext = { method: "POST", path: `/humans/${id}/extract` };
@@ -124,12 +126,12 @@ router.post(
       // Resolve Anthropic key (key-service decides source)
       const resolved = await resolveApiKey(
         "anthropic",
-        { orgId, userId, runId: effectiveRunId },
+        { orgId, userId, runId: effectiveRunId, workflowTracking },
         callerContext
       );
 
       // Pass our own runId downstream (not the one we received)
-      const tracking = { orgId, userId, runId: effectiveRunId };
+      const tracking = { orgId, userId, runId: effectiveRunId, workflowTracking };
 
       // Discover URLs via scraping-service
       const allUrls: string[] = [];
@@ -177,7 +179,7 @@ router.post(
               costSource: resolved.keySource,
               quantity: extraction.outputTokens,
             },
-          ], { orgId, userId });
+          ], { orgId, userId, workflowTracking });
         }
       }
 
@@ -215,6 +217,9 @@ router.post(
         extractedAt: new Date(),
         expiresAt,
         updatedAt: new Date(),
+        campaignId: workflowTracking.campaignId ?? null,
+        brandId: workflowTracking.brandId ?? null,
+        workflowName: workflowTracking.workflowName ?? null,
       };
 
       // Check if methodology exists for upsert
@@ -241,7 +246,7 @@ router.post(
       }
 
       if (childRunId) {
-        await completeRun(childRunId, "completed", { orgId, userId });
+        await completeRun(childRunId, "completed", { orgId, userId, workflowTracking });
       }
 
       // Re-fetch human to get updated fields
