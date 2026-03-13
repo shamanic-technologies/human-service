@@ -1,3 +1,6 @@
+import type { WorkflowTrackingHeaders } from "../middleware/auth.js";
+import { workflowTrackingToHeaders } from "../middleware/auth.js";
+
 const KEY_SERVICE_URL = process.env.KEY_SERVICE_URL;
 const KEY_SERVICE_API_KEY = process.env.KEY_SERVICE_API_KEY;
 
@@ -13,7 +16,7 @@ export interface ResolvedKey {
 
 export async function resolveApiKey(
   provider: string,
-  params: { orgId: string; userId: string; runId: string },
+  params: { orgId: string; userId: string; runId: string; workflowTracking?: WorkflowTrackingHeaders },
   callerContext: CallerContext
 ): Promise<ResolvedKey | null> {
   if (!KEY_SERVICE_URL || !KEY_SERVICE_API_KEY) return null;
@@ -30,6 +33,7 @@ export async function resolveApiKey(
         "x-caller-service": "human",
         "x-caller-method": callerContext.method,
         "x-caller-path": callerContext.path,
+        ...workflowTrackingToHeaders(params.workflowTracking ?? {}),
       },
     });
 

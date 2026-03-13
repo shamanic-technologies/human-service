@@ -1,9 +1,13 @@
+import type { WorkflowTrackingHeaders } from "../middleware/auth.js";
+import { workflowTrackingToHeaders } from "../middleware/auth.js";
+
 const RUNS_SERVICE_URL = process.env.RUNS_SERVICE_URL;
 const RUNS_SERVICE_API_KEY = process.env.RUNS_SERVICE_API_KEY;
 
 interface IdentityContext {
   orgId: string;
   userId: string;
+  workflowTracking?: WorkflowTrackingHeaders;
 }
 
 interface CreateRunParams extends IdentityContext {
@@ -31,6 +35,7 @@ export async function createRun(
         "x-org-id": params.orgId,
         "x-user-id": params.userId,
         ...(params.parentRunId ? { "x-run-id": params.parentRunId } : {}),
+        ...workflowTrackingToHeaders(params.workflowTracking ?? {}),
       },
       body: JSON.stringify({
         serviceName: "human-service",
@@ -62,6 +67,7 @@ export async function addCosts(
         "x-org-id": identity.orgId,
         "x-user-id": identity.userId,
         "x-run-id": runId,
+        ...workflowTrackingToHeaders(identity.workflowTracking ?? {}),
       },
       body: JSON.stringify({ items }),
     });
@@ -86,6 +92,7 @@ export async function completeRun(
         "x-org-id": identity.orgId,
         "x-user-id": identity.userId,
         "x-run-id": runId,
+        ...workflowTrackingToHeaders(identity.workflowTracking ?? {}),
       },
       body: JSON.stringify({ status }),
     });

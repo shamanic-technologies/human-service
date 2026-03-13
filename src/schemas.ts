@@ -18,6 +18,9 @@ const identityHeaders = z.object({
   "x-org-id": z.string().uuid().openapi({ description: "Internal org UUID from client-service" }),
   "x-user-id": z.string().uuid().openapi({ description: "Internal user UUID from client-service" }),
   "x-run-id": z.string().uuid().openapi({ description: "Caller's run ID — used as parentRunId when creating this service's own run" }),
+  "x-campaign-id": z.string().optional().openapi({ description: "Campaign ID — injected by workflow-service on DAG calls" }),
+  "x-brand-id": z.string().optional().openapi({ description: "Brand ID — injected by workflow-service on DAG calls" }),
+  "x-workflow-name": z.string().optional().openapi({ description: "Workflow name — injected by workflow-service on DAG calls" }),
 });
 
 // --- Shared schemas ---

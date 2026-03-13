@@ -190,4 +190,134 @@ describe("downstream service headers", () => {
       expect(opts.headers["x-run-id"]).toBe("run-1");
     });
   });
+
+  describe("workflow tracking headers forwarding", () => {
+    it("createRun forwards x-campaign-id, x-brand-id, x-workflow-name when provided", async () => {
+      process.env.RUNS_SERVICE_URL = "http://runs:3000";
+      process.env.RUNS_SERVICE_API_KEY = "runs-key";
+
+      const { createRun } = await import("../../src/services/runs.js");
+
+      await createRun({
+        orgId: "org-1",
+        userId: "user-1",
+        parentRunId: "parent-run-1",
+        taskName: "test-task",
+        workflowTracking: {
+          campaignId: "camp-123",
+          brandId: "brand-456",
+          workflowName: "extract-methodology",
+        },
+      });
+
+      const [, opts] = fetchSpy.mock.calls[0];
+      expect(opts.headers["x-campaign-id"]).toBe("camp-123");
+      expect(opts.headers["x-brand-id"]).toBe("brand-456");
+      expect(opts.headers["x-workflow-name"]).toBe("extract-methodology");
+    });
+
+    it("createRun omits workflow tracking headers when not provided", async () => {
+      process.env.RUNS_SERVICE_URL = "http://runs:3000";
+      process.env.RUNS_SERVICE_API_KEY = "runs-key";
+
+      const { createRun } = await import("../../src/services/runs.js");
+
+      await createRun({
+        orgId: "org-1",
+        userId: "user-1",
+        taskName: "test-task",
+      });
+
+      const [, opts] = fetchSpy.mock.calls[0];
+      expect(opts.headers["x-campaign-id"]).toBeUndefined();
+      expect(opts.headers["x-brand-id"]).toBeUndefined();
+      expect(opts.headers["x-workflow-name"]).toBeUndefined();
+    });
+
+    it("mapSiteUrls forwards workflow tracking headers", async () => {
+      process.env.SCRAPING_SERVICE_URL = "http://scraping:3010";
+      process.env.SCRAPING_SERVICE_API_KEY = "scrape-key";
+
+      fetchSpy.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ urls: ["https://example.com/page1"] }),
+      });
+
+      const { mapSiteUrls } = await import("../../src/services/scraping.js");
+
+      await mapSiteUrls("https://example.com", {
+        orgId: "org-1",
+        userId: "user-1",
+        runId: "run-1",
+        workflowTracking: {
+          campaignId: "camp-123",
+          brandId: "brand-456",
+          workflowName: "extract-methodology",
+        },
+      });
+
+      const [, opts] = fetchSpy.mock.calls[0];
+      expect(opts.headers["x-campaign-id"]).toBe("camp-123");
+      expect(opts.headers["x-brand-id"]).toBe("brand-456");
+      expect(opts.headers["x-workflow-name"]).toBe("extract-methodology");
+    });
+
+    it("resolveApiKey forwards workflow tracking headers", async () => {
+      process.env.KEY_SERVICE_URL = "http://keys:3001";
+      process.env.KEY_SERVICE_API_KEY = "key-svc-key";
+
+      fetchSpy.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ key: "sk-test", keySource: "platform" }),
+      });
+
+      const { resolveApiKey } = await import("../../src/services/keys.js");
+
+      await resolveApiKey(
+        "anthropic",
+        {
+          orgId: "org-1",
+          userId: "user-1",
+          runId: "run-1",
+          workflowTracking: {
+            campaignId: "camp-123",
+            brandId: "brand-456",
+            workflowName: "extract-methodology",
+          },
+        },
+        { method: "POST", path: "/test" }
+      );
+
+      const [, opts] = fetchSpy.mock.calls[0];
+      expect(opts.headers["x-campaign-id"]).toBe("camp-123");
+      expect(opts.headers["x-brand-id"]).toBe("brand-456");
+      expect(opts.headers["x-workflow-name"]).toBe("extract-methodology");
+    });
+
+    it("addCosts forwards workflow tracking headers", async () => {
+      process.env.RUNS_SERVICE_URL = "http://runs:3000";
+      process.env.RUNS_SERVICE_API_KEY = "runs-key";
+
+      const { addCosts } = await import("../../src/services/runs.js");
+
+      await addCosts(
+        "run-abc",
+        [{ costName: "tokens", costSource: "platform", quantity: 100 }],
+        {
+          orgId: "org-1",
+          userId: "user-1",
+          workflowTracking: {
+            campaignId: "camp-123",
+            brandId: "brand-456",
+            workflowName: "extract-methodology",
+          },
+        }
+      );
+
+      const [, opts] = fetchSpy.mock.calls[0];
+      expect(opts.headers["x-campaign-id"]).toBe("camp-123");
+      expect(opts.headers["x-brand-id"]).toBe("brand-456");
+      expect(opts.headers["x-workflow-name"]).toBe("extract-methodology");
+    });
+  });
 });

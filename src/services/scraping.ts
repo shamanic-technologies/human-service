@@ -1,3 +1,6 @@
+import type { WorkflowTrackingHeaders } from "../middleware/auth.js";
+import { workflowTrackingToHeaders } from "../middleware/auth.js";
+
 const SCRAPING_SERVICE_URL = process.env.SCRAPING_SERVICE_URL;
 const SCRAPING_SERVICE_API_KEY = process.env.SCRAPING_SERVICE_API_KEY;
 
@@ -5,6 +8,7 @@ interface ScrapingTracking {
   orgId: string;
   userId: string;
   runId: string;
+  workflowTracking?: WorkflowTrackingHeaders;
 }
 
 export interface MapResult {
@@ -29,6 +33,7 @@ export async function mapSiteUrls(
         "x-org-id": tracking.orgId,
         "x-user-id": tracking.userId,
         "x-run-id": tracking.runId,
+        ...workflowTrackingToHeaders(tracking.workflowTracking ?? {}),
       },
       body: JSON.stringify({
         url,
@@ -67,6 +72,7 @@ export async function scrapePage(
         "x-org-id": tracking.orgId,
         "x-user-id": tracking.userId,
         "x-run-id": tracking.runId,
+        ...workflowTrackingToHeaders(tracking.workflowTracking ?? {}),
       },
       body: JSON.stringify({
         url,
