@@ -17,7 +17,7 @@ function createApp() {
         orgId: res.locals.orgId,
         campaignId: wt.campaignId ?? null,
         brandId: wt.brandId ?? null,
-        workflowName: wt.workflowName ?? null,
+        workflowSlug: wt.workflowSlug ?? null,
       });
     }
   );
@@ -41,13 +41,13 @@ describe("workflow tracking middleware", () => {
         ...baseHeaders,
         "x-campaign-id": "camp-abc",
         "x-brand-id": "brand-xyz",
-        "x-workflow-name": "my-workflow",
+        "x-workflow-slug": "my-workflow",
       });
 
     expect(res.status).toBe(200);
     expect(res.body.campaignId).toBe("camp-abc");
     expect(res.body.brandId).toBe("brand-xyz");
-    expect(res.body.workflowName).toBe("my-workflow");
+    expect(res.body.workflowSlug).toBe("my-workflow");
   });
 
   it("returns null for workflow tracking headers when absent", async () => {
@@ -58,7 +58,7 @@ describe("workflow tracking middleware", () => {
     expect(res.status).toBe(200);
     expect(res.body.campaignId).toBeNull();
     expect(res.body.brandId).toBeNull();
-    expect(res.body.workflowName).toBeNull();
+    expect(res.body.workflowSlug).toBeNull();
   });
 
   it("handles partial workflow tracking headers", async () => {
@@ -72,7 +72,7 @@ describe("workflow tracking middleware", () => {
     expect(res.status).toBe(200);
     expect(res.body.campaignId).toBe("camp-only");
     expect(res.body.brandId).toBeNull();
-    expect(res.body.workflowName).toBeNull();
+    expect(res.body.workflowSlug).toBeNull();
   });
 
   it("still requires identity headers — workflow headers alone are not enough", async () => {
