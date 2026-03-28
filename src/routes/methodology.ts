@@ -219,7 +219,7 @@ router.post(
         updatedAt: new Date(),
         campaignId: workflowTracking.campaignId ?? null,
         brandId: workflowTracking.brandId ?? null,
-        workflowName: workflowTracking.workflowName ?? null,
+        workflowSlug: workflowTracking.workflowSlug ?? null,
       };
 
       // Check if methodology exists for upsert

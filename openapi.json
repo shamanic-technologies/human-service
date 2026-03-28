@@ -430,11 +430,11 @@
           {
             "schema": {
               "type": "string",
-              "description": "Workflow name — injected by workflow-service on DAG calls"
+              "description": "Workflow slug — injected by workflow-service on DAG calls"
             },
             "required": false,
-            "description": "Workflow name — injected by workflow-service on DAG calls",
-            "name": "x-workflow-name",
+            "description": "Workflow slug — injected by workflow-service on DAG calls",
+            "name": "x-workflow-slug",
             "in": "header"
           }
         ],
@@ -537,11 +537,11 @@
           {
             "schema": {
               "type": "string",
-              "description": "Workflow name — injected by workflow-service on DAG calls"
+              "description": "Workflow slug — injected by workflow-service on DAG calls"
             },
             "required": false,
-            "description": "Workflow name — injected by workflow-service on DAG calls",
-            "name": "x-workflow-name",
+            "description": "Workflow slug — injected by workflow-service on DAG calls",
+            "name": "x-workflow-slug",
             "in": "header"
           }
         ],
@@ -636,11 +636,11 @@
           {
             "schema": {
               "type": "string",
-              "description": "Workflow name — injected by workflow-service on DAG calls"
+              "description": "Workflow slug — injected by workflow-service on DAG calls"
             },
             "required": false,
-            "description": "Workflow name — injected by workflow-service on DAG calls",
-            "name": "x-workflow-name",
+            "description": "Workflow slug — injected by workflow-service on DAG calls",
+            "name": "x-workflow-slug",
             "in": "header"
           }
         ],
@@ -745,11 +745,11 @@
           {
             "schema": {
               "type": "string",
-              "description": "Workflow name — injected by workflow-service on DAG calls"
+              "description": "Workflow slug — injected by workflow-service on DAG calls"
             },
             "required": false,
-            "description": "Workflow name — injected by workflow-service on DAG calls",
-            "name": "x-workflow-name",
+            "description": "Workflow slug — injected by workflow-service on DAG calls",
+            "name": "x-workflow-slug",
             "in": "header"
           }
         ],
@@ -854,11 +854,11 @@
           {
             "schema": {
               "type": "string",
-              "description": "Workflow name — injected by workflow-service on DAG calls"
+              "description": "Workflow slug — injected by workflow-service on DAG calls"
             },
             "required": false,
-            "description": "Workflow name — injected by workflow-service on DAG calls",
-            "name": "x-workflow-name",
+            "description": "Workflow slug — injected by workflow-service on DAG calls",
+            "name": "x-workflow-slug",
             "in": "header"
           }
         ],

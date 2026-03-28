@@ -192,7 +192,7 @@ describe("downstream service headers", () => {
   });
 
   describe("workflow tracking headers forwarding", () => {
-    it("createRun forwards x-campaign-id, x-brand-id, x-workflow-name when provided", async () => {
+    it("createRun forwards x-campaign-id, x-brand-id, x-workflow-slug when provided", async () => {
       process.env.RUNS_SERVICE_URL = "http://runs:3000";
       process.env.RUNS_SERVICE_API_KEY = "runs-key";
 
@@ -206,14 +206,14 @@ describe("downstream service headers", () => {
         workflowTracking: {
           campaignId: "camp-123",
           brandId: "brand-456",
-          workflowName: "extract-methodology",
+          workflowSlug: "extract-methodology",
         },
       });
 
       const [, opts] = fetchSpy.mock.calls[0];
       expect(opts.headers["x-campaign-id"]).toBe("camp-123");
       expect(opts.headers["x-brand-id"]).toBe("brand-456");
-      expect(opts.headers["x-workflow-name"]).toBe("extract-methodology");
+      expect(opts.headers["x-workflow-slug"]).toBe("extract-methodology");
     });
 
     it("createRun omits workflow tracking headers when not provided", async () => {
@@ -231,7 +231,7 @@ describe("downstream service headers", () => {
       const [, opts] = fetchSpy.mock.calls[0];
       expect(opts.headers["x-campaign-id"]).toBeUndefined();
       expect(opts.headers["x-brand-id"]).toBeUndefined();
-      expect(opts.headers["x-workflow-name"]).toBeUndefined();
+      expect(opts.headers["x-workflow-slug"]).toBeUndefined();
     });
 
     it("mapSiteUrls forwards workflow tracking headers", async () => {
@@ -252,14 +252,14 @@ describe("downstream service headers", () => {
         workflowTracking: {
           campaignId: "camp-123",
           brandId: "brand-456",
-          workflowName: "extract-methodology",
+          workflowSlug: "extract-methodology",
         },
       });
 
       const [, opts] = fetchSpy.mock.calls[0];
       expect(opts.headers["x-campaign-id"]).toBe("camp-123");
       expect(opts.headers["x-brand-id"]).toBe("brand-456");
-      expect(opts.headers["x-workflow-name"]).toBe("extract-methodology");
+      expect(opts.headers["x-workflow-slug"]).toBe("extract-methodology");
     });
 
     it("resolveApiKey forwards workflow tracking headers", async () => {
@@ -282,7 +282,7 @@ describe("downstream service headers", () => {
           workflowTracking: {
             campaignId: "camp-123",
             brandId: "brand-456",
-            workflowName: "extract-methodology",
+            workflowSlug: "extract-methodology",
           },
         },
         { method: "POST", path: "/test" }
@@ -291,7 +291,7 @@ describe("downstream service headers", () => {
       const [, opts] = fetchSpy.mock.calls[0];
       expect(opts.headers["x-campaign-id"]).toBe("camp-123");
       expect(opts.headers["x-brand-id"]).toBe("brand-456");
-      expect(opts.headers["x-workflow-name"]).toBe("extract-methodology");
+      expect(opts.headers["x-workflow-slug"]).toBe("extract-methodology");
     });
 
     it("addCosts forwards workflow tracking headers", async () => {
@@ -309,7 +309,7 @@ describe("downstream service headers", () => {
           workflowTracking: {
             campaignId: "camp-123",
             brandId: "brand-456",
-            workflowName: "extract-methodology",
+            workflowSlug: "extract-methodology",
           },
         }
       );
@@ -317,7 +317,7 @@ describe("downstream service headers", () => {
       const [, opts] = fetchSpy.mock.calls[0];
       expect(opts.headers["x-campaign-id"]).toBe("camp-123");
       expect(opts.headers["x-brand-id"]).toBe("brand-456");
-      expect(opts.headers["x-workflow-name"]).toBe("extract-methodology");
+      expect(opts.headers["x-workflow-slug"]).toBe("extract-methodology");
     });
   });
 });
