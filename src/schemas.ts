@@ -19,7 +19,7 @@ const identityHeaders = z.object({
   "x-user-id": z.string().uuid().openapi({ description: "Internal user UUID from client-service" }),
   "x-run-id": z.string().uuid().openapi({ description: "Caller's run ID — used as parentRunId when creating this service's own run" }),
   "x-campaign-id": z.string().optional().openapi({ description: "Campaign ID — injected by workflow-service on DAG calls" }),
-  "x-brand-id": z.string().optional().openapi({ description: "Brand ID — injected by workflow-service on DAG calls" }),
+  "x-brand-id": z.string().optional().openapi({ description: "Brand ID(s) — comma-separated UUIDs when multi-brand (e.g. 'uuid1,uuid2,uuid3')" }),
   "x-workflow-slug": z.string().optional().openapi({ description: "Workflow slug — injected by workflow-service on DAG calls" }),
 });
 

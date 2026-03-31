@@ -218,7 +218,7 @@ router.post(
         expiresAt,
         updatedAt: new Date(),
         campaignId: workflowTracking.campaignId ?? null,
-        brandId: workflowTracking.brandId ?? null,
+        brandIds: workflowTracking.brandIds?.length ? workflowTracking.brandIds : null,
         workflowSlug: workflowTracking.workflowSlug ?? null,
       };
 

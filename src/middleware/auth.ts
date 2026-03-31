@@ -33,11 +33,14 @@ export function requireIdentity(
 
   // Optional workflow tracking headers — forwarded by workflow-service on all DAG calls
   const campaignId = req.headers["x-campaign-id"] as string | undefined;
-  const brandId = req.headers["x-brand-id"] as string | undefined;
+  const rawBrandId = req.headers["x-brand-id"] as string | undefined;
+  const brandIds = rawBrandId
+    ? String(rawBrandId).split(",").map(s => s.trim()).filter(Boolean)
+    : [];
   const workflowSlug = req.headers["x-workflow-slug"] as string | undefined;
 
   if (campaignId) res.locals.campaignId = campaignId;
-  if (brandId) res.locals.brandId = brandId;
+  if (brandIds.length > 0) res.locals.brandIds = brandIds;
   if (workflowSlug) res.locals.workflowSlug = workflowSlug;
 
   next();
@@ -45,14 +48,14 @@ export function requireIdentity(
 
 export interface WorkflowTrackingHeaders {
   campaignId?: string;
-  brandId?: string;
+  brandIds?: string[];
   workflowSlug?: string;
 }
 
 export function getWorkflowTracking(locals: Record<string, unknown>): WorkflowTrackingHeaders {
   return {
     ...(locals.campaignId ? { campaignId: locals.campaignId as string } : {}),
-    ...(locals.brandId ? { brandId: locals.brandId as string } : {}),
+    ...(locals.brandIds ? { brandIds: locals.brandIds as string[] } : {}),
     ...(locals.workflowSlug ? { workflowSlug: locals.workflowSlug as string } : {}),
   };
 }
@@ -60,7 +63,7 @@ export function getWorkflowTracking(locals: Record<string, unknown>): WorkflowTr
 export function workflowTrackingToHeaders(tracking: WorkflowTrackingHeaders): Record<string, string> {
   return {
     ...(tracking.campaignId ? { "x-campaign-id": tracking.campaignId } : {}),
-    ...(tracking.brandId ? { "x-brand-id": tracking.brandId } : {}),
+    ...(tracking.brandIds?.length ? { "x-brand-id": tracking.brandIds.join(",") } : {}),
     ...(tracking.workflowSlug ? { "x-workflow-slug": tracking.workflowSlug } : {}),
   };
 }

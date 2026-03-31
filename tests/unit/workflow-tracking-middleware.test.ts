@@ -16,7 +16,7 @@ function createApp() {
       res.json({
         orgId: res.locals.orgId,
         campaignId: wt.campaignId ?? null,
-        brandId: wt.brandId ?? null,
+        brandIds: wt.brandIds ?? null,
         workflowSlug: wt.workflowSlug ?? null,
       });
     }
@@ -34,7 +34,7 @@ describe("workflow tracking middleware", () => {
     "x-run-id": "00000000-0000-0000-0000-000000000003",
   };
 
-  it("extracts workflow tracking headers when present", async () => {
+  it("extracts workflow tracking headers when present (single brand)", async () => {
     const res = await request(app)
       .get("/test")
       .set({
@@ -46,8 +46,32 @@ describe("workflow tracking middleware", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.campaignId).toBe("camp-abc");
-    expect(res.body.brandId).toBe("brand-xyz");
+    expect(res.body.brandIds).toEqual(["brand-xyz"]);
     expect(res.body.workflowSlug).toBe("my-workflow");
+  });
+
+  it("parses multi-brand CSV x-brand-id header", async () => {
+    const res = await request(app)
+      .get("/test")
+      .set({
+        ...baseHeaders,
+        "x-brand-id": "brand-1,brand-2,brand-3",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.brandIds).toEqual(["brand-1", "brand-2", "brand-3"]);
+  });
+
+  it("trims whitespace in CSV brand IDs", async () => {
+    const res = await request(app)
+      .get("/test")
+      .set({
+        ...baseHeaders,
+        "x-brand-id": " brand-1 , brand-2 , brand-3 ",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.brandIds).toEqual(["brand-1", "brand-2", "brand-3"]);
   });
 
   it("returns null for workflow tracking headers when absent", async () => {
@@ -57,7 +81,7 @@ describe("workflow tracking middleware", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.campaignId).toBeNull();
-    expect(res.body.brandId).toBeNull();
+    expect(res.body.brandIds).toBeNull();
     expect(res.body.workflowSlug).toBeNull();
   });
 
@@ -71,7 +95,7 @@ describe("workflow tracking middleware", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.campaignId).toBe("camp-only");
-    expect(res.body.brandId).toBeNull();
+    expect(res.body.brandIds).toBeNull();
     expect(res.body.workflowSlug).toBeNull();
   });
 
