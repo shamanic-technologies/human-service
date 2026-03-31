@@ -87,7 +87,7 @@ export const humanMethodologies = pgTable(
 
     // Workflow tracking — populated when extraction is triggered from a workflow
     campaignId: text("campaign_id"),
-    brandId: text("brand_id"),
+    brandIds: text("brand_ids").array(),
     workflowSlug: text("workflow_slug"),
 
     createdAt: timestamp("created_at", { withTimezone: true })

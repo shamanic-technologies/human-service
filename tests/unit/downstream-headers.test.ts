@@ -205,7 +205,7 @@ describe("downstream service headers", () => {
         taskName: "test-task",
         workflowTracking: {
           campaignId: "camp-123",
-          brandId: "brand-456",
+          brandIds: ["brand-456"],
           workflowSlug: "extract-methodology",
         },
       });
@@ -251,7 +251,7 @@ describe("downstream service headers", () => {
         runId: "run-1",
         workflowTracking: {
           campaignId: "camp-123",
-          brandId: "brand-456",
+          brandIds: ["brand-456"],
           workflowSlug: "extract-methodology",
         },
       });
@@ -281,7 +281,7 @@ describe("downstream service headers", () => {
           runId: "run-1",
           workflowTracking: {
             campaignId: "camp-123",
-            brandId: "brand-456",
+            brandIds: ["brand-456"],
             workflowSlug: "extract-methodology",
           },
         },
@@ -308,7 +308,7 @@ describe("downstream service headers", () => {
           userId: "user-1",
           workflowTracking: {
             campaignId: "camp-123",
-            brandId: "brand-456",
+            brandIds: ["brand-456"],
             workflowSlug: "extract-methodology",
           },
         }
