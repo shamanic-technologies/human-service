@@ -1,19 +1,16 @@
 import { Router } from "express";
 import * as fs from "fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 const router = Router();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
 router.get("/openapi.json", (_req, res) => {
-  const specPath = join(__dirname, "../../openapi.json");
+  const specPath = join(process.cwd(), "openapi.json");
   if (fs.existsSync(specPath)) {
     const spec = JSON.parse(fs.readFileSync(specPath, "utf-8"));
     res.json(spec);
   } else {
+    console.error("[human-service] openapi.json not found at", specPath);
     res.status(404).json({ error: "OpenAPI spec not generated" });
   }
 });
