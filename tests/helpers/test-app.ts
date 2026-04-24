@@ -4,6 +4,7 @@ import healthRoutes from "../../src/routes/health.js";
 import openapiRoutes from "../../src/routes/openapi.js";
 import humanRoutes from "../../src/routes/humans.js";
 import methodologyRoutes from "../../src/routes/methodology.js";
+import transferBrandRoutes from "../../src/routes/transfer-brand.js";
 
 export function createTestApp() {
   const app = express();
@@ -14,6 +15,7 @@ export function createTestApp() {
   app.use(openapiRoutes);
   app.use(humanRoutes);
   app.use(methodologyRoutes);
+  app.use(transferBrandRoutes);
 
   app.use((_req: express.Request, res: express.Response) => {
     res.status(404).json({ error: "Not found" });
