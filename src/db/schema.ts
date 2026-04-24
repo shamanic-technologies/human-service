@@ -72,6 +72,7 @@ export const humanMethodologies = pgTable(
       .references(() => humans.id, { onDelete: "cascade" })
       .notNull()
       .unique(),
+    orgId: text("org_id"),
 
     frameworks: jsonb("frameworks").$type<Framework[]>(),
     strategicPatterns: text("strategic_patterns").array(),
@@ -97,5 +98,8 @@ export const humanMethodologies = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (table) => [index("idx_methodologies_human").on(table.humanId)]
+  (table) => [
+    index("idx_methodologies_human").on(table.humanId),
+    index("idx_methodologies_org_brand").on(table.orgId),
+  ]
 );
