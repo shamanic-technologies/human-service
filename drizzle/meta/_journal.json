@@ -15,6 +15,41 @@
       "when": 1740758400000,
       "tag": "0001_refactor_schema",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1741363200000,
+      "tag": "0002_remove_appid_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1742572800000,
+      "tag": "0003_add_workflow_tracking",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1743177600000,
+      "tag": "0004_rename_workflow_name_to_slug",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1743782400000,
+      "tag": "0005_multi_brand_ids",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1745452800000,
+      "tag": "0006_add_methodology_org_id",
+      "breakpoints": true
     }
   ]
 }
