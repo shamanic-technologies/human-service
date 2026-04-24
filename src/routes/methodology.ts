@@ -206,6 +206,7 @@ router.post(
 
       const methodologyValues = {
         humanId: id,
+        orgId,
         frameworks: extractedData?.frameworks ?? null,
         strategicPatterns: extractedData?.strategicPatterns ?? null,
         toneOfVoice: extractedData?.toneOfVoice ?? null,

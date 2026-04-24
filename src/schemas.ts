@@ -285,6 +285,54 @@ registry.registerPath({
   },
 });
 
+// --- POST /internal/transfer-brand ---
+
+export const TransferBrandRequestSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    sourceOrgId: z.string().uuid(),
+    targetOrgId: z.string().uuid(),
+  })
+  .openapi("TransferBrandRequest");
+
+export const TransferBrandResponseSchema = z
+  .object({
+    updatedTables: z.array(
+      z.object({
+        tableName: z.string(),
+        count: z.number().int(),
+      })
+    ),
+  })
+  .openapi("TransferBrandResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/transfer-brand",
+  summary: "Transfer a solo-brand from one org to another",
+  security: [{ apiKey: [] }],
+  request: {
+    body: {
+      content: {
+        "application/json": { schema: TransferBrandRequestSchema },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Brand transferred",
+      content: {
+        "application/json": { schema: TransferBrandResponseSchema },
+      },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
 // --- GET /health ---
 
 export const HealthResponseSchema = z
