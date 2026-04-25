@@ -18,20 +18,24 @@ router.post(
       return;
     }
 
-    const { brandId, sourceOrgId, targetOrgId } = parsed.data;
+    const { sourceBrandId, sourceOrgId, targetOrgId, targetBrandId } = parsed.data;
 
     try {
       // Update human_methodologies where:
       // - org_id matches sourceOrgId
-      // - brand_ids has exactly 1 element AND that element is brandId
+      // - brand_ids has exactly 1 element AND that element is sourceBrandId
       const result = await db
         .update(humanMethodologies)
-        .set({ orgId: targetOrgId, updatedAt: new Date() })
+        .set({
+          orgId: targetOrgId,
+          ...(targetBrandId ? { brandIds: [targetBrandId] } : {}),
+          updatedAt: new Date(),
+        })
         .where(
           and(
             eq(humanMethodologies.orgId, sourceOrgId),
             sql`array_length(${humanMethodologies.brandIds}, 1) = 1`,
-            sql`${humanMethodologies.brandIds}[1] = ${brandId}`
+            sql`${humanMethodologies.brandIds}[1] = ${sourceBrandId}`
           )
         )
         .returning({ id: humanMethodologies.id });
@@ -45,7 +49,7 @@ router.post(
       }
 
       console.log(
-        `[human-service] transfer-brand: brandId=${brandId} sourceOrgId=${sourceOrgId} targetOrgId=${targetOrgId} — human_methodologies: ${result.length} rows updated`
+        `[human-service] transfer-brand: sourceBrandId=${sourceBrandId} targetBrandId=${targetBrandId ?? "none"} sourceOrgId=${sourceOrgId} targetOrgId=${targetOrgId} — human_methodologies: ${result.length} rows updated`
       );
 
       res.json({ updatedTables });

@@ -48,7 +48,7 @@ describe("POST /internal/transfer-brand", () => {
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set(apiKeyHeader)
-      .send({ brandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
 
     expect(res.status).toBe(200);
     expect(res.body.updatedTables).toEqual([
@@ -81,7 +81,7 @@ describe("POST /internal/transfer-brand", () => {
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set(apiKeyHeader)
-      .send({ brandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
 
     expect(res.status).toBe(200);
     expect(res.body.updatedTables).toEqual([]);
@@ -113,13 +113,13 @@ describe("POST /internal/transfer-brand", () => {
     await request(app)
       .post("/internal/transfer-brand")
       .set(apiKeyHeader)
-      .send({ brandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
 
     // Second call — should be no-op
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set(apiKeyHeader)
-      .send({ brandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
 
     expect(res.status).toBe(200);
     expect(res.body.updatedTables).toEqual([]);
@@ -143,7 +143,7 @@ describe("POST /internal/transfer-brand", () => {
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set(apiKeyHeader)
-      .send({ brandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
 
     expect(res.status).toBe(200);
     expect(res.body.updatedTables).toEqual([]);
@@ -174,7 +174,7 @@ describe("POST /internal/transfer-brand", () => {
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set(apiKeyHeader)
-      .send({ brandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
 
     expect(res.status).toBe(200);
     expect(res.body.updatedTables).toEqual([]);
@@ -184,15 +184,54 @@ describe("POST /internal/transfer-brand", () => {
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set(apiKeyHeader)
-      .send({ brandId: BRAND_A });
+      .send({ sourceBrandId: BRAND_A });
 
     expect(res.status).toBe(400);
+  });
+
+  it("rewrites brand_ids when targetBrandId is provided (conflict)", async () => {
+    const TARGET_BRAND = "b0000000-0000-4000-8000-00000000000c";
+    const human = await insertHuman({
+      orgId: SOURCE_ORG,
+      name: "Conflict",
+      slug: "conflict",
+      urls: ["https://conflict.example.com"],
+    });
+
+    const meth = await insertMethodology({ humanId: human.id });
+
+    await db
+      .update(humanMethodologies)
+      .set({ orgId: SOURCE_ORG, brandIds: [BRAND_A] })
+      .where(eq(humanMethodologies.id, meth.id));
+
+    const res = await request(app)
+      .post("/internal/transfer-brand")
+      .set(apiKeyHeader)
+      .send({
+        sourceBrandId: BRAND_A,
+        sourceOrgId: SOURCE_ORG,
+        targetOrgId: TARGET_ORG,
+        targetBrandId: TARGET_BRAND,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.updatedTables).toEqual([
+      { tableName: "human_methodologies", count: 1 },
+    ]);
+
+    const [updated] = await db
+      .select()
+      .from(humanMethodologies)
+      .where(eq(humanMethodologies.id, meth.id));
+    expect(updated.orgId).toBe(TARGET_ORG);
+    expect(updated.brandIds).toEqual([TARGET_BRAND]);
   });
 
   it("returns 401 without API key", async () => {
     const res = await request(app)
       .post("/internal/transfer-brand")
-      .send({ brandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
 
     expect(res.status).toBe(401);
   });
@@ -201,7 +240,7 @@ describe("POST /internal/transfer-brand", () => {
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set(apiKeyHeader)
-      .send({ brandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
 
     // Should succeed without x-org-id, x-user-id, x-run-id
     expect(res.status).toBe(200);
