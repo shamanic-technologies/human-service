@@ -21,16 +21,10 @@ router.post(
     const { sourceBrandId, sourceOrgId, targetOrgId, targetBrandId } = parsed.data;
 
     try {
-      // Update human_methodologies where:
-      // - org_id matches sourceOrgId
-      // - brand_ids has exactly 1 element AND that element is sourceBrandId
-      const result = await db
+      // Step 1: Move org — scoped to sourceOrgId + solo-brand
+      const step1 = await db
         .update(humanMethodologies)
-        .set({
-          orgId: targetOrgId,
-          ...(targetBrandId ? { brandIds: [targetBrandId] } : {}),
-          updatedAt: new Date(),
-        })
+        .set({ orgId: targetOrgId, updatedAt: new Date() })
         .where(
           and(
             eq(humanMethodologies.orgId, sourceOrgId),
@@ -40,16 +34,33 @@ router.post(
         )
         .returning({ id: humanMethodologies.id });
 
+      // Step 2: Rewrite brand_id globally (no org filter)
+      let step2Count = 0;
+      if (targetBrandId) {
+        const step2 = await db
+          .update(humanMethodologies)
+          .set({ brandIds: [targetBrandId], updatedAt: new Date() })
+          .where(
+            and(
+              sql`array_length(${humanMethodologies.brandIds}, 1) = 1`,
+              sql`${humanMethodologies.brandIds}[1] = ${sourceBrandId}`
+            )
+          )
+          .returning({ id: humanMethodologies.id });
+        step2Count = step2.length;
+      }
+
+      const totalCount = Math.max(step1.length, step2Count);
       const updatedTables: { tableName: string; count: number }[] = [];
-      if (result.length > 0) {
+      if (totalCount > 0) {
         updatedTables.push({
           tableName: "human_methodologies",
-          count: result.length,
+          count: totalCount,
         });
       }
 
       console.log(
-        `[human-service] transfer-brand: sourceBrandId=${sourceBrandId} targetBrandId=${targetBrandId ?? "none"} sourceOrgId=${sourceOrgId} targetOrgId=${targetOrgId} — human_methodologies: ${result.length} rows updated`
+        `[human-service] transfer-brand: sourceBrandId=${sourceBrandId} targetBrandId=${targetBrandId ?? "none"} sourceOrgId=${sourceOrgId} targetOrgId=${targetOrgId} — step1(org): ${step1.length}, step2(brand): ${step2Count}`
       );
 
       res.json({ updatedTables });
