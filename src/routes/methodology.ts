@@ -9,6 +9,7 @@ import { createRun, addCosts, completeRun } from "../services/runs.js";
 import { mapSiteUrls, scrapePage } from "../services/scraping.js";
 import { rankPages } from "../services/url-utils.js";
 import { extractMethodology } from "../services/extractor.js";
+import { traceEvent } from "../lib/trace-event.js";
 
 const router = Router();
 
@@ -109,6 +110,16 @@ router.post(
         }
       }
 
+      const traceHeaders = {
+        "x-org-id": orgId,
+        "x-user-id": userId,
+        ...(workflowTracking.campaignId ? { "x-campaign-id": workflowTracking.campaignId } : {}),
+        ...(workflowTracking.brandIds?.length ? { "x-brand-id": workflowTracking.brandIds.join(",") } : {}),
+        ...(workflowTracking.workflowSlug ? { "x-workflow-slug": workflowTracking.workflowSlug } : {}),
+      };
+
+      traceEvent(runId, { service: "human-service", event: "extract-started", detail: `humanId=${id} slug=${human.slug}` }, traceHeaders);
+
       // Create our own run with the caller's runId as parent
       const childRunId = await createRun({
         orgId,
@@ -140,6 +151,8 @@ router.post(
         allUrls.push(...mapped.urls);
       }
 
+      traceEvent(effectiveRunId, { service: "human-service", event: "urls-discovered", detail: `${allUrls.length} URLs from ${human.urls.length} base URLs` }, traceHeaders);
+
       // Select top pages
       const maxPages = human.maxPages;
       const selectedUrls = rankPages(
@@ -155,6 +168,8 @@ router.post(
       const pages = scrapeResults.filter(
         (r): r is NonNullable<typeof r> => r !== null
       );
+
+      traceEvent(effectiveRunId, { service: "human-service", event: "pages-scraped", detail: `${pages.length}/${selectedUrls.length} pages scraped successfully` }, traceHeaders);
 
       // AI extraction
       let extractedData = null;
@@ -182,6 +197,14 @@ router.post(
           ], { orgId, userId, workflowTracking });
         }
       }
+
+      traceEvent(effectiveRunId, {
+        service: "human-service",
+        event: extractedData ? "ai-extraction-complete" : "ai-extraction-skipped",
+        detail: extractedData
+          ? `${extractedData.frameworks.length} frameworks, ${extractedData.strategicPatterns.length} patterns extracted`
+          : `key=${!!resolved?.key} pages=${pages.length}`,
+      }, traceHeaders);
 
       // Update human with extracted bio/expertise/knownFor
       if (extractedData) {
@@ -257,12 +280,15 @@ router.post(
         .where(eq(humans.id, id))
         .limit(1);
 
+      traceEvent(effectiveRunId, { service: "human-service", event: "extract-complete", detail: `pagesScraped=${pages.length}` }, traceHeaders);
+
       res.json({
         human: serializeHumanBasic(updatedHuman),
         methodology: serializeMethodology(methodology),
         pagesScraped: pages.length,
       });
     } catch (err) {
+      traceEvent(runId, { service: "human-service", event: "extract-failed", level: "error", detail: String(err) }, { "x-org-id": orgId, "x-user-id": userId });
       console.error("Error extracting methodology:", err);
       res.status(500).json({ error: "Internal server error" });
     }
