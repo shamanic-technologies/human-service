@@ -1,10 +1,17 @@
 import { db } from "../../src/db/index.js";
-import { humans, humanMethodologies } from "../../src/db/schema.js";
+import {
+  humans,
+  humanMethodologies,
+  lists,
+  listMembers,
+} from "../../src/db/schema.js";
 import { sql } from "../../src/db/index.js";
 
 export async function cleanTestData() {
   await db.delete(humanMethodologies);
   await db.delete(humans);
+  await db.delete(listMembers);
+  await db.delete(lists);
 }
 
 export async function closeDb() {

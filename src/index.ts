@@ -7,6 +7,8 @@ import openapiRoutes from "./routes/openapi.js";
 import humanRoutes from "./routes/humans.js";
 import methodologyRoutes from "./routes/methodology.js";
 import transferBrandRoutes from "./routes/transfer-brand.js";
+import listsRoutes from "./routes/lists.js";
+import { register as runInstrumentation } from "./instrumentation.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,6 +21,7 @@ app.use(openapiRoutes);
 app.use(humanRoutes);
 app.use(methodologyRoutes);
 app.use(transferBrandRoutes);
+app.use(listsRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
@@ -26,14 +29,15 @@ app.use((_req, res) => {
 
 if (process.env.NODE_ENV !== "test") {
   migrate(db, { migrationsFolder: "./drizzle" })
-    .then(() => {
-      console.log("Migrations complete");
+    .then(async () => {
+      console.log("[human-service] Migrations complete");
+      await runInstrumentation();
       app.listen(Number(PORT), "::", () => {
-        console.log(`Human service running on port ${PORT}`);
+        console.log(`[human-service] Running on port ${PORT}`);
       });
     })
     .catch((err) => {
-      console.error("Migration failed:", err);
+      console.error("[human-service] Migration failed:", err);
       process.exit(1);
     });
 }
