@@ -334,6 +334,271 @@ registry.registerPath({
   },
 });
 
+// --- CRM v1: lists + list_members ---
+//
+// Identity headers for /orgs/lists/* endpoints. Only x-org-id is strictly
+// required; x-user-id is optional (populates created_by_user_id /
+// added_by_user_id). x-run-id is optional and used as parentRunId for
+// run-tracking when present.
+
+const orgsListsHeaders = z.object({
+  "x-org-id": z.string().uuid().openapi({ description: "Internal org UUID from client-service" }),
+  "x-user-id": z
+    .string()
+    .uuid()
+    .optional()
+    .openapi({ description: "Internal user UUID — populates created_by/added_by columns when present" }),
+  "x-run-id": z
+    .string()
+    .uuid()
+    .optional()
+    .openapi({ description: "Caller's run ID — used as parentRunId when creating this service's run" }),
+});
+
+export const ListSchema = z
+  .object({
+    id: z.string().uuid(),
+    orgId: z.string().uuid(),
+    brandId: z.string().uuid().nullable(),
+    name: z.string(),
+    description: z.string().nullable(),
+    createdByUserId: z.string().uuid().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .openapi("List");
+
+export const ListMemberSchema = z
+  .object({
+    id: z.string().uuid(),
+    orgId: z.string().uuid(),
+    listId: z.string().uuid(),
+    sourceService: z.string(),
+    sourceResourceId: z.string(),
+    sourceAccountId: z.string().uuid().nullable(),
+    humanId: z.string().uuid().nullable(),
+    addedByUserId: z.string().uuid().nullable(),
+    addedAt: z.string(),
+  })
+  .openapi("ListMember");
+
+// --- POST /orgs/lists ---
+
+export const CreateListRequestSchema = z
+  .object({
+    name: z.string().min(1),
+    description: z.string().optional(),
+    brandId: z.string().uuid().optional(),
+  })
+  .openapi("CreateListRequest");
+
+export const CreateListResponseSchema = z
+  .object({ list: ListSchema })
+  .openapi("CreateListResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/lists",
+  summary: "Create a CRM list",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: orgsListsHeaders,
+    body: { content: { "application/json": { schema: CreateListRequestSchema } } },
+  },
+  responses: {
+    201: { description: "List created", content: { "application/json": { schema: CreateListResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+// --- GET /orgs/lists ---
+
+export const ListListsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+  brandId: z.string().uuid().optional(),
+});
+
+export const ListListsResponseSchema = z
+  .object({
+    lists: z.array(ListSchema),
+    total: z.number().int(),
+    limit: z.number().int(),
+    offset: z.number().int(),
+  })
+  .openapi("ListListsResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/lists",
+  summary: "List CRM lists for an org",
+  security: [{ apiKey: [] }],
+  request: { headers: orgsListsHeaders, query: ListListsQuerySchema },
+  responses: {
+    200: { description: "Lists found", content: { "application/json": { schema: ListListsResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+// --- GET /orgs/lists/{id} ---
+
+export const GetListResponseSchema = z
+  .object({ list: ListSchema })
+  .openapi("GetListResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/lists/{id}",
+  summary: "Get a CRM list by id",
+  security: [{ apiKey: [] }],
+  request: { headers: orgsListsHeaders, params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    200: { description: "List found", content: { "application/json": { schema: GetListResponseSchema } } },
+    404: { description: "List not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+// --- PATCH /orgs/lists/{id} ---
+
+export const UpdateListRequestSchema = z
+  .object({
+    name: z.string().min(1).optional(),
+    description: z.string().nullable().optional(),
+    brandId: z.string().uuid().nullable().optional(),
+  })
+  .openapi("UpdateListRequest");
+
+registry.registerPath({
+  method: "patch",
+  path: "/orgs/lists/{id}",
+  summary: "Update a CRM list",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: orgsListsHeaders,
+    params: z.object({ id: z.string().uuid() }),
+    body: { content: { "application/json": { schema: UpdateListRequestSchema } } },
+  },
+  responses: {
+    200: { description: "List updated", content: { "application/json": { schema: GetListResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "List not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+// --- DELETE /orgs/lists/{id} ---
+
+registry.registerPath({
+  method: "delete",
+  path: "/orgs/lists/{id}",
+  summary: "Delete a CRM list (cascades to members)",
+  security: [{ apiKey: [] }],
+  request: { headers: orgsListsHeaders, params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    204: { description: "List deleted" },
+    404: { description: "List not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+// --- GET /orgs/lists/{id}/members ---
+
+export const ListMembersQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+export const ListMembersResponseSchema = z
+  .object({
+    members: z.array(ListMemberSchema),
+    total: z.number().int(),
+    limit: z.number().int(),
+    offset: z.number().int(),
+  })
+  .openapi("ListMembersResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/lists/{id}/members",
+  summary: "Get members of a CRM list",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: orgsListsHeaders,
+    params: z.object({ id: z.string().uuid() }),
+    query: ListMembersQuerySchema,
+  },
+  responses: {
+    200: { description: "Members found", content: { "application/json": { schema: ListMembersResponseSchema } } },
+    404: { description: "List not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+// --- POST /orgs/lists/{id}/members (bulk add, idempotent) ---
+
+const MemberInputSchema = z.object({
+  sourceService: z.string().min(1).optional(),
+  sourceResourceId: z.string().min(1),
+  sourceAccountId: z.string().uuid().optional(),
+});
+
+export const BulkAddMembersRequestSchema = z
+  .object({ members: z.array(MemberInputSchema).min(1) })
+  .openapi("BulkAddMembersRequest");
+
+export const BulkAddMembersResponseSchema = z
+  .object({ added: z.number().int(), skipped: z.number().int() })
+  .openapi("BulkAddMembersResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/lists/{id}/members",
+  summary: "Bulk add members to a list (idempotent on (list_id, source_service, source_resource_id))",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: orgsListsHeaders,
+    params: z.object({ id: z.string().uuid() }),
+    body: { content: { "application/json": { schema: BulkAddMembersRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Bulk add complete", content: { "application/json": { schema: BulkAddMembersResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "List not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+// --- DELETE /orgs/lists/{id}/members (bulk remove) ---
+
+export const BulkRemoveMembersRequestSchema = z
+  .object({ members: z.array(MemberInputSchema).min(1) })
+  .openapi("BulkRemoveMembersRequest");
+
+export const BulkRemoveMembersResponseSchema = z
+  .object({ removed: z.number().int(), notFound: z.number().int() })
+  .openapi("BulkRemoveMembersResponse");
+
+registry.registerPath({
+  method: "delete",
+  path: "/orgs/lists/{id}/members",
+  summary: "Bulk remove members from a list",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: orgsListsHeaders,
+    params: z.object({ id: z.string().uuid() }),
+    body: { content: { "application/json": { schema: BulkRemoveMembersRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Bulk remove complete", content: { "application/json": { schema: BulkRemoveMembersResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "List not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
 // --- GET /health ---
 
 export const HealthResponseSchema = z

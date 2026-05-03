@@ -31,6 +31,37 @@ export function requireIdentity(
   res.locals.userId = userId;
   res.locals.runId = runId;
 
+  parseOptionalTrackingHeaders(req, res);
+  next();
+}
+
+// requireOrgIdOnly: x-org-id is the only required header. x-user-id and x-run-id
+// are parsed if present (used for `created_by_user_id`, `added_by_user_id`,
+// and run-tracking parent linkage). Used by /orgs/lists/* CRM endpoints which
+// can be called from a UI session without a parent workflow run.
+export function requireOrgIdOnly(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  const orgId = req.headers["x-org-id"] as string | undefined;
+  if (!orgId) {
+    res.status(400).json({ error: "x-org-id header is required" });
+    return;
+  }
+
+  res.locals.orgId = orgId;
+
+  const userId = req.headers["x-user-id"] as string | undefined;
+  const runId = req.headers["x-run-id"] as string | undefined;
+  if (userId) res.locals.userId = userId;
+  if (runId) res.locals.runId = runId;
+
+  parseOptionalTrackingHeaders(req, res);
+  next();
+}
+
+function parseOptionalTrackingHeaders(req: Request, res: Response): void {
   // Optional workflow tracking headers — forwarded by workflow-service on all DAG calls
   const campaignId = req.headers["x-campaign-id"] as string | undefined;
   const rawBrandId = req.headers["x-brand-id"] as string | undefined;
@@ -42,8 +73,6 @@ export function requireIdentity(
   if (campaignId) res.locals.campaignId = campaignId;
   if (brandIds.length > 0) res.locals.brandIds = brandIds;
   if (workflowSlug) res.locals.workflowSlug = workflowSlug;
-
-  next();
 }
 
 export interface WorkflowTrackingHeaders {

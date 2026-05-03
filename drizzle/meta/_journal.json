@@ -50,6 +50,13 @@
       "when": 1745452800000,
       "tag": "0006_add_methodology_org_id",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1746230400000,
+      "tag": "0007_add_lists_and_list_members",
+      "breakpoints": true
     }
   ]
 }
