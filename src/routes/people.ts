@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { requireApiKey, requireOrgIdOnly, getWorkflowTracking } from "../middleware/auth.js";
+import { requireApiKey, requireOrgAndUser, getWorkflowTracking } from "../middleware/auth.js";
 import {
   PeopleSearchRequestSchema,
   ResolveEmailRequestSchema,
@@ -68,7 +68,7 @@ function sendProviderError(
 router.post(
   "/orgs/people/search",
   requireApiKey,
-  requireOrgIdOnly,
+  requireOrgAndUser,
   async (req, res) => {
     const parsed = PeopleSearchRequestSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -98,7 +98,7 @@ router.post(
 router.post(
   "/orgs/people/resolve-email",
   requireApiKey,
-  requireOrgIdOnly,
+  requireOrgAndUser,
   async (req, res) => {
     const parsed = ResolveEmailRequestSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -128,7 +128,7 @@ router.post(
 router.post(
   "/orgs/people/search/dry-run",
   requireApiKey,
-  requireOrgIdOnly,
+  requireOrgAndUser,
   async (req, res) => {
     const parsed = DryRunRequestSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -152,7 +152,7 @@ router.post(
 router.get(
   "/orgs/people/filters-prompt",
   requireApiKey,
-  requireOrgIdOnly,
+  requireOrgAndUser,
   async (req, res) => {
     const parsed = FiltersPromptQuerySchema.safeParse(req.query);
     if (!parsed.success) {

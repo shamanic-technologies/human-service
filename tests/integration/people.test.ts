@@ -60,6 +60,18 @@ describe("POST /orgs/people/search", () => {
     expect(res.status).toBe(400);
   });
 
+  it("400 with x-org-id but no x-user-id (gateway requires both)", async () => {
+    const res = await request(app)
+      .post("/orgs/people/search")
+      .set({
+        "X-API-Key": "test-api-key",
+        "Content-Type": "application/json",
+        "x-org-id": "00000000-0000-0000-0000-000000000001",
+      })
+      .send({ provider: "apollo", filters: {} });
+    expect(res.status).toBe(400);
+  });
+
   it("400 on invalid body (bad provider enum)", async () => {
     const res = await request(app)
       .post("/orgs/people/search")

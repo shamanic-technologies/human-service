@@ -2484,10 +2484,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
-              "description": "Internal user UUID — populates created_by/added_by columns when present"
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
             },
-            "required": false,
-            "description": "Internal user UUID — populates created_by/added_by columns when present",
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
             "name": "x-user-id",
             "in": "header"
           },
@@ -2495,10 +2495,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
-              "description": "Caller's run ID — used as parentRunId when creating this service's run"
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
             },
             "required": false,
-            "description": "Caller's run ID — used as parentRunId when creating this service's run",
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
             "name": "x-run-id",
             "in": "header"
           }
@@ -2573,10 +2573,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
-              "description": "Internal user UUID — populates created_by/added_by columns when present"
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
             },
-            "required": false,
-            "description": "Internal user UUID — populates created_by/added_by columns when present",
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
             "name": "x-user-id",
             "in": "header"
           },
@@ -2584,10 +2584,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
-              "description": "Caller's run ID — used as parentRunId when creating this service's run"
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
             },
             "required": false,
-            "description": "Caller's run ID — used as parentRunId when creating this service's run",
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
             "name": "x-run-id",
             "in": "header"
           }
@@ -2662,10 +2662,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
-              "description": "Internal user UUID — populates created_by/added_by columns when present"
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
             },
-            "required": false,
-            "description": "Internal user UUID — populates created_by/added_by columns when present",
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
             "name": "x-user-id",
             "in": "header"
           },
@@ -2673,10 +2673,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
-              "description": "Caller's run ID — used as parentRunId when creating this service's run"
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
             },
             "required": false,
-            "description": "Caller's run ID — used as parentRunId when creating this service's run",
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
             "name": "x-run-id",
             "in": "header"
           }
@@ -2775,10 +2775,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
-              "description": "Internal user UUID — populates created_by/added_by columns when present"
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
             },
-            "required": false,
-            "description": "Internal user UUID — populates created_by/added_by columns when present",
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
             "name": "x-user-id",
             "in": "header"
           },
@@ -2786,10 +2786,10 @@
             "schema": {
               "type": "string",
               "format": "uuid",
-              "description": "Caller's run ID — used as parentRunId when creating this service's run"
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
             },
             "required": false,
-            "description": "Caller's run ID — used as parentRunId when creating this service's run",
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
             "name": "x-run-id",
             "in": "header"
           }
