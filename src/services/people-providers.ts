@@ -74,6 +74,12 @@ export interface PeopleSearchFilters {
   keywords?: string[];
   employeeMin?: number;
   employeeMax?: number;
+  // Rich filters. apify honors all four; apollo honors revenueRanges (revenueRange)
+  // and technologies (currentlyUsingAnyOfTechnologyUids) only.
+  companySizes?: string[];
+  revenueRanges?: string[];
+  fundingStages?: string[];
+  technologies?: string[];
 }
 
 export interface NeutralOrganization {
@@ -118,6 +124,8 @@ export interface PeopleSearchResult {
   people: Person[];
   done: boolean;
   total: number;
+  // apify offset cursor for the next page (null when done / apollo cursor-based).
+  nextOffset: number | null;
 }
 
 export interface ResolveEmailResult {
@@ -326,16 +334,21 @@ function toApolloSearchParams(
   const ranges = apolloEmployeeRanges(filters.employeeMin, filters.employeeMax);
   if (ranges.length) params.organizationNumEmployeesRanges = ranges;
 
-  // Note: neutral `functions` and `companyNames` have no apollo search filter;
-  // they are honored only on the apify provider.
+  if (filters.revenueRanges?.length) params.revenueRange = filters.revenueRanges;
+  if (filters.technologies?.length)
+    params.currentlyUsingAnyOfTechnologyUids = filters.technologies;
+
+  // Note: neutral `functions`, `companyNames`, `companySizes`, `fundingStages`
+  // have no apollo search filter; they are honored only on the apify provider.
   return params;
 }
 
-function toApifyFilters(
-  filters: PeopleSearchFilters,
-  limit: number
+// Flat apify filter body (no limit/offset). Used by /search (+ limit/offset)
+// and /search/count (alone).
+function toApifyFilterBody(
+  filters: PeopleSearchFilters
 ): Record<string, unknown> {
-  const body: Record<string, unknown> = { limit };
+  const body: Record<string, unknown> = {};
   if (filters.titles?.length) body.titles = filters.titles;
   if (filters.seniorities?.length) body.seniorities = filters.seniorities;
   if (filters.functions?.length) body.functions = filters.functions;
@@ -350,6 +363,10 @@ function toApifyFilters(
     body.companyDomains = filters.companyDomains;
   if (filters.industries?.length) body.industries = filters.industries;
   if (filters.keywords?.length) body.keywords = filters.keywords;
+  if (filters.companySizes?.length) body.companySizes = filters.companySizes;
+  if (filters.revenueRanges?.length) body.revenueRanges = filters.revenueRanges;
+  if (filters.fundingStages?.length) body.fundingStages = filters.fundingStages;
+  if (filters.technologies?.length) body.technologies = filters.technologies;
   if (filters.employeeMin !== undefined) body.employeeMin = filters.employeeMin;
   if (filters.employeeMax !== undefined) body.employeeMax = filters.employeeMax;
   return body;
@@ -499,6 +516,7 @@ export async function peopleSearch(args: {
   filters: PeopleSearchFilters;
   isNextPage?: boolean;
   limit?: number;
+  offset?: number;
   identity: Identity;
 }): Promise<PeopleSearchResult> {
   const provider = resolveProvider(args);
@@ -524,10 +542,13 @@ export async function peopleSearch(args: {
       people: data.people.map(normalizeApolloPerson),
       done: data.done,
       total: data.totalEntries,
+      nextOffset: null,
     };
   }
 
-  // apify — one-shot, no cursor. Returns everything then done=true.
+  // apify — offset-based pagination (apify-service#6). totalMatched / hasMore /
+  // nextOffset are pipelinelabs-only signals (microworlds contributes page 1
+  // only) — a provider-specific cursor, NOT a cross-source-exact total.
   const { url, key } = requireApify();
   const limit = args.limit ?? APIFY_DEFAULT_LIMIT;
   const data = (await postProvider(
@@ -535,14 +556,26 @@ export async function peopleSearch(args: {
     url,
     key,
     "/search",
-    toApifyFilters(args.filters, limit),
+    {
+      ...toApifyFilterBody(args.filters),
+      limit,
+      ...(args.offset !== undefined ? { offset: args.offset } : {}),
+    },
     args.identity
-  )) as { leads: ApifyLead[]; leadCount: number; verifiedCount: number };
+  )) as {
+    leads: ApifyLead[];
+    leadCount: number;
+    verifiedCount: number;
+    totalMatched?: number;
+    hasMore?: boolean;
+    nextOffset?: number;
+  };
   return {
     provider,
     people: data.leads.map(normalizeApifyLead),
-    done: true,
-    total: data.leadCount,
+    done: data.hasMore !== true,
+    total: data.totalMatched ?? data.leadCount,
+    nextOffset: data.hasMore === true ? data.nextOffset ?? null : null,
   };
 }
 
@@ -608,8 +641,17 @@ export async function dryRun(args: {
 }): Promise<{ provider: Provider; totalEntries: number }> {
   const provider = resolveProvider(args);
   if (provider === "apify") {
-    // apify-service has no free count endpoint yet (apify-service#6).
-    throw new ProviderUnsupportedError("apify", "dry-run");
+    // apify-service#6: free count, zero credit, zero persistence.
+    const { url, key } = requireApify();
+    const data = (await postProvider(
+      "apify",
+      url,
+      key,
+      "/search/count",
+      toApifyFilterBody(args.filters),
+      args.identity
+    )) as { totalMatched: number };
+    return { provider, totalEntries: data.totalMatched };
   }
   const { url, key } = requireApollo();
   const data = (await postProvider(
@@ -628,12 +670,9 @@ export async function filtersPrompt(args: {
   identity: Identity;
 }): Promise<{ provider: Provider; prompt: string; schemaVersion: string }> {
   const provider = args.provider ?? "apollo";
-  if (provider === "apify") {
-    throw new ProviderUnsupportedError("apify", "filters-prompt");
-  }
-  const { url, key } = requireApollo();
+  const { url, key } = provider === "apify" ? requireApify() : requireApollo();
   const data = (await getProvider(
-    "apollo",
+    provider,
     url,
     key,
     "/search/filters-prompt",

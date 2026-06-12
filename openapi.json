@@ -722,14 +722,21 @@
             "type": "boolean"
           },
           "total": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Total matchable. apify: pipelinelabs-only signal (provider cursor, not a cross-source-exact total)."
+          },
+          "nextOffset": {
+            "type": "integer",
+            "nullable": true,
+            "description": "apify offset for the next page (null when done / apollo cursor-based)."
           }
         },
         "required": [
           "provider",
           "people",
           "done",
-          "total"
+          "total",
+          "nextOffset"
         ]
       },
       "Person": {
@@ -921,6 +928,11 @@
             "minimum": 1,
             "maximum": 1000,
             "description": "apify only: max leads to return (provider cap 1000). Defaults to 100 (one page)."
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "apify only: pagination offset (pass back `nextOffset` from the prior page)."
           }
         }
       },
@@ -1018,6 +1030,38 @@
             "type": "integer",
             "minimum": 0,
             "exclusiveMinimum": true
+          },
+          "companySizes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Company size buckets. apify only."
+          },
+          "revenueRanges": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Annual revenue ranges. apify + apollo (apollo `revenueRange`)."
+          },
+          "fundingStages": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Latest funding stage. apify only."
+          },
+          "technologies": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Tech stack. apify + apollo (apollo technology UIDs)."
           }
         }
       },
@@ -2640,7 +2684,7 @@
     },
     "/orgs/people/search/dry-run": {
       "post": {
-        "summary": "Count matches for filters without consuming credits (apollo only in v1)",
+        "summary": "Count matches for filters without consuming credits (apollo + apify)",
         "security": [
           {
             "apiKey": []
@@ -2714,16 +2758,6 @@
           "401": {
             "description": "Unauthorized"
           },
-          "501": {
-            "description": "Provider does not support dry-run (apify — see apify-service#6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
           "502": {
             "description": "Provider error",
             "content": {
@@ -2739,7 +2773,7 @@
     },
     "/orgs/people/filters-prompt": {
       "get": {
-        "summary": "LLM filter-shape prompt for a provider (apollo only in v1)",
+        "summary": "LLM filter-shape prompt for a provider (apollo + apify)",
         "security": [
           {
             "apiKey": []
@@ -2817,16 +2851,6 @@
           },
           "401": {
             "description": "Unauthorized"
-          },
-          "501": {
-            "description": "Provider does not support filters-prompt (apify — see apify-service#6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
           },
           "502": {
             "description": "Provider error",

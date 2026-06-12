@@ -654,6 +654,18 @@ export const PeopleSearchFiltersSchema = z
     keywords: z.array(z.string().min(1)).optional(),
     employeeMin: z.number().int().positive().optional(),
     employeeMax: z.number().int().positive().optional(),
+    companySizes: z.array(z.string().min(1)).optional().openapi({
+      description: "Company size buckets. apify only.",
+    }),
+    revenueRanges: z.array(z.string().min(1)).optional().openapi({
+      description: "Annual revenue ranges. apify + apollo (apollo `revenueRange`).",
+    }),
+    fundingStages: z.array(z.string().min(1)).optional().openapi({
+      description: "Latest funding stage. apify only.",
+    }),
+    technologies: z.array(z.string().min(1)).optional().openapi({
+      description: "Tech stack. apify + apollo (apollo technology UIDs).",
+    }),
   })
   .openapi("PeopleSearchFilters");
 
@@ -712,6 +724,9 @@ export const PeopleSearchRequestSchema = z
     limit: z.number().int().min(1).max(1000).optional().openapi({
       description: "apify only: max leads to return (provider cap 1000). Defaults to 100 (one page).",
     }),
+    offset: z.number().int().min(0).optional().openapi({
+      description: "apify only: pagination offset (pass back `nextOffset` from the prior page).",
+    }),
   })
   .openapi("PeopleSearchRequest");
 
@@ -720,7 +735,12 @@ export const PeopleSearchResponseSchema = z
     provider: providerEnum,
     people: z.array(PersonSchema),
     done: z.boolean(),
-    total: z.number().int(),
+    total: z.number().int().openapi({
+      description: "Total matchable. apify: pipelinelabs-only signal (provider cursor, not a cross-source-exact total).",
+    }),
+    nextOffset: z.number().int().nullable().openapi({
+      description: "apify offset for the next page (null when done / apollo cursor-based).",
+    }),
   })
   .openapi("PeopleSearchResponse");
 
@@ -800,7 +820,7 @@ export const DryRunResponseSchema = z
 registry.registerPath({
   method: "post",
   path: "/orgs/people/search/dry-run",
-  summary: "Count matches for filters without consuming credits (apollo only in v1)",
+  summary: "Count matches for filters without consuming credits (apollo + apify)",
   security: [{ apiKey: [] }],
   request: {
     headers: peopleHeaders,
@@ -810,7 +830,6 @@ registry.registerPath({
     200: { description: "Match count", content: { "application/json": { schema: DryRunResponseSchema } } },
     400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
-    501: { description: "Provider does not support dry-run (apify — see apify-service#6)", content: { "application/json": { schema: ErrorSchema } } },
     502: { description: "Provider error", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
@@ -832,14 +851,13 @@ export const FiltersPromptResponseSchema = z
 registry.registerPath({
   method: "get",
   path: "/orgs/people/filters-prompt",
-  summary: "LLM filter-shape prompt for a provider (apollo only in v1)",
+  summary: "LLM filter-shape prompt for a provider (apollo + apify)",
   security: [{ apiKey: [] }],
   request: { headers: peopleHeaders, query: FiltersPromptQuerySchema },
   responses: {
     200: { description: "Filter prompt + version hash", content: { "application/json": { schema: FiltersPromptResponseSchema } } },
     400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
-    501: { description: "Provider does not support filters-prompt (apify — see apify-service#6)", content: { "application/json": { schema: ErrorSchema } } },
     502: { description: "Provider error", content: { "application/json": { schema: ErrorSchema } } },
   },
 });

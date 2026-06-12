@@ -7,7 +7,6 @@ import {
   dryRun,
   filtersPrompt,
   ProviderError,
-  ProviderUnsupportedError,
   ProviderConfigError,
 } from "../../src/services/people-providers.js";
 
@@ -219,6 +218,54 @@ describe("peopleSearch — apify", () => {
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(body.limit).toBe(100);
   });
+
+  it("forwards offset + maps totalMatched/hasMore/nextOffset", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      ok({ searchId: "s", leadCount: 1, verifiedCount: 1, totalMatched: 5000, hasMore: true, nextOffset: 200, leads: [] })
+    );
+    const result = await peopleSearch({ provider: "apify", filters: {}, limit: 100, offset: 100, identity });
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body).offset).toBe(100);
+    expect(result.total).toBe(5000);
+    expect(result.done).toBe(false);
+    expect(result.nextOffset).toBe(200);
+  });
+
+  it("done=true + nextOffset null when hasMore false", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      ok({ searchId: "s", leadCount: 3, verifiedCount: 3, totalMatched: 3, hasMore: false, leads: [] })
+    );
+    const result = await peopleSearch({ provider: "apify", filters: {}, identity });
+    expect(result.done).toBe(true);
+    expect(result.nextOffset).toBeNull();
+    expect(result.total).toBe(3);
+  });
+
+  it("maps rich filters to apify verbatim", async () => {
+    fetchSpy.mockResolvedValueOnce(ok({ searchId: "s", leadCount: 0, verifiedCount: 0, leads: [] }));
+    await peopleSearch({
+      provider: "apify",
+      filters: { companySizes: ["11-50"], revenueRanges: ["1M-10M"], fundingStages: ["seed"], technologies: ["hubspot"] },
+      identity,
+    });
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.companySizes).toEqual(["11-50"]);
+    expect(body.revenueRanges).toEqual(["1M-10M"]);
+    expect(body.fundingStages).toEqual(["seed"]);
+    expect(body.technologies).toEqual(["hubspot"]);
+  });
+
+  it("maps rich filters to apollo where equivalent (revenue, technologies)", async () => {
+    fetchSpy.mockResolvedValueOnce(ok({ people: [], done: true, totalEntries: 0 }));
+    await peopleSearch({
+      provider: "apollo",
+      filters: { revenueRanges: ["1000000,10000000"], technologies: ["salesforce"], fundingStages: ["seed"] },
+      identity,
+    });
+    const sp = JSON.parse(fetchSpy.mock.calls[0][1].body).searchParams;
+    expect(sp.revenueRange).toEqual(["1000000,10000000"]);
+    expect(sp.currentlyUsingAnyOfTechnologyUids).toEqual(["salesforce"]);
+    expect(sp.fundingStages).toBeUndefined(); // apollo has no funding-stage search filter
+  });
 });
 
 describe("resolveEmail", () => {
@@ -299,11 +346,15 @@ describe("dryRun", () => {
     expect(fetchSpy.mock.calls[0][0]).toBe("http://apollo:8080/search/dry-run");
     expect(result.totalEntries).toBe(5000);
   });
-  it("apify throws ProviderUnsupportedError", async () => {
-    await expect(dryRun({ provider: "apify", filters: {}, identity })).rejects.toBeInstanceOf(
-      ProviderUnsupportedError
-    );
-    expect(fetchSpy).not.toHaveBeenCalled();
+  it("apify routes to /search/count → totalEntries", async () => {
+    fetchSpy.mockResolvedValueOnce(ok({ totalMatched: 8421 }));
+    const result = await dryRun({ provider: "apify", filters: { titles: ["CEO"] }, identity });
+    expect(fetchSpy.mock.calls[0][0]).toBe("http://apify:8080/search/count");
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.limit).toBeUndefined(); // count has no limit
+    expect(body.titles).toEqual(["CEO"]);
+    expect(result.provider).toBe("apify");
+    expect(result.totalEntries).toBe(8421);
   });
 });
 
@@ -315,10 +366,12 @@ describe("filtersPrompt", () => {
     expect(result.prompt).toBe("## filters");
     expect(result.schemaVersion).toBe("abc123");
   });
-  it("apify throws ProviderUnsupportedError", async () => {
-    await expect(filtersPrompt({ provider: "apify", identity })).rejects.toBeInstanceOf(
-      ProviderUnsupportedError
-    );
+  it("apify proxies its own filters-prompt", async () => {
+    fetchSpy.mockResolvedValueOnce(ok({ prompt: "## apify filters", schemaVersion: "apifyv1" }));
+    const result = await filtersPrompt({ provider: "apify", identity });
+    expect(fetchSpy.mock.calls[0][0]).toBe("http://apify:8080/search/filters-prompt");
+    expect(result.provider).toBe("apify");
+    expect(result.schemaVersion).toBe("apifyv1");
   });
 });
 
