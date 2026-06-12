@@ -8,6 +8,7 @@ import humanRoutes from "./routes/humans.js";
 import methodologyRoutes from "./routes/methodology.js";
 import transferBrandRoutes from "./routes/transfer-brand.js";
 import listsRoutes from "./routes/lists.js";
+import peopleRoutes from "./routes/people.js";
 import { register as runInstrumentation } from "./instrumentation.js";
 
 const app = express();
@@ -22,6 +23,7 @@ app.use(humanRoutes);
 app.use(methodologyRoutes);
 app.use(transferBrandRoutes);
 app.use(listsRoutes);
+app.use(peopleRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });

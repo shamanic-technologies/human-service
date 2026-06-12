@@ -6,6 +6,7 @@ import humanRoutes from "../../src/routes/humans.js";
 import methodologyRoutes from "../../src/routes/methodology.js";
 import transferBrandRoutes from "../../src/routes/transfer-brand.js";
 import listsRoutes from "../../src/routes/lists.js";
+import peopleRoutes from "../../src/routes/people.js";
 
 export function createTestApp() {
   const app = express();
@@ -18,6 +19,7 @@ export function createTestApp() {
   app.use(methodologyRoutes);
   app.use(transferBrandRoutes);
   app.use(listsRoutes);
+  app.use(peopleRoutes);
 
   app.use((_req: express.Request, res: express.Response) => {
     res.status(404).json({ error: "Not found" });
