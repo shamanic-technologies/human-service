@@ -83,9 +83,14 @@ confusing downstream 502.
   only** (thrown rejection, never a completed HTTP response) with 250/500/1000ms
   backoff — write-safe because the request never reached the server. See
   CLAUDE.md global "second surface" note.
-- **apify v1 gaps**: `dry-run` + `filters-prompt` route to apollo only;
-  `provider=apify` returns **501** (explicit, no fallback) until
-  `apify-service#6` ships the missing endpoints.
+- **apify parity** (apify-service#6, shipped): `dry-run` → apify `POST
+  /search/count`; `filters-prompt` → apify `GET /search/filters-prompt`;
+  `search` consumes apify `totalMatched`/`hasMore`/`nextOffset` + accepts
+  `offset`. apify pagination/total are **pipelinelabs-only** signals
+  (microworlds contributes page 1 only) — surfaced as a provider-specific
+  cursor (`nextOffset`), NOT a cross-source-exact total. Rich filters
+  (`companySizes`, `revenueRanges`, `fundingStages`, `technologies`) map to
+  apify verbatim; `revenueRanges`/`technologies` also map to apollo.
 - **No cost declaration here** — apollo/apify own the paid call; human-service
   only forwards `x-run-id`.
 - **Env vars**: `APOLLO_SERVICE_URL`, `APOLLO_SERVICE_API_KEY`,

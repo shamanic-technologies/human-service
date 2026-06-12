@@ -82,6 +82,7 @@ router.post(
         filters: parsed.data.filters ?? {},
         isNextPage: parsed.data.nextPage,
         limit: parsed.data.limit,
+        offset: parsed.data.offset,
         identity: buildIdentity(res),
       });
       console.log(
