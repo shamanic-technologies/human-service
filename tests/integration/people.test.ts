@@ -166,15 +166,16 @@ describe("POST /orgs/people/search/dry-run", () => {
     expect(res.body.totalEntries).toBe(1234);
   });
 
-  it("501 for provider=apify (unsupported until apify-service#6)", async () => {
+  it("200 apify routes to /search/count", async () => {
+    fetchSpy.mockResolvedValueOnce(ok({ totalMatched: 777 }));
     const res = await request(app)
       .post("/orgs/people/search/dry-run")
       .set(getAuthHeaders())
-      .send({ provider: "apify", filters: {} });
-    expect(res.status).toBe(501);
+      .send({ provider: "apify", filters: { titles: ["CTO"] } });
+    expect(res.status).toBe(200);
     expect(res.body.provider).toBe("apify");
-    expect(res.body.capability).toBe("dry-run");
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(res.body.totalEntries).toBe(777);
+    expect(fetchSpy.mock.calls[0][0]).toBe("http://apify:8080/search/count");
   });
 });
 
@@ -188,10 +189,14 @@ describe("GET /orgs/people/filters-prompt", () => {
     expect(res.body.schemaVersion).toBe("v1hash");
   });
 
-  it("501 for provider=apify", async () => {
+  it("200 apify proxies its own filters-prompt", async () => {
+    fetchSpy.mockResolvedValueOnce(ok({ prompt: "## apify", schemaVersion: "apifyv1" }));
     const res = await request(app)
       .get("/orgs/people/filters-prompt?provider=apify")
       .set(getAuthHeaders());
-    expect(res.status).toBe(501);
+    expect(res.status).toBe(200);
+    expect(res.body.provider).toBe("apify");
+    expect(res.body.schemaVersion).toBe("apifyv1");
+    expect(fetchSpy.mock.calls[0][0]).toBe("http://apify:8080/search/filters-prompt");
   });
 });
