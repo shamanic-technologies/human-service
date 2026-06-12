@@ -61,6 +61,34 @@ export function requireOrgIdOnly(
   next();
 }
 
+// requireOrgAndUser: x-org-id AND x-user-id are required; x-run-id is optional.
+// Used by the /orgs/people/* gateway, which proxies to apollo-service /
+// apify-service — both require x-user-id for key resolution / attribution, so
+// accepting a request without it would only produce a confusing 502 downstream.
+// x-run-id stays optional (apollo dry-run/search don't need it; enrich uses it
+// for cost tracking when present).
+export function requireOrgAndUser(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  const orgId = req.headers["x-org-id"] as string | undefined;
+  const userId = req.headers["x-user-id"] as string | undefined;
+  if (!orgId || !userId) {
+    res.status(400).json({ error: "x-org-id and x-user-id headers are required" });
+    return;
+  }
+
+  res.locals.orgId = orgId;
+  res.locals.userId = userId;
+
+  const runId = req.headers["x-run-id"] as string | undefined;
+  if (runId) res.locals.runId = runId;
+
+  parseOptionalTrackingHeaders(req, res);
+  next();
+}
+
 function parseOptionalTrackingHeaders(req: Request, res: Response): void {
   // Optional workflow tracking headers — forwarded by workflow-service on all DAG calls
   const campaignId = req.headers["x-campaign-id"] as string | undefined;

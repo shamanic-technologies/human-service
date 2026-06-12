@@ -330,11 +330,14 @@ describe("fail-loud", () => {
     ).rejects.toBeInstanceOf(ProviderError);
   });
 
-  it("throws ProviderError on network failure", async () => {
-    fetchSpy.mockRejectedValueOnce(new Error("ECONNRESET"));
+  it("throws ProviderError when a transient failure persists past all retries", async () => {
+    // ECONNRESET is transient → retried; a persistent reject exhausts retries
+    // and surfaces as a ProviderError (still fail-loud, no fallback).
+    fetchSpy.mockRejectedValue(new Error("ECONNRESET"));
     await expect(
       peopleSearch({ provider: "apify", filters: {}, identity })
     ).rejects.toBeInstanceOf(ProviderError);
+    expect(fetchSpy).toHaveBeenCalledTimes(4); // initial + 3 retries
   });
 
   it("throws ProviderConfigError when provider env is missing", async () => {
@@ -342,5 +345,36 @@ describe("fail-loud", () => {
     await expect(
       peopleSearch({ provider: "apollo", filters: {}, identity })
     ).rejects.toBeInstanceOf(ProviderConfigError);
+  });
+});
+
+describe("cold-start connect retry", () => {
+  it("retries a transient 'fetch failed' (Neon sibling wake) then succeeds", async () => {
+    const transient = new TypeError("fetch failed");
+    (transient as { cause?: unknown }).cause = { code: "ECONNRESET" };
+    fetchSpy
+      .mockRejectedValueOnce(transient)
+      .mockRejectedValueOnce(transient)
+      .mockResolvedValueOnce(ok({ people: [], done: true, totalEntries: 0 }));
+
+    const result = await peopleSearch({ provider: "apollo", filters: {}, identity });
+    expect(result.total).toBe(0);
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it("does NOT retry a non-transient throw", async () => {
+    fetchSpy.mockRejectedValueOnce(new Error("boom"));
+    await expect(
+      peopleSearch({ provider: "apollo", filters: {}, identity })
+    ).rejects.toBeInstanceOf(ProviderError);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT retry a completed HTTP 5xx (real answer)", async () => {
+    fetchSpy.mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}), text: async () => "down" });
+    await expect(
+      peopleSearch({ provider: "apollo", filters: {}, identity })
+    ).rejects.toBeInstanceOf(ProviderError);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });

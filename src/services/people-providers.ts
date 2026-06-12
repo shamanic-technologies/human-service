@@ -161,6 +161,53 @@ function downstreamHeaders(
   };
 }
 
+const TRANSIENT_CODES = ["ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "EAI_AGAIN"];
+const RETRY_BACKOFF_MS = [250, 500, 1000];
+
+// Walk err.cause / AggregateError.errors for a transient connect-phase code.
+// apollo/apify are Neon-backed siblings; their first request after an idle
+// scale-to-zero lands mid-wake and rejects with `fetch failed` whose cause is
+// ECONNRESET/ETIMEDOUT/ECONNREFUSED. See CLAUDE.md "second surface".
+function isTransientConnectError(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  const visit = (e: unknown): boolean => {
+    if (!e || typeof e !== "object" || seen.has(e)) return false;
+    seen.add(e);
+    const anyE = e as { code?: string; cause?: unknown; errors?: unknown[]; message?: string };
+    if (anyE.code && TRANSIENT_CODES.includes(anyE.code)) return true;
+    if (typeof anyE.message === "string" && /fetch failed|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED/i.test(anyE.message))
+      return true;
+    if (Array.isArray(anyE.errors) && anyE.errors.some(visit)) return true;
+    return visit(anyE.cause);
+  };
+  return visit(err);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Connect-phase retry on a THROWN rejection only — never on a completed HTTP
+// response (an HTTP 5xx is a real answer that may have side-effected). Safe for
+// POSTs because the request never reached the server when fetch itself rejects.
+async function fetchWithConnectRetry(
+  url: string,
+  init: RequestInit
+): Promise<Response> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt++) {
+    try {
+      return await fetch(url, init);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < RETRY_BACKOFF_MS.length && isTransientConnectError(err)) {
+        await sleep(RETRY_BACKOFF_MS[attempt]);
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
+
 async function postProvider(
   provider: Provider,
   baseUrl: string,
@@ -171,13 +218,13 @@ async function postProvider(
 ): Promise<unknown> {
   let res: Response;
   try {
-    res = await fetch(`${baseUrl}${path}`, {
+    res = await fetchWithConnectRetry(`${baseUrl}${path}`, {
       method: "POST",
       headers: downstreamHeaders(apiKey, identity),
       body: JSON.stringify(body),
     });
   } catch (err) {
-    // Network-phase failure — fail loud.
+    // Network-phase failure after retries — fail loud.
     throw new ProviderError(provider, 0, String(err));
   }
   if (!res.ok) {
@@ -196,7 +243,7 @@ async function getProvider(
 ): Promise<unknown> {
   let res: Response;
   try {
-    res = await fetch(`${baseUrl}${path}`, {
+    res = await fetchWithConnectRetry(`${baseUrl}${path}`, {
       method: "GET",
       headers: downstreamHeaders(apiKey, identity),
     });

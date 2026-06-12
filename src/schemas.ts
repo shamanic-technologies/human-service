@@ -611,6 +611,19 @@ const providerEnum = z
   .enum(["apollo", "apify"])
   .openapi({ description: "Lead provider to route to. Explicit choice wins over `need`." });
 
+// People gateway requires x-org-id AND x-user-id (apollo/apify need x-user-id
+// for key resolution / attribution). x-run-id optional (used downstream for
+// cost tracking when present).
+const peopleHeaders = z.object({
+  "x-org-id": z.string().uuid().openapi({ description: "Internal org UUID from client-service" }),
+  "x-user-id": z.string().uuid().openapi({ description: "Internal user UUID — required; forwarded to apollo/apify" }),
+  "x-run-id": z
+    .string()
+    .uuid()
+    .optional()
+    .openapi({ description: "Caller's run ID — forwarded for downstream cost tracking when present" }),
+});
+
 const seniorityEnum = z.enum([
   "entry",
   "senior",
@@ -717,7 +730,7 @@ registry.registerPath({
   summary: "Search people via a lead provider (apollo or apify), normalized",
   security: [{ apiKey: [] }],
   request: {
-    headers: orgsListsHeaders,
+    headers: peopleHeaders,
     body: { content: { "application/json": { schema: PeopleSearchRequestSchema } } },
   },
   responses: {
@@ -757,7 +770,7 @@ registry.registerPath({
   summary: "Resolve a verified email for a known person (name + domain)",
   security: [{ apiKey: [] }],
   request: {
-    headers: orgsListsHeaders,
+    headers: peopleHeaders,
     body: { content: { "application/json": { schema: ResolveEmailRequestSchema } } },
   },
   responses: {
@@ -790,7 +803,7 @@ registry.registerPath({
   summary: "Count matches for filters without consuming credits (apollo only in v1)",
   security: [{ apiKey: [] }],
   request: {
-    headers: orgsListsHeaders,
+    headers: peopleHeaders,
     body: { content: { "application/json": { schema: DryRunRequestSchema } } },
   },
   responses: {
@@ -821,7 +834,7 @@ registry.registerPath({
   path: "/orgs/people/filters-prompt",
   summary: "LLM filter-shape prompt for a provider (apollo only in v1)",
   security: [{ apiKey: [] }],
-  request: { headers: orgsListsHeaders, query: FiltersPromptQuerySchema },
+  request: { headers: peopleHeaders, query: FiltersPromptQuerySchema },
   responses: {
     200: { description: "Filter prompt + version hash", content: { "application/json": { schema: FiltersPromptResponseSchema } } },
     400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
