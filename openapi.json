@@ -701,6 +701,447 @@
           "members"
         ]
       },
+      "PeopleSearchResponse": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "apollo",
+              "apify"
+            ],
+            "description": "Lead provider to route to. Explicit choice wins over `need`."
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Person"
+            }
+          },
+          "done": {
+            "type": "boolean"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "provider",
+          "people",
+          "done",
+          "total"
+        ]
+      },
+      "Person": {
+        "type": "object",
+        "properties": {
+          "firstName": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastName": {
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "headline": {
+            "type": "string",
+            "nullable": true
+          },
+          "seniority": {
+            "type": "string",
+            "nullable": true
+          },
+          "email": {
+            "type": "string",
+            "nullable": true
+          },
+          "emailStatus": {
+            "type": "string",
+            "nullable": true
+          },
+          "catchAll": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "inferred": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "linkedinUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "photoUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "city": {
+            "type": "string",
+            "nullable": true
+          },
+          "state": {
+            "type": "string",
+            "nullable": true
+          },
+          "country": {
+            "type": "string",
+            "nullable": true
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "apollo",
+              "apify"
+            ],
+            "description": "Lead provider to route to. Explicit choice wins over `need`."
+          },
+          "providerPersonId": {
+            "type": "string",
+            "nullable": true,
+            "description": "apollo person id (usable for a later enrich). null for apify."
+          },
+          "organization": {
+            "$ref": "#/components/schemas/NeutralOrganization"
+          }
+        },
+        "required": [
+          "firstName",
+          "lastName",
+          "name",
+          "title",
+          "headline",
+          "seniority",
+          "email",
+          "emailStatus",
+          "catchAll",
+          "inferred",
+          "linkedinUrl",
+          "photoUrl",
+          "city",
+          "state",
+          "country",
+          "provider",
+          "providerPersonId",
+          "organization"
+        ]
+      },
+      "NeutralOrganization": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "domain": {
+            "type": "string",
+            "nullable": true
+          },
+          "websiteUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "industry": {
+            "type": "string",
+            "nullable": true
+          },
+          "estimatedNumEmployees": {
+            "type": "number",
+            "nullable": true
+          },
+          "linkedinUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "logoUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "city": {
+            "type": "string",
+            "nullable": true
+          },
+          "state": {
+            "type": "string",
+            "nullable": true
+          },
+          "country": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "name",
+          "domain",
+          "websiteUrl",
+          "industry",
+          "estimatedNumEmployees",
+          "linkedinUrl",
+          "logoUrl",
+          "city",
+          "state",
+          "country"
+        ]
+      },
+      "PeopleSearchRequest": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "apollo",
+              "apify"
+            ],
+            "description": "Lead provider to route to. Explicit choice wins over `need`."
+          },
+          "need": {
+            "type": "string",
+            "enum": [
+              "verified_email"
+            ],
+            "description": "Intent routing: 'verified_email' routes to apify. Ignored if `provider` is set."
+          },
+          "filters": {
+            "$ref": "#/components/schemas/PeopleSearchFilters"
+          },
+          "nextPage": {
+            "type": "boolean",
+            "description": "apollo only: omit filters and advance the server-managed cursor for the next page."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "description": "apify only: max leads to return (provider cap 1000). Defaults to 100 (one page)."
+          }
+        }
+      },
+      "PeopleSearchFilters": {
+        "type": "object",
+        "properties": {
+          "titles": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "seniorities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "entry",
+                "senior",
+                "manager",
+                "director",
+                "vp",
+                "c_suite",
+                "owner",
+                "founder",
+                "partner"
+              ]
+            }
+          },
+          "functions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Job functions. Honored by apify only — apollo has no functions search filter."
+          },
+          "locationCountries": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "locationStates": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "locationCities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "companyNames": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Company names. Honored by apify only — apollo searches by domain/industry, not name."
+          },
+          "companyDomains": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "industries": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "employeeMin": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          },
+          "employeeMax": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          }
+        }
+      },
+      "ResolveEmailResponse": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "apollo",
+              "apify"
+            ],
+            "description": "Lead provider to route to. Explicit choice wins over `need`."
+          },
+          "person": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Person"
+              },
+              {
+                "nullable": true
+              }
+            ]
+          }
+        },
+        "required": [
+          "provider",
+          "person"
+        ]
+      },
+      "ResolveEmailRequest": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "apollo",
+              "apify"
+            ],
+            "description": "Defaults to apify (verified-email specialist). Set 'apollo' to use Apollo match."
+          },
+          "firstName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "lastName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "domain": {
+            "type": "string",
+            "minLength": 1
+          },
+          "includeInferred": {
+            "type": "boolean",
+            "description": "apify only: include pattern-inferred emails in the waterfall."
+          }
+        },
+        "required": [
+          "firstName",
+          "lastName",
+          "domain"
+        ]
+      },
+      "PeopleDryRunResponse": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "apollo",
+              "apify"
+            ],
+            "description": "Lead provider to route to. Explicit choice wins over `need`."
+          },
+          "totalEntries": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "provider",
+          "totalEntries"
+        ]
+      },
+      "PeopleDryRunRequest": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "apollo",
+              "apify"
+            ],
+            "description": "Lead provider to route to. Explicit choice wins over `need`."
+          },
+          "filters": {
+            "$ref": "#/components/schemas/PeopleSearchFilters"
+          }
+        }
+      },
+      "PeopleFiltersPromptResponse": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "apollo",
+              "apify"
+            ],
+            "description": "Lead provider to route to. Explicit choice wins over `need`."
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "prompt",
+          "schemaVersion"
+        ]
+      },
       "HealthResponse": {
         "type": "object",
         "properties": {
@@ -2008,6 +2449,387 @@
           },
           "404": {
             "description": "List not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/people/search": {
+      "post": {
+        "summary": "Search people via a lead provider (apollo or apify), normalized",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PeopleSearchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Page of normalized people",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeopleSearchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "Provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/people/resolve-email": {
+      "post": {
+        "summary": "Resolve a verified email for a known person (name + domain)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveEmailRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Resolved person (or null)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolveEmailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "Provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/people/search/dry-run": {
+      "post": {
+        "summary": "Count matches for filters without consuming credits (apollo only in v1)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PeopleDryRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Match count",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeopleDryRunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "501": {
+            "description": "Provider does not support dry-run (apify — see apify-service#6)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/people/filters-prompt": {
+      "get": {
+        "summary": "LLM filter-shape prompt for a provider (apollo only in v1)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "apollo",
+                "apify"
+              ],
+              "description": "Lead provider to route to. Explicit choice wins over `need`."
+            },
+            "required": false,
+            "description": "Lead provider to route to. Explicit choice wins over `need`.",
+            "name": "provider",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Filter prompt + version hash",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PeopleFiltersPromptResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "501": {
+            "description": "Provider does not support filters-prompt (apify — see apify-service#6)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider error",
             "content": {
               "application/json": {
                 "schema": {

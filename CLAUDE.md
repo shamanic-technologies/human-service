@@ -12,6 +12,13 @@ Backend service that owns two distinct concerns:
    google-service People API resources) via `(source_service,
    source_resource_id)` string pointer. No FK across services.
 
+3. **People gateway v1** — a provider-agnostic façade over `apollo-service`
+   (rich search + enrich) and `apify-service` (verified-email waterfall).
+   Callers hit `/orgs/people/*` to search people and resolve verified emails
+   without caring which provider serves the request. **Stateless** — routes +
+   normalizes only, no tables. Declares **no cost** (apollo/apify own the paid
+   call); forwards `x-run-id` for downstream tracing. See below.
+
 Stack: Express + Drizzle (Postgres) + Zod + zod-to-openapi. Deployed on
 Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 
@@ -35,6 +42,10 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Org-scoped (CRM v1) | `GET /orgs/lists/{id}/members` | apiKey + `x-org-id` | List members (paginated) |
 | Org-scoped (CRM v1) | `POST /orgs/lists/{id}/members` | apiKey + `x-org-id` | Bulk add (idempotent on `(list_id, source_service, source_resource_id)`) |
 | Org-scoped (CRM v1) | `DELETE /orgs/lists/{id}/members` | apiKey + `x-org-id` | Bulk remove |
+| Org-scoped (People v1) | `POST /orgs/people/search` | apiKey + `x-org-id` + `x-user-id` | Search people via apollo/apify, normalized |
+| Org-scoped (People v1) | `POST /orgs/people/resolve-email` | apiKey + `x-org-id` + `x-user-id` | Resolve a verified email (name + domain) |
+| Org-scoped (People v1) | `POST /orgs/people/search/dry-run` | apiKey + `x-org-id` + `x-user-id` | Count matches, free (apollo only in v1) |
+| Org-scoped (People v1) | `GET /orgs/people/filters-prompt` | apiKey + `x-org-id` + `x-user-id` | LLM filter-shape prompt (apollo only in v1) |
 
 The CRM `/orgs/lists/*` endpoints use `requireOrgIdOnly`: only `x-org-id` is
 required. `x-user-id` is parsed when present and populates
@@ -44,6 +55,42 @@ for run-tracking parent linkage.
 The legacy `/humans/*` and `/humans/{id}/methodology` endpoints use the
 older `requireIdentity` middleware that requires all three of `x-org-id`,
 `x-user-id`, `x-run-id`.
+
+## People gateway (v1) — `/orgs/people/*`
+
+Provider-agnostic façade. `src/services/people-providers.ts` does the routing,
+filter mapping, and response normalization; `src/routes/people.ts` is the thin
+HTTP layer (`requireOrgAndUser` — `x-org-id` + `x-user-id` required, `x-run-id`
+optional). Unlike the CRM `/orgs/lists/*` routes (which use `requireOrgIdOnly`),
+the people gateway needs `x-user-id` because apollo/apify require it for key
+resolution / attribution — accepting a request without it would only produce a
+confusing downstream 502.
+
+- **Routing**: explicit `provider: "apollo" | "apify"` wins; else
+  `need: "verified_email"` → apify; else default **apollo** (richest, fully
+  ready). `resolve-email` defaults to **apify** (verified-email specialist).
+- **Neutral `Person` shape**: field names mirror lead-service `FullLead` so a
+  future Sales Lead Service mapping is trivial — but the type is **owned here**,
+  never imported cross-repo.
+- **Pagination**: apollo keeps its server-managed cursor (keyed by org +
+  `x-campaign-id`); human-service forwards next-page calls (empty body advances
+  the cursor). apify is one-shot (`limit`, default 100) → `done: true`.
+- **Fail loud**: a provider non-2xx / network error → thrown `ProviderError` →
+  **502** (never a silent fallback). `ProviderConfigError` (missing env) → 502.
+- **Cold-start retry**: apollo/apify are Neon-backed siblings; the first call
+  after their idle scale-to-zero rejects with `fetch failed` (cause
+  ECONNRESET/ETIMEDOUT). `fetchWithConnectRetry` retries the **connect phase
+  only** (thrown rejection, never a completed HTTP response) with 250/500/1000ms
+  backoff — write-safe because the request never reached the server. See
+  CLAUDE.md global "second surface" note.
+- **apify v1 gaps**: `dry-run` + `filters-prompt` route to apollo only;
+  `provider=apify` returns **501** (explicit, no fallback) until
+  `apify-service#6` ships the missing endpoints.
+- **No cost declaration here** — apollo/apify own the paid call; human-service
+  only forwards `x-run-id`.
+- **Env vars**: `APOLLO_SERVICE_URL`, `APOLLO_SERVICE_API_KEY`,
+  `APIFY_SERVICE_URL`, `APIFY_SERVICE_API_KEY`. Read at call time (not boot) so
+  a missing var fails the request loudly rather than crash-looping boot.
 
 ## Org isolation
 

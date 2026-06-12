@@ -599,6 +599,251 @@ registry.registerPath({
   },
 });
 
+// --- People gateway (v1): /orgs/people/* ---
+//
+// Provider-agnostic façade over apollo-service (rich search + enrich) and
+// apify-service (verified-email waterfall). Normalizes both into one neutral
+// `Person` shape whose field names mirror lead-service FullLead. Stateless:
+// human-service routes + normalizes, declares no cost (apollo/apify own the
+// paid call), forwards x-run-id for downstream tracing.
+
+const providerEnum = z
+  .enum(["apollo", "apify"])
+  .openapi({ description: "Lead provider to route to. Explicit choice wins over `need`." });
+
+// People gateway requires x-org-id AND x-user-id (apollo/apify need x-user-id
+// for key resolution / attribution). x-run-id optional (used downstream for
+// cost tracking when present).
+const peopleHeaders = z.object({
+  "x-org-id": z.string().uuid().openapi({ description: "Internal org UUID from client-service" }),
+  "x-user-id": z.string().uuid().openapi({ description: "Internal user UUID — required; forwarded to apollo/apify" }),
+  "x-run-id": z
+    .string()
+    .uuid()
+    .optional()
+    .openapi({ description: "Caller's run ID — forwarded for downstream cost tracking when present" }),
+});
+
+const seniorityEnum = z.enum([
+  "entry",
+  "senior",
+  "manager",
+  "director",
+  "vp",
+  "c_suite",
+  "owner",
+  "founder",
+  "partner",
+]);
+
+export const PeopleSearchFiltersSchema = z
+  .object({
+    titles: z.array(z.string().min(1)).optional(),
+    seniorities: z.array(seniorityEnum).optional(),
+    functions: z.array(z.string().min(1)).optional().openapi({
+      description: "Job functions. Honored by apify only — apollo has no functions search filter.",
+    }),
+    locationCountries: z.array(z.string().min(1)).optional(),
+    locationStates: z.array(z.string().min(1)).optional(),
+    locationCities: z.array(z.string().min(1)).optional(),
+    companyNames: z.array(z.string().min(1)).optional().openapi({
+      description: "Company names. Honored by apify only — apollo searches by domain/industry, not name.",
+    }),
+    companyDomains: z.array(z.string().min(1)).optional(),
+    industries: z.array(z.string().min(1)).optional(),
+    keywords: z.array(z.string().min(1)).optional(),
+    employeeMin: z.number().int().positive().optional(),
+    employeeMax: z.number().int().positive().optional(),
+  })
+  .openapi("PeopleSearchFilters");
+
+export const NeutralOrganizationSchema = z
+  .object({
+    name: z.string().nullable(),
+    domain: z.string().nullable(),
+    websiteUrl: z.string().nullable(),
+    industry: z.string().nullable(),
+    estimatedNumEmployees: z.number().nullable(),
+    linkedinUrl: z.string().nullable(),
+    logoUrl: z.string().nullable(),
+    city: z.string().nullable(),
+    state: z.string().nullable(),
+    country: z.string().nullable(),
+  })
+  .openapi("NeutralOrganization");
+
+export const PersonSchema = z
+  .object({
+    firstName: z.string().nullable(),
+    lastName: z.string().nullable(),
+    name: z.string().nullable(),
+    title: z.string().nullable(),
+    headline: z.string().nullable(),
+    seniority: z.string().nullable(),
+    email: z.string().nullable(),
+    emailStatus: z.string().nullable(),
+    catchAll: z.boolean().nullable(),
+    inferred: z.boolean().nullable(),
+    linkedinUrl: z.string().nullable(),
+    photoUrl: z.string().nullable(),
+    city: z.string().nullable(),
+    state: z.string().nullable(),
+    country: z.string().nullable(),
+    provider: providerEnum,
+    providerPersonId: z.string().nullable().openapi({
+      description: "apollo person id (usable for a later enrich). null for apify.",
+    }),
+    organization: NeutralOrganizationSchema.nullable(),
+  })
+  .openapi("Person");
+
+// --- POST /orgs/people/search ---
+
+export const PeopleSearchRequestSchema = z
+  .object({
+    provider: providerEnum.optional(),
+    need: z.literal("verified_email").optional().openapi({
+      description: "Intent routing: 'verified_email' routes to apify. Ignored if `provider` is set.",
+    }),
+    filters: PeopleSearchFiltersSchema.optional(),
+    nextPage: z.boolean().optional().openapi({
+      description: "apollo only: omit filters and advance the server-managed cursor for the next page.",
+    }),
+    limit: z.number().int().min(1).max(1000).optional().openapi({
+      description: "apify only: max leads to return (provider cap 1000). Defaults to 100 (one page).",
+    }),
+  })
+  .openapi("PeopleSearchRequest");
+
+export const PeopleSearchResponseSchema = z
+  .object({
+    provider: providerEnum,
+    people: z.array(PersonSchema),
+    done: z.boolean(),
+    total: z.number().int(),
+  })
+  .openapi("PeopleSearchResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/people/search",
+  summary: "Search people via a lead provider (apollo or apify), normalized",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: peopleHeaders,
+    body: { content: { "application/json": { schema: PeopleSearchRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Page of normalized people", content: { "application/json": { schema: PeopleSearchResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "Provider error", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+// --- POST /orgs/people/resolve-email ---
+
+export const ResolveEmailRequestSchema = z
+  .object({
+    provider: providerEnum.optional().openapi({
+      description: "Defaults to apify (verified-email specialist). Set 'apollo' to use Apollo match.",
+    }),
+    firstName: z.string().min(1),
+    lastName: z.string().min(1),
+    domain: z.string().min(1),
+    includeInferred: z.boolean().optional().openapi({
+      description: "apify only: include pattern-inferred emails in the waterfall.",
+    }),
+  })
+  .openapi("ResolveEmailRequest");
+
+export const ResolveEmailResponseSchema = z
+  .object({
+    provider: providerEnum,
+    person: PersonSchema.nullable(),
+  })
+  .openapi("ResolveEmailResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/people/resolve-email",
+  summary: "Resolve a verified email for a known person (name + domain)",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: peopleHeaders,
+    body: { content: { "application/json": { schema: ResolveEmailRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Resolved person (or null)", content: { "application/json": { schema: ResolveEmailResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "Provider error", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+// --- POST /orgs/people/search/dry-run ---
+
+export const DryRunRequestSchema = z
+  .object({
+    provider: providerEnum.optional(),
+    filters: PeopleSearchFiltersSchema.optional(),
+  })
+  .openapi("PeopleDryRunRequest");
+
+export const DryRunResponseSchema = z
+  .object({
+    provider: providerEnum,
+    totalEntries: z.number().int(),
+  })
+  .openapi("PeopleDryRunResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/people/search/dry-run",
+  summary: "Count matches for filters without consuming credits (apollo only in v1)",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: peopleHeaders,
+    body: { content: { "application/json": { schema: DryRunRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Match count", content: { "application/json": { schema: DryRunResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    501: { description: "Provider does not support dry-run (apify — see apify-service#6)", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "Provider error", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+// --- GET /orgs/people/filters-prompt ---
+
+export const FiltersPromptQuerySchema = z.object({
+  provider: providerEnum.optional(),
+});
+
+export const FiltersPromptResponseSchema = z
+  .object({
+    provider: providerEnum,
+    prompt: z.string(),
+    schemaVersion: z.string(),
+  })
+  .openapi("PeopleFiltersPromptResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/people/filters-prompt",
+  summary: "LLM filter-shape prompt for a provider (apollo only in v1)",
+  security: [{ apiKey: [] }],
+  request: { headers: peopleHeaders, query: FiltersPromptQuerySchema },
+  responses: {
+    200: { description: "Filter prompt + version hash", content: { "application/json": { schema: FiltersPromptResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    501: { description: "Provider does not support filters-prompt (apify — see apify-service#6)", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "Provider error", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 // --- GET /health ---
 
 export const HealthResponseSchema = z
