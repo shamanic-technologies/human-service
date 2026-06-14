@@ -927,7 +927,7 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 1000,
-            "description": "apify only: max leads to return (provider cap 1000). Defaults to 100 (one page)."
+            "description": "apify only: max leads to return (provider cap 1000). Defaults to 1 — apify bills per returned lead (each hit carries a verified email; no free teaser list), so the gateway takes the strict minimum unless you consciously raise it to batch."
           },
           "offset": {
             "type": "integer",

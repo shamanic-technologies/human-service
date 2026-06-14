@@ -722,7 +722,7 @@ export const PeopleSearchRequestSchema = z
       description: "apollo only: omit filters and advance the server-managed cursor for the next page.",
     }),
     limit: z.number().int().min(1).max(1000).optional().openapi({
-      description: "apify only: max leads to return (provider cap 1000). Defaults to 100 (one page).",
+      description: "apify only: max leads to return (provider cap 1000). Defaults to 1 — apify bills per returned lead (each hit carries a verified email; no free teaser list), so the gateway takes the strict minimum unless you consciously raise it to batch.",
     }),
     offset: z.number().int().min(0).optional().openapi({
       description: "apify only: pagination offset (pass back `nextOffset` from the prior page).",
