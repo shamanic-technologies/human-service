@@ -213,11 +213,11 @@ describe("peopleSearch — apify", () => {
     expect(p.organization?.estimatedNumEmployees).toBe(50);
   });
 
-  it("defaults limit to 100 when omitted", async () => {
+  it("defaults limit to 1 (strict minimum — apify bills per returned lead) when omitted", async () => {
     fetchSpy.mockResolvedValueOnce(ok({ searchId: "s", leadCount: 0, verifiedCount: 0, leads: [] }));
     await peopleSearch({ provider: "apify", filters: {}, identity });
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.limit).toBe(100);
+    expect(body.limit).toBe(1);
   });
 
   it("forwards offset + maps totalMatched/hasMore/nextOffset", async () => {

@@ -13,7 +13,11 @@
 import type { WorkflowTrackingHeaders } from "../middleware/auth.js";
 import { workflowTrackingToHeaders } from "../middleware/auth.js";
 
-const APIFY_DEFAULT_LIMIT = 100; // mirror apollo's fixed page size
+// apify bills per RETURNED lead (each search hit carries a verified email — there
+// is no free teaser list like apollo's). So the gateway takes the strict minimum
+// by default: one lead per call. A caller that consciously wants a batch passes
+// an explicit `limit`. apollo is unaffected (cursor-based, ignores `limit`).
+const APIFY_DEFAULT_LIMIT = 1;
 
 export type Provider = "apollo" | "apify";
 

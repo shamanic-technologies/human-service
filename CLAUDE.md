@@ -90,7 +90,18 @@ confusing downstream 502.
   never imported cross-repo.
 - **Pagination**: apollo keeps its server-managed cursor (keyed by org +
   `x-campaign-id`); human-service forwards next-page calls (empty body advances
-  the cursor). apify is one-shot (`limit`, default 100) → `done: true`.
+  the cursor). apify is offset-based (`limit` + `offset`).
+- **apify billing asymmetry — default `limit: 1` (strict minimum).** apollo
+  search is a FREE teaser (masked email + person id); the verified email is
+  revealed one-by-one, billed, via `resolve-email`. apify has NO free teaser —
+  every `/search` hit carries a verified email and is **billed per returned
+  lead**, and no endpoint returns names without buying the email (`/search/count`
+  yields only a count). So the gateway can't replicate apollo's free-list-then-
+  reveal pattern on apify; instead it takes the **strict minimum** — apify
+  `limit` defaults to **1**, not a batch. A caller that consciously wants N leads
+  passes an explicit `limit` and pays for N. The dry-run (`/search/count`, free)
+  is the way to size a result set before spending. apollo ignores `limit`
+  (cursor-based).
 - **Fail loud**: a provider non-2xx / network error → thrown `ProviderError` →
   **502** (never a silent fallback). `ProviderConfigError` (missing env) → 502.
 - **Cold-start retry**: apollo/apify are Neon-backed siblings; the first call
