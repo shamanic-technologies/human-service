@@ -105,7 +105,51 @@ describe("POST /orgs/people/search", () => {
 });
 
 describe("POST /orgs/people/resolve-email", () => {
-  it("200 default routes to apify /resolve", async () => {
+  it("200 default apollo reveals by providerPersonId via /enrich", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      ok({
+        enrichmentId: "e1",
+        cached: false,
+        person: {
+          id: "a1",
+          firstName: "Jane",
+          lastName: "Doe",
+          name: "Jane Doe",
+          email: "jane@acme.com",
+          emailStatus: "verified",
+          title: null,
+          headline: null,
+          seniority: null,
+          linkedinUrl: null,
+          photoUrl: null,
+          city: null,
+          state: null,
+          country: null,
+          organizationName: null,
+          organizationDomain: "acme.com",
+          organizationWebsiteUrl: null,
+          organizationIndustry: null,
+          organizationSize: null,
+          organizationLinkedinUrl: null,
+          organizationLogoUrl: null,
+          organizationCity: null,
+          organizationState: null,
+          organizationCountry: null,
+        },
+      })
+    );
+    const res = await request(app)
+      .post("/orgs/people/resolve-email")
+      .set(getAuthHeaders())
+      .send({ providerPersonId: "a1" });
+    expect(res.status).toBe(200);
+    expect(res.body.provider).toBe("apollo");
+    expect(res.body.person.email).toBe("jane@acme.com");
+    expect(fetchSpy.mock.calls[0][0]).toBe("http://apollo:8080/enrich");
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body)).toEqual({ apolloPersonId: "a1" });
+  });
+
+  it("200 provider=apify + name+domain routes to /resolve", async () => {
     fetchSpy.mockResolvedValueOnce(
       ok({
         searchId: "s",
@@ -139,14 +183,14 @@ describe("POST /orgs/people/resolve-email", () => {
     const res = await request(app)
       .post("/orgs/people/resolve-email")
       .set(getAuthHeaders())
-      .send({ firstName: "Jane", lastName: "Doe", domain: "acme.com" });
+      .send({ provider: "apify", firstName: "Jane", lastName: "Doe", domain: "acme.com" });
     expect(res.status).toBe(200);
     expect(res.body.provider).toBe("apify");
     expect(res.body.person.email).toBe("jane@acme.com");
     expect(fetchSpy.mock.calls[0][0]).toBe("http://apify:8080/resolve");
   });
 
-  it("400 when firstName missing", async () => {
+  it("400 when neither providerPersonId nor full identity provided", async () => {
     const res = await request(app)
       .post("/orgs/people/resolve-email")
       .set(getAuthHeaders())
