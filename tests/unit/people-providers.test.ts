@@ -8,6 +8,7 @@ import {
   filtersPrompt,
   ProviderError,
   ProviderConfigError,
+  ProviderUnsupportedError,
 } from "../../src/services/people-providers.js";
 
 const fetchSpy = vi.fn();
@@ -268,8 +269,77 @@ describe("peopleSearch — apify", () => {
   });
 });
 
+const apolloPersonOk = (overrides: Record<string, unknown> = {}) =>
+  ok({
+    enrichmentId: "e1",
+    cached: false,
+    person: {
+      id: "a1",
+      firstName: "Jane",
+      lastName: "Doe",
+      name: "Jane Doe",
+      email: "jane@acme.com",
+      emailStatus: "verified",
+      title: null,
+      headline: null,
+      seniority: null,
+      linkedinUrl: null,
+      photoUrl: null,
+      city: null,
+      state: null,
+      country: null,
+      organizationName: null,
+      organizationDomain: "acme.com",
+      organizationWebsiteUrl: null,
+      organizationIndustry: null,
+      organizationSize: null,
+      organizationLinkedinUrl: null,
+      organizationLogoUrl: null,
+      organizationCity: null,
+      organizationState: null,
+      organizationCountry: null,
+    },
+    ...overrides,
+  });
+
 describe("resolveEmail", () => {
-  it("defaults to apify /resolve", async () => {
+  it("defaults to apollo /enrich by providerPersonId (the billed reveal path)", async () => {
+    fetchSpy.mockResolvedValueOnce(apolloPersonOk());
+    const result = await resolveEmail({ providerPersonId: "a1", identity });
+    const [url, opts] = fetchSpy.mock.calls[0];
+    expect(url).toBe("http://apollo:8080/enrich");
+    expect(JSON.parse(opts.body)).toEqual({ apolloPersonId: "a1" });
+    expect(result.provider).toBe("apollo");
+    expect(result.person?.email).toBe("jane@acme.com");
+    expect(result.person?.providerPersonId).toBe("a1");
+  });
+
+  it("provider=apollo + providerPersonId routes to /enrich", async () => {
+    fetchSpy.mockResolvedValueOnce(apolloPersonOk());
+    const result = await resolveEmail({
+      provider: "apollo",
+      providerPersonId: "a1",
+      identity,
+    });
+    expect(fetchSpy.mock.calls[0][0]).toBe("http://apollo:8080/enrich");
+    expect(result.person?.email).toBe("jane@acme.com");
+  });
+
+  it("apollo /enrich returns person=null when apollo reveals nothing", async () => {
+    fetchSpy.mockResolvedValueOnce(ok({ enrichmentId: null, cached: false, person: null }));
+    const result = await resolveEmail({ providerPersonId: "a1", identity });
+    expect(result.provider).toBe("apollo");
+    expect(result.person).toBeNull();
+  });
+
+  it("provider=apify + providerPersonId only fails loud (no person-id enrich on apify)", async () => {
+    await expect(
+      resolveEmail({ provider: "apify", providerPersonId: "a1", identity })
+    ).rejects.toBeInstanceOf(ProviderUnsupportedError);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("provider=apify + name+domain routes to /resolve", async () => {
     fetchSpy.mockResolvedValueOnce(
       ok({
         searchId: "s",
@@ -301,6 +371,7 @@ describe("resolveEmail", () => {
       })
     );
     const result = await resolveEmail({
+      provider: "apify",
       firstName: "Jane",
       lastName: "Doe",
       domain: "acme.com",
@@ -314,7 +385,7 @@ describe("resolveEmail", () => {
     expect(result.person?.email).toBe("jane@acme.com");
   });
 
-  it("provider=apollo routes to /match with organizationDomain", async () => {
+  it("provider=apollo + name+domain (no person id) falls back to /match", async () => {
     fetchSpy.mockResolvedValueOnce(
       ok({ enrichmentId: "e1", cached: false, person: { id: "a1", firstName: "Jane", lastName: "Doe", name: "Jane Doe", email: "jane@acme.com", emailStatus: "verified", title: null, headline: null, seniority: null, linkedinUrl: null, photoUrl: null, city: null, state: null, country: null, organizationName: null, organizationDomain: "acme.com", organizationWebsiteUrl: null, organizationIndustry: null, organizationSize: null, organizationLinkedinUrl: null, organizationLogoUrl: null, organizationCity: null, organizationState: null, organizationCountry: null } })
     );
@@ -332,9 +403,11 @@ describe("resolveEmail", () => {
     expect(result.person?.providerPersonId).toBe("a1");
   });
 
-  it("returns person=null when provider finds nothing", async () => {
-    fetchSpy.mockResolvedValueOnce(ok({ searchId: "s", requested: 1, resolvedCount: 0, leads: [] }));
+  it("returns person=null when apollo /match finds nothing", async () => {
+    fetchSpy.mockResolvedValueOnce(ok({ enrichmentId: null, cached: false, person: null }));
     const result = await resolveEmail({ firstName: "No", lastName: "One", domain: "x.com", identity });
+    expect(fetchSpy.mock.calls[0][0]).toBe("http://apollo:8080/match");
+    expect(result.provider).toBe("apollo");
     expect(result.person).toBeNull();
   });
 });

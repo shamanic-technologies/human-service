@@ -581,35 +581,84 @@ export async function peopleSearch(args: {
 
 export async function resolveEmail(args: {
   provider?: Provider;
-  firstName: string;
-  lastName: string;
-  domain: string;
+  // apollo person id from a prior search — the preferred apollo reveal handle.
+  providerPersonId?: string;
+  firstName?: string;
+  lastName?: string;
+  domain?: string;
   includeInferred?: boolean;
   identity: Identity;
 }): Promise<ResolveEmailResult> {
-  // Default to apify — verified email is its specialty. Explicit provider wins.
-  const provider = args.provider ?? "apify";
+  // Default to apollo (same default as search). The reveal follows the provider
+  // that searched: a providerPersonId is provider-specific (an apollo id means
+  // nothing to apify), so we never cross providers — the caller picks the
+  // provider at search time and the reveal inherits it.
+  const provider = args.provider ?? "apollo";
+  const hasIdentity = !!(args.firstName && args.lastName && args.domain);
 
   if (provider === "apollo") {
     const { url, key } = requireApollo();
-    const data = (await postProvider(
+    // PREFERRED: reveal by apollo person id via /enrich — the BILLED path
+    // (1 apollo-credit per verified email). apollo search returns only a teaser
+    // (first name + person id) and masks last name + domain, so identity-based
+    // /match can't be satisfied from a search hit. Enrich-by-id is the reveal
+    // that actually works for an apollo-sourced lead.
+    if (args.providerPersonId) {
+      const data = (await postProvider(
+        "apollo",
+        url,
+        key,
+        "/enrich",
+        { apolloPersonId: args.providerPersonId },
+        args.identity
+      )) as { person: ApolloPerson | null };
+      return {
+        provider,
+        person: data.person ? normalizeApolloPerson(data.person) : null,
+      };
+    }
+    // Fallback: identity-based match (name + domain) when no person id is known
+    // (e.g. a direct caller resolving a known contact). Also bills via /match.
+    if (hasIdentity) {
+      const data = (await postProvider(
+        "apollo",
+        url,
+        key,
+        "/match",
+        {
+          firstName: args.firstName,
+          lastName: args.lastName,
+          organizationDomain: args.domain,
+        },
+        args.identity
+      )) as { person: ApolloPerson | null };
+      return {
+        provider,
+        person: data.person ? normalizeApolloPerson(data.person) : null,
+      };
+    }
+    // Unreachable when called via the route (Zod refine guarantees one path);
+    // defensive fail-loud for direct callers.
+    throw new ProviderError(
       "apollo",
-      url,
-      key,
-      "/match",
-      {
-        firstName: args.firstName,
-        lastName: args.lastName,
-        organizationDomain: args.domain,
-      },
-      args.identity
-    )) as { person: ApolloPerson | null };
-    return {
-      provider,
-      person: data.person ? normalizeApolloPerson(data.person) : null,
-    };
+      0,
+      "resolve-email requires providerPersonId or firstName+lastName+domain"
+    );
   }
 
+  // apify — verified-email waterfall by identity. apify has no person-id enrich,
+  // so a providerPersonId-only request can't be served: fail loud (501) rather
+  // than silently cross to a different mechanism.
+  if (args.providerPersonId && !hasIdentity) {
+    throw new ProviderUnsupportedError("apify", "enrich-by-person-id");
+  }
+  if (!hasIdentity) {
+    throw new ProviderError(
+      "apify",
+      0,
+      "resolve-email requires firstName+lastName+domain"
+    );
+  }
   const { url, key } = requireApify();
   const data = (await postProvider(
     "apify",

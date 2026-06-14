@@ -766,15 +766,28 @@ registry.registerPath({
 export const ResolveEmailRequestSchema = z
   .object({
     provider: providerEnum.optional().openapi({
-      description: "Defaults to apify (verified-email specialist). Set 'apollo' to use Apollo match.",
+      description:
+        "Defaults to apollo (same as search). Set 'apify' for the verified-email waterfall. The reveal follows the provider that searched — a provider person id only means something to its own provider.",
     }),
-    firstName: z.string().min(1),
-    lastName: z.string().min(1),
-    domain: z.string().min(1),
+    providerPersonId: z.string().min(1).optional().openapi({
+      description:
+        "apollo only: the apollo person id returned by a prior search. Reveals the verified email via apollo /enrich (the billed path, 1 credit). PREFERRED for apollo — apollo search masks last name + domain, so identity-based match can't be satisfied from a search hit.",
+    }),
+    firstName: z.string().min(1).optional(),
+    lastName: z.string().min(1).optional(),
+    domain: z.string().min(1).optional(),
     includeInferred: z.boolean().optional().openapi({
       description: "apify only: include pattern-inferred emails in the waterfall.",
     }),
   })
+  .refine(
+    (v) =>
+      !!v.providerPersonId || (!!v.firstName && !!v.lastName && !!v.domain),
+    {
+      message:
+        "Provide providerPersonId (apollo enrich-by-id) OR firstName + lastName + domain (identity resolve).",
+    }
+  )
   .openapi("ResolveEmailRequest");
 
 export const ResolveEmailResponseSchema = z

@@ -43,7 +43,7 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Org-scoped (CRM v1) | `POST /orgs/lists/{id}/members` | apiKey + `x-org-id` | Bulk add (idempotent on `(list_id, source_service, source_resource_id)`) |
 | Org-scoped (CRM v1) | `DELETE /orgs/lists/{id}/members` | apiKey + `x-org-id` | Bulk remove |
 | Org-scoped (People v1) | `POST /orgs/people/search` | apiKey + `x-org-id` + `x-user-id` | Search people via apollo/apify, normalized |
-| Org-scoped (People v1) | `POST /orgs/people/resolve-email` | apiKey + `x-org-id` + `x-user-id` | Resolve a verified email (name + domain) |
+| Org-scoped (People v1) | `POST /orgs/people/resolve-email` | apiKey + `x-org-id` + `x-user-id` | Reveal a verified email — apollo by `providerPersonId` (`/enrich`, billed) or name+domain (`/match`); apify by name+domain |
 | Org-scoped (People v1) | `POST /orgs/people/search/dry-run` | apiKey + `x-org-id` + `x-user-id` | Count matches, free (apollo only in v1) |
 | Org-scoped (People v1) | `GET /orgs/people/filters-prompt` | apiKey + `x-org-id` + `x-user-id` | LLM filter-shape prompt (apollo only in v1) |
 
@@ -68,7 +68,23 @@ confusing downstream 502.
 
 - **Routing**: explicit `provider: "apollo" | "apify"` wins; else
   `need: "verified_email"` → apify; else default **apollo** (richest, fully
-  ready). `resolve-email` defaults to **apify** (verified-email specialist).
+  ready). `resolve-email` **also defaults to apollo** (same provider as search;
+  the reveal follows the provider that searched — a `providerPersonId` is
+  provider-specific, so we never cross providers).
+- **Reveal (`resolve-email`) is generic — input mirrors the search output.** The
+  neutral `Person` from search carries its own `provider` + handle; hand it back
+  to reveal:
+  - **apollo + `providerPersonId`** → `/enrich` (THE billed path: 1
+    `apollo-credit` per verified email). Apollo search returns only a teaser
+    (first name + person id) and **masks last name + domain**, so identity
+    `/match` can't be satisfied from a search hit — enrich-by-id is the reveal
+    that works for an apollo-sourced lead.
+  - apollo + name+domain (no person id) → `/match` (fallback, also billed).
+  - **apify + name+domain** → `/resolve` (waterfall). apify has no person-id
+    enrich → a `providerPersonId`-only request fails loud (501), never silently
+    crosses mechanisms.
+  - Request requires `providerPersonId` OR (`firstName` + `lastName` + `domain`)
+    — Zod refine, 400 otherwise.
 - **Neutral `Person` shape**: field names mirror lead-service `FullLead` so a
   future Sales Lead Service mapping is trivial — but the type is **owned here**,
   never imported cross-repo.
