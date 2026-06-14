@@ -109,6 +109,7 @@ router.post(
     try {
       const result = await resolveEmail({
         provider: parsed.data.provider,
+        providerPersonId: parsed.data.providerPersonId,
         firstName: parsed.data.firstName,
         lastName: parsed.data.lastName,
         domain: parsed.data.domain,
