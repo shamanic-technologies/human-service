@@ -175,3 +175,104 @@ export const listMembers = pgTable(
 
 export type ListMember = typeof listMembers.$inferSelect;
 export type NewListMember = typeof listMembers.$inferInsert;
+
+// --- People gateway v1: per-brand cross-provider suppression (B/S/G) ---
+//
+// The people gateway serves leads for a brand via apollo OR apify. Only the
+// gateway sees BOTH providers' emissions for a brand, so the cross-provider
+// "already served for this brand" truth lives here (not in any single
+// provider). Two layers:
+//
+//   🥉 bronze `lead_serves`        — append-only, immutable, source-faithful
+//                                    event log. Full audit. Silver rebuildable
+//                                    from it when identity-resolution evolves.
+//   🥈 silver `brand_suppressions` — canonical, deduped per (org, brand,
+//                                    person). The ONLY table the read paths
+//                                    (apollo teaser filter, apify exclude-set,
+//                                    resolve-email block) query.
+//
+// Window (3 months) is enforced ON READ via `last_served_at`. No cron/cleanup
+// (gold is a view if/when a consumer needs counts). org_id / brand_id are uuid
+// per the new-table convention; campaign_id / run_id are text (audit-only
+// forwarded headers, may not be uuid).
+
+// 🥉 Bronze — one row per (serve, atomic brand). Never updated.
+export const leadServes = pgTable(
+  "lead_serves",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    provider: text("provider").notNull(), // "apollo" | "apify"
+    providerPersonId: text("provider_person_id"),
+    // Raw identity as-received from the provider (source-faithful).
+    firstName: text("first_name"),
+    lastName: text("last_name"),
+    email: text("email"),
+    linkedinUrl: text("linkedin_url"),
+    companyDomain: text("company_domain"),
+    // Provenance.
+    campaignId: text("campaign_id"),
+    runId: text("run_id"),
+    servedAt: timestamp("served_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_lead_serves_org_brand").on(table.orgId, table.brandId),
+    index("idx_lead_serves_served_at").on(table.servedAt),
+  ]
+);
+
+export type LeadServe = typeof leadServes.$inferSelect;
+export type NewLeadServe = typeof leadServes.$inferInsert;
+
+// 🥈 Silver — canonical per (org, brand, person). Promoted inline at serve time.
+// Keyed on email_norm (always present when a verified email is served);
+// linkedin_url_norm + provider_person_id are additional indexed match columns
+// for the apollo free-teaser pre-pay lookup. Non-partial unique index on
+// (org_id, brand_id, email_norm) — all NOT NULL, so ON CONFLICT infers it
+// cleanly (no 42P10 partial-index trap).
+export const brandSuppressions = pgTable(
+  "brand_suppressions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    emailNorm: text("email_norm").notNull(),
+    linkedinUrlNorm: text("linkedin_url_norm"),
+    providerPersonId: text("provider_person_id"),
+    lastProvider: text("last_provider"),
+    firstServedAt: timestamp("first_served_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastServedAt: timestamp("last_served_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_brand_suppressions_unique").on(
+      table.orgId,
+      table.brandId,
+      table.emailNorm
+    ),
+    index("idx_brand_suppressions_linkedin").on(
+      table.orgId,
+      table.brandId,
+      table.linkedinUrlNorm
+    ),
+    index("idx_brand_suppressions_person").on(
+      table.orgId,
+      table.brandId,
+      table.providerPersonId
+    ),
+    index("idx_brand_suppressions_window").on(
+      table.orgId,
+      table.brandId,
+      table.lastServedAt
+    ),
+  ]
+);
+
+export type BrandSuppression = typeof brandSuppressions.$inferSelect;
+export type NewBrandSuppression = typeof brandSuppressions.$inferInsert;
