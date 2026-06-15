@@ -28,6 +28,9 @@ function buildIdentity(res: import("express").Response): Identity {
     ...(res.locals.campaignId
       ? { campaignId: res.locals.campaignId as string }
       : {}),
+    ...(res.locals.brandIds
+      ? { brandIds: res.locals.brandIds as string[] }
+      : {}),
     workflowTracking: getWorkflowTracking(res.locals),
   };
 }

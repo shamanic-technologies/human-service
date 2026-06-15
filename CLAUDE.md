@@ -15,9 +15,12 @@ Backend service that owns two distinct concerns:
 3. **People gateway v1** — a provider-agnostic façade over `apollo-service`
    (rich search + enrich) and `apify-service` (verified-email waterfall).
    Callers hit `/orgs/people/*` to search people and resolve verified emails
-   without caring which provider serves the request. **Stateless** — routes +
-   normalizes only, no tables. Declares **no cost** (apollo/apify own the paid
-   call); forwards `x-run-id` for downstream tracing. See below.
+   without caring which provider serves the request. Routes + normalizes; owns
+   a **per-brand cross-provider suppression** log (tables `lead_serves` bronze +
+   `brand_suppressions` silver — only the gateway sees both providers' emissions
+   for a brand, so the "already served" truth lives here). Declares **no cost**
+   (apollo/apify own the paid call); forwards `x-run-id` for downstream tracing.
+   See below.
 
 Stack: Express + Drizzle (Postgres) + Zod + zod-to-openapi. Deployed on
 Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
@@ -107,6 +110,35 @@ confusing downstream 502.
   cursor (`nextOffset`), NOT a cross-source-exact total. Rich filters
   (`companySizes`, `revenueRanges`, `fundingStages`, `technologies`) map to
   apify verbatim; `revenueRanges`/`technologies` also map to apollo.
+- **Per-brand cross-provider suppression** (human-service#36): every serve (a
+  lead handed back with a verified email — apify at `/search`, apollo at
+  `resolve-email`) is logged per **atomic brand** for a **3-month** window.
+  Later requests for that brand exclude already-served leads, **across
+  providers**. The "before paying" mechanism rides each provider's billing
+  asymmetry:
+  - **apollo** search is FREE (only enrich bills) → drop already-served teasers
+    in-gateway (match on `linkedin_url_norm` OR `provider_person_id`) BEFORE
+    revealing the email. A brand-saturated audience pages the free cursor a
+    bounded number of times (`APOLLO_MAX_SATURATION_PAGES`) then returns a
+    truthful `done` — producer-side saturation stop, no consumer heuristic.
+  - **apify** BILLS per returned lead → can't post-filter (pay-then-drop). The
+    brand's exclude-set (`excludeEmails` + `excludeLinkedinUrls`) is **pushed
+    down** to apify `/search` so the actor never returns/bills a served lead and
+    stops when the fresh pool is dry. **Depends on apify-service accepting the
+    exclude-set** (apify-service#18 engine) — until it ships, the apify path
+    still records serves (feeding apollo cross-exclusion) but won't self-exclude.
+  - **resolve-email block**: the residual no-linkedin cross-provider edge (an
+    apify-served lead with no linkedin slips the apollo teaser filter and gets
+    enriched) is caught at `resolve-email` — an `email_norm` suppression hit
+    returns `person:null` so it's not re-served (credit already spent).
+  - **Layering (B/S/G)**: bronze `lead_serves` (append-only, audit, silver
+    rebuildable) → silver `brand_suppressions` (canonical per `(org, brand,
+    email_norm)`, the only table the read paths query, promoted inline at serve
+    time). Identity keys: `email_norm` canonical; `linkedin_url_norm` is the
+    cross-provider key available pre-pay on both providers. Window enforced on
+    read via `last_served_at`. No gold table (a view if a consumer needs counts).
+    `src/services/suppression.ts` owns it; `org_id`/`brand_id` uuid,
+    `campaign_id`/`run_id` text (audit-only).
 - **No cost declaration here** — apollo/apify own the paid call; human-service
   only forwards `x-run-id`.
 - **Env vars**: `APOLLO_SERVICE_URL`, `APOLLO_SERVICE_API_KEY`,
@@ -126,6 +158,9 @@ returns 404, never 403, to avoid leaking existence.
 - **`humans` and `human_methodologies`** (legacy): `org_id text` — predates
   the internal-UUID convention. Do not migrate without coordinating with
   every caller.
+- **`lead_serves` and `brand_suppressions`** (people gateway): `org_id` +
+  `brand_id` uuid (new-table convention); `campaign_id` / `run_id` text
+  (audit-only forwarded headers, not guaranteed uuid).
 
 The same request can hit both column families because the value passed in
 `x-org-id` is text-coercible-to-uuid in practice. New tables use `uuid`.

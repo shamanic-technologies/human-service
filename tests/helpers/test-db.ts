@@ -4,6 +4,8 @@ import {
   humanMethodologies,
   lists,
   listMembers,
+  leadServes,
+  brandSuppressions,
 } from "../../src/db/schema.js";
 import { sql } from "../../src/db/index.js";
 
@@ -12,6 +14,8 @@ export async function cleanTestData() {
   await db.delete(humans);
   await db.delete(listMembers);
   await db.delete(lists);
+  await db.delete(leadServes);
+  await db.delete(brandSuppressions);
 }
 
 export async function closeDb() {
