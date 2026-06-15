@@ -232,6 +232,16 @@ To re-generate the OpenAPI spec after editing `src/schemas.ts`:
 npm run generate:openapi
 ```
 
+**Migrations are hand-authored, not `drizzle-kit generate`d.** `drizzle/meta/`
+keeps only `0000_snapshot.json` (intermediate snapshots were never committed),
+so `drizzle-kit generate` mis-diffs — it prompts to "rename" EXISTING tables
+(e.g. `humans` from `human_profiles`) and would emit a destructive migration.
+For a new table: hand-write `drizzle/NNNN_*.sql` (idempotent — `CREATE TABLE IF
+NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`) following `0007`/`0008`, and append a
+matching entry to `drizzle/meta/_journal.json` with a `when` greater than every
+existing entry (the runtime migrator only checks `when`, ignores the SQL hash).
+`drizzle-kit migrate` applies them on boot + in CI.
+
 ## Run tracking
 
 Run tracking is wired through `src/services/runs.ts` for the legacy
