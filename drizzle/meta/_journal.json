@@ -57,6 +57,13 @@
       "when": 1746230400000,
       "tag": "0007_add_lists_and_list_members",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1771587966879,
+      "tag": "0008_add_suppression_bsg",
+      "breakpoints": true
     }
   ]
 }

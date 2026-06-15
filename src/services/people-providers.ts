@@ -12,6 +12,20 @@
 
 import type { WorkflowTrackingHeaders } from "../middleware/auth.js";
 import { workflowTrackingToHeaders } from "../middleware/auth.js";
+import {
+  filterSuppressed,
+  getSuppressionSet,
+  isEmailSuppressed,
+  recordServe,
+  type ServedContact,
+} from "./suppression.js";
+
+// apollo search is FREE (only enrich is billed), so on a brand-saturated
+// audience we can page the free cursor and drop already-served teasers without
+// spending. Cap how many consecutive all-served pages we scan before returning
+// a truthful per-brand `done` — producer-side saturation stop (the gateway IS
+// lead-service's producer), bounded so we never deep-page forever.
+const APOLLO_MAX_SATURATION_PAGES = 5;
 
 const APIFY_DEFAULT_LIMIT = 100; // mirror apollo's fixed page size
 
@@ -138,7 +152,23 @@ export interface Identity {
   userId?: string;
   runId?: string;
   campaignId?: string;
+  // Atomic brands this request serves leads for. Drives per-brand cross-provider
+  // suppression. Empty / absent ⟹ no suppression (nothing to scope against).
+  brandIds?: string[];
   workflowTracking?: WorkflowTrackingHeaders;
+}
+
+// Map a normalized neutral Person to the suppression layer's serve record.
+function toServedContact(p: Person): ServedContact {
+  return {
+    email: p.email,
+    linkedinUrl: p.linkedinUrl,
+    firstName: p.firstName,
+    lastName: p.lastName,
+    companyDomain: p.organization?.domain ?? null,
+    provider: p.provider,
+    providerPersonId: p.providerPersonId,
+  };
 }
 
 // --- Provider routing ---
@@ -520,37 +550,79 @@ export async function peopleSearch(args: {
   identity: Identity;
 }): Promise<PeopleSearchResult> {
   const provider = resolveProvider(args);
+  const brandIds = args.identity.brandIds ?? [];
 
   if (provider === "apollo") {
     const { url, key } = requireApollo();
-    // Apollo owns the cursor (keyed by org + x-campaign-id). On a next-page
-    // call the caller omits filters; we forward an empty body so apollo
-    // advances its stored cursor.
-    const body = args.isNextPage
+    // Apollo owns the cursor (keyed by org + x-campaign-id). The first call
+    // sends searchParams; next-page calls send an empty body so apollo advances
+    // its stored cursor.
+    //
+    // Per-brand suppression: apollo search is FREE, so we drop teasers already
+    // served for the brand (linkedin / person-id match) BEFORE paying to reveal
+    // their email. If a page is entirely already-served, we page the free cursor
+    // again — bounded — and return a truthful per-brand `done` on saturation, so
+    // a saturated audience exhausts without the caller deep-paging forever.
+    const firstBody = args.isNextPage
       ? {}
       : { searchParams: toApolloSearchParams(args.filters) };
-    const data = (await postProvider(
-      "apollo",
-      url,
-      key,
-      "/search/next",
-      body,
-      args.identity
-    )) as { people: ApolloPerson[]; done: boolean; totalEntries: number };
-    return {
-      provider,
-      people: data.people.map(normalizeApolloPerson),
-      done: data.done,
-      total: data.totalEntries,
-      nextOffset: null,
-    };
+
+    const collected: Person[] = [];
+    let total = 0;
+    let done = false;
+    // Without brandIds there is nothing to suppress against — single page, the
+    // caller drives pagination exactly as before.
+    const maxPages = brandIds.length > 0 ? APOLLO_MAX_SATURATION_PAGES : 1;
+
+    for (let page = 0; page < maxPages; page++) {
+      const data = (await postProvider(
+        "apollo",
+        url,
+        key,
+        "/search/next",
+        page === 0 ? firstBody : {},
+        args.identity
+      )) as { people: ApolloPerson[]; done: boolean; totalEntries: number };
+      total = data.totalEntries;
+
+      let people = data.people.map(normalizeApolloPerson);
+      if (brandIds.length > 0) {
+        people = await filterSuppressed(args.identity.orgId, brandIds, people);
+      }
+      collected.push(...people);
+
+      if (data.done) {
+        done = true;
+        break;
+      }
+      // Got fresh (non-suppressed) leads, or suppression is off → return them
+      // and let the caller request the next page.
+      if (brandIds.length === 0 || people.length > 0) break;
+      // Whole page already served for the brand — try the next free page.
+    }
+
+    // Brand-scoped search that scanned the bounded page budget and found zero
+    // fresh leads ⟹ audience saturated for this brand → terminal.
+    if (brandIds.length > 0 && collected.length === 0 && !done) done = true;
+
+    return { provider, people: collected, done, total, nextOffset: null };
   }
 
   // apify — offset-based pagination (apify-service#6). totalMatched / hasMore /
   // nextOffset are pipelinelabs-only signals (microworlds contributes page 1
   // only) — a provider-specific cursor, NOT a cross-source-exact total.
+  //
+  // Per-brand suppression: apify BILLS per returned lead, so we cannot post-
+  // filter (that pays for trash). We push the brand's exclude-set down so apify
+  // never returns / bills a lead already served for the brand, and stops once
+  // the fresh pool is dry (apify-service#18 saturation-stop). Every returned
+  // lead carries a verified email ⟹ it IS a serve, recorded here.
   const { url, key } = requireApify();
   const limit = args.limit ?? APIFY_DEFAULT_LIMIT;
+  const exclude =
+    brandIds.length > 0
+      ? await getSuppressionSet(args.identity.orgId, brandIds)
+      : { emails: [], linkedinUrls: [] };
   const data = (await postProvider(
     "apify",
     url,
@@ -560,6 +632,10 @@ export async function peopleSearch(args: {
       ...toApifyFilterBody(args.filters),
       limit,
       ...(args.offset !== undefined ? { offset: args.offset } : {}),
+      ...(exclude.emails.length > 0 ? { excludeEmails: exclude.emails } : {}),
+      ...(exclude.linkedinUrls.length > 0
+        ? { excludeLinkedinUrls: exclude.linkedinUrls }
+        : {}),
     },
     args.identity
   )) as {
@@ -570,13 +646,42 @@ export async function peopleSearch(args: {
     hasMore?: boolean;
     nextOffset?: number;
   };
+  const apifyPeople = data.leads.map(normalizeApifyLead);
+  if (brandIds.length > 0 && apifyPeople.length > 0) {
+    await recordServe(
+      args.identity.orgId,
+      brandIds,
+      apifyPeople.map(toServedContact),
+      { campaignId: args.identity.campaignId, runId: args.identity.runId }
+    );
+  }
   return {
     provider,
-    people: data.leads.map(normalizeApifyLead),
+    people: apifyPeople,
     done: data.hasMore !== true,
     total: data.totalMatched ?? data.leadCount,
     nextOffset: data.hasMore === true ? data.nextOffset ?? null : null,
   };
+}
+
+// After a billed reveal, apply per-brand suppression: block re-emission (the
+// credit is already spent, but a lead already served for the brand must not be
+// handed back again) and otherwise record the serve. No brandIds ⟹ pass through.
+async function finalizeResolved(
+  provider: Provider,
+  person: Person | null,
+  identity: Identity
+): Promise<ResolveEmailResult> {
+  const brandIds = identity.brandIds ?? [];
+  if (!person || brandIds.length === 0) return { provider, person };
+  if (await isEmailSuppressed(identity.orgId, brandIds, person.email)) {
+    return { provider, person: null };
+  }
+  await recordServe(identity.orgId, brandIds, [toServedContact(person)], {
+    campaignId: identity.campaignId,
+    runId: identity.runId,
+  });
+  return { provider, person };
 }
 
 export async function resolveEmail(args: {
@@ -612,10 +717,11 @@ export async function resolveEmail(args: {
         { apolloPersonId: args.providerPersonId },
         args.identity
       )) as { person: ApolloPerson | null };
-      return {
+      return finalizeResolved(
         provider,
-        person: data.person ? normalizeApolloPerson(data.person) : null,
-      };
+        data.person ? normalizeApolloPerson(data.person) : null,
+        args.identity
+      );
     }
     // Fallback: identity-based match (name + domain) when no person id is known
     // (e.g. a direct caller resolving a known contact). Also bills via /match.
@@ -632,10 +738,11 @@ export async function resolveEmail(args: {
         },
         args.identity
       )) as { person: ApolloPerson | null };
-      return {
+      return finalizeResolved(
         provider,
-        person: data.person ? normalizeApolloPerson(data.person) : null,
-      };
+        data.person ? normalizeApolloPerson(data.person) : null,
+        args.identity
+      );
     }
     // Unreachable when called via the route (Zod refine guarantees one path);
     // defensive fail-loud for direct callers.
@@ -680,7 +787,11 @@ export async function resolveEmail(args: {
     args.identity
   )) as { leads: ApifyLead[] };
   const lead = data.leads[0];
-  return { provider, person: lead ? normalizeApifyLead(lead) : null };
+  return finalizeResolved(
+    provider,
+    lead ? normalizeApifyLead(lead) : null,
+    args.identity
+  );
 }
 
 export async function dryRun(args: {
