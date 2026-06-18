@@ -275,11 +275,21 @@ is the chat-service client.
   `responseFormat:"json"`). **chat-service OWNS the LLM cost** — it does the
   provision→authorize→execute→actualize against the org balance — so
   **human-service still declares no cost** (the invariant holds; chat-service is
-  the LLM-cost owner exactly as apollo/apify own search cost). We do NOT pass a
-  provider `responseSchema` (the neutral filter shape has many optional fields;
-  anthropic strict-mode rejects permissive schemas) — the exact JSON shape is
-  described in the prompt and **validated caller-side** (`parseCandidates` →
-  fail loud 502 on a malformed LLM response).
+  the LLM-cost owner exactly as apollo/apify own search cost). chat-service
+  **enforces the Anthropic JSON-mode contract**: `provider:"anthropic"` +
+  `responseFormat:"json"` is **rejected 400 unless a `responseSchema` is
+  supplied** (Anthropic has no standalone JSON flag — enforcement is only via
+  `output_config.format`). So `completeJson` passes a `responseSchema`
+  (`SUGGEST_RESPONSE_SCHEMA`). The Anthropic strict requirement applies to the
+  **top-level object only** (`additionalProperties:false` + explicit
+  `properties` + all keys `required`); nested objects may stay OPEN, so we lock
+  the `{candidates:[{label,rationale,filters}]}` envelope and leave each
+  candidate's `filters` as a bare `{type:"object"}` — the ~20 optional
+  neutral-filter fields are deliberately NOT enumerated. The shape is **still
+  validated caller-side** (`parseCandidates` → fail loud 502 on a malformed LLM
+  response) and the per-filter dry-run validates the filter values. (Hotfix
+  v0.13.1 / #50: the original "no responseSchema, prompt-described only" design
+  400'd every prod call once chat-service added the upfront guard.)
 - **Granularity is emergent from the NL, not an input.** Input is ONLY
   `{nlPrompt, brandId}` — no `strategy`/count knob. The LLM reads the caller's
   own segmentation intent ("split by country", "FR and DE separately", "one
