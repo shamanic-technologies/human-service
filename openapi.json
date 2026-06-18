@@ -1408,13 +1408,15 @@
           },
           "apolloCount": {
             "type": "integer",
+            "nullable": true,
             "minimum": 0,
-            "description": "Optional count snapshot the caller already obtained from /orgs/people/search/dry-run (apollo). Stored as-is; refresh-count re-computes it server-side later."
+            "description": "Optional count snapshot the caller already obtained from /orgs/people/search/dry-run (apollo). Stored as-is; refresh-count re-computes it server-side later. Accepts null (e.g. an apify-source candidate carries apolloCount: null)."
           },
           "apifyCount": {
             "type": "integer",
+            "nullable": true,
             "minimum": 0,
-            "description": "Optional apify count snapshot (see apolloCount)."
+            "description": "Optional apify count snapshot (see apolloCount). Accepts null (e.g. an apollo-source candidate carries apifyCount: null)."
           }
         },
         "required": [
