@@ -927,12 +927,13 @@ export const CreateAudienceRequestSchema = z
     }),
     nlPrompt: z.string().min(1).optional(),
     filters: PeopleSearchFiltersSchema.optional(),
-    apolloCount: z.number().int().min(0).optional().openapi({
+    apolloCount: z.number().int().min(0).nullish().openapi({
       description:
-        "Optional count snapshot the caller already obtained from /orgs/people/search/dry-run (apollo). Stored as-is; refresh-count re-computes it server-side later.",
+        "Optional count snapshot the caller already obtained from /orgs/people/search/dry-run (apollo). Stored as-is; refresh-count re-computes it server-side later. Accepts null (e.g. an apify-source candidate carries apolloCount: null).",
     }),
-    apifyCount: z.number().int().min(0).optional().openapi({
-      description: "Optional apify count snapshot (see apolloCount).",
+    apifyCount: z.number().int().min(0).nullish().openapi({
+      description:
+        "Optional apify count snapshot (see apolloCount). Accepts null (e.g. an apollo-source candidate carries apifyCount: null).",
     }),
   })
   .openapi("CreateAudienceRequest");
