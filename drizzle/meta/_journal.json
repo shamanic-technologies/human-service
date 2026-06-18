@@ -78,6 +78,13 @@
       "when": 1771587966881,
       "tag": "0010_add_audience_provider",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1771587966882,
+      "tag": "0011_add_audience_status_provenance",
+      "breakpoints": true
     }
   ]
 }

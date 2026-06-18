@@ -5,6 +5,7 @@ import openapiRoutes from "../../src/routes/openapi.js";
 import humanRoutes from "../../src/routes/humans.js";
 import methodologyRoutes from "../../src/routes/methodology.js";
 import transferBrandRoutes from "../../src/routes/transfer-brand.js";
+import backfillRoutes from "../../src/routes/backfill.js";
 import listsRoutes from "../../src/routes/lists.js";
 import peopleRoutes from "../../src/routes/people.js";
 import audiencesRoutes from "../../src/routes/audiences.js";
@@ -19,6 +20,7 @@ export function createTestApp() {
   app.use(humanRoutes);
   app.use(methodologyRoutes);
   app.use(transferBrandRoutes);
+  app.use(backfillRoutes);
   app.use(listsRoutes);
   app.use(peopleRoutes);
   app.use(audiencesRoutes);
