@@ -322,6 +322,34 @@ const SUGGEST_PROVIDERS: Provider[] = ["apollo", "apify"];
 const SUGGEST_MAX_CANDIDATES_PER_PROVIDER = 6; // safety backstop (not a knob)
 const SUGGEST_MAX_REVISE_ROUNDS = 3;
 
+// chat-service enforces the Anthropic JSON-mode contract: a `responseSchema` is
+// required (else 400). For anthropic the TOP-LEVEL object must be strict
+// (`additionalProperties: false` + an explicit `properties` map + every key
+// `required`); nested objects may stay OPEN. So we lock the `{candidates:[...]}`
+// envelope and leave each candidate's `filters` as a bare `{type:"object"}` —
+// the neutral filter shape has ~20 optional fields we deliberately do NOT
+// enumerate; `parseCandidates` + the provider dry-run validate filters anyway.
+const SUGGEST_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["candidates"],
+  properties: {
+    candidates: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["label", "rationale", "filters"],
+        properties: {
+          label: { type: "string" },
+          rationale: { type: "string" },
+          filters: { type: "object" },
+        },
+      },
+    },
+  },
+};
+
 export interface AudienceCandidate {
   provider: Provider;
   label: string;
@@ -443,7 +471,12 @@ async function suggestForProvider(
   const systemPrompt = buildSuggestSystemPrompt(provider, rules);
 
   const initial = parseCandidates(
-    await completeJson({ message: nlPrompt, systemPrompt, identity })
+    await completeJson({
+      message: nlPrompt,
+      systemPrompt,
+      identity,
+      responseSchema: SUGGEST_RESPONSE_SCHEMA,
+    })
   );
   const truncated = initial.length > SUGGEST_MAX_CANDIDATES_PER_PROVIDER;
 
@@ -478,6 +511,7 @@ async function suggestForProvider(
         message: buildRevisePrompt(nlPrompt, failing),
         systemPrompt,
         identity,
+        responseSchema: SUGGEST_RESPONSE_SCHEMA,
       })
     );
     for (const w of failing) {
