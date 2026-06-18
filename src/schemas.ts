@@ -727,6 +727,10 @@ export const PeopleSearchRequestSchema = z
     offset: z.number().int().min(0).optional().openapi({
       description: "apify only: pagination offset (pass back `nextOffset` from the prior page).",
     }),
+    audienceId: z.string().uuid().optional().openapi({
+      description:
+        "Tag returned (served) leads as members of this audience (provenance membership). The audience must belong to the org (404 otherwise). Tagging applies to billed serves only — apify search hits (every hit is billed). Does not change which filters are searched; the caller supplies filters as usual.",
+    }),
   })
   .openapi("PeopleSearchRequest");
 
@@ -778,6 +782,10 @@ export const ResolveEmailRequestSchema = z
     domain: z.string().min(1).optional(),
     includeInferred: z.boolean().optional().openapi({
       description: "apify only: include pattern-inferred emails in the waterfall.",
+    }),
+    audienceId: z.string().uuid().optional().openapi({
+      description:
+        "Tag the resolved (served) person as a member of this audience (provenance membership). The audience must belong to the org (404 otherwise).",
     }),
   })
   .refine(
@@ -872,6 +880,263 @@ registry.registerPath({
     400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
     502: { description: "Provider error", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+// --- Audiences (v1): /orgs/audiences/* ---
+//
+// An audience is a saved neutral filter-set whose membership is computed
+// dynamically (CDP "dynamic audience"). Members accrue by PROVENANCE: a person
+// joins an audience iff a serve made under that audience returned them. CRUD is
+// org-scoped (x-org-id; x-user-id optional, populates created_by). refresh-count
+// additionally requires x-user-id (apollo/apify key resolution).
+
+export const AudienceSchema = z
+  .object({
+    id: z.string().uuid(),
+    orgId: z.string().uuid(),
+    brandId: z.string().uuid(),
+    name: z.string(),
+    nlPrompt: z.string().nullable(),
+    filters: PeopleSearchFiltersSchema.nullable(),
+    apolloCount: z.number().int().nullable(),
+    apifyCount: z.number().int().nullable(),
+    countedAt: z.string().nullable(),
+    createdByUserId: z.string().uuid().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .openapi("Audience");
+
+export const CreateAudienceRequestSchema = z
+  .object({
+    name: z.string().min(1),
+    brandId: z.string().uuid(),
+    nlPrompt: z.string().min(1).optional(),
+    filters: PeopleSearchFiltersSchema.optional(),
+    apolloCount: z.number().int().min(0).optional().openapi({
+      description:
+        "Optional count snapshot the caller already obtained from /orgs/people/search/dry-run (apollo). Stored as-is; refresh-count re-computes it server-side later.",
+    }),
+    apifyCount: z.number().int().min(0).optional().openapi({
+      description: "Optional apify count snapshot (see apolloCount).",
+    }),
+  })
+  .openapi("CreateAudienceRequest");
+
+export const UpdateAudienceRequestSchema = z
+  .object({
+    name: z.string().min(1).optional(),
+    nlPrompt: z.string().nullable().optional(),
+    brandId: z.string().uuid().optional(),
+    filters: PeopleSearchFiltersSchema.nullable().optional(),
+  })
+  .openapi("UpdateAudienceRequest");
+
+export const ListAudiencesQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+  brandId: z.string().uuid().optional(),
+});
+
+export const AudienceMembersQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+export const AudienceStatsRequestSchema = z
+  .object({
+    emails: z.array(z.string().min(1)).optional(),
+    personIds: z.array(z.string().uuid()).optional(),
+  })
+  .refine((v) => (v.emails?.length ?? 0) + (v.personIds?.length ?? 0) > 0, {
+    message: "Provide at least one of emails or personIds.",
+  })
+  .openapi("AudienceStatsRequest");
+
+export const GetAudienceResponseSchema = z
+  .object({ audience: AudienceSchema })
+  .openapi("GetAudienceResponse");
+
+export const ListAudiencesResponseSchema = z
+  .object({
+    audiences: z.array(AudienceSchema),
+    total: z.number().int(),
+    limit: z.number().int(),
+    offset: z.number().int(),
+  })
+  .openapi("ListAudiencesResponse");
+
+export const AudienceMemberSchema = z
+  .object({
+    personId: z.string().uuid(),
+    emailNorm: z.string().nullable(),
+    linkedinUrlNorm: z.string().nullable(),
+    firstName: z.string().nullable(),
+    lastName: z.string().nullable(),
+    fullName: z.string().nullable(),
+    companyDomain: z.string().nullable(),
+    source: z.string().nullable(),
+    confidence: z.string(),
+    joinedAt: z.string(),
+    lastServedAt: z.string(),
+  })
+  .openapi("AudienceMember");
+
+export const ListAudienceMembersResponseSchema = z
+  .object({
+    members: z.array(AudienceMemberSchema),
+    total: z.number().int(),
+    limit: z.number().int(),
+    offset: z.number().int(),
+  })
+  .openapi("ListAudienceMembersResponse");
+
+export const AudienceStatsResponseSchema = z
+  .object({
+    matched: z.array(
+      z.object({
+        personId: z.string().uuid(),
+        emailNorm: z.string().nullable(),
+        fullName: z.string().nullable(),
+        audiences: z.array(
+          z.object({ audienceId: z.string().uuid(), name: z.string() })
+        ),
+      })
+    ),
+    unmatched: z.object({
+      emails: z.array(z.string()),
+      personIds: z.array(z.string()),
+    }),
+    byAudience: z.array(
+      z.object({
+        audienceId: z.string().uuid(),
+        name: z.string(),
+        brandId: z.string().uuid(),
+        matchedCount: z.number().int(),
+      })
+    ),
+  })
+  .openapi("AudienceStatsResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences",
+  summary: "Create an audience (saved filter-set + optional count snapshot)",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: orgsListsHeaders,
+    body: { content: { "application/json": { schema: CreateAudienceRequestSchema } } },
+  },
+  responses: {
+    201: { description: "Audience created", content: { "application/json": { schema: GetAudienceResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/audiences",
+  summary: "List audiences for an org (optional brandId filter)",
+  security: [{ apiKey: [] }],
+  request: { headers: orgsListsHeaders, query: ListAudiencesQuerySchema },
+  responses: {
+    200: { description: "Audiences found", content: { "application/json": { schema: ListAudiencesResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/stats",
+  summary: "Per-audience membership stats for a list of emails / personIds",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: orgsListsHeaders,
+    body: { content: { "application/json": { schema: AudienceStatsRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Stats", content: { "application/json": { schema: AudienceStatsResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/audiences/{id}",
+  summary: "Get an audience by id",
+  security: [{ apiKey: [] }],
+  request: { headers: orgsListsHeaders, params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    200: { description: "Audience found", content: { "application/json": { schema: GetAudienceResponseSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "patch",
+  path: "/orgs/audiences/{id}",
+  summary: "Update an audience (name / nlPrompt / brand / filters)",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: orgsListsHeaders,
+    params: z.object({ id: z.string().uuid() }),
+    body: { content: { "application/json": { schema: UpdateAudienceRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Audience updated", content: { "application/json": { schema: GetAudienceResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/orgs/audiences/{id}",
+  summary: "Delete an audience (cascades members)",
+  security: [{ apiKey: [] }],
+  request: { headers: orgsListsHeaders, params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    204: { description: "Deleted" },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/{id}/refresh-count",
+  summary: "Re-snapshot apollo + apify counts via the free dry-run",
+  security: [{ apiKey: [] }],
+  request: { headers: peopleHeaders, params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    200: { description: "Counts refreshed", content: { "application/json": { schema: GetAudienceResponseSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "Provider error", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/audiences/{id}/members",
+  summary: "List the canonical people who are members of an audience",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: orgsListsHeaders,
+    params: z.object({ id: z.string().uuid() }),
+    query: AudienceMembersQuerySchema,
+  },
+  responses: {
+    200: { description: "Members", content: { "application/json": { schema: ListAudienceMembersResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
   },
 });
 

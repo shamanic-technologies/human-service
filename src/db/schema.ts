@@ -214,6 +214,8 @@ export const leadServes = pgTable(
     // Provenance.
     campaignId: text("campaign_id"),
     runId: text("run_id"),
+    // The audience this serve was made under (audit-only link to `audiences`).
+    audienceId: uuid("audience_id"),
     servedAt: timestamp("served_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -276,3 +278,118 @@ export const brandSuppressions = pgTable(
 
 export type BrandSuppression = typeof brandSuppressions.$inferSelect;
 export type NewBrandSuppression = typeof brandSuppressions.$inferInsert;
+
+// --- People gateway v1: audiences + canonical people + membership bridge ---
+//
+// Naming follows CDP/CRM canon (Segment / Salesforce CDP / Adobe AEP / HubSpot):
+//   - `audiences`        — a saved neutral filter-set whose membership is
+//                          computed dynamically. (CDP "dynamic audience". NOT
+//                          "persona" = the trait layer above; NOT
+//                          "database_search" = the mechanism.)
+//   - `people`           — canonical, deduped person dimension (🥈 silver). The
+//                          legacy `humans` table is expert-profiles, so the
+//                          canonical person entity is `people`.
+//   - `audienceMembers`  — Kimball BRIDGE for the many-to-many person<->audience
+//                          relation, with effective dates for point-in-time.
+//
+// Membership is PROVENANCE-based: a person joins an audience iff a serve made
+// under that audience returned them. No local re-implementation of provider
+// matching. One person accrues many audiences over time.
+
+// 🥈 Silver — canonical deduped person. Dedup keys: email_norm (canonical) then
+// linkedin_url_norm then provider person ids. Non-partial unique on
+// (org_id, email_norm) — email_norm nullable, NULLs distinct, ON CONFLICT-safe.
+export const people = pgTable(
+  "people",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    emailNorm: text("email_norm"),
+    linkedinUrlNorm: text("linkedin_url_norm"),
+    apolloPersonId: text("apollo_person_id"),
+    apifyPersonId: text("apify_person_id"),
+    firstName: text("first_name"),
+    lastName: text("last_name"),
+    fullName: text("full_name"),
+    companyDomain: text("company_domain"),
+    companyName: text("company_name"),
+    title: text("title"),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_people_org_email").on(table.orgId, table.emailNorm),
+    index("idx_people_org_linkedin").on(table.orgId, table.linkedinUrlNorm),
+    index("idx_people_org_apollo").on(table.orgId, table.apolloPersonId),
+    index("idx_people_org_apify").on(table.orgId, table.apifyPersonId),
+  ]
+);
+
+export type Person = typeof people.$inferSelect;
+export type NewPerson = typeof people.$inferInsert;
+
+// 🥈 Silver — saved audience (neutral filter-set + per-provider count snapshot).
+export const audiences = pgTable(
+  "audiences",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    name: text("name").notNull(),
+    nlPrompt: text("nl_prompt"),
+    // Neutral PeopleSearchFilters shape (maps to both providers).
+    filters: jsonb("filters").$type<Record<string, unknown>>(),
+    apolloCount: integer("apollo_count"),
+    apifyCount: integer("apify_count"),
+    countedAt: timestamp("counted_at", { withTimezone: true }),
+    createdByUserId: uuid("created_by_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index("idx_audiences_org_brand").on(table.orgId, table.brandId)]
+);
+
+export type Audience = typeof audiences.$inferSelect;
+export type NewAudience = typeof audiences.$inferInsert;
+
+// 🥈 Silver — Kimball bridge: person <-> audience (many-to-many).
+export const audienceMembers = pgTable(
+  "audience_members",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    personId: uuid("person_id")
+      .notNull()
+      .references(() => people.id, { onDelete: "cascade" }),
+    source: text("source"), // provider that surfaced it: "apollo" | "apify"
+    confidence: text("confidence").notNull().default("provider_confirmed"),
+    joinedAt: timestamp("joined_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastServedAt: timestamp("last_served_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_audience_members_unique").on(
+      table.audienceId,
+      table.personId
+    ),
+    index("idx_audience_members_org").on(table.orgId),
+    index("idx_audience_members_person").on(table.personId),
+  ]
+);
+
+export type AudienceMember = typeof audienceMembers.$inferSelect;
+export type NewAudienceMember = typeof audienceMembers.$inferInsert;
