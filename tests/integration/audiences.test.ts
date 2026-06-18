@@ -120,15 +120,33 @@ describe("Audiences CRUD", () => {
     expect(filtered.body.audiences[0].name).toBe("B2");
   });
 
-  it("patches name + filters", async () => {
-    const id = await createAudience(ORG_A, { name: "old", brandId: BRAND_1 });
-    const res = await request(app)
+  it("patches name (metadata) but rejects filter edits (immutable)", async () => {
+    const id = await createAudience(ORG_A, {
+      name: "old",
+      brandId: BRAND_1,
+      filters: { titles: ["CEO"] },
+    });
+    // Metadata edit succeeds.
+    const ok = await request(app)
       .patch(`/orgs/audiences/${id}`)
       .set(headersForOrg(ORG_A))
-      .send({ name: "new", filters: { titles: ["CTO"] } });
-    expect(res.status).toBe(200);
-    expect(res.body.audience.name).toBe("new");
-    expect(res.body.audience.filters).toEqual({ titles: ["CTO"] });
+      .send({ name: "new" });
+    expect(ok.status).toBe(200);
+    expect(ok.body.audience.name).toBe("new");
+
+    // Filter edit is rejected — an audience is immutable except its status
+    // (editing filters = a new audience).
+    const rejected = await request(app)
+      .patch(`/orgs/audiences/${id}`)
+      .set(headersForOrg(ORG_A))
+      .send({ filters: { titles: ["CTO"] } });
+    expect(rejected.status).toBe(400);
+
+    // Filters unchanged.
+    const get = await request(app)
+      .get(`/orgs/audiences/${id}`)
+      .set(headersForOrg(ORG_A));
+    expect(get.body.audience.filters).toEqual({ titles: ["CEO"] });
   });
 
   it("deletes (204) then 404 on get", async () => {

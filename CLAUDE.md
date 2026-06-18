@@ -37,6 +37,7 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Org-scoped (legacy) | `GET /humans/{id}/methodology` | apiKey + identity | Get cached methodology |
 | Org-scoped (legacy) | `POST /humans/{id}/extract` | apiKey + identity | Trigger scrape + AI extraction |
 | Internal | `POST /internal/transfer-brand` | apiKey | Move solo-brand methodology rows between orgs |
+| Internal | `POST /internal/backfill-audiences-from-personas` | apiKey | One-time: copy brand-service personas → audiences (id-preserving, idempotent, `?dryRun=true`, provenance-tagged) |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
 | Org-scoped (CRM v1) | `GET /orgs/lists/{id}` | apiKey + `x-org-id` | Get a CRM list |
@@ -53,8 +54,9 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` filter) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
-| Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}` | apiKey + `x-org-id` | Update name / nlPrompt / brand / filters |
-| Org-scoped (Audiences v1) | `DELETE /orgs/audiences/{id}` | apiKey + `x-org-id` | Delete (cascades members) |
+| Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}` | apiKey + `x-org-id` | Update metadata (name / nlPrompt only) — immutable otherwise |
+| Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}/status` | apiKey + `x-org-id` | Change status (active / paused / archived) — mutates only status |
+| Org-scoped (Audiences v1) | `DELETE /orgs/audiences/{id}` | apiKey + `x-org-id` | Hard delete (cascades members) — archive is a soft state, not delete |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/refresh-count` | apiKey + `x-org-id` + `x-user-id` | Re-snapshot apollo + apify counts via free dry-run |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/members` | apiKey + `x-org-id` | List canonical people in the audience (paginated) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/stats` | apiKey + `x-org-id` | Per-audience membership stats for a list of emails / personIds |
@@ -217,6 +219,49 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
   `source` text (provider).
 - **No cost declaration here** either — counting rides the providers' free
   dry-run; the billed reveal still belongs to apollo/apify.
+
+### Status lifecycle + persona migration (Wave 2)
+
+Audiences carry a **status lifecycle** mirroring brand-service persona
+semantics, so every caller can treat an audience exactly like a persona
+(filter by lifecycle, pause/resume/archive/restore). This is the human-service
+half of the platform migration that makes audiences the SINGLE owner; a later
+wave drops brand-service personas entirely + switches consumers'
+(features-service / campaign-service / dashboard) reads.
+
+- **`audiences.status`** = `active | paused | archived`, default `active`
+  (migration `0011`). An audience is **immutable except its status** — `PATCH
+  /orgs/audiences/{id}` accepts only `name`/`nlPrompt` metadata; `brandId` and
+  `filters` are rejected (`.strict()` → 400) because editing filters = a new
+  audience (evidence attribution is keyed on the audience id). `PATCH
+  /orgs/audiences/{id}/status` is the dedicated status-only mutator. The hard
+  `DELETE` stays for true cleanup — **archive is a soft state, NOT a delete**.
+- **Name-unique per brand** (case-insensitive): unique index
+  `idx_audiences_brand_lower_name` on `(brand_id, lower(name))`, mirroring
+  brand-service `brand_personas_brand_id_lower_name_key`. A duplicate-name
+  create → 409.
+- **One-time backfill** — `POST /internal/backfill-audiences-from-personas`
+  (`src/routes/backfill.ts`, service-auth) copies every brand-service persona
+  into `audiences`, **preserving the persona id as the audience id** (downstream
+  evidence survives the later cutover). `?dryRun=true` reports counts without
+  writing; real run inserts `ON CONFLICT (id) DO NOTHING` (idempotent — re-run
+  is a no-op); inserted rows are tagged `source = 'brand_persona_backfill'`
+  (reversible: `DELETE FROM audiences WHERE source = 'brand_persona_backfill'`).
+  - **`audiences.source`** = provenance: `'brand_persona_backfill'` for
+    backfilled rows, null for native rows. (Distinct from
+    `audience_members.source` = provider.)
+  - Personas are stored **brand-scoped, no org_id**; audiences require an org.
+    The brand→org mapping lives only in brand-service (`org_brands`, M:N), so
+    backfill reads it from brand-service's **`GET /internal/personas`**
+    (`src/lib/brand-client.ts`) which returns each persona with its **owning org
+    resolved (earliest `claimed_at`)**. human-service never resolves org itself.
+  - **Multi-org caveat**: ~6 of 11 persona-bearing brands are claimed by several
+    orgs; the persona id can only become ONE audience (id is a PK), so it's
+    assigned to the earliest-claiming org. Orgs that *share* a brand but aren't
+    the owner won't see that audience via org-scoped `GET /orgs/audiences` —
+    relevant only when consumers switch reads in the later cutover wave.
+  - **Env vars (NEW)**: `BRAND_SERVICE_URL`, `BRAND_SERVICE_API_KEY` (read at
+    call time; absent → `BrandConfigError` → 502). Still **no cost** here.
 
 ### Audience suggestion (onboarding) — `POST /orgs/audiences/suggest`
 

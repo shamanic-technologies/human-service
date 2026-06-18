@@ -11,6 +11,7 @@ import {
 import {
   CreateAudienceRequestSchema,
   UpdateAudienceRequestSchema,
+  ChangeAudienceStatusRequestSchema,
   ListAudiencesQuerySchema,
   AudienceMembersQuerySchema,
   AudienceStatsRequestSchema,
@@ -101,25 +102,36 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
   const orgId = res.locals.orgId as string;
   const userId = (res.locals.userId as string | undefined) ?? null;
 
-  const [audience] = await db
-    .insert(audiences)
-    .values({
-      orgId,
-      brandId: parsed.data.brandId,
-      name: parsed.data.name,
-      provider: parsed.data.provider ?? null,
-      nlPrompt: parsed.data.nlPrompt ?? null,
-      filters: parsed.data.filters ?? null,
-      apolloCount: parsed.data.apolloCount ?? null,
-      apifyCount: parsed.data.apifyCount ?? null,
-      countedAt:
-        parsed.data.apolloCount !== undefined ||
-        parsed.data.apifyCount !== undefined
-          ? new Date()
-          : null,
-      createdByUserId: userId,
-    })
-    .returning();
+  let audience;
+  try {
+    [audience] = await db
+      .insert(audiences)
+      .values({
+        orgId,
+        brandId: parsed.data.brandId,
+        name: parsed.data.name,
+        provider: parsed.data.provider ?? null,
+        nlPrompt: parsed.data.nlPrompt ?? null,
+        filters: parsed.data.filters ?? null,
+        apolloCount: parsed.data.apolloCount ?? null,
+        apifyCount: parsed.data.apifyCount ?? null,
+        countedAt:
+          parsed.data.apolloCount !== undefined ||
+          parsed.data.apifyCount !== undefined
+            ? new Date()
+            : null,
+        createdByUserId: userId,
+      })
+      .returning();
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      res
+        .status(409)
+        .json({ error: "An audience with this name already exists for this brand." });
+      return;
+    }
+    throw err;
+  }
 
   console.log(
     `[human-service] audience.create org=${orgId} audience=${audience.id} brand=${audience.brandId}`
@@ -168,10 +180,12 @@ router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) 
   const limit = parsedQuery.data.limit ?? DEFAULT_LIMIT;
   const offset = parsedQuery.data.offset ?? 0;
   const brandFilter = parsedQuery.data.brandId;
+  const statusFilter = parsedQuery.data.status;
 
-  const whereClause = brandFilter
-    ? and(eq(audiences.orgId, orgId), eq(audiences.brandId, brandFilter))
-    : eq(audiences.orgId, orgId);
+  const conditions = [eq(audiences.orgId, orgId)];
+  if (brandFilter) conditions.push(eq(audiences.brandId, brandFilter));
+  if (statusFilter) conditions.push(eq(audiences.status, statusFilter));
+  const whereClause = and(...conditions);
 
   const [rows, totalRows] = await Promise.all([
     db
@@ -232,18 +246,31 @@ router.patch("/orgs/audiences/:id", requireApiKey, requireOrgIdOnly, async (req,
     return;
   }
 
+  // An audience is immutable except status. PATCH edits only metadata
+  // (name / nlPrompt); brandId and filters are rejected by the .strict() schema
+  // above (editing filters = a new audience). Status changes go through
+  // PATCH /orgs/audiences/:id/status.
   const orgId = res.locals.orgId as string;
   const updates: Record<string, unknown> = { updatedAt: new Date() };
   if (parsed.data.name !== undefined) updates.name = parsed.data.name;
   if (parsed.data.nlPrompt !== undefined) updates.nlPrompt = parsed.data.nlPrompt;
-  if (parsed.data.brandId !== undefined) updates.brandId = parsed.data.brandId;
-  if (parsed.data.filters !== undefined) updates.filters = parsed.data.filters;
 
-  const [updated] = await db
-    .update(audiences)
-    .set(updates)
-    .where(and(eq(audiences.id, req.params.id), eq(audiences.orgId, orgId)))
-    .returning();
+  let updated;
+  try {
+    [updated] = await db
+      .update(audiences)
+      .set(updates)
+      .where(and(eq(audiences.id, req.params.id), eq(audiences.orgId, orgId)))
+      .returning();
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      res
+        .status(409)
+        .json({ error: "An audience with this name already exists for this brand." });
+      return;
+    }
+    throw err;
+  }
 
   if (!updated) {
     res.status(404).json({ error: "Audience not found" });
@@ -252,6 +279,39 @@ router.patch("/orgs/audiences/:id", requireApiKey, requireOrgIdOnly, async (req,
 
   res.json({ audience: serializeAudience(updated) });
 });
+
+// --- PATCH /orgs/audiences/:id/status (mutates ONLY status) ---
+// Mirrors brand-service persona status flips. archive is a soft state — the
+// hard DELETE route below stays for true cleanup.
+router.patch(
+  "/orgs/audiences/:id/status",
+  requireApiKey,
+  requireOrgIdOnly,
+  async (req, res) => {
+    const parsed = ChangeAudienceStatusRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+
+    const orgId = res.locals.orgId as string;
+    const [updated] = await db
+      .update(audiences)
+      .set({ status: parsed.data.status, updatedAt: new Date() })
+      .where(and(eq(audiences.id, req.params.id), eq(audiences.orgId, orgId)))
+      .returning();
+
+    if (!updated) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
+
+    console.log(
+      `[human-service] audience.status org=${orgId} audience=${updated.id} status=${updated.status}`
+    );
+    res.json({ audience: serializeAudience(updated) });
+  }
+);
 
 // --- DELETE /orgs/audiences/:id ---
 router.delete("/orgs/audiences/:id", requireApiKey, requireOrgIdOnly, async (req, res) => {
@@ -380,6 +440,16 @@ router.get(
 
 // --- helpers ---
 
+// Postgres unique_violation (e.g. the name-unique-per-brand index). postgres.js
+// surfaces it as an error with `.code === "23505"`.
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: string }).code === "23505"
+  );
+}
+
 function serializeAudience(row: typeof audiences.$inferSelect) {
   return {
     id: row.id,
@@ -388,6 +458,8 @@ function serializeAudience(row: typeof audiences.$inferSelect) {
     name: row.name,
     nlPrompt: row.nlPrompt,
     provider: row.provider,
+    status: row.status,
+    source: row.source,
     filters: row.filters,
     apolloCount: row.apolloCount,
     apifyCount: row.apifyCount,

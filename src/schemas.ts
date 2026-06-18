@@ -891,6 +891,11 @@ registry.registerPath({
 // org-scoped (x-org-id; x-user-id optional, populates created_by). refresh-count
 // additionally requires x-user-id (apollo/apify key resolution).
 
+// Audience status lifecycle, mirroring brand-service persona semantics.
+export const AudienceStatusSchema = z
+  .enum(["active", "paused", "archived"])
+  .openapi("AudienceStatus");
+
 export const AudienceSchema = z
   .object({
     id: z.string().uuid(),
@@ -899,6 +904,9 @@ export const AudienceSchema = z
     name: z.string(),
     nlPrompt: z.string().nullable(),
     provider: z.enum(["apollo", "apify"]).nullable(),
+    status: AudienceStatusSchema,
+    // Provenance: "brand_persona_backfill" for backfilled rows, else null.
+    source: z.string().nullable(),
     filters: PeopleSearchFiltersSchema.nullable(),
     apolloCount: z.number().int().nullable(),
     apifyCount: z.number().int().nullable(),
@@ -929,19 +937,31 @@ export const CreateAudienceRequestSchema = z
   })
   .openapi("CreateAudienceRequest");
 
+// An audience is immutable except its status (editing filters = a new audience).
+// PATCH only accepts metadata (name / nlPrompt); brandId and filters are NOT
+// editable. `.strict()` so a request that tries to change them fails loud (400)
+// rather than being silently stripped. Status changes go through the dedicated
+// PATCH /orgs/audiences/{id}/status route.
 export const UpdateAudienceRequestSchema = z
   .object({
     name: z.string().min(1).optional(),
     nlPrompt: z.string().nullable().optional(),
-    brandId: z.string().uuid().optional(),
-    filters: PeopleSearchFiltersSchema.nullable().optional(),
   })
+  .strict()
   .openapi("UpdateAudienceRequest");
+
+export const ChangeAudienceStatusRequestSchema = z
+  .object({
+    status: AudienceStatusSchema,
+  })
+  .strict()
+  .openapi("ChangeAudienceStatusRequest");
 
 export const ListAudiencesQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
   offset: z.coerce.number().int().min(0).optional(),
   brandId: z.string().uuid().optional(),
+  status: AudienceStatusSchema.optional(),
 });
 
 export const AudienceMembersQuerySchema = z.object({
@@ -1058,6 +1078,34 @@ export const SuggestAudiencesResponseSchema = z
   })
   .openapi("SuggestAudiencesResponse");
 
+// --- Internal: one-time persona -> audience backfill ---
+export const BackfillPersonasQuerySchema = z.object({
+  dryRun: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({
+      description:
+        "When 'true', report counts without writing any rows. Defaults to false (real run).",
+    }),
+});
+
+export const BackfillPersonasResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    totalPersonas: z.number().int().openapi({
+      description: "Personas returned by brand-service.",
+    }),
+    inserted: z.number().int().openapi({
+      description:
+        "Personas written as new audiences (0 on a dry-run or a re-run where all already exist).",
+    }),
+    skipped: z.number().int().openapi({
+      description:
+        "Personas whose id already exists as an audience (idempotent no-op).",
+    }),
+  })
+  .openapi("BackfillPersonasResponse");
+
 registry.registerPath({
   method: "post",
   path: "/orgs/audiences/suggest",
@@ -1137,7 +1185,7 @@ registry.registerPath({
 registry.registerPath({
   method: "patch",
   path: "/orgs/audiences/{id}",
-  summary: "Update an audience (name / nlPrompt / brand / filters)",
+  summary: "Update an audience's metadata (name / nlPrompt only — immutable otherwise)",
   security: [{ apiKey: [] }],
   request: {
     headers: orgsListsHeaders,
@@ -1146,6 +1194,24 @@ registry.registerPath({
   },
   responses: {
     200: { description: "Audience updated", content: { "application/json": { schema: GetAudienceResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "patch",
+  path: "/orgs/audiences/{id}/status",
+  summary: "Change an audience's status (active / paused / archived) — mutates only status",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: orgsListsHeaders,
+    params: z.object({ id: z.string().uuid() }),
+    body: { content: { "application/json": { schema: ChangeAudienceStatusRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Status changed", content: { "application/json": { schema: GetAudienceResponseSchema } } },
     400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
     404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
@@ -1194,6 +1260,20 @@ registry.registerPath({
     400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
     404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/backfill-audiences-from-personas",
+  summary:
+    "One-time backfill: copy every brand-service persona into audiences, preserving the persona id (idempotent, dry-runnable, provenance-tagged for reversibility)",
+  security: [{ apiKey: [] }],
+  request: { query: BackfillPersonasQuerySchema },
+  responses: {
+    200: { description: "Backfill result", content: { "application/json": { schema: BackfillPersonasResponseSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "brand-service error", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 

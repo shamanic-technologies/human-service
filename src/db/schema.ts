@@ -344,6 +344,13 @@ export const audiences = pgTable(
     // The provider this audience commits to ("apollo" | "apify"); null = neutral.
     // Set when a provider-specific candidate from /suggest is selected.
     provider: text("provider"),
+    // Status lifecycle, mirroring brand-service persona semantics:
+    // "active" | "paused" | "archived". Default active. The ONLY mutable field
+    // (editing filters = a new audience). Archived is a soft state, NOT a delete.
+    status: text("status").notNull().default("active"),
+    // Provenance tag for reversibility. Set to "brand_persona_backfill" for rows
+    // created by the one-time persona->audience backfill; null for native rows.
+    source: text("source"),
     // Neutral PeopleSearchFilters shape (maps to both providers).
     filters: jsonb("filters").$type<Record<string, unknown>>(),
     apolloCount: integer("apollo_count"),
@@ -357,7 +364,15 @@ export const audiences = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (table) => [index("idx_audiences_org_brand").on(table.orgId, table.brandId)]
+  (table) => [
+    index("idx_audiences_org_brand").on(table.orgId, table.brandId),
+    // Name-unique per brand (case-insensitive), mirroring brand-service's
+    // brand_personas_brand_id_lower_name_key.
+    uniqueIndex("idx_audiences_brand_lower_name").on(
+      table.brandId,
+      sql`lower(${table.name})`
+    ),
+  ]
 );
 
 export type Audience = typeof audiences.$inferSelect;

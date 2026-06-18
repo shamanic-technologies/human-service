@@ -1313,6 +1313,13 @@
               null
             ]
           },
+          "status": {
+            "$ref": "#/components/schemas/AudienceStatus"
+          },
+          "source": {
+            "type": "string",
+            "nullable": true
+          },
           "filters": {
             "allOf": [
               {
@@ -1354,6 +1361,8 @@
           "name",
           "nlPrompt",
           "provider",
+          "status",
+          "source",
           "filters",
           "apolloCount",
           "apifyCount",
@@ -1361,6 +1370,14 @@
           "createdByUserId",
           "createdAt",
           "updatedAt"
+        ]
+      },
+      "AudienceStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "paused",
+          "archived"
         ]
       },
       "CreateAudienceRequest": {
@@ -1564,22 +1581,21 @@
           "nlPrompt": {
             "type": "string",
             "nullable": true
-          },
-          "brandId": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "filters": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/PeopleSearchFilters"
-              },
-              {
-                "nullable": true
-              }
-            ]
           }
-        }
+        },
+        "additionalProperties": false
+      },
+      "ChangeAudienceStatusRequest": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/AudienceStatus"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false
       },
       "ListAudienceMembersResponse": {
         "type": "object",
@@ -1664,6 +1680,32 @@
           "confidence",
           "joinedAt",
           "lastServedAt"
+        ]
+      },
+      "BackfillPersonasResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "totalPersonas": {
+            "type": "integer",
+            "description": "Personas returned by brand-service."
+          },
+          "inserted": {
+            "type": "integer",
+            "description": "Personas written as new audiences (0 on a dry-run or a re-run where all already exist)."
+          },
+          "skipped": {
+            "type": "integer",
+            "description": "Personas whose id already exists as an audience (idempotent no-op)."
+          }
+        },
+        "required": [
+          "dryRun",
+          "totalPersonas",
+          "inserted",
+          "skipped"
         ]
       },
       "HealthResponse": {
@@ -3551,6 +3593,14 @@
           },
           {
             "schema": {
+              "$ref": "#/components/schemas/AudienceStatus"
+            },
+            "required": false,
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
               "type": "string",
               "format": "uuid",
               "description": "Internal org UUID from client-service"
@@ -3768,7 +3818,7 @@
         }
       },
       "patch": {
-        "summary": "Update an audience (name / nlPrompt / brand / filters)",
+        "summary": "Update an audience's metadata (name / nlPrompt only — immutable otherwise)",
         "security": [
           {
             "apiKey": []
@@ -3917,6 +3967,104 @@
         "responses": {
           "204": {
             "description": "Deleted"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/{id}/status": {
+      "patch": {
+        "summary": "Change an audience's status (active / paused / archived) — mutates only status",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — populates created_by/added_by columns when present"
+            },
+            "required": false,
+            "description": "Internal user UUID — populates created_by/added_by columns when present",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — used as parentRunId when creating this service's run"
+            },
+            "required": false,
+            "description": "Caller's run ID — used as parentRunId when creating this service's run",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeAudienceStatusRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Status changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetAudienceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           },
           "401": {
             "description": "Unauthorized"
@@ -4121,6 +4269,57 @@
           },
           "404": {
             "description": "Audience not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/backfill-audiences-from-personas": {
+      "post": {
+        "summary": "One-time backfill: copy every brand-service persona into audiences, preserving the persona id (idempotent, dry-runnable, provenance-tagged for reversibility)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', report counts without writing any rows. Defaults to false (real run)."
+            },
+            "required": false,
+            "description": "When 'true', report counts without writing any rows. Defaults to false (real run).",
+            "name": "dryRun",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Backfill result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillPersonasResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "brand-service error",
             "content": {
               "application/json": {
                 "schema": {
