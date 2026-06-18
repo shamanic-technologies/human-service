@@ -64,7 +64,7 @@ export async function recordServe(
   orgId: string,
   brandIds: string[],
   contacts: ServedContact[],
-  ctx: { campaignId?: string; runId?: string } = {}
+  ctx: { campaignId?: string; runId?: string; audienceId?: string } = {}
 ): Promise<void> {
   if (brandIds.length === 0 || contacts.length === 0) return;
 
@@ -87,6 +87,7 @@ export async function recordServe(
         companyDomain: c.companyDomain,
         campaignId: ctx.campaignId ?? null,
         runId: ctx.runId ?? null,
+        audienceId: ctx.audienceId ?? null,
       });
 
       // 🥈 Silver — canonical row keyed on email_norm (the only stable

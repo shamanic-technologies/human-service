@@ -27,7 +27,11 @@ import {
 // lead-service's producer), bounded so we never deep-page forever.
 const APOLLO_MAX_SATURATION_PAGES = 5;
 
-const APIFY_DEFAULT_LIMIT = 100; // mirror apollo's fixed page size
+// apify bills per RETURNED lead (each search hit carries a verified email — there
+// is no free teaser list like apollo's). So the gateway takes the strict minimum
+// by default: one lead per call. A caller that consciously wants a batch passes
+// an explicit `limit`. apollo is unaffected (cursor-based, ignores `limit`).
+const APIFY_DEFAULT_LIMIT = 1;
 
 export type Provider = "apollo" | "apify";
 
@@ -158,8 +162,8 @@ export interface Identity {
   workflowTracking?: WorkflowTrackingHeaders;
 }
 
-// Map a normalized neutral Person to the suppression layer's serve record.
-function toServedContact(p: Person): ServedContact {
+// Map a normalized neutral Person to the suppression/membership contact shape.
+export function toServedContact(p: Person): ServedContact {
   return {
     email: p.email,
     linkedinUrl: p.linkedinUrl,
@@ -547,6 +551,9 @@ export async function peopleSearch(args: {
   isNextPage?: boolean;
   limit?: number;
   offset?: number;
+  // Audience to record bronze serves under (membership tagging is done by the
+  // route after the result returns). Audit-only here.
+  audienceId?: string;
   identity: Identity;
 }): Promise<PeopleSearchResult> {
   const provider = resolveProvider(args);
@@ -652,7 +659,11 @@ export async function peopleSearch(args: {
       args.identity.orgId,
       brandIds,
       apifyPeople.map(toServedContact),
-      { campaignId: args.identity.campaignId, runId: args.identity.runId }
+      {
+        campaignId: args.identity.campaignId,
+        runId: args.identity.runId,
+        audienceId: args.audienceId,
+      }
     );
   }
   return {
@@ -670,17 +681,24 @@ export async function peopleSearch(args: {
 async function finalizeResolved(
   provider: Provider,
   person: Person | null,
-  identity: Identity
+  identity: Identity,
+  audienceId?: string
 ): Promise<ResolveEmailResult> {
+  if (!person) return { provider, person };
   const brandIds = identity.brandIds ?? [];
-  if (!person || brandIds.length === 0) return { provider, person };
-  if (await isEmailSuppressed(identity.orgId, brandIds, person.email)) {
+  if (
+    brandIds.length > 0 &&
+    (await isEmailSuppressed(identity.orgId, brandIds, person.email))
+  ) {
     return { provider, person: null };
   }
-  await recordServe(identity.orgId, brandIds, [toServedContact(person)], {
-    campaignId: identity.campaignId,
-    runId: identity.runId,
-  });
+  if (brandIds.length > 0) {
+    await recordServe(identity.orgId, brandIds, [toServedContact(person)], {
+      campaignId: identity.campaignId,
+      runId: identity.runId,
+      audienceId,
+    });
+  }
   return { provider, person };
 }
 
@@ -692,6 +710,9 @@ export async function resolveEmail(args: {
   lastName?: string;
   domain?: string;
   includeInferred?: boolean;
+  // Audience to record the bronze serve under (membership tagging is done by the
+  // route after this returns).
+  audienceId?: string;
   identity: Identity;
 }): Promise<ResolveEmailResult> {
   // Default to apollo (same default as search). The reveal follows the provider
@@ -720,7 +741,8 @@ export async function resolveEmail(args: {
       return finalizeResolved(
         provider,
         data.person ? normalizeApolloPerson(data.person) : null,
-        args.identity
+        args.identity,
+        args.audienceId
       );
     }
     // Fallback: identity-based match (name + domain) when no person id is known
@@ -741,7 +763,8 @@ export async function resolveEmail(args: {
       return finalizeResolved(
         provider,
         data.person ? normalizeApolloPerson(data.person) : null,
-        args.identity
+        args.identity,
+        args.audienceId
       );
     }
     // Unreachable when called via the route (Zod refine guarantees one path);
@@ -790,7 +813,8 @@ export async function resolveEmail(args: {
   return finalizeResolved(
     provider,
     lead ? normalizeApifyLead(lead) : null,
-    args.identity
+    args.identity,
+    args.audienceId
   );
 }
 

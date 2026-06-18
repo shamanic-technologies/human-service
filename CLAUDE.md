@@ -49,6 +49,14 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Org-scoped (People v1) | `POST /orgs/people/resolve-email` | apiKey + `x-org-id` + `x-user-id` | Reveal a verified email — apollo by `providerPersonId` (`/enrich`, billed) or name+domain (`/match`); apify by name+domain |
 | Org-scoped (People v1) | `POST /orgs/people/search/dry-run` | apiKey + `x-org-id` + `x-user-id` | Count matches, free (apollo only in v1) |
 | Org-scoped (People v1) | `GET /orgs/people/filters-prompt` | apiKey + `x-org-id` + `x-user-id` | LLM filter-shape prompt (apollo only in v1) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot) |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` filter) |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
+| Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}` | apiKey + `x-org-id` | Update name / nlPrompt / brand / filters |
+| Org-scoped (Audiences v1) | `DELETE /orgs/audiences/{id}` | apiKey + `x-org-id` | Delete (cascades members) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/refresh-count` | apiKey + `x-org-id` + `x-user-id` | Re-snapshot apollo + apify counts via free dry-run |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/members` | apiKey + `x-org-id` | List canonical people in the audience (paginated) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/stats` | apiKey + `x-org-id` | Per-audience membership stats for a list of emails / personIds |
 
 The CRM `/orgs/lists/*` endpoints use `requireOrgIdOnly`: only `x-org-id` is
 required. `x-user-id` is parsed when present and populates
@@ -93,7 +101,18 @@ confusing downstream 502.
   never imported cross-repo.
 - **Pagination**: apollo keeps its server-managed cursor (keyed by org +
   `x-campaign-id`); human-service forwards next-page calls (empty body advances
-  the cursor). apify is one-shot (`limit`, default 100) → `done: true`.
+  the cursor). apify is offset-based (`limit` + `offset`).
+- **apify billing asymmetry — default `limit: 1` (strict minimum).** apollo
+  search is a FREE teaser (masked email + person id); the verified email is
+  revealed one-by-one, billed, via `resolve-email`. apify has NO free teaser —
+  every `/search` hit carries a verified email and is **billed per returned
+  lead**, and no endpoint returns names without buying the email (`/search/count`
+  yields only a count). So the gateway can't replicate apollo's free-list-then-
+  reveal pattern on apify; instead it takes the **strict minimum** — apify
+  `limit` defaults to **1**, not a batch. A caller that consciously wants N leads
+  passes an explicit `limit` and pays for N. The dry-run (`/search/count`, free)
+  is the way to size a result set before spending. apollo ignores `limit`
+  (cursor-based).
 - **Fail loud**: a provider non-2xx / network error → thrown `ProviderError` →
   **502** (never a silent fallback). `ProviderConfigError` (missing env) → 502.
 - **Cold-start retry**: apollo/apify are Neon-backed siblings; the first call
@@ -145,6 +164,59 @@ confusing downstream 502.
   `APIFY_SERVICE_URL`, `APIFY_SERVICE_API_KEY`. Read at call time (not boot) so
   a missing var fails the request loudly rather than crash-looping boot.
 
+## Audiences (v1) — `/orgs/audiences/*`
+
+A provider-agnostic **audience** concept layered on the people gateway. An
+audience is a **saved persona/ICP filter-set** + a per-provider headcount; as
+the gateway serves people under an audience it accrues a **canonical, deduped
+membership**. Then `/orgs/audiences/stats` answers "which audiences are these
+emails/people in?". `src/services/audiences.ts` owns the engine;
+`src/routes/audiences.ts` is the thin HTTP layer.
+
+- **Naming follows CDP/CRM canon, deliberately** (Segment / Salesforce CDP /
+  Adobe AEP / HubSpot, + Kimball/medallion): **`audience`** = a saved filter-set
+  whose membership is computed dynamically ("dynamic audience"). NOT `persona`
+  (in CDP canon persona is the trait-assignment layer ABOVE audiences) and NOT
+  `database_search` (names the mechanism, not the thing). The canonical person
+  entity is **`people`** because the legacy `humans` table is expert-profiles (a
+  different concept) — the API exposes its id as `personId`. The many-to-many is
+  the **Kimball bridge** `audience_members` with effective dates (`joined_at` /
+  `last_served_at`) for point-in-time membership.
+- **One neutral filter set, two counts.** The gateway's neutral
+  `PeopleSearchFilters` maps to BOTH providers, so an audience stores ONE
+  `filters` blob + `apollo_count` + `apify_count` (the same filters match a
+  different number of people in each provider's DB). Counts are a snapshot:
+  caller may pass them at create (it already ran `/search/dry-run`), or
+  `POST /{id}/refresh-count` re-runs the free dry-run server-side. **No cost** —
+  dry-run is the free count path; refresh-count needs `x-user-id` (apollo/apify
+  key resolution), the CRUD routes use `requireOrgIdOnly`.
+- **Membership = PROVENANCE, not local matching.** A person joins an audience
+  iff a serve made under that audience returned them. The caller passes
+  `audienceId` on `/orgs/people/search` or `/resolve-email`; the route validates
+  it belongs to the org (404 before any provider spend) and, after the result,
+  tags every returned person (apollo free teasers + apify billed hits alike) as
+  a member. We **never** re-implement provider filter-matching locally —
+  provenance matches provider semantics exactly. One person accrues many
+  audiences over time as different audiences' searches surface them. **Eager
+  cross-audience matching ("this person also fits audience Y before Y is
+  queried") is deliberately deferred** — it would require local predicate eval
+  on structured filters only, tagged `confidence:'locally_inferred'` (the
+  `confidence` column exists for it). v1 only writes `provider_confirmed`.
+- **Dedup (multi-source).** `resolvePersonId` (in a transaction) matches an
+  incoming served contact to a canonical `people` row by `email_norm` (canonical)
+  → `linkedin_url_norm` → `apollo_person_id`/`apify_person_id`, merging
+  newly-learned fields (coalesce). So an apollo teaser (no email, has person id +
+  linkedin) and its later apify reveal (same linkedin, now with email) collapse
+  to ONE person. `email_norm` non-partial unique on `(org_id, email_norm)`
+  (nullable, NULLs distinct, ON CONFLICT-safe) guards the email race.
+- **Layering (B/S/G).** 🥉 bronze `lead_serves` gains an audit `audience_id`
+  (the serve's audience). 🥈 silver = `people` (canonical dimension) + `audiences`
+  + `audience_members` (bridge). Gold = `/orgs/audiences/stats` /
+  `/{id}/members` rollups (views/queries, no table). `org_id`/`brand_id` uuid;
+  `source` text (provider).
+- **No cost declaration here** either — counting rides the providers' free
+  dry-run; the billed reveal still belongs to apollo/apify.
+
 ## Org isolation
 
 Every `/orgs/*` query MUST filter by `WHERE org_id = $orgId`. List ownership
@@ -161,9 +233,19 @@ returns 404, never 403, to avoid leaking existence.
 - **`lead_serves` and `brand_suppressions`** (people gateway): `org_id` +
   `brand_id` uuid (new-table convention); `campaign_id` / `run_id` text
   (audit-only forwarded headers, not guaranteed uuid).
+- **`people`, `audiences`, `audience_members`** (audiences v1): `org_id` +
+  `brand_id` uuid (new-table convention); `source` / `confidence` text.
 
 The same request can hit both column families because the value passed in
 `x-org-id` is text-coercible-to-uuid in practice. New tables use `uuid`.
+
+> **Naming caveat — `people` is the canonical person, NOT `humans`.** The legacy
+> `humans` table is expert-profiles (v0). The CRM-v2 plan below predates the
+> audiences feature and calls the future canonical contact table `humans`; that
+> name is taken, so the realized canonical person dimension is **`people`**
+> (`audience_members.person_id` → `people.id`). When CRM v2 lands it should
+> reuse `people` (and may backfill `list_members.human_id` → `people.id`) rather
+> than introduce a second canonical table.
 
 ## Data layering
 

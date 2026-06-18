@@ -11,11 +11,13 @@ import {
   resolveEmail,
   dryRun,
   filtersPrompt,
+  toServedContact,
   ProviderError,
   ProviderConfigError,
   ProviderUnsupportedError,
   type Identity,
 } from "../services/people-providers.js";
+import { getAudienceInOrg, tagAudienceServe } from "../services/audiences.js";
 
 const router = Router();
 
@@ -78,6 +80,15 @@ router.post(
       res.status(400).json({ error: parsed.error.message });
       return;
     }
+    const orgId = res.locals.orgId as string;
+    // Validate the audience belongs to the org BEFORE spending on the provider.
+    if (
+      parsed.data.audienceId &&
+      !(await getAudienceInOrg(orgId, parsed.data.audienceId))
+    ) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
     try {
       const result = await peopleSearch({
         provider: parsed.data.provider,
@@ -86,10 +97,20 @@ router.post(
         isNextPage: parsed.data.nextPage,
         limit: parsed.data.limit,
         offset: parsed.data.offset,
+        audienceId: parsed.data.audienceId,
         identity: buildIdentity(res),
       });
+      // Provenance membership: every person the audience's search returned joins
+      // it (apollo free teasers + apify billed hits alike). Idempotent.
+      if (parsed.data.audienceId && result.people.length > 0) {
+        await tagAudienceServe(
+          orgId,
+          parsed.data.audienceId,
+          result.people.map(toServedContact)
+        );
+      }
       console.log(
-        `[human-service] people.search org=${res.locals.orgId} provider=${result.provider} returned=${result.people.length} total=${result.total} done=${result.done}`
+        `[human-service] people.search org=${orgId} provider=${result.provider} returned=${result.people.length} total=${result.total} done=${result.done} audience=${parsed.data.audienceId ?? "none"}`
       );
       res.json(result);
     } catch (err) {
@@ -109,6 +130,14 @@ router.post(
       res.status(400).json({ error: parsed.error.message });
       return;
     }
+    const orgId = res.locals.orgId as string;
+    if (
+      parsed.data.audienceId &&
+      !(await getAudienceInOrg(orgId, parsed.data.audienceId))
+    ) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
     try {
       const result = await resolveEmail({
         provider: parsed.data.provider,
@@ -117,10 +146,17 @@ router.post(
         lastName: parsed.data.lastName,
         domain: parsed.data.domain,
         includeInferred: parsed.data.includeInferred,
+        audienceId: parsed.data.audienceId,
         identity: buildIdentity(res),
       });
+      // Provenance membership: the resolved person joins the audience.
+      if (parsed.data.audienceId && result.person) {
+        await tagAudienceServe(orgId, parsed.data.audienceId, [
+          toServedContact(result.person),
+        ]);
+      }
       console.log(
-        `[human-service] people.resolve_email org=${res.locals.orgId} provider=${result.provider} found=${result.person !== null}`
+        `[human-service] people.resolve_email org=${orgId} provider=${result.provider} found=${result.person !== null} audience=${parsed.data.audienceId ?? "none"}`
       );
       res.json(result);
     } catch (err) {
