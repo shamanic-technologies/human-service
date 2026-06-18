@@ -181,6 +181,44 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(apollo.every((c: { truncated: boolean }) => c.truncated)).toBe(true);
   });
 
+  it("sends a strict responseSchema to chat-service (anthropic JSON-mode contract)", async () => {
+    const completeBodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/search/filters-prompt"))
+        return ok({ prompt: "RULES", schemaVersion: "1" });
+      if (u.endsWith("/complete")) {
+        completeBodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({
+          json: {
+            candidates: [
+              { label: "CMOs", rationale: "r", filters: { seniorities: ["c_suite"] } },
+            ],
+          },
+          content: "",
+          tokensInput: 1,
+          tokensOutput: 1,
+          model: "claude-sonnet-4-6",
+        });
+      }
+      if (u.endsWith("/search/dry-run")) return ok({ totalEntries: 100 });
+      if (u.endsWith("/search/count")) return ok({ totalMatched: 50 });
+      throw new Error("unexpected url " + u);
+    });
+    const res = await suggest("CMOs");
+    expect(res.status).toBe(200);
+    expect(completeBodies.length).toBeGreaterThan(0);
+    for (const body of completeBodies) {
+      const schema = body.responseSchema as
+        | { type?: string; additionalProperties?: boolean; required?: string[] }
+        | undefined;
+      expect(schema).toBeDefined();
+      expect(schema?.type).toBe("object");
+      expect(schema?.additionalProperties).toBe(false);
+      expect(schema?.required).toContain("candidates");
+    }
+  });
+
   it("502 when chat-service env is not configured", async () => {
     delete process.env.CHAT_SERVICE_URL;
     wire({ chat: (p) => [{ label: p, rationale: "r", filters: {} }] });
