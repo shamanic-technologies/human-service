@@ -91,16 +91,22 @@ function requireChat(): { url: string; key: string } {
   return { url, key };
 }
 
-// One-shot JSON LLM completion via chat-service. We rely on `responseFormat:
-// "json"` + an explicit shape described in the prompt (and Zod-validate the
-// result caller-side) rather than a provider-enforced `responseSchema` — the
-// neutral filter shape has many optional fields and anthropic strict-mode
-// rejects permissive schemas, so prompt-described + caller-validated is the
-// robust, provider-agnostic path. Returns the parsed `json` object.
+// One-shot JSON LLM completion via chat-service. chat-service now ENFORCES the
+// Anthropic JSON-mode contract: `responseFormat: "json"` on the anthropic
+// provider is rejected with 400 unless a `responseSchema` is supplied (Anthropic
+// has no standalone JSON flag — enforcement is only via
+// `output_config.format = { type: "json_schema", schema }`). So the caller MUST
+// pass `responseSchema`. The schema is forwarded verbatim to the provider; for
+// anthropic it must be STRICT (top-level `additionalProperties: false` + an
+// explicit `properties` map + all keys `required`), but nested objects may be
+// left open (`{ type: "object" }`) — exactly what the suggest caller does for
+// the permissive neutral-filter blob, with caller-side Zod validation on top.
+// Returns the parsed `json` object.
 export async function completeJson(args: {
   message: string;
   systemPrompt: string;
   identity: ChatIdentity;
+  responseSchema?: Record<string, unknown>;
   provider?: "anthropic" | "google";
   model?: string;
   temperature?: number;
@@ -117,6 +123,7 @@ export async function completeJson(args: {
     message: args.message,
     systemPrompt: args.systemPrompt,
     responseFormat: "json",
+    ...(args.responseSchema ? { responseSchema: args.responseSchema } : {}),
     provider: args.provider ?? "anthropic",
     model: args.model ?? "sonnet",
     ...(args.temperature !== undefined ? { temperature: args.temperature } : {}),
