@@ -322,33 +322,17 @@ const SUGGEST_PROVIDERS: Provider[] = ["apollo", "apify"];
 const SUGGEST_MAX_CANDIDATES_PER_PROVIDER = 6; // safety backstop (not a knob)
 const SUGGEST_MAX_REVISE_ROUNDS = 3;
 
-// chat-service enforces the Anthropic JSON-mode contract: a `responseSchema` is
-// required (else 400). For anthropic the TOP-LEVEL object must be strict
-// (`additionalProperties: false` + an explicit `properties` map + every key
-// `required`); nested objects may stay OPEN. So we lock the `{candidates:[...]}`
-// envelope and leave each candidate's `filters` as a bare `{type:"object"}` —
-// the neutral filter shape has ~20 optional fields we deliberately do NOT
-// enumerate; `parseCandidates` + the provider dry-run validate filters anyway.
-const SUGGEST_RESPONSE_SCHEMA: Record<string, unknown> = {
-  type: "object",
-  additionalProperties: false,
-  required: ["candidates"],
-  properties: {
-    candidates: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["label", "rationale", "filters"],
-        properties: {
-          label: { type: "string" },
-          rationale: { type: "string" },
-          filters: { type: "object" },
-        },
-      },
-    },
-  },
-};
+// LLM provider/model for the suggest flow. We use Gemini in SCHEMALESS JSON mode
+// (responseMimeType: application/json, no responseSchema) rather than Anthropic:
+// chat-service rejects anthropic JSON mode without a responseSchema, and
+// Anthropic's strict schema requires `additionalProperties:false` + an explicit
+// `properties` map on EVERY object — which cannot express our open `filters`
+// blob (~16 optional neutral fields) without enumerating + over-constraining it.
+// Gemini's native JSON mode needs no schema, so the shape stays prompt-described
+// + caller-validated (`parseCandidates` + the per-filter dry-run). flash is also
+// ~10-20x cheaper than sonnet, cutting the per-suggest cost.
+const SUGGEST_LLM_PROVIDER = "google" as const;
+const SUGGEST_LLM_MODEL = "flash";
 
 export interface AudienceCandidate {
   provider: Provider;
@@ -475,7 +459,8 @@ async function suggestForProvider(
       message: nlPrompt,
       systemPrompt,
       identity,
-      responseSchema: SUGGEST_RESPONSE_SCHEMA,
+      provider: SUGGEST_LLM_PROVIDER,
+      model: SUGGEST_LLM_MODEL,
     })
   );
   const truncated = initial.length > SUGGEST_MAX_CANDIDATES_PER_PROVIDER;
@@ -511,7 +496,8 @@ async function suggestForProvider(
         message: buildRevisePrompt(nlPrompt, failing),
         systemPrompt,
         identity,
-        responseSchema: SUGGEST_RESPONSE_SCHEMA,
+        provider: SUGGEST_LLM_PROVIDER,
+        model: SUGGEST_LLM_MODEL,
       })
     );
     for (const w of failing) {
