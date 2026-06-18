@@ -49,7 +49,8 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Org-scoped (People v1) | `POST /orgs/people/resolve-email` | apiKey + `x-org-id` + `x-user-id` | Reveal a verified email — apollo by `providerPersonId` (`/enrich`, billed) or name+domain (`/match`); apify by name+domain |
 | Org-scoped (People v1) | `POST /orgs/people/search/dry-run` | apiKey + `x-org-id` + `x-user-id` | Count matches, free (apollo only in v1) |
 | Org-scoped (People v1) | `GET /orgs/people/filters-prompt` | apiKey + `x-org-id` + `x-user-id` | LLM filter-shape prompt (apollo only in v1) |
-| Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/suggest` | apiKey + `x-org-id` + `x-user-id` | NL → candidate audiences (apollo + apify, LLM via chat-service, dry-run counted) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` filter) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
 | Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}` | apiKey + `x-org-id` | Update name / nlPrompt / brand / filters |
@@ -216,6 +217,54 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
   `source` text (provider).
 - **No cost declaration here** either — counting rides the providers' free
   dry-run; the billed reveal still belongs to apollo/apify.
+
+### Audience suggestion (onboarding) — `POST /orgs/audiences/suggest`
+
+Turns a natural-language audience description into a **set of candidate
+audiences** the user picks from, during onboarding. `requireOrgAndUser`
+(`x-user-id` needed for chat-service + provider key resolution).
+`src/services/audiences.ts` `suggestAudiences` owns it; `src/lib/chat-client.ts`
+is the chat-service client.
+
+- **LLM runs via chat-service `POST /complete`** (`anthropic`/`sonnet`,
+  `responseFormat:"json"`). **chat-service OWNS the LLM cost** — it does the
+  provision→authorize→execute→actualize against the org balance — so
+  **human-service still declares no cost** (the invariant holds; chat-service is
+  the LLM-cost owner exactly as apollo/apify own search cost). We do NOT pass a
+  provider `responseSchema` (the neutral filter shape has many optional fields;
+  anthropic strict-mode rejects permissive schemas) — the exact JSON shape is
+  described in the prompt and **validated caller-side** (`parseCandidates` →
+  fail loud 502 on a malformed LLM response).
+- **Granularity is emergent from the NL, not an input.** Input is ONLY
+  `{nlPrompt, brandId}` — no `strategy`/count knob. The LLM reads the caller's
+  own segmentation intent ("split by country", "FR and DE separately", "one
+  broad list") and emits one candidate per implied segment. Safety backstop:
+  `SUGGEST_MAX_CANDIDATES_PER_PROVIDER = 6` (the LLM is told to group coarser +
+  set `truncated` if the NL implies more) — a cap, not a knob.
+- **Per provider** (apollo + apify): fetch that provider's `filters-prompt`
+  (its rulebook) → LLM generates candidates → each candidate's filters counted
+  via the **free dry-run**. A candidate that returns **0** or **invalid
+  filters** (provider 4xx) is fed back to the LLM to revise, bounded by
+  `SUGGEST_MAX_REVISE_ROUNDS = 3`; still-dry candidates are returned with
+  `count:0` honestly (no infinite loop, no silent drop). `dryRunSafe`
+  distinguishes a provider **4xx (invalid filters → revise)** from a **5xx /
+  network / config error (real outage → rethrow, fail loud 502)** — the 4xx is
+  the validation signal the loop consumes, NOT a swallow.
+- **Candidates use the NEUTRAL `PeopleSearchFilters` shape** (not raw
+  provider-DSL). "apollo-flavored vs apify-flavored" = which neutral fields each
+  provider honors + each provider's count. Raw provider-only filters beyond the
+  neutral vocabulary are a deliberate future option (would need a gateway
+  raw-passthrough dry-run/search path) — not built; nothing downstream needs it.
+- **Stateless**: `/suggest` persists nothing. The user picks candidates and
+  saves each via `POST /orgs/audiences` with `provider` + that candidate's
+  `filters` + `count`. A selected audience is **provider-specific**
+  (`audiences.provider` = `apollo`|`apify`); the audience id stays our own
+  cross-provider-unique uuid.
+- **Env vars (NEW)**: `CHAT_SERVICE_URL`, `CHAT_SERVICE_API_KEY` (read at call
+  time, fail the request loudly if absent — `ChatConfigError` → 502).
+- **Onboarding-before-balance caveat**: `/complete` authorizes against the org
+  balance; a zero-balance org → 502. The product fix is onboarding credits at
+  the billing layer, not a cost-skip here.
 
 ## Org isolation
 
