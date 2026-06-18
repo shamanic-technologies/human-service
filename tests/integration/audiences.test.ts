@@ -89,6 +89,46 @@ describe("Audiences CRUD", () => {
     expect(res.body.audience.countedAt).not.toBeNull();
   });
 
+  it("accepts a null sibling count (apollo-source: apolloCount set, apifyCount null)", async () => {
+    const res = await request(app)
+      .post("/orgs/audiences")
+      .set(headersForOrg(ORG_A))
+      .send({
+        name: "apollo-src",
+        brandId: BRAND_1,
+        provider: "apollo",
+        apolloCount: 120,
+        apifyCount: null,
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.audience.apolloCount).toBe(120);
+    expect(res.body.audience.apifyCount).toBeNull();
+  });
+
+  it("accepts a null sibling count (apify-source: apifyCount set, apolloCount null)", async () => {
+    const res = await request(app)
+      .post("/orgs/audiences")
+      .set(headersForOrg(ORG_A))
+      .send({
+        name: "apify-src",
+        brandId: BRAND_1,
+        provider: "apify",
+        apifyCount: 45,
+        apolloCount: null,
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.audience.apifyCount).toBe(45);
+    expect(res.body.audience.apolloCount).toBeNull();
+  });
+
+  it("still rejects a negative count (min(0) intact)", async () => {
+    const res = await request(app)
+      .post("/orgs/audiences")
+      .set(headersForOrg(ORG_A))
+      .send({ name: "neg", brandId: BRAND_1, apolloCount: -1 });
+    expect(res.status).toBe(400);
+  });
+
   it("rejects create without brandId (400)", async () => {
     const res = await request(app)
       .post("/orgs/audiences")
