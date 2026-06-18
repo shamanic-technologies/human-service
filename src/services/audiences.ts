@@ -26,9 +26,13 @@ import {
 } from "./suppression.js";
 import {
   dryRun,
+  filtersPrompt,
+  ProviderError,
   type Identity,
   type PeopleSearchFilters,
+  type Provider,
 } from "./people-providers.js";
+import { completeJson, ChatServiceError } from "../lib/chat-client.js";
 
 // The transaction handle drizzle passes to the `db.transaction` callback.
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -298,6 +302,213 @@ export async function computeStats(
     },
     byAudience: [...perAudience.values()],
   };
+}
+
+// --- Audience suggestion (onboarding NL -> candidate audiences) ---
+//
+// The user types a natural-language audience description. For each provider we
+// hand the NL + that provider's filter rulebook (its /search/filters-prompt) to
+// the LLM (via chat-service /complete, which OWNS the LLM cost), and the LLM
+// reads the user's own granularity intent ("split by country", "founders in FR
+// and DE separately", "one broad list") to emit a SET of candidate audiences.
+// Each candidate is counted via the free dry-run; a candidate that returns zero
+// or invalid filters is fed back to the LLM to revise (bounded). The user then
+// picks any number and persists them via POST /orgs/audiences.
+//
+// Membership/dedup stays untouched; this is purely the discovery step. No cost
+// declared here — chat-service meters the LLM spend against the org.
+
+const SUGGEST_PROVIDERS: Provider[] = ["apollo", "apify"];
+const SUGGEST_MAX_CANDIDATES_PER_PROVIDER = 6; // safety backstop (not a knob)
+const SUGGEST_MAX_REVISE_ROUNDS = 3;
+
+export interface AudienceCandidate {
+  provider: Provider;
+  label: string;
+  rationale: string;
+  filters: PeopleSearchFilters;
+  count: number;
+  validationError: string | null;
+  truncated: boolean;
+}
+
+interface RawCandidate {
+  label: string;
+  rationale: string;
+  filters: PeopleSearchFilters;
+}
+
+function parseCandidates(obj: Record<string, unknown>): RawCandidate[] {
+  const arr = obj.candidates;
+  if (!Array.isArray(arr)) {
+    throw new ChatServiceError(502, "LLM response missing `candidates` array");
+  }
+  return arr.map((c, i) => {
+    if (!c || typeof c !== "object") {
+      throw new ChatServiceError(502, `LLM candidate ${i} is not an object`);
+    }
+    const o = c as Record<string, unknown>;
+    if (typeof o.label !== "string" || o.label.length === 0) {
+      throw new ChatServiceError(502, `LLM candidate ${i} missing label`);
+    }
+    if (!o.filters || typeof o.filters !== "object") {
+      throw new ChatServiceError(502, `LLM candidate ${i} missing filters`);
+    }
+    return {
+      label: o.label,
+      rationale: typeof o.rationale === "string" ? o.rationale : "",
+      filters: o.filters as PeopleSearchFilters,
+    };
+  });
+}
+
+function buildSuggestSystemPrompt(provider: Provider, rules: string): string {
+  return [
+    `You are an expert at building ${provider} people-search audiences.`,
+    "",
+    "PROVIDER FILTER RULES (authoritative — only these values are valid):",
+    rules,
+    "",
+    "The caller sends a natural-language description of who they want to reach.",
+    "READ the caller's text for any GRANULARITY / SEGMENTATION intent (e.g.",
+    '"split by country", "founders in France and Germany separately", "by',
+    'seniority"). Produce ONE candidate audience per segment they imply. If they',
+    "imply no split, produce a single broad candidate. The number and the",
+    "grouping dimension come from the CALLER's words, never invented. Never",
+    `produce more than ${SUGGEST_MAX_CANDIDATES_PER_PROVIDER} candidates — if the`,
+    "text implies more, group coarser and say so in the rationale.",
+    "",
+    'Each candidate\'s "filters" MUST use ONLY these neutral fields (omit any you',
+    "don't use): titles[], seniorities[] (one of: entry, senior, manager,",
+    "director, vp, c_suite, owner, founder, partner), functions[],",
+    "locationCountries[], locationStates[], locationCities[], companyNames[],",
+    "companyDomains[], industries[], keywords[], employeeMin (int), employeeMax",
+    `(int), companySizes[], revenueRanges[], fundingStages[], technologies[].`,
+    "Populate the fields THIS provider honors best per the rules above.",
+    "",
+    "Respond with ONLY valid JSON of this EXACT shape (no prose, no markdown):",
+    '{"candidates":[{"label":"<short human label>","rationale":"<one sentence',
+    'why these filters match>","filters":{ ... }}]}',
+  ].join("\n");
+}
+
+function buildRevisePrompt(nlPrompt: string, failing: AudienceCandidate[]): string {
+  const lines = failing.map(
+    (f) =>
+      `- label "${f.label}": ${
+        f.validationError
+          ? "INVALID filters (" + f.validationError + ")"
+          : "ZERO matches"
+      } — filters were ${JSON.stringify(f.filters)}`
+  );
+  return [
+    `Original request: ${nlPrompt}`,
+    "",
+    "These candidates returned ZERO matches or INVALID filters. Revise each to",
+    "be broader and valid while staying true to the original request. Keep the",
+    "SAME label for each so it can be matched back:",
+    ...lines,
+    "",
+    'Respond with the same JSON shape {"candidates":[...]} containing ONLY the',
+    "revised versions of these labels.",
+  ].join("\n");
+}
+
+// Count a candidate's filters via the free dry-run. A provider 4xx means the
+// filters are invalid (LLM's fault → feed back to revise); a 5xx / network /
+// config error is a real outage → rethrow (fail loud). NOT a swallow: the 4xx
+// IS the validation signal the loop exists to consume.
+async function dryRunSafe(
+  provider: Provider,
+  filters: PeopleSearchFilters,
+  identity: Identity
+): Promise<{ count: number; validationError: string | null }> {
+  try {
+    const { totalEntries } = await dryRun({ provider, filters, identity });
+    return { count: totalEntries, validationError: null };
+  } catch (err) {
+    if (err instanceof ProviderError && err.status >= 400 && err.status < 500) {
+      return { count: 0, validationError: err.message };
+    }
+    throw err;
+  }
+}
+
+async function suggestForProvider(
+  provider: Provider,
+  nlPrompt: string,
+  identity: Identity
+): Promise<AudienceCandidate[]> {
+  const rules = (await filtersPrompt({ provider, identity })).prompt;
+  const systemPrompt = buildSuggestSystemPrompt(provider, rules);
+
+  const initial = parseCandidates(
+    await completeJson({ message: nlPrompt, systemPrompt, identity })
+  );
+  const truncated = initial.length > SUGGEST_MAX_CANDIDATES_PER_PROVIDER;
+
+  const working: AudienceCandidate[] = initial
+    .slice(0, SUGGEST_MAX_CANDIDATES_PER_PROVIDER)
+    .map((c) => ({
+      provider,
+      label: c.label,
+      rationale: c.rationale,
+      filters: c.filters,
+      count: -1,
+      validationError: null,
+      truncated,
+    }));
+
+  for (let round = 0; round <= SUGGEST_MAX_REVISE_ROUNDS; round++) {
+    await Promise.all(
+      working.map(async (w) => {
+        if (w.count > 0 && !w.validationError) return; // already good
+        const r = await dryRunSafe(provider, w.filters, identity);
+        w.count = r.count;
+        w.validationError = r.validationError;
+      })
+    );
+    const failing = working.filter(
+      (w) => w.count === 0 || w.validationError !== null
+    );
+    if (failing.length === 0 || round === SUGGEST_MAX_REVISE_ROUNDS) break;
+
+    const revised = parseCandidates(
+      await completeJson({
+        message: buildRevisePrompt(nlPrompt, failing),
+        systemPrompt,
+        identity,
+      })
+    );
+    for (const w of failing) {
+      const match = revised.find((r) => r.label === w.label);
+      if (match) {
+        w.filters = match.filters;
+        w.rationale = match.rationale;
+        w.count = -1;
+        w.validationError = null;
+      }
+    }
+  }
+
+  return working.map((w) => ({
+    ...w,
+    count: w.count < 0 ? 0 : w.count,
+  }));
+}
+
+// Turn a natural-language prompt into a set of candidate audiences across both
+// providers (apollo + apify), each with its filters + live count. Fail loud: a
+// provider/chat outage propagates (502). The caller picks candidates and
+// persists them via POST /orgs/audiences.
+export async function suggestAudiences(
+  nlPrompt: string,
+  identity: Identity
+): Promise<AudienceCandidate[]> {
+  const perProvider = await Promise.all(
+    SUGGEST_PROVIDERS.map((p) => suggestForProvider(p, nlPrompt, identity))
+  );
+  return perProvider.flat();
 }
 
 // Verify an audience exists and belongs to the org. Returns the row or null.

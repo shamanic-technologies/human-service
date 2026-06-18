@@ -14,11 +14,13 @@ import {
   ListAudiencesQuerySchema,
   AudienceMembersQuerySchema,
   AudienceStatsRequestSchema,
+  SuggestAudiencesRequestSchema,
 } from "../schemas.js";
 import {
   computeStats,
   getAudienceInOrg,
   refreshCounts,
+  suggestAudiences,
 } from "../services/audiences.js";
 import {
   ProviderError,
@@ -27,6 +29,7 @@ import {
   type Identity,
   type PeopleSearchFilters,
 } from "../services/people-providers.js";
+import { ChatServiceError, ChatConfigError } from "../lib/chat-client.js";
 
 const router = Router();
 
@@ -52,6 +55,17 @@ function sendProviderError(
   res: import("express").Response,
   err: unknown
 ): void {
+  if (err instanceof ChatConfigError) {
+    res.status(502).json({ error: err.message });
+    return;
+  }
+  if (err instanceof ChatServiceError) {
+    console.error(
+      `[human-service] audiences.chat_error status=${err.status}`
+    );
+    res.status(502).json({ error: err.message, upstreamStatus: err.status });
+    return;
+  }
   if (err instanceof ProviderUnsupportedError) {
     res
       .status(501)
@@ -93,6 +107,7 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
       orgId,
       brandId: parsed.data.brandId,
       name: parsed.data.name,
+      provider: parsed.data.provider ?? null,
       nlPrompt: parsed.data.nlPrompt ?? null,
       filters: parsed.data.filters ?? null,
       apolloCount: parsed.data.apolloCount ?? null,
@@ -112,6 +127,34 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
 
   res.status(201).json({ audience: serializeAudience(audience) });
 });
+
+// --- POST /orgs/audiences/suggest ---
+// NL -> candidate audiences (apollo + apify), LLM-generated via chat-service,
+// dry-run counted. Needs x-user-id (chat-service + providers key resolution).
+router.post(
+  "/orgs/audiences/suggest",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const parsed = SuggestAudiencesRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+    try {
+      const candidates = await suggestAudiences(
+        parsed.data.nlPrompt,
+        buildIdentity(res)
+      );
+      console.log(
+        `[human-service] audience.suggest org=${res.locals.orgId} brand=${parsed.data.brandId} candidates=${candidates.length}`
+      );
+      res.json({ candidates });
+    } catch (err) {
+      sendProviderError(res, err);
+    }
+  }
+);
 
 // --- GET /orgs/audiences ---
 router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) => {
@@ -344,6 +387,7 @@ function serializeAudience(row: typeof audiences.$inferSelect) {
     brandId: row.brandId,
     name: row.name,
     nlPrompt: row.nlPrompt,
+    provider: row.provider,
     filters: row.filters,
     apolloCount: row.apolloCount,
     apifyCount: row.apifyCount,

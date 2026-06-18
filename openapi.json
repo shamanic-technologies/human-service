@@ -1196,6 +1196,81 @@
           "schemaVersion"
         ]
       },
+      "SuggestAudiencesResponse": {
+        "type": "object",
+        "properties": {
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AudienceCandidate"
+            }
+          }
+        },
+        "required": [
+          "candidates"
+        ]
+      },
+      "AudienceCandidate": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "apollo",
+              "apify"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "filters": {
+            "$ref": "#/components/schemas/PeopleSearchFilters"
+          },
+          "count": {
+            "type": "integer",
+            "description": "Live match count for these filters on this provider (free dry-run). 0 means the LLM could not find a non-empty, valid filter set within the retry budget."
+          },
+          "validationError": {
+            "type": "string",
+            "nullable": true,
+            "description": "Set when the provider rejected the filters as invalid after the retry budget was exhausted."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the NL implied more segments than the per-provider cap and the LLM grouped coarser."
+          }
+        },
+        "required": [
+          "provider",
+          "label",
+          "rationale",
+          "filters",
+          "count",
+          "validationError",
+          "truncated"
+        ]
+      },
+      "SuggestAudiencesRequest": {
+        "type": "object",
+        "properties": {
+          "nlPrompt": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Natural-language audience description. The LLM reads the caller's own granularity intent from this text (e.g. 'split by country', 'founders in FR and DE separately') and emits one candidate per implied segment — granularity and count are NOT separate inputs."
+          },
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "nlPrompt",
+          "brandId"
+        ]
+      },
       "GetAudienceResponse": {
         "type": "object",
         "properties": {
@@ -1228,6 +1303,15 @@
           "nlPrompt": {
             "type": "string",
             "nullable": true
+          },
+          "provider": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "apollo",
+              "apify",
+              null
+            ]
           },
           "filters": {
             "allOf": [
@@ -1269,6 +1353,7 @@
           "brandId",
           "name",
           "nlPrompt",
+          "provider",
           "filters",
           "apolloCount",
           "apifyCount",
@@ -1288,6 +1373,14 @@
           "brandId": {
             "type": "string",
             "format": "uuid"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "apollo",
+              "apify"
+            ],
+            "description": "The provider this audience commits to, when persisting a candidate from /suggest. Omit for a neutral audience."
           },
           "nlPrompt": {
             "type": "string",
@@ -3241,6 +3334,95 @@
           },
           "502": {
             "description": "Provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/suggest": {
+      "post": {
+        "summary": "Suggest candidate audiences from a natural-language prompt (apollo + apify, LLM-generated, dry-run counted)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SuggestAudiencesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Candidate audiences",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuggestAudiencesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "LLM / provider error",
             "content": {
               "application/json": {
                 "schema": {
