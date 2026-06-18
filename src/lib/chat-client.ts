@@ -91,17 +91,19 @@ function requireChat(): { url: string; key: string } {
   return { url, key };
 }
 
-// One-shot JSON LLM completion via chat-service. chat-service now ENFORCES the
-// Anthropic JSON-mode contract: `responseFormat: "json"` on the anthropic
-// provider is rejected with 400 unless a `responseSchema` is supplied (Anthropic
-// has no standalone JSON flag — enforcement is only via
-// `output_config.format = { type: "json_schema", schema }`). So the caller MUST
-// pass `responseSchema`. The schema is forwarded verbatim to the provider; for
-// anthropic it must be STRICT (top-level `additionalProperties: false` + an
-// explicit `properties` map + all keys `required`), but nested objects may be
-// left open (`{ type: "object" }`) — exactly what the suggest caller does for
-// the permissive neutral-filter blob, with caller-side Zod validation on top.
-// Returns the parsed `json` object.
+// One-shot JSON LLM completion via chat-service. Returns the parsed `json`
+// object. JSON-mode contract differs by provider:
+//   - `anthropic`: chat-service rejects `responseFormat:"json"` with 400 unless
+//     a `responseSchema` is supplied, and Anthropic enforces it STRICTLY —
+//     `additionalProperties:false` + an explicit `properties` map on EVERY
+//     object (open/permissive objects are rejected). So an anthropic JSON caller
+//     MUST pass a fully-enumerated strict `responseSchema`.
+//   - `google`: native JSON mode (`responseMimeType:"application/json"`) needs
+//     NO schema — `responseFormat:"json"` alone suffices, and the shape is
+//     prompt-described + validated caller-side. This is what the suggest flow
+//     uses, since its open `filters` blob can't be expressed as an Anthropic
+//     strict schema without over-constraining it.
+// `responseSchema` is added to the body only when present (omit ⇒ unchanged).
 export async function completeJson(args: {
   message: string;
   systemPrompt: string;

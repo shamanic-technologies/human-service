@@ -271,25 +271,27 @@ audiences** the user picks from, during onboarding. `requireOrgAndUser`
 `src/services/audiences.ts` `suggestAudiences` owns it; `src/lib/chat-client.ts`
 is the chat-service client.
 
-- **LLM runs via chat-service `POST /complete`** (`anthropic`/`sonnet`,
-  `responseFormat:"json"`). **chat-service OWNS the LLM cost** — it does the
-  provision→authorize→execute→actualize against the org balance — so
-  **human-service still declares no cost** (the invariant holds; chat-service is
-  the LLM-cost owner exactly as apollo/apify own search cost). chat-service
-  **enforces the Anthropic JSON-mode contract**: `provider:"anthropic"` +
-  `responseFormat:"json"` is **rejected 400 unless a `responseSchema` is
-  supplied** (Anthropic has no standalone JSON flag — enforcement is only via
-  `output_config.format`). So `completeJson` passes a `responseSchema`
-  (`SUGGEST_RESPONSE_SCHEMA`). The Anthropic strict requirement applies to the
-  **top-level object only** (`additionalProperties:false` + explicit
-  `properties` + all keys `required`); nested objects may stay OPEN, so we lock
-  the `{candidates:[{label,rationale,filters}]}` envelope and leave each
-  candidate's `filters` as a bare `{type:"object"}` — the ~20 optional
-  neutral-filter fields are deliberately NOT enumerated. The shape is **still
-  validated caller-side** (`parseCandidates` → fail loud 502 on a malformed LLM
-  response) and the per-filter dry-run validates the filter values. (Hotfix
-  v0.13.1 / #50: the original "no responseSchema, prompt-described only" design
-  400'd every prod call once chat-service added the upfront guard.)
+- **LLM runs via chat-service `POST /complete`** (`google`/`flash`,
+  `responseFormat:"json"`, **no `responseSchema`**). **chat-service OWNS the LLM
+  cost** — it does the provision→authorize→execute→actualize against the org
+  balance — so **human-service still declares no cost** (the invariant holds;
+  chat-service is the LLM-cost owner exactly as apollo/apify own search cost).
+  **Why Gemini, not Anthropic:** chat-service rejects `provider:"anthropic"` +
+  `responseFormat:"json"` with **400 unless a `responseSchema` is supplied**, and
+  Anthropic enforces that schema STRICTLY — `additionalProperties:false` + an
+  explicit `properties` map on **every** object (open/permissive objects are
+  rejected). Our candidate `filters` is an OPEN blob (~16 optional neutral
+  fields) that can't be expressed as an Anthropic strict schema without
+  enumerating + over-constraining it. Gemini's native JSON mode
+  (`responseMimeType:"application/json"`) needs **no schema**, so the shape stays
+  **prompt-described + validated caller-side** (`parseCandidates` → fail loud 502
+  on a malformed LLM response; the per-filter dry-run validates the values).
+  `flash` is also ~10-20× cheaper than `sonnet`, cutting the per-suggest cost.
+  (History: #44 shipped sonnet + no schema; chat-service later added the upfront
+  anthropic guard → every call 400'd (#50/v0.13.1). The first fix tried an
+  anthropic strict envelope with an open `filters` — Anthropic 400'd
+  *`additionalProperties` must be explicitly set to false* on the open object.
+  Final fix v0.13.2 / #54: switch to Gemini schemaless JSON.)
 - **Granularity is emergent from the NL, not an input.** Input is ONLY
   `{nlPrompt, brandId}` — no `strategy`/count knob. The LLM reads the caller's
   own segmentation intent ("split by country", "FR and DE separately", "one

@@ -181,7 +181,7 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(apollo.every((c: { truncated: boolean }) => c.truncated)).toBe(true);
   });
 
-  it("sends a strict responseSchema to chat-service (anthropic JSON-mode contract)", async () => {
+  it("calls chat-service with google JSON mode and NO responseSchema (avoids anthropic strict-schema 400)", async () => {
     const completeBodies: Array<Record<string, unknown>> = [];
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
@@ -198,7 +198,7 @@ describe("POST /orgs/audiences/suggest", () => {
           content: "",
           tokensInput: 1,
           tokensOutput: 1,
-          model: "claude-sonnet-4-6",
+          model: "gemini-flash",
         });
       }
       if (u.endsWith("/search/dry-run")) return ok({ totalEntries: 100 });
@@ -209,13 +209,12 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(res.status).toBe(200);
     expect(completeBodies.length).toBeGreaterThan(0);
     for (const body of completeBodies) {
-      const schema = body.responseSchema as
-        | { type?: string; additionalProperties?: boolean; required?: string[] }
-        | undefined;
-      expect(schema).toBeDefined();
-      expect(schema?.type).toBe("object");
-      expect(schema?.additionalProperties).toBe(false);
-      expect(schema?.required).toContain("candidates");
+      expect(body.provider).toBe("google");
+      expect(body.responseFormat).toBe("json");
+      // No responseSchema — Gemini native JSON mode needs none, and Anthropic
+      // strict-schema can't express the open `filters` blob. This is the exact
+      // shape that was 400ing before the fix.
+      expect(body.responseSchema).toBeUndefined();
     }
   });
 
