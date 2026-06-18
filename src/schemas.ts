@@ -898,6 +898,7 @@ export const AudienceSchema = z
     brandId: z.string().uuid(),
     name: z.string(),
     nlPrompt: z.string().nullable(),
+    provider: z.enum(["apollo", "apify"]).nullable(),
     filters: PeopleSearchFiltersSchema.nullable(),
     apolloCount: z.number().int().nullable(),
     apifyCount: z.number().int().nullable(),
@@ -912,6 +913,10 @@ export const CreateAudienceRequestSchema = z
   .object({
     name: z.string().min(1),
     brandId: z.string().uuid(),
+    provider: z.enum(["apollo", "apify"]).optional().openapi({
+      description:
+        "The provider this audience commits to, when persisting a candidate from /suggest. Omit for a neutral audience.",
+    }),
     nlPrompt: z.string().min(1).optional(),
     filters: PeopleSearchFiltersSchema.optional(),
     apolloCount: z.number().int().min(0).optional().openapi({
@@ -1018,6 +1023,58 @@ export const AudienceStatsResponseSchema = z
     ),
   })
   .openapi("AudienceStatsResponse");
+
+export const SuggestAudiencesRequestSchema = z
+  .object({
+    nlPrompt: z.string().min(1).openapi({
+      description:
+        "Natural-language audience description. The LLM reads the caller's own granularity intent from this text (e.g. 'split by country', 'founders in FR and DE separately') and emits one candidate per implied segment — granularity and count are NOT separate inputs.",
+    }),
+    brandId: z.string().uuid(),
+  })
+  .openapi("SuggestAudiencesRequest");
+
+export const AudienceCandidateSchema = z
+  .object({
+    provider: z.enum(["apollo", "apify"]),
+    label: z.string(),
+    rationale: z.string(),
+    filters: PeopleSearchFiltersSchema,
+    count: z.number().int().openapi({
+      description: "Live match count for these filters on this provider (free dry-run). 0 means the LLM could not find a non-empty, valid filter set within the retry budget.",
+    }),
+    validationError: z.string().nullable().openapi({
+      description: "Set when the provider rejected the filters as invalid after the retry budget was exhausted.",
+    }),
+    truncated: z.boolean().openapi({
+      description: "True when the NL implied more segments than the per-provider cap and the LLM grouped coarser.",
+    }),
+  })
+  .openapi("AudienceCandidate");
+
+export const SuggestAudiencesResponseSchema = z
+  .object({
+    candidates: z.array(AudienceCandidateSchema),
+  })
+  .openapi("SuggestAudiencesResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/suggest",
+  summary:
+    "Suggest candidate audiences from a natural-language prompt (apollo + apify, LLM-generated, dry-run counted)",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: peopleHeaders,
+    body: { content: { "application/json": { schema: SuggestAudiencesRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Candidate audiences", content: { "application/json": { schema: SuggestAudiencesResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "LLM / provider error", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
 
 registry.registerPath({
   method: "post",

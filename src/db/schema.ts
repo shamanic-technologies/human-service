@@ -341,6 +341,9 @@ export const audiences = pgTable(
     brandId: uuid("brand_id").notNull(),
     name: text("name").notNull(),
     nlPrompt: text("nl_prompt"),
+    // The provider this audience commits to ("apollo" | "apify"); null = neutral.
+    // Set when a provider-specific candidate from /suggest is selected.
+    provider: text("provider"),
     // Neutral PeopleSearchFilters shape (maps to both providers).
     filters: jsonb("filters").$type<Record<string, unknown>>(),
     apolloCount: integer("apollo_count"),
