@@ -1297,6 +1297,59 @@ registry.registerPath({
   },
 });
 
+// --- Internal: one-time re-map of backfilled audience filters to canonical vocab ---
+export const RemapAudienceFiltersQuerySchema = z.object({
+  dryRun: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({
+      description:
+        "When 'true', report counts + a before/after sample without writing. Defaults to false (real run).",
+    }),
+});
+
+export const RemapAudienceFiltersResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    scanned: z.number().int().openapi({
+      description: "Backfilled audiences inspected (source='brand_persona_backfill').",
+    }),
+    remapped: z.number().int().openapi({
+      description: "Audiences whose filters were translated (0 on a dry-run).",
+    }),
+    wouldRemap: z.number().int().openapi({
+      description: "Audiences that still hold persona vocab and would be translated.",
+    }),
+    alreadyCanonical: z.number().int().openapi({
+      description: "Backfilled audiences already canonical (idempotent no-op).",
+    }),
+    sample: z
+      .array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          before: z.record(z.string(), z.unknown()),
+          after: z.record(z.string(), z.unknown()),
+        })
+      )
+      .openapi({ description: "Per-audience before/after preview (capped)." }),
+  })
+  .openapi("RemapAudienceFiltersResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/remap-audience-filters",
+  summary:
+    "One-time data fix: translate backfilled audiences' filters from legacy persona vocab to the canonical PeopleSearchFilters vocab, in place (idempotent, dry-runnable, reversible)",
+  security: [{ apiKey: [] }],
+  request: { query: RemapAudienceFiltersQuerySchema },
+  responses: {
+    200: { description: "Re-map result", content: { "application/json": { schema: RemapAudienceFiltersResponseSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "unrepresentable persona filter", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 // --- GET /health ---
 
 export const HealthResponseSchema = z
