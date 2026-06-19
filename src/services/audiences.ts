@@ -33,6 +33,7 @@ import {
   type Provider,
 } from "./people-providers.js";
 import { completeJson, ChatServiceError } from "../lib/chat-client.js";
+import { PeopleSearchFiltersSchema } from "../schemas.js";
 
 // The transaction handle drizzle passes to the `db.transaction` callback.
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -440,8 +441,24 @@ async function dryRunSafe(
   filters: PeopleSearchFilters,
   identity: Identity
 ): Promise<{ count: number; validationError: string | null }> {
+  // The LLM proposes the filter shape blind; validate it against the neutral
+  // filters schema BEFORE the provider call. A bad shape (e.g. `keywords` as a
+  // string instead of string[], or a non-enum seniority) is the LLM's fault and
+  // is fed back into the loop via the SAME validationError channel as a provider
+  // 4xx -- never a crash, never a silent coercion.
+  const parsed = PeopleSearchFiltersSchema.safeParse(filters);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+      .join("; ");
+    return { count: 0, validationError: `Invalid filter shape: ${issues}` };
+  }
   try {
-    const { totalEntries } = await dryRun({ provider, filters, identity });
+    const { totalEntries } = await dryRun({
+      provider,
+      filters: parsed.data,
+      identity,
+    });
     return { count: totalEntries, validationError: null };
   } catch (err) {
     if (err instanceof ProviderError && err.status >= 400 && err.status < 500) {
