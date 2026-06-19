@@ -37,7 +37,6 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Org-scoped (legacy) | `GET /humans/{id}/methodology` | apiKey + identity | Get cached methodology |
 | Org-scoped (legacy) | `POST /humans/{id}/extract` | apiKey + identity | Trigger scrape + AI extraction |
 | Internal | `POST /internal/transfer-brand` | apiKey | Move solo-brand methodology rows between orgs |
-| Internal | `POST /internal/backfill-audiences-from-personas` | apiKey | One-time: copy brand-service personas → audiences (id-preserving, idempotent, `?dryRun=true`, provenance-tagged, **maps persona vocab → canonical filters on insert**) |
 | Internal | `POST /internal/remap-audience-filters` | apiKey | One-time data fix: translate already-backfilled audiences' filters from legacy persona vocab → canonical `PeopleSearchFilters` vocab, in place (idempotent, `?dryRun=true`, reversible) |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
@@ -298,26 +297,28 @@ wave drops brand-service personas entirely + switches consumers'
   (migration `0012` widened it from brand-only so a name can repeat across orgs
   sharing a brand — the suggest flow keys proposals on org+brand+name). A
   duplicate-name create → 409.
-- **One-time backfill** — `POST /internal/backfill-audiences-from-personas`
-  (`src/routes/backfill.ts`, service-auth) copies every brand-service persona
-  into `audiences`, **preserving the persona id as the audience id** (downstream
-  evidence survives the later cutover). `?dryRun=true` reports counts without
-  writing; real run inserts `ON CONFLICT (id) DO NOTHING` (idempotent — re-run
-  is a no-op); inserted rows are tagged `source = 'brand_persona_backfill'`
-  (reversible: `DELETE FROM audiences WHERE source = 'brand_persona_backfill'`).
-  - **Filter vocabulary is MAPPED, not copied verbatim.** brand-service personas
-    speak the LEGACY persona vocab (`industry`, `jobTitles`, `location`,
-    `employeeRange`, `seniority`, `department`, `fundingStage`, `revenueRange`,
-    `keywords`, `technologies`); audiences (+ the people gateway) speak the
-    canonical `PeopleSearchFilters` vocab (`industries`, `titles`,
-    `locationCountries`, `employeeMin`/`Max`, `seniorities`, `functions`,
-    `fundingStages`, `revenueRanges`, `keywords`, `technologies`). The audiences
-    Zod silently STRIPS any non-canonical key on write, so a verbatim copy would
-    lose the filter. `src/services/persona-filter-map.ts`
-    (`mapPersonaFiltersToCanonical`) translates one vocab into the other and runs
-    on BOTH the backfill (on insert) and the re-map endpoint. Lossy edges (owned
-    deliberately): `location` → `locationCountries` (all values, NO city/state
-    split — apollo flattens location tiers anyway); `employeeRange` buckets →
+- **One-time backfill (COMPLETE, endpoint REMOVED).** The persona→audience
+  backfill `POST /internal/backfill-audiences-from-personas` and its
+  brand-service persona-reader (`src/lib/brand-client.ts`,
+  `GET /internal/personas`) ran once — 28 audiences copied into prod
+  (id-preserving, tagged `source = 'brand_persona_backfill'`, filters mapped to
+  canonical vocab) — then re-mapped to canonical filters. With brand-service
+  personas being deleted platform-wide (Wave 2), both the endpoint and the
+  client are now dead and were removed; the `BRAND_SERVICE_URL` /
+  `BRAND_SERVICE_API_KEY` env vars they used are no longer read. The backfilled
+  rows + their provenance tag remain live in `audiences`.
+  - **Filter vocabulary is MAPPED, not copied verbatim** (still used by the
+    re-map endpoint below). brand-service personas spoke the LEGACY persona vocab
+    (`industry`, `jobTitles`, `location`, `employeeRange`, `seniority`,
+    `department`, `fundingStage`, `revenueRange`, `keywords`, `technologies`);
+    audiences (+ the people gateway) speak the canonical `PeopleSearchFilters`
+    vocab (`industries`, `titles`, `locationCountries`, `employeeMin`/`Max`,
+    `seniorities`, `functions`, `fundingStages`, `revenueRanges`, `keywords`,
+    `technologies`). The audiences Zod silently STRIPS any non-canonical key on
+    write. `src/services/persona-filter-map.ts` (`mapPersonaFiltersToCanonical`)
+    translates one vocab into the other. Lossy edges (owned deliberately):
+    `location` → `locationCountries` (all values, NO city/state split — apollo
+    flattens location tiers anyway); `employeeRange` buckets →
     `employeeMin`/`employeeMax` (numeric range honored by both providers; `"N+"`
     → open max); `seniority` keeps only enum values; `department` → `functions`
     (lowercase, spaces→`_`). FAIL LOUD (`PersonaFilterMapError` → 502) on a
@@ -328,24 +329,11 @@ wave drops brand-service personas entirely + switches consumers'
     `source='brand_persona_backfill'` audiences in place. Scoped to rows still
     holding persona vocab; idempotent (a canonical row is `alreadyCanonical`, not
     re-written, so re-run is a no-op); `?dryRun=true` returns counts + a per-row
-    before/after sample without writing; reversible (rows stay provenance-tagged;
-    brand-service personas — the SoT — untouched). **Must be run in BOTH staging
-    AND prod after deploy** (the live backfilled rows are in prod).
+    before/after sample without writing; reversible (rows stay provenance-tagged).
+    Kept (idempotent + harmless) even though the backfill is done.
   - **`audiences.source`** = provenance: `'brand_persona_backfill'` for
     backfilled rows, null for native rows. (Distinct from
     `audience_members.source` = provider.)
-  - Personas are stored **brand-scoped, no org_id**; audiences require an org.
-    The brand→org mapping lives only in brand-service (`org_brands`, M:N), so
-    backfill reads it from brand-service's **`GET /internal/personas`**
-    (`src/lib/brand-client.ts`) which returns each persona with its **owning org
-    resolved (earliest `claimed_at`)**. human-service never resolves org itself.
-  - **Multi-org caveat**: ~6 of 11 persona-bearing brands are claimed by several
-    orgs; the persona id can only become ONE audience (id is a PK), so it's
-    assigned to the earliest-claiming org. Orgs that *share* a brand but aren't
-    the owner won't see that audience via org-scoped `GET /orgs/audiences` —
-    relevant only when consumers switch reads in the later cutover wave.
-  - **Env vars (NEW)**: `BRAND_SERVICE_URL`, `BRAND_SERVICE_API_KEY` (read at
-    call time; absent → `BrandConfigError` → 502). Still **no cost** here.
 
 ### Audience suggestion (onboarding) — `POST /orgs/audiences/suggest`
 

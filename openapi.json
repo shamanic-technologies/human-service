@@ -1744,32 +1744,6 @@
           "lastServedAt"
         ]
       },
-      "BackfillPersonasResponse": {
-        "type": "object",
-        "properties": {
-          "dryRun": {
-            "type": "boolean"
-          },
-          "totalPersonas": {
-            "type": "integer",
-            "description": "Personas returned by brand-service."
-          },
-          "inserted": {
-            "type": "integer",
-            "description": "Personas written as new audiences (0 on a dry-run or a re-run where all already exist)."
-          },
-          "skipped": {
-            "type": "integer",
-            "description": "Personas whose id already exists as an audience (idempotent no-op)."
-          }
-        },
-        "required": [
-          "dryRun",
-          "totalPersonas",
-          "inserted",
-          "skipped"
-        ]
-      },
       "RemapAudienceFiltersResponse": {
         "type": "object",
         "properties": {
@@ -4603,57 +4577,6 @@
           },
           "404": {
             "description": "Audience not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/internal/backfill-audiences-from-personas": {
-      "post": {
-        "summary": "One-time backfill: copy every brand-service persona into audiences, preserving the persona id (idempotent, dry-runnable, provenance-tagged for reversibility)",
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string",
-              "enum": [
-                "true",
-                "false"
-              ],
-              "description": "When 'true', report counts without writing any rows. Defaults to false (real run)."
-            },
-            "required": false,
-            "description": "When 'true', report counts without writing any rows. Defaults to false (real run).",
-            "name": "dryRun",
-            "in": "query"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Backfill result",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BackfillPersonasResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized"
-          },
-          "502": {
-            "description": "brand-service error",
             "content": {
               "application/json": {
                 "schema": {
