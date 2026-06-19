@@ -25,6 +25,7 @@ import {
   type ServedContact,
 } from "./suppression.js";
 import {
+  apolloIndustriesReference,
   dryRun,
   filtersPrompt,
   peopleSearch,
@@ -355,9 +356,16 @@ const SUGGEST_STATUS = "suggested"; // inactive default for suggest-created rows
 // `properties` map on EVERY object -- which cannot express our open `filters`
 // blob (~16 optional neutral fields) without enumerating + over-constraining it.
 // Gemini's native JSON mode needs no schema, so the shape stays prompt-described
-// + caller-validated. flash is also ~10-20x cheaper than sonnet.
+// + caller-validated.
+//
+// Model = `flash-pro` (Gemini 3.5 Flash, mid-tier). The whole relevance of a
+// suggested audience is the LLM's NL->filters mapping -- apollo/apify just match
+// structured filters deterministically, no LLM on their side -- so the model
+// tier IS the filter-quality lever. `flash-pro` reasons over the segment +
+// provider rulebook noticeably better than plain `flash` (which under-targets),
+// while staying far cheaper than `pro`/`sonnet`.
 const SUGGEST_LLM_PROVIDER = "google" as const;
-const SUGGEST_LLM_MODEL = "flash";
+const SUGGEST_LLM_MODEL = "flash-pro";
 
 export interface AudienceCandidate {
   audienceId: string;
@@ -389,12 +397,23 @@ function buildLayer1SystemPrompt(): string {
     `Never produce more than ${SUGGEST_MAX_CANDIDATES} audiences -- if the text`,
     "implies more, group coarser.",
     "",
+    "An ICP (ideal customer profile) for a people-search database is defined by",
+    "THREE filterable axes -- make each audience concrete on the axes the caller",
+    "implies, and DO NOT invent constraints they didn't state:",
+    "  1. PERSONA (the person): job titles, seniority level, department/function.",
+    "  2. FIRMOGRAPHIC (the company): industry, headcount/size, revenue, funding",
+    "     stage, and geography (where the person or the company HQ is).",
+    "  3. TECHNOGRAPHIC (optional): technologies the company uses -- only when the",
+    "     caller mentions a tool/stack.",
+    "",
     "Each audience needs:",
     '- "name": a short human label, MAX 4 words (e.g. "CEO SaaS US >$1M",',
     '  "Security-First Enterprise Tech"). Distinct per audience.',
-    '- "description": ONE self-contained sentence describing exactly who this',
-    "  audience targets (titles, seniority, geography, company traits) -- detailed",
-    "  enough to build people-search filters from without re-reading the original.",
+    '- "description": ONE self-contained sentence that pins down the audience on',
+    "  the relevant axes above (persona + firmographic, plus technographic/geo",
+    "  when implied) -- concrete and detailed enough to build people-search filters",
+    "  from without re-reading the original request. Carry over EVERY constraint",
+    "  the caller stated; never drop or invent one.",
     "",
     "Respond with ONLY valid JSON (no prose, no markdown):",
     '{"audiences":[{"name":"<=4 words","description":"one sentence"}]}',
@@ -476,7 +495,11 @@ async function dryRunSafe(
   }
 }
 
-function buildLayer2SystemPrompt(provider: Provider, rules: string): string {
+function buildLayer2SystemPrompt(
+  provider: Provider,
+  rules: string,
+  industriesVocab?: string[]
+): string {
   return [
     `You build a ${provider} people-search audience for ONE target segment.`,
     "",
@@ -491,6 +514,22 @@ function buildLayer2SystemPrompt(provider: Provider, rules: string): string {
     "companySizes[], revenueRanges[], fundingStages[], technologies[].",
     "Populate the fields THIS provider honors best per the rules above.",
     "",
+    "VOCABULARY IS EXACT. For any enum-constrained field (seniorities, functions,",
+    "industries, companySizes, revenueRanges, fundingStages) use ONLY values that",
+    "appear verbatim in the rules / lists above -- copy them character-for-",
+    "character. NEVER invent or paraphrase an enum value (e.g. do not write 'SaaS'",
+    "or 'Tech' for an industry): an unrecognized value is silently dropped by the",
+    "provider and quietly under-matches. Free-text fields (titles, keywords,",
+    "locations, companyNames, companyDomains, technologies) accept any string.",
+    ...(industriesVocab && industriesVocab.length > 0
+      ? [
+          "",
+          "CANONICAL INDUSTRIES (the ONLY accepted values for industries[] -- pick",
+          "the closest one or more; do not use any industry name not in this list):",
+          industriesVocab.join(", ") + ".",
+        ]
+      : []),
+    "",
     "You operate in a MULTI-TURN loop. Each turn respond with EXACTLY ONE JSON",
     "object (no prose, no markdown):",
     '- TEST a filter set (server replies with its live match count):',
@@ -500,8 +539,14 @@ function buildLayer2SystemPrompt(provider: Provider, rules: string): string {
     '- EXHAUSTED if no valid in-scope filter set yields a usable audience:',
     '  {"action":"exhausted","reason":"<why>"}',
     "",
-    "JUDGE THE COUNT YOURSELF: too few matches -> broaden; an implausibly huge or",
-    "loose count -> tighten and test again; a focused, on-target audience -> confirm.",
+    "JUDGE THE COUNT YOURSELF: aim for a focused, addressable audience -- roughly",
+    "500 to 50,000 people is a healthy band for a B2B segment. Far below ~200 is",
+    "too narrow (a typo'd title, an over-constrained set, or a dropped enum value)",
+    "-> broaden or fix the vocabulary and test again. In the hundreds-of-thousands",
+    "or millions is too loose (under-targeted) -> add a discriminating constraint",
+    "and test again. A count inside the band that faithfully matches the segment",
+    "-> confirm. These are guides, not hard limits: a genuinely niche segment may",
+    "legitimately sit under 200 -- confirm it rather than widening beyond scope.",
     "Iterate as many test rounds as you need before confirming. Stay STRICTLY",
     "within the segment description -- never widen beyond its titles/geography/",
     "company traits. If a test returns a validation error, propose corrected",
@@ -551,7 +596,14 @@ async function refineFilters(
   identity: Identity
 ): Promise<RefineResult> {
   const rules = (await filtersPrompt({ provider, identity })).prompt;
-  const systemPrompt = buildLayer2SystemPrompt(provider, rules);
+  // apollo's industries filter is free-text against a hidden canonical taxonomy;
+  // inject the authoritative list so the LLM can only pick matchable values.
+  // apify already embeds its accepted values in its own filters-prompt.
+  const industriesVocab =
+    provider === "apollo"
+      ? await apolloIndustriesReference({ identity })
+      : undefined;
+  const systemPrompt = buildLayer2SystemPrompt(provider, rules, industriesVocab);
   const transcript: string[] = [
     [
       "TARGET AUDIENCE:",

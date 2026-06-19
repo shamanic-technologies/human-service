@@ -864,3 +864,27 @@ export async function filtersPrompt(args: {
   )) as { prompt: string; schemaVersion: string };
   return { provider, prompt: data.prompt, schemaVersion: data.schemaVersion };
 }
+
+// Apollo's industries filter (`qOrganizationIndustryTagIds`) is a free-text
+// string[] in apollo's schema, so apollo's filters-prompt documents only an
+// EXAMPLE value, NOT the canonical 148-entry LinkedIn taxonomy apollo actually
+// matches against. An LLM guessing "SaaS" instead of "Computer Software" yields
+// a silent zero-match (apollo drops the unrecognized value). We fetch the
+// authoritative list (apollo GET /reference/industries) and inject it into the
+// layer-2 prompt so the model can only pick exact, matchable values. apify needs
+// no equivalent: its filters-prompt already embeds the full accepted-value enum.
+export async function apolloIndustriesReference(args: {
+  identity: Identity;
+}): Promise<string[]> {
+  const { url, key } = requireApollo();
+  const data = (await getProvider(
+    "apollo",
+    url,
+    key,
+    "/reference/industries",
+    args.identity
+  )) as { industries: Array<{ name?: string }> };
+  return data.industries
+    .map((i) => i.name)
+    .filter((n): n is string => typeof n === "string" && n.length > 0);
+}
