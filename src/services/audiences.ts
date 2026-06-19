@@ -304,132 +304,137 @@ export async function computeStats(
   };
 }
 
-// --- Audience suggestion (onboarding NL -> candidate audiences) ---
+// --- Audience suggestion (onboarding NL -> persisted candidate audiences) ---
 //
-// The user types a natural-language audience description. For each provider we
-// hand the NL + that provider's filter rulebook (its /search/filters-prompt) to
-// the LLM (via chat-service /complete, which OWNS the LLM cost), and the LLM
-// reads the user's own granularity intent ("split by country", "founders in FR
-// and DE separately", "one broad list") to emit a SET of candidate audiences.
-// Each candidate is counted via the free dry-run; a candidate that returns zero
-// or invalid filters is fed back to the LLM to revise (bounded). The user then
-// picks any number and persists them via POST /orgs/audiences.
+// Two layers, then collapse + persist:
 //
-// Membership/dedup stays untouched; this is purely the discovery step. No cost
-// declared here — chat-service meters the LLM spend against the org.
+//   LAYER 1 (shared, provider-agnostic, ONE LLM call): decompose the caller's NL
+//     into a SET of distinct named audiences { name, description }. The LLM reads
+//     the caller's own granularity intent ("US and Europe separately", "split by
+//     seniority", "one broad list"). The audience names are SHARED across both
+//     providers so layer 2's two provider runs map to the SAME segments and can
+//     be compared head-to-head.
+//
+//   LAYER 2 (per audience x per provider, an agentic multi-turn loop): hand the
+//     segment + that provider's filter rulebook to the LLM, which proposes a
+//     filter set ("test"), sees its FREE dry-run count fed back, and decides for
+//     itself whether the count is a satisfying audience ("confirm"), needs more
+//     refinement ("test" again), or is unreachable in scope ("exhausted").
+//     Mirrors lead-service's generateNextStrategy self-iteration mechanism
+//     (which is slated for deprecation later -- kept here for parity for now).
+//
+//   COLLAPSE: per audience, keep the provider with the larger count (tie ->
+//     apollo). We return ONE candidate per audience, not one per provider.
+//
+//   PERSIST: each collapsed audience is written as an `audiences` row at status
+//     "suggested" (INACTIVE -- never live for the brand until the caller flips it
+//     to "active" via PATCH /orgs/audiences/{id}/status). We return the audience
+//     ids so the front can activate the selected ones.
+//
+// No cost declared here -- chat-service meters the LLM spend; dry-run is free;
+// the DB write is free. The cost invariant holds.
 
-const SUGGEST_PROVIDERS: Provider[] = ["apollo", "apify"];
-const SUGGEST_MAX_CANDIDATES_PER_PROVIDER = 6; // safety backstop (not a knob)
-const SUGGEST_MAX_REVISE_ROUNDS = 3;
+const SUGGEST_PROVIDERS: Provider[] = ["apollo", "apify"]; // apollo first => wins ties
+const SUGGEST_MAX_CANDIDATES = 6; // cap on layer-1 audiences (not a knob)
+const SUGGEST_MAX_ITERATION_ROUNDS = 8; // layer-2 agentic loop bound per (audience, provider)
+const SUGGEST_STATUS = "suggested"; // inactive default for suggest-created rows
 
 // LLM provider/model for the suggest flow. We use Gemini in SCHEMALESS JSON mode
 // (responseMimeType: application/json, no responseSchema) rather than Anthropic:
 // chat-service rejects anthropic JSON mode without a responseSchema, and
 // Anthropic's strict schema requires `additionalProperties:false` + an explicit
-// `properties` map on EVERY object — which cannot express our open `filters`
+// `properties` map on EVERY object -- which cannot express our open `filters`
 // blob (~16 optional neutral fields) without enumerating + over-constraining it.
 // Gemini's native JSON mode needs no schema, so the shape stays prompt-described
-// + caller-validated (`parseCandidates` + the per-filter dry-run). flash is also
-// ~10-20x cheaper than sonnet, cutting the per-suggest cost.
+// + caller-validated. flash is also ~10-20x cheaper than sonnet.
 const SUGGEST_LLM_PROVIDER = "google" as const;
 const SUGGEST_LLM_MODEL = "flash";
 
 export interface AudienceCandidate {
-  provider: Provider;
-  label: string;
+  audienceId: string;
+  name: string;
   rationale: string;
+  provider: Provider;
   filters: PeopleSearchFilters;
   count: number;
+  status: string;
   validationError: string | null;
   truncated: boolean;
 }
 
-interface RawCandidate {
-  label: string;
-  rationale: string;
-  filters: PeopleSearchFilters;
+// --- Layer 1: decompose NL into named audiences ---
+
+interface Segment {
+  name: string;
+  description: string;
 }
 
-function parseCandidates(obj: Record<string, unknown>): RawCandidate[] {
-  const arr = obj.candidates;
+function buildLayer1SystemPrompt(): string {
+  return [
+    "You decompose a natural-language audience request into a SET of distinct,",
+    "named target audiences. READ the caller's own segmentation intent (e.g.",
+    '"US and Europe separately", "founders in France and Germany separately",',
+    '"split by seniority", or "one broad list"). Produce ONE audience per segment',
+    "they imply; if they imply no split, produce a SINGLE audience. The number and",
+    "the grouping dimension come from the CALLER's words, never invented.",
+    `Never produce more than ${SUGGEST_MAX_CANDIDATES} audiences -- if the text`,
+    "implies more, group coarser.",
+    "",
+    "Each audience needs:",
+    '- "name": a short human label, MAX 4 words (e.g. "CEO SaaS US >$1M",',
+    '  "Security-First Enterprise Tech"). Distinct per audience.',
+    '- "description": ONE self-contained sentence describing exactly who this',
+    "  audience targets (titles, seniority, geography, company traits) -- detailed",
+    "  enough to build people-search filters from without re-reading the original.",
+    "",
+    "Respond with ONLY valid JSON (no prose, no markdown):",
+    '{"audiences":[{"name":"<=4 words","description":"one sentence"}]}',
+  ].join("\n");
+}
+
+function parseSegments(obj: Record<string, unknown>): Segment[] {
+  const arr = obj.audiences;
   if (!Array.isArray(arr)) {
-    throw new ChatServiceError(502, "LLM response missing `candidates` array");
+    throw new ChatServiceError(502, "LLM response missing `audiences` array");
   }
   return arr.map((c, i) => {
     if (!c || typeof c !== "object") {
-      throw new ChatServiceError(502, `LLM candidate ${i} is not an object`);
+      throw new ChatServiceError(502, `LLM audience ${i} is not an object`);
     }
     const o = c as Record<string, unknown>;
-    if (typeof o.label !== "string" || o.label.length === 0) {
-      throw new ChatServiceError(502, `LLM candidate ${i} missing label`);
+    if (typeof o.name !== "string" || o.name.length === 0) {
+      throw new ChatServiceError(502, `LLM audience ${i} missing name`);
     }
-    if (!o.filters || typeof o.filters !== "object") {
-      throw new ChatServiceError(502, `LLM candidate ${i} missing filters`);
+    if (typeof o.description !== "string" || o.description.length === 0) {
+      throw new ChatServiceError(502, `LLM audience ${i} missing description`);
     }
-    return {
-      label: o.label,
-      rationale: typeof o.rationale === "string" ? o.rationale : "",
-      filters: o.filters as PeopleSearchFilters,
-    };
+    return { name: o.name, description: o.description };
   });
 }
 
-function buildSuggestSystemPrompt(provider: Provider, rules: string): string {
-  return [
-    `You are an expert at building ${provider} people-search audiences.`,
-    "",
-    "PROVIDER FILTER RULES (authoritative — only these values are valid):",
-    rules,
-    "",
-    "The caller sends a natural-language description of who they want to reach.",
-    "READ the caller's text for any GRANULARITY / SEGMENTATION intent (e.g.",
-    '"split by country", "founders in France and Germany separately", "by',
-    'seniority"). Produce ONE candidate audience per segment they imply. If they',
-    "imply no split, produce a single broad candidate. The number and the",
-    "grouping dimension come from the CALLER's words, never invented. Never",
-    `produce more than ${SUGGEST_MAX_CANDIDATES_PER_PROVIDER} candidates — if the`,
-    "text implies more, group coarser and say so in the rationale.",
-    "",
-    'Each candidate\'s "filters" MUST use ONLY these neutral fields (omit any you',
-    "don't use): titles[], seniorities[] (one of: entry, senior, manager,",
-    "director, vp, c_suite, owner, founder, partner), functions[],",
-    "locationCountries[], locationStates[], locationCities[], companyNames[],",
-    "companyDomains[], industries[], keywords[], employeeMin (int), employeeMax",
-    `(int), companySizes[], revenueRanges[], fundingStages[], technologies[].`,
-    "Populate the fields THIS provider honors best per the rules above.",
-    "",
-    "Respond with ONLY valid JSON of this EXACT shape (no prose, no markdown):",
-    '{"candidates":[{"label":"<short human label>","rationale":"<one sentence',
-    'why these filters match>","filters":{ ... }}]}',
-  ].join("\n");
-}
-
-function buildRevisePrompt(nlPrompt: string, failing: AudienceCandidate[]): string {
-  const lines = failing.map(
-    (f) =>
-      `- label "${f.label}": ${
-        f.validationError
-          ? "INVALID filters (" + f.validationError + ")"
-          : "ZERO matches"
-      } — filters were ${JSON.stringify(f.filters)}`
+async function decomposeSegments(
+  nlPrompt: string,
+  identity: Identity
+): Promise<{ segments: Segment[]; truncated: boolean }> {
+  const parsed = parseSegments(
+    await completeJson({
+      message: nlPrompt,
+      systemPrompt: buildLayer1SystemPrompt(),
+      identity,
+      provider: SUGGEST_LLM_PROVIDER,
+      model: SUGGEST_LLM_MODEL,
+    })
   );
-  return [
-    `Original request: ${nlPrompt}`,
-    "",
-    "These candidates returned ZERO matches or INVALID filters. Revise each to",
-    "be broader and valid while staying true to the original request. Keep the",
-    "SAME label for each so it can be matched back:",
-    ...lines,
-    "",
-    'Respond with the same JSON shape {"candidates":[...]} containing ONLY the',
-    "revised versions of these labels.",
-  ].join("\n");
+  const truncated = parsed.length > SUGGEST_MAX_CANDIDATES;
+  return { segments: parsed.slice(0, SUGGEST_MAX_CANDIDATES), truncated };
 }
 
-// Count a candidate's filters via the free dry-run. A provider 4xx means the
-// filters are invalid (LLM's fault → feed back to revise); a 5xx / network /
-// config error is a real outage → rethrow (fail loud). NOT a swallow: the 4xx
-// IS the validation signal the loop exists to consume.
+// --- Layer 2: per (audience, provider) agentic filter-refinement loop ---
+
+// Count a filter set via the FREE dry-run. A provider 4xx means the filters are
+// invalid (LLM's fault -> feed back to revise); a 5xx / network / config error is
+// a real outage -> rethrow (fail loud). NOT a swallow: the 4xx IS the validation
+// signal the loop consumes.
 async function dryRunSafe(
   provider: Provider,
   filters: PeopleSearchFilters,
@@ -446,89 +451,298 @@ async function dryRunSafe(
   }
 }
 
-async function suggestForProvider(
+function buildLayer2SystemPrompt(provider: Provider, rules: string): string {
+  return [
+    `You build a ${provider} people-search audience for ONE target segment.`,
+    "",
+    "PROVIDER FILTER RULES (authoritative -- only these values are valid):",
+    rules,
+    "",
+    'Your "filters" MUST use ONLY these neutral fields (omit any you don\'t use):',
+    "titles[], seniorities[] (one of: entry, senior, manager, director, vp,",
+    "c_suite, owner, founder, partner), functions[], locationCountries[],",
+    "locationStates[], locationCities[], companyNames[], companyDomains[],",
+    "industries[], keywords[], employeeMin (int), employeeMax (int),",
+    "companySizes[], revenueRanges[], fundingStages[], technologies[].",
+    "Populate the fields THIS provider honors best per the rules above.",
+    "",
+    "You operate in a MULTI-TURN loop. Each turn respond with EXACTLY ONE JSON",
+    "object (no prose, no markdown):",
+    '- TEST a filter set (server replies with its live match count):',
+    '  {"action":"test","filters":{ ... },"reasoning":"<one sentence>"}',
+    "- CONFIRM the last tested set when you are SATISFIED its count is a healthy,",
+    '  well-targeted audience for this segment: {"action":"confirm","reasoning":"..."}',
+    '- EXHAUSTED if no valid in-scope filter set yields a usable audience:',
+    '  {"action":"exhausted","reason":"<why>"}',
+    "",
+    "JUDGE THE COUNT YOURSELF: too few matches -> broaden; an implausibly huge or",
+    "loose count -> tighten and test again; a focused, on-target audience -> confirm.",
+    "Iterate as many test rounds as you need before confirming. Stay STRICTLY",
+    "within the segment description -- never widen beyond its titles/geography/",
+    "company traits. If a test returns a validation error, propose corrected",
+    "filters; NEVER confirm a set with unresolved validation errors.",
+  ].join("\n");
+}
+
+interface RefineResult {
+  filters: PeopleSearchFilters;
+  count: number;
+  validationError: string | null;
+}
+
+type Layer2Action =
+  | { type: "test"; filters: PeopleSearchFilters }
+  | { type: "confirm" }
+  | { type: "exhausted"; reason: string }
+  | { type: "unknown" };
+
+function parseLayer2Action(obj: Record<string, unknown>): Layer2Action {
+  const action = typeof obj.action === "string" ? obj.action : "";
+  if (action === "exhausted") {
+    return {
+      type: "exhausted",
+      reason:
+        typeof obj.reason === "string"
+          ? obj.reason
+          : "LLM declared exhausted with no reason",
+    };
+  }
+  if (action === "confirm") return { type: "confirm" };
+  if (action === "test") {
+    if (
+      obj.filters &&
+      typeof obj.filters === "object" &&
+      !Array.isArray(obj.filters)
+    ) {
+      return { type: "test", filters: obj.filters as PeopleSearchFilters };
+    }
+  }
+  return { type: "unknown" };
+}
+
+async function refineFilters(
   provider: Provider,
-  nlPrompt: string,
+  segment: Segment,
   identity: Identity
-): Promise<AudienceCandidate[]> {
+): Promise<RefineResult> {
   const rules = (await filtersPrompt({ provider, identity })).prompt;
-  const systemPrompt = buildSuggestSystemPrompt(provider, rules);
+  const systemPrompt = buildLayer2SystemPrompt(provider, rules);
+  const transcript: string[] = [
+    [
+      "TARGET AUDIENCE:",
+      `name: ${segment.name}`,
+      `description: ${segment.description}`,
+      "",
+      `Propose your first "test" filter set for ${provider}.`,
+    ].join("\n"),
+  ];
 
-  const initial = parseCandidates(
-    await completeJson({
-      message: nlPrompt,
-      systemPrompt,
-      identity,
-      provider: SUGGEST_LLM_PROVIDER,
-      model: SUGGEST_LLM_MODEL,
-    })
-  );
-  const truncated = initial.length > SUGGEST_MAX_CANDIDATES_PER_PROVIDER;
+  let lastFilters: PeopleSearchFilters | null = null;
+  let lastCleanCount = 0; // count of the last test that had NO validation error
+  let lastValidationError: string | null = null;
+  let lastHadError = false;
 
-  const working: AudienceCandidate[] = initial
-    .slice(0, SUGGEST_MAX_CANDIDATES_PER_PROVIDER)
-    .map((c) => ({
-      provider,
-      label: c.label,
-      rationale: c.rationale,
-      filters: c.filters,
-      count: -1,
-      validationError: null,
-      truncated,
-    }));
-
-  for (let round = 0; round <= SUGGEST_MAX_REVISE_ROUNDS; round++) {
-    await Promise.all(
-      working.map(async (w) => {
-        if (w.count > 0 && !w.validationError) return; // already good
-        const r = await dryRunSafe(provider, w.filters, identity);
-        w.count = r.count;
-        w.validationError = r.validationError;
-      })
-    );
-    const failing = working.filter(
-      (w) => w.count === 0 || w.validationError !== null
-    );
-    if (failing.length === 0 || round === SUGGEST_MAX_REVISE_ROUNDS) break;
-
-    const revised = parseCandidates(
+  for (let round = 0; round < SUGGEST_MAX_ITERATION_ROUNDS; round++) {
+    const action = parseLayer2Action(
       await completeJson({
-        message: buildRevisePrompt(nlPrompt, failing),
+        message: transcript.join("\n\n---\n\n"),
         systemPrompt,
         identity,
         provider: SUGGEST_LLM_PROVIDER,
         model: SUGGEST_LLM_MODEL,
       })
     );
-    for (const w of failing) {
-      const match = revised.find((r) => r.label === w.label);
-      if (match) {
-        w.filters = match.filters;
-        w.rationale = match.rationale;
-        w.count = -1;
-        w.validationError = null;
+
+    if (action.type === "exhausted") {
+      // Best-effort: if a clean filter set was tested before giving up, return it
+      // (honest count); otherwise surface count 0 + the reason.
+      if (lastFilters && !lastHadError) {
+        return {
+          filters: lastFilters,
+          count: lastCleanCount,
+          validationError: null,
+        };
       }
+      return {
+        filters: lastFilters ?? {},
+        count: 0,
+        validationError: lastValidationError ?? action.reason,
+      };
     }
+
+    if (action.type === "confirm") {
+      if (!lastFilters || lastHadError) {
+        transcript.push(
+          `Round ${round + 1}: confirm rejected -- you must TEST a valid filter set (no validation errors) before confirming.`
+        );
+        continue;
+      }
+      return {
+        filters: lastFilters,
+        count: lastCleanCount,
+        validationError: null,
+      };
+    }
+
+    if (action.type === "test") {
+      const r = await dryRunSafe(provider, action.filters, identity);
+      lastFilters = action.filters;
+      if (r.validationError) {
+        lastHadError = true;
+        lastValidationError = r.validationError;
+        transcript.push(
+          `Round ${round + 1}: filters=${JSON.stringify(action.filters)} -> REJECTED as invalid: ${r.validationError}. Propose corrected filters, or declare exhausted.`
+        );
+      } else {
+        lastHadError = false;
+        lastValidationError = null;
+        lastCleanCount = r.count;
+        transcript.push(
+          `Round ${round + 1}: filters=${JSON.stringify(action.filters)} -> count=${r.count}. Confirm this set, test another, or declare exhausted.`
+        );
+      }
+      continue;
+    }
+
+    transcript.push(
+      `Round ${round + 1}: unrecognized response. Reply with exactly one JSON action: test, confirm, or exhausted.`
+    );
   }
 
-  return working.map((w) => ({
-    ...w,
-    count: w.count < 0 ? 0 : w.count,
-  }));
+  // Iteration budget exhausted -- return the best clean effort, else honest 0.
+  if (lastFilters && !lastHadError) {
+    return { filters: lastFilters, count: lastCleanCount, validationError: null };
+  }
+  return { filters: lastFilters ?? {}, count: 0, validationError: lastValidationError };
 }
 
-// Turn a natural-language prompt into a set of candidate audiences across both
-// providers (apollo + apify), each with its filters + live count. Fail loud: a
-// provider/chat outage propagates (502). The caller picks candidates and
-// persists them via POST /orgs/audiences.
+// --- Persist a collapsed audience at status "suggested" (inactive) ---
+//
+// Unique per (org_id, brand_id, lower(name)). On a name collision: refresh the
+// filters/count ONLY when the existing row is still "suggested"; NEVER mutate an
+// active/paused/archived audience (audiences are immutable except their status).
+// Returns the audience id either way.
+async function persistSuggestedAudience(args: {
+  identity: Identity;
+  brandId: string;
+  nlPrompt: string;
+  segment: Segment;
+  provider: Provider;
+  filters: PeopleSearchFilters;
+  count: number;
+}): Promise<string> {
+  const orgId = args.identity.orgId;
+  const countCols =
+    args.provider === "apollo"
+      ? { apolloCount: args.count }
+      : { apifyCount: args.count };
+  return db.transaction(async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(audiences)
+      .where(
+        and(
+          eq(audiences.orgId, orgId),
+          eq(audiences.brandId, args.brandId),
+          sql`lower(${audiences.name}) = lower(${args.segment.name})`
+        )
+      )
+      .limit(1);
+
+    if (existing) {
+      if (existing.status === SUGGEST_STATUS) {
+        await tx
+          .update(audiences)
+          .set({
+            provider: args.provider,
+            filters: args.filters as Record<string, unknown>,
+            ...countCols,
+            countedAt: new Date(),
+            nlPrompt: args.nlPrompt,
+            updatedAt: new Date(),
+          })
+          .where(eq(audiences.id, existing.id));
+      }
+      return existing.id;
+    }
+
+    const [row] = await tx
+      .insert(audiences)
+      .values({
+        orgId,
+        brandId: args.brandId,
+        name: args.segment.name,
+        nlPrompt: args.nlPrompt,
+        provider: args.provider,
+        status: SUGGEST_STATUS,
+        filters: args.filters as Record<string, unknown>,
+        ...countCols,
+        countedAt: new Date(),
+        createdByUserId: args.identity.userId ?? null,
+      })
+      .returning({ id: audiences.id });
+    return row.id;
+  });
+}
+
+// Turn a natural-language prompt into a set of PERSISTED candidate audiences.
+// Layer 1 decomposes the NL into named segments; layer 2 builds + refines each
+// segment's filters per provider (agentic loop); we collapse to the higher-count
+// provider per segment and persist each at status "suggested" (inactive). Fail
+// loud: a provider/chat outage propagates (502). The caller activates chosen ids
+// via PATCH /orgs/audiences/{id}/status.
 export async function suggestAudiences(
   nlPrompt: string,
+  brandId: string,
   identity: Identity
 ): Promise<AudienceCandidate[]> {
-  const perProvider = await Promise.all(
-    SUGGEST_PROVIDERS.map((p) => suggestForProvider(p, nlPrompt, identity))
+  const { segments, truncated } = await decomposeSegments(nlPrompt, identity);
+
+  // Layer 2 + collapse, per segment. Segments run concurrently; the two providers
+  // within a segment run concurrently too.
+  const collapsed = await Promise.all(
+    segments.map(async (segment) => {
+      const perProvider = await Promise.all(
+        SUGGEST_PROVIDERS.map(async (provider) => ({
+          provider,
+          ...(await refineFilters(provider, segment, identity)),
+        }))
+      );
+      // Pick the larger count; reduce keeps the incumbent on a tie, and apollo is
+      // first in SUGGEST_PROVIDERS, so ties resolve to apollo.
+      const winner = perProvider.reduce((best, cur) =>
+        cur.count > best.count ? cur : best
+      );
+      return { segment, winner };
+    })
   );
-  return perProvider.flat();
+
+  // Persist sequentially (one row per segment; names are distinct, so no
+  // intra-request collision; the unique index guards cross-request races).
+  const out: AudienceCandidate[] = [];
+  for (const { segment, winner } of collapsed) {
+    const audienceId = await persistSuggestedAudience({
+      identity,
+      brandId,
+      nlPrompt,
+      segment,
+      provider: winner.provider,
+      filters: winner.filters,
+      count: winner.count,
+    });
+    out.push({
+      audienceId,
+      name: segment.name,
+      rationale: segment.description,
+      provider: winner.provider,
+      filters: winner.filters,
+      count: winner.count,
+      status: SUGGEST_STATUS,
+      validationError: winner.validationError,
+      truncated,
+    });
+  }
+  return out;
 }
 
 // Verify an audience exists and belongs to the org. Returns the row or null.

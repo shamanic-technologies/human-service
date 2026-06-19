@@ -1213,45 +1213,68 @@
       "AudienceCandidate": {
         "type": "object",
         "properties": {
+          "audienceId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The id of the PERSISTED audience row (status 'suggested', inactive). The caller activates a chosen candidate via PATCH /orgs/audiences/{id}/status {status:'active'}."
+          },
+          "name": {
+            "type": "string",
+            "description": "Short human label for this audience (<=4 words), shared across providers — the layer-1 segment name."
+          },
+          "rationale": {
+            "type": "string",
+            "description": "One-sentence description of who this audience targets."
+          },
           "provider": {
             "type": "string",
             "enum": [
               "apollo",
               "apify"
-            ]
-          },
-          "label": {
-            "type": "string"
-          },
-          "rationale": {
-            "type": "string"
+            ],
+            "description": "The winning provider for this audience — the one with the larger free dry-run count (tie -> apollo). Only this provider's filters/count are returned."
           },
           "filters": {
             "$ref": "#/components/schemas/PeopleSearchFilters"
           },
           "count": {
             "type": "integer",
-            "description": "Live match count for these filters on this provider (free dry-run). 0 means the LLM could not find a non-empty, valid filter set within the retry budget."
+            "description": "The winning provider's live match count (free dry-run). 0 means the LLM could not find a non-empty, valid filter set within the iteration budget on either provider."
+          },
+          "status": {
+            "$ref": "#/components/schemas/AudienceStatus"
           },
           "validationError": {
             "type": "string",
             "nullable": true,
-            "description": "Set when the provider rejected the filters as invalid after the retry budget was exhausted."
+            "description": "Set when the winning provider rejected the filters as invalid after the iteration budget was exhausted."
           },
           "truncated": {
             "type": "boolean",
-            "description": "True when the NL implied more segments than the per-provider cap and the LLM grouped coarser."
+            "description": "True when the NL implied more audiences than the cap and the LLM grouped coarser."
           }
         },
         "required": [
-          "provider",
-          "label",
+          "audienceId",
+          "name",
           "rationale",
+          "provider",
           "filters",
           "count",
+          "status",
           "validationError",
           "truncated"
         ]
+      },
+      "AudienceStatus": {
+        "type": "string",
+        "enum": [
+          "suggested",
+          "active",
+          "paused",
+          "archived"
+        ],
+        "description": "Always 'suggested' (inactive) for a freshly-suggested audience."
       },
       "SuggestAudiencesRequest": {
         "type": "object",
@@ -1370,14 +1393,6 @@
           "createdByUserId",
           "createdAt",
           "updatedAt"
-        ]
-      },
-      "AudienceStatus": {
-        "type": "string",
-        "enum": [
-          "active",
-          "paused",
-          "archived"
         ]
       },
       "CreateAudienceRequest": {

@@ -50,7 +50,7 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Org-scoped (People v1) | `POST /orgs/people/resolve-email` | apiKey + `x-org-id` + `x-user-id` | Reveal a verified email — apollo by `providerPersonId` (`/enrich`, billed) or name+domain (`/match`); apify by name+domain |
 | Org-scoped (People v1) | `POST /orgs/people/search/dry-run` | apiKey + `x-org-id` + `x-user-id` | Count matches, free (apollo only in v1) |
 | Org-scoped (People v1) | `GET /orgs/people/filters-prompt` | apiKey + `x-org-id` + `x-user-id` | LLM filter-shape prompt (apollo only in v1) |
-| Org-scoped (Audiences v1) | `POST /orgs/audiences/suggest` | apiKey + `x-org-id` + `x-user-id` | NL → candidate audiences (apollo + apify, LLM via chat-service, dry-run counted) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/suggest` | apiKey + `x-org-id` + `x-user-id` | NL → **persisted** candidate audiences (one per segment, best provider only), returns `audienceId`s at status `suggested` (inactive) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` filter) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
@@ -229,17 +229,21 @@ half of the platform migration that makes audiences the SINGLE owner; a later
 wave drops brand-service personas entirely + switches consumers'
 (features-service / campaign-service / dashboard) reads.
 
-- **`audiences.status`** = `active | paused | archived`, default `active`
-  (migration `0011`). An audience is **immutable except its status** — `PATCH
+- **`audiences.status`** = `suggested | active | paused | archived`, default
+  `active` (migration `0011`; column is free-text `text`, no DB CHECK — values
+  enforced app-level in `AudienceStatusSchema`). `suggested` is the **inactive**
+  default for rows created by `/suggest` (never live for the brand until flipped
+  to `active`). An audience is **immutable except its status** — `PATCH
   /orgs/audiences/{id}` accepts only `name`/`nlPrompt` metadata; `brandId` and
   `filters` are rejected (`.strict()` → 400) because editing filters = a new
   audience (evidence attribution is keyed on the audience id). `PATCH
   /orgs/audiences/{id}/status` is the dedicated status-only mutator. The hard
   `DELETE` stays for true cleanup — **archive is a soft state, NOT a delete**.
-- **Name-unique per brand** (case-insensitive): unique index
-  `idx_audiences_brand_lower_name` on `(brand_id, lower(name))`, mirroring
-  brand-service `brand_personas_brand_id_lower_name_key`. A duplicate-name
-  create → 409.
+- **Name-unique per (org, brand)** (case-insensitive): unique index
+  `idx_audiences_org_brand_lower_name` on `(org_id, brand_id, lower(name))`
+  (migration `0012` widened it from brand-only so a name can repeat across orgs
+  sharing a brand — the suggest flow keys proposals on org+brand+name). A
+  duplicate-name create → 409.
 - **One-time backfill** — `POST /internal/backfill-audiences-from-personas`
   (`src/routes/backfill.ts`, service-auth) copies every brand-service persona
   into `audiences`, **preserving the persona id as the audience id** (downstream
@@ -265,11 +269,36 @@ wave drops brand-service personas entirely + switches consumers'
 
 ### Audience suggestion (onboarding) — `POST /orgs/audiences/suggest`
 
-Turns a natural-language audience description into a **set of candidate
-audiences** the user picks from, during onboarding. `requireOrgAndUser`
+Turns a natural-language audience description into a **set of persisted
+candidate audiences** the user picks from, during onboarding. `requireOrgAndUser`
 (`x-user-id` needed for chat-service + provider key resolution).
 `src/services/audiences.ts` `suggestAudiences` owns it; `src/lib/chat-client.ts`
 is the chat-service client.
+
+**Three stages — layer-1 decompose → layer-2 agentic refine → collapse + persist:**
+
+1. **LAYER 1 (shared, provider-agnostic, ONE LLM call)** — `decomposeSegments`
+   reads the caller's segmentation intent ("US and Europe separately", "split by
+   seniority", "one broad list") and emits a SET of **named** audiences
+   `{ name (≤4 words), description }`. The names are SHARED so layer-2's two
+   provider runs map to the SAME segments and are comparable head-to-head. Cap
+   `SUGGEST_MAX_CANDIDATES = 6` (LLM told to group coarser + `truncated:true`).
+2. **LAYER 2 (per audience × per provider, agentic multi-turn loop)** —
+   `refineFilters` hands the segment + that provider's `filters-prompt` rulebook
+   to the LLM, which `{action:"test",filters}` → server runs the **free dry-run**
+   → count fed back into the transcript → LLM decides for itself: `confirm`
+   (satisfied with the count), `test` again (refine — too few/too loose), or
+   `exhausted`. Bounded by `SUGGEST_MAX_ITERATION_ROUNDS = 8`. Mirrors
+   lead-service's `generateNextStrategy` self-iteration mechanism (slated for
+   deprecation later — parity for now).
+3. **COLLAPSE + PERSIST** — per audience, keep the provider with the **larger
+   count** (tie → apollo); we return **ONE candidate per audience, not one per
+   provider**. Each collapsed audience is written as an `audiences` row at status
+   **`suggested`** (INACTIVE — never live for the brand until the caller flips it
+   to `active` via `PATCH /orgs/audiences/{id}/status`). The `audienceId`s are
+   returned so the front activates the chosen ones. Unique per
+   `(org_id, brand_id, lower(name))`; re-running refreshes a still-`suggested`
+   row in place, never mutates an `active`/`paused`/`archived` one.
 
 - **LLM runs via chat-service `POST /complete`** (`google`/`flash`,
   `responseFormat:"json"`, **no `responseSchema`**). **chat-service OWNS the LLM
@@ -293,30 +322,33 @@ is the chat-service client.
   *`additionalProperties` must be explicitly set to false* on the open object.
   Final fix v0.13.2 / #54: switch to Gemini schemaless JSON.)
 - **Granularity is emergent from the NL, not an input.** Input is ONLY
-  `{nlPrompt, brandId}` — no `strategy`/count knob. The LLM reads the caller's
-  own segmentation intent ("split by country", "FR and DE separately", "one
-  broad list") and emits one candidate per implied segment. Safety backstop:
-  `SUGGEST_MAX_CANDIDATES_PER_PROVIDER = 6` (the LLM is told to group coarser +
-  set `truncated` if the NL implies more) — a cap, not a knob.
-- **Per provider** (apollo + apify): fetch that provider's `filters-prompt`
-  (its rulebook) → LLM generates candidates → each candidate's filters counted
-  via the **free dry-run**. A candidate that returns **0** or **invalid
-  filters** (provider 4xx) is fed back to the LLM to revise, bounded by
-  `SUGGEST_MAX_REVISE_ROUNDS = 3`; still-dry candidates are returned with
-  `count:0` honestly (no infinite loop, no silent drop). `dryRunSafe`
-  distinguishes a provider **4xx (invalid filters → revise)** from a **5xx /
-  network / config error (real outage → rethrow, fail loud 502)** — the 4xx is
-  the validation signal the loop consumes, NOT a swallow.
+  `{nlPrompt, brandId}` — no `strategy`/count knob. Layer 1 reads the caller's
+  own segmentation intent and emits one **named** audience per implied segment.
+- **Best provider only, not both.** We query apollo AND apify for each audience
+  (free dry-runs), then return **only the higher-count provider** per audience
+  (tie → apollo). The neutral filter set is provider-specific (each provider's
+  layer-2 loop fills the fields IT honors best). `dryRunSafe` distinguishes a
+  provider **4xx (invalid filters → fed back to the layer-2 loop to revise)**
+  from a **5xx / network / config error (real outage → rethrow, fail loud 502)**
+  — the 4xx is the validation signal the loop consumes, NOT a swallow. An
+  audience the LLM can't fill on either provider is returned `count:0` honestly
+  (no infinite loop, no silent drop).
 - **Candidates use the NEUTRAL `PeopleSearchFilters` shape** (not raw
-  provider-DSL). "apollo-flavored vs apify-flavored" = which neutral fields each
-  provider honors + each provider's count. Raw provider-only filters beyond the
-  neutral vocabulary are a deliberate future option (would need a gateway
-  raw-passthrough dry-run/search path) — not built; nothing downstream needs it.
-- **Stateless**: `/suggest` persists nothing. The user picks candidates and
-  saves each via `POST /orgs/audiences` with `provider` + that candidate's
-  `filters` + `count`. A selected audience is **provider-specific**
-  (`audiences.provider` = `apollo`|`apify`); the audience id stays our own
-  cross-provider-unique uuid.
+  provider-DSL). Raw provider-only filters beyond the neutral vocabulary are a
+  deliberate future option (would need a gateway raw-passthrough dry-run/search
+  path) — not built; nothing downstream needs it.
+- **Stateful — persists `suggested` rows, returns `audienceId`s.** `/suggest`
+  writes each collapsed audience as an `audiences` row at status `suggested`
+  (inactive) and returns its `audienceId`. The front displays them, the user
+  picks, and the front **activates** the chosen ones via
+  `PATCH /orgs/audiences/{id}/status {status:"active"}` (existing endpoint, no
+  new save). Unselected `suggested` rows stay inactive (filterable via
+  `GET /orgs/audiences?status=suggested`; never surface in the brand's active
+  view). A selected audience is **provider-specific**
+  (`audiences.provider` = `apollo`|`apify`); the audience id is our own
+  cross-provider-unique uuid. (History: #44 was stateless + two-providers-flat +
+  revise-only-on-failure; this rev made it layer-1-shared + agentic-refine +
+  best-provider-collapse + stateful-`suggested`.)
 - **Env vars (NEW)**: `CHAT_SERVICE_URL`, `CHAT_SERVICE_API_KEY` (read at call
   time, fail the request loudly if absent — `ChatConfigError` → 502).
 - **Onboarding-before-balance caveat**: `/complete` authorizes against the org

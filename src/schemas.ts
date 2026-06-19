@@ -892,8 +892,11 @@ registry.registerPath({
 // additionally requires x-user-id (apollo/apify key resolution).
 
 // Audience status lifecycle, mirroring brand-service persona semantics.
+// "suggested" is the INACTIVE default for rows created by POST /orgs/audiences/
+// suggest — the audience is never live for the brand until the caller flips it
+// to "active" via PATCH /orgs/audiences/{id}/status.
 export const AudienceStatusSchema = z
-  .enum(["active", "paused", "archived"])
+  .enum(["suggested", "active", "paused", "archived"])
   .openapi("AudienceStatus");
 
 export const AudienceSchema = z
@@ -1057,18 +1060,34 @@ export const SuggestAudiencesRequestSchema = z
 
 export const AudienceCandidateSchema = z
   .object({
-    provider: z.enum(["apollo", "apify"]),
-    label: z.string(),
-    rationale: z.string(),
+    audienceId: z.string().uuid().openapi({
+      description:
+        "The id of the PERSISTED audience row (status 'suggested', inactive). The caller activates a chosen candidate via PATCH /orgs/audiences/{id}/status {status:'active'}.",
+    }),
+    name: z.string().openapi({
+      description:
+        "Short human label for this audience (<=4 words), shared across providers — the layer-1 segment name.",
+    }),
+    rationale: z.string().openapi({
+      description: "One-sentence description of who this audience targets.",
+    }),
+    provider: z.enum(["apollo", "apify"]).openapi({
+      description:
+        "The winning provider for this audience — the one with the larger free dry-run count (tie -> apollo). Only this provider's filters/count are returned.",
+    }),
     filters: PeopleSearchFiltersSchema,
     count: z.number().int().openapi({
-      description: "Live match count for these filters on this provider (free dry-run). 0 means the LLM could not find a non-empty, valid filter set within the retry budget.",
+      description:
+        "The winning provider's live match count (free dry-run). 0 means the LLM could not find a non-empty, valid filter set within the iteration budget on either provider.",
+    }),
+    status: AudienceStatusSchema.openapi({
+      description: "Always 'suggested' (inactive) for a freshly-suggested audience.",
     }),
     validationError: z.string().nullable().openapi({
-      description: "Set when the provider rejected the filters as invalid after the retry budget was exhausted.",
+      description: "Set when the winning provider rejected the filters as invalid after the iteration budget was exhausted.",
     }),
     truncated: z.boolean().openapi({
-      description: "True when the NL implied more segments than the per-provider cap and the LLM grouped coarser.",
+      description: "True when the NL implied more audiences than the cap and the LLM grouped coarser.",
     }),
   })
   .openapi("AudienceCandidate");
