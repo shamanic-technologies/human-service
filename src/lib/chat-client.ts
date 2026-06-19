@@ -154,3 +154,54 @@ export async function completeJson(args: {
   }
   return data.json;
 }
+
+export interface GeneratedImage {
+  imageBase64: string;
+  mimeType: string;
+  model: string;
+  tokensInput: number;
+  tokensOutput: number;
+  text?: string;
+}
+
+// One-shot image generation via chat-service POST /orgs/images/generate. As with
+// /complete, chat-service OWNS the cost (provision→authorize→execute→actualize
+// against the org balance) — human-service declares none, it only forwards the
+// prompt + identity headers and stores the returned bytes. Fail loud: a non-2xx
+// (incl. a 402 when the org can't afford the call) throws ChatServiceError → 502.
+export async function generateImage(args: {
+  prompt: string;
+  identity: ChatIdentity;
+}): Promise<GeneratedImage> {
+  const { url, key } = requireChat();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-API-Key": key,
+    "x-org-id": args.identity.orgId,
+    ...(args.identity.userId ? { "x-user-id": args.identity.userId } : {}),
+    ...(args.identity.runId ? { "x-run-id": args.identity.runId } : {}),
+  };
+
+  let res: Response;
+  try {
+    res = await fetchWithConnectRetry(`${url}/orgs/images/generate`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ prompt: args.prompt }),
+    });
+  } catch (err) {
+    throw new ChatServiceError(0, `chat-service unreachable: ${String(err)}`);
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ChatServiceError(res.status, text);
+  }
+  const data = (await res.json()) as Partial<GeneratedImage>;
+  if (!data.imageBase64 || !data.mimeType) {
+    throw new ChatServiceError(
+      502,
+      "chat-service returned no image bytes / mime type"
+    );
+  }
+  return data as GeneratedImage;
+}
