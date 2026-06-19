@@ -37,7 +37,8 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Org-scoped (legacy) | `GET /humans/{id}/methodology` | apiKey + identity | Get cached methodology |
 | Org-scoped (legacy) | `POST /humans/{id}/extract` | apiKey + identity | Trigger scrape + AI extraction |
 | Internal | `POST /internal/transfer-brand` | apiKey | Move solo-brand methodology rows between orgs |
-| Internal | `POST /internal/backfill-audiences-from-personas` | apiKey | One-time: copy brand-service personas → audiences (id-preserving, idempotent, `?dryRun=true`, provenance-tagged) |
+| Internal | `POST /internal/backfill-audiences-from-personas` | apiKey | One-time: copy brand-service personas → audiences (id-preserving, idempotent, `?dryRun=true`, provenance-tagged, **maps persona vocab → canonical filters on insert**) |
+| Internal | `POST /internal/remap-audience-filters` | apiKey | One-time data fix: translate already-backfilled audiences' filters from legacy persona vocab → canonical `PeopleSearchFilters` vocab, in place (idempotent, `?dryRun=true`, reversible) |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
 | Org-scoped (CRM v1) | `GET /orgs/lists/{id}` | apiKey + `x-org-id` | Get a CRM list |
@@ -251,6 +252,32 @@ wave drops brand-service personas entirely + switches consumers'
   writing; real run inserts `ON CONFLICT (id) DO NOTHING` (idempotent — re-run
   is a no-op); inserted rows are tagged `source = 'brand_persona_backfill'`
   (reversible: `DELETE FROM audiences WHERE source = 'brand_persona_backfill'`).
+  - **Filter vocabulary is MAPPED, not copied verbatim.** brand-service personas
+    speak the LEGACY persona vocab (`industry`, `jobTitles`, `location`,
+    `employeeRange`, `seniority`, `department`, `fundingStage`, `revenueRange`,
+    `keywords`, `technologies`); audiences (+ the people gateway) speak the
+    canonical `PeopleSearchFilters` vocab (`industries`, `titles`,
+    `locationCountries`, `employeeMin`/`Max`, `seniorities`, `functions`,
+    `fundingStages`, `revenueRanges`, `keywords`, `technologies`). The audiences
+    Zod silently STRIPS any non-canonical key on write, so a verbatim copy would
+    lose the filter. `src/services/persona-filter-map.ts`
+    (`mapPersonaFiltersToCanonical`) translates one vocab into the other and runs
+    on BOTH the backfill (on insert) and the re-map endpoint. Lossy edges (owned
+    deliberately): `location` → `locationCountries` (all values, NO city/state
+    split — apollo flattens location tiers anyway); `employeeRange` buckets →
+    `employeeMin`/`employeeMax` (numeric range honored by both providers; `"N+"`
+    → open max); `seniority` keeps only enum values; `department` → `functions`
+    (lowercase, spaces→`_`). FAIL LOUD (`PersonaFilterMapError` → 502) on a
+    persona key with no canonical target or an unparseable value — never a silent
+    drop of a representable filter.
+  - **Re-map of already-backfilled rows** — `POST /internal/remap-audience-filters`
+    (`src/routes/backfill.ts`, service-auth) translates the filters of existing
+    `source='brand_persona_backfill'` audiences in place. Scoped to rows still
+    holding persona vocab; idempotent (a canonical row is `alreadyCanonical`, not
+    re-written, so re-run is a no-op); `?dryRun=true` returns counts + a per-row
+    before/after sample without writing; reversible (rows stay provenance-tagged;
+    brand-service personas — the SoT — untouched). **Must be run in BOTH staging
+    AND prod after deploy** (the live backfilled rows are in prod).
   - **`audiences.source`** = provenance: `'brand_persona_backfill'` for
     backfilled rows, null for native rows. (Distinct from
     `audience_members.source` = provider.)

@@ -1725,6 +1725,71 @@
           "skipped"
         ]
       },
+      "RemapAudienceFiltersResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "scanned": {
+            "type": "integer",
+            "description": "Backfilled audiences inspected (source='brand_persona_backfill')."
+          },
+          "remapped": {
+            "type": "integer",
+            "description": "Audiences whose filters were translated (0 on a dry-run)."
+          },
+          "wouldRemap": {
+            "type": "integer",
+            "description": "Audiences that still hold persona vocab and would be translated."
+          },
+          "alreadyCanonical": {
+            "type": "integer",
+            "description": "Backfilled audiences already canonical (idempotent no-op)."
+          },
+          "sample": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "before": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "nullable": true
+                  }
+                },
+                "after": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "nullable": true
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "before",
+                "after"
+              ]
+            },
+            "description": "Per-audience before/after preview (capped)."
+          }
+        },
+        "required": [
+          "dryRun",
+          "scanned",
+          "remapped",
+          "wouldRemap",
+          "alreadyCanonical",
+          "sample"
+        ]
+      },
       "HealthResponse": {
         "type": "object",
         "properties": {
@@ -4337,6 +4402,57 @@
           },
           "502": {
             "description": "brand-service error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/remap-audience-filters": {
+      "post": {
+        "summary": "One-time data fix: translate backfilled audiences' filters from legacy persona vocab to the canonical PeopleSearchFilters vocab, in place (idempotent, dry-runnable, reversible)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', report counts + a before/after sample without writing. Defaults to false (real run)."
+            },
+            "required": false,
+            "description": "When 'true', report counts + a before/after sample without writing. Defaults to false (real run).",
+            "name": "dryRun",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Re-map result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemapAudienceFiltersResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "unrepresentable persona filter",
             "content": {
               "application/json": {
                 "schema": {
