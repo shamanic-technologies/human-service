@@ -1127,34 +1127,6 @@ export const GenerateAudienceAvatarRequestSchema = z
   .strict()
   .openapi("GenerateAudienceAvatarRequest");
 
-// --- Internal: one-time persona -> audience backfill ---
-export const BackfillPersonasQuerySchema = z.object({
-  dryRun: z
-    .enum(["true", "false"])
-    .optional()
-    .openapi({
-      description:
-        "When 'true', report counts without writing any rows. Defaults to false (real run).",
-    }),
-});
-
-export const BackfillPersonasResponseSchema = z
-  .object({
-    dryRun: z.boolean(),
-    totalPersonas: z.number().int().openapi({
-      description: "Personas returned by brand-service.",
-    }),
-    inserted: z.number().int().openapi({
-      description:
-        "Personas written as new audiences (0 on a dry-run or a re-run where all already exist).",
-    }),
-    skipped: z.number().int().openapi({
-      description:
-        "Personas whose id already exists as an audience (idempotent no-op).",
-    }),
-  })
-  .openapi("BackfillPersonasResponse");
-
 registry.registerPath({
   method: "post",
   path: "/orgs/audiences/suggest",
@@ -1345,20 +1317,6 @@ registry.registerPath({
     400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
     404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
-  },
-});
-
-registry.registerPath({
-  method: "post",
-  path: "/internal/backfill-audiences-from-personas",
-  summary:
-    "One-time backfill: copy every brand-service persona into audiences, preserving the persona id (idempotent, dry-runnable, provenance-tagged for reversibility)",
-  security: [{ apiKey: [] }],
-  request: { query: BackfillPersonasQuerySchema },
-  responses: {
-    200: { description: "Backfill result", content: { "application/json": { schema: BackfillPersonasResponseSchema } } },
-    401: { description: "Unauthorized" },
-    502: { description: "brand-service error", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
