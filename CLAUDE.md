@@ -370,7 +370,19 @@ is the chat-service client.
    (satisfied with the count), `test` again (refine — too few/too loose), or
    `exhausted`. Bounded by `SUGGEST_MAX_ITERATION_ROUNDS = 8`. Mirrors
    lead-service's `generateNextStrategy` self-iteration mechanism (slated for
-   deprecation later — parity for now).
+   deprecation later — parity for now). The layer-2 system prompt also carries a
+   **healthy-count band** (~500–50k, guides not hard limits) so the LLM judges
+   too-narrow vs too-loose consistently, and an **exact-vocabulary** rule (copy
+   enum values verbatim from the rulebook, never invent one — an unrecognized
+   value is silently dropped by the provider and under-matches).
+   - **Apollo industries are injected from the canonical taxonomy.** apollo's
+     `industries` filter (`qOrganizationIndustryTagIds`) is free-text `string[]`
+     against a hidden 148-entry LinkedIn list, so apollo's `filters-prompt`
+     documents only an *example*, not the accepted values — the LLM would guess
+     ("SaaS" → zero match). `refineFilters` fetches apollo `GET
+     /reference/industries` (`apolloIndustriesReference`) and injects the full
+     list into the apollo layer-2 prompt. **apify needs no equivalent** — its
+     `filters-prompt` already embeds every enum's accepted values.
 3. **COLLAPSE + PERSIST** — per audience, keep the provider with the **larger
    count** (tie → apollo); we return **ONE candidate per audience, not one per
    provider**. Each collapsed audience is written as an `audiences` row at status
@@ -380,7 +392,7 @@ is the chat-service client.
    `(org_id, brand_id, lower(name))`; re-running refreshes a still-`suggested`
    row in place, never mutates an `active`/`paused`/`archived` one.
 
-- **LLM runs via chat-service `POST /complete`** (`google`/`flash`,
+- **LLM runs via chat-service `POST /complete`** (`google`/`flash-pro`,
   `responseFormat:"json"`, **no `responseSchema`**). **chat-service OWNS the LLM
   cost** — it does the provision→authorize→execute→actualize against the org
   balance — so **human-service still declares no cost** (the invariant holds;
@@ -395,12 +407,18 @@ is the chat-service client.
   (`responseMimeType:"application/json"`) needs **no schema**, so the shape stays
   **prompt-described + validated caller-side** (`parseCandidates` → fail loud 502
   on a malformed LLM response; the per-filter dry-run validates the values).
-  `flash` is also ~10-20× cheaper than `sonnet`, cutting the per-suggest cost.
-  (History: #44 shipped sonnet + no schema; chat-service later added the upfront
-  anthropic guard → every call 400'd (#50/v0.13.1). The first fix tried an
-  anthropic strict envelope with an open `filters` — Anthropic 400'd
-  *`additionalProperties` must be explicitly set to false* on the open object.
-  Final fix v0.13.2 / #54: switch to Gemini schemaless JSON.)
+  **Model = `flash-pro`** (Gemini 3.5 Flash, mid-tier): the suggested audience's
+  relevance is entirely the LLM's NL→filters mapping (apollo/apify match
+  structured filters deterministically — **no LLM on the provider side**), so the
+  model tier IS the filter-quality lever. `flash-pro` reasons over the segment +
+  rulebook noticeably better than plain `flash` (which under-targets) while
+  staying far cheaper than `pro`/`sonnet`. (History: #44 shipped sonnet + no
+  schema; chat-service later added the upfront anthropic guard → every call 400'd
+  (#50/v0.13.1). The first fix tried an anthropic strict envelope with an open
+  `filters` — Anthropic 400'd *`additionalProperties` must be explicitly set to
+  false* on the open object. Then v0.13.2 / #54 switched to Gemini schemaless
+  JSON on `flash`; later bumped to `flash-pro` + ICP-axis layer-1 prompt + apollo
+  canonical-industries injection to raise filter relevance.)
 - **Granularity is emergent from the NL, not an input.** Input is ONLY
   `{nlPrompt, brandId}` — no `strategy`/count knob. Layer 1 reads the caller's
   own segmentation intent and emits one **named** audience per implied segment.
