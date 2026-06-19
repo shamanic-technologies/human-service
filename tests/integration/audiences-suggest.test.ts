@@ -185,6 +185,31 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(c.validationError).toBeNull();
   });
 
+  it("feeds a malformed LLM filter shape back to layer-2 (no crash), then confirms the valid set", async () => {
+    // The LLM returns `keywords` as a STRING instead of string[] on its first
+    // test. Pre-fix this crashed in toApolloSearchParams (`.join is not a
+    // function`) -> uncaught -> 500. It must instead surface as a validation
+    // error fed back into the loop, exactly like a provider 4xx.
+    wire({
+      segments: [{ name: "Founders", description: "startup founders" }],
+      act: (_p, _cleanTests, msg) => {
+        if (msg.includes("-> count=")) return { action: "confirm", reasoning: "r" };
+        if (msg.includes("Invalid filter shape"))
+          return { action: "test", filters: { titles: ["Founder"] }, reasoning: "r" };
+        // malformed: keywords must be string[], not a string
+        return { action: "test", filters: { keywords: "founders" }, reasoning: "r" };
+      },
+      apolloCount: () => 200,
+      apifyCount: () => 30,
+    });
+    const res = await suggest("startup founders");
+    expect(res.status).toBe(200);
+    const c = res.body.candidates[0];
+    expect(c.provider).toBe("apollo");
+    expect(c.count).toBe(200);
+    expect(c.validationError).toBeNull();
+  });
+
   it("surfaces count:0 honestly when neither provider yields matches", async () => {
     wire({
       segments: [{ name: "Impossible", description: "nobody" }],
