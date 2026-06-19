@@ -56,6 +56,8 @@ function wire(opts: {
     const u = String(url);
     if (u.endsWith("/search/filters-prompt"))
       return ok({ prompt: "RULES", schemaVersion: "1" });
+    if (u.endsWith("/reference/industries"))
+      return ok({ industries: [{ name: "Computer Software" }, { name: "Banking" }] });
     if (u.endsWith("/complete")) {
       const body = JSON.parse(init.body ?? "{}") as {
         systemPrompt: string;
@@ -304,6 +306,8 @@ describe("POST /orgs/audiences/suggest", () => {
       const u = String(url);
       if (u.endsWith("/search/filters-prompt"))
         return ok({ prompt: "RULES", schemaVersion: "1" });
+      if (u.endsWith("/reference/industries"))
+        return ok({ industries: [{ name: "Computer Software" }] });
       if (u.endsWith("/complete")) {
         const body = JSON.parse(init.body ?? "{}");
         completeBodies.push(body);
@@ -327,9 +331,57 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(completeBodies.length).toBeGreaterThan(0);
     for (const body of completeBodies) {
       expect(body.provider).toBe("google");
+      expect(body.model).toBe("flash-pro");
       expect(body.responseFormat).toBe("json");
       expect(body.responseSchema).toBeUndefined();
     }
+  });
+
+  it("injects apollo's canonical industries list into the apollo layer-2 prompt, not the apify one", async () => {
+    const layer2: Array<{ provider: "apollo" | "apify"; systemPrompt: string }> = [];
+    let referenceCalls = 0;
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/search/filters-prompt"))
+        return ok({ prompt: "RULES", schemaVersion: "1" });
+      if (u.endsWith("/reference/industries")) {
+        referenceCalls++;
+        return ok({ industries: [{ name: "Computer Software" }, { name: "Banking" }] });
+      }
+      if (u.endsWith("/complete")) {
+        const body = JSON.parse(init.body ?? "{}") as {
+          systemPrompt: string;
+          message: string;
+        };
+        if (body.systemPrompt.includes("decompose a natural-language audience")) {
+          return ok({ json: { audiences: [{ name: "Fintech CTOs", description: "CTOs in fintech" }] } });
+        }
+        const provider = body.systemPrompt.includes("build a apify") ? "apify" : "apollo";
+        layer2.push({ provider, systemPrompt: body.systemPrompt });
+        const cleanTests = (body.message.match(/-> count=/g) ?? []).length;
+        return ok({
+          json: cleanTests === 0
+            ? { action: "test", filters: { titles: ["CTO"] } }
+            : { action: "confirm" },
+        });
+      }
+      if (u.endsWith("/search/dry-run")) return ok({ totalEntries: 800 });
+      if (u.endsWith("/search/count")) return ok({ totalMatched: 40 });
+      throw new Error("unexpected url " + u);
+    });
+
+    const res = await suggest("CTOs in fintech");
+    expect(res.status).toBe(200);
+
+    // apollo reference fetched (at least once); injected into the apollo prompt.
+    expect(referenceCalls).toBeGreaterThanOrEqual(1);
+    const apolloPrompt = layer2.find((l) => l.provider === "apollo")?.systemPrompt;
+    const apifyPrompt = layer2.find((l) => l.provider === "apify")?.systemPrompt;
+    expect(apolloPrompt).toContain("CANONICAL INDUSTRIES");
+    expect(apolloPrompt).toContain("Computer Software");
+    // apify carries no injected industries block (its own rulebook already has them).
+    expect(apifyPrompt).toBeDefined();
+    expect(apifyPrompt).not.toContain("CANONICAL INDUSTRIES");
   });
 
   it("502 when chat-service env is not configured", async () => {
