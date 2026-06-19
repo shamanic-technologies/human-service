@@ -366,9 +366,11 @@ export const audiences = pgTable(
   },
   (table) => [
     index("idx_audiences_org_brand").on(table.orgId, table.brandId),
-    // Name-unique per brand (case-insensitive), mirroring brand-service's
-    // brand_personas_brand_id_lower_name_key.
-    uniqueIndex("idx_audiences_brand_lower_name").on(
+    // Name-unique per (org, brand) (case-insensitive). Widened from brand-only
+    // so the same audience name can exist for the same brand across different
+    // orgs (org isolation) — the suggest flow keys proposals on org+brand+name.
+    uniqueIndex("idx_audiences_org_brand_lower_name").on(
+      table.orgId,
       table.brandId,
       sql`lower(${table.name})`
     ),

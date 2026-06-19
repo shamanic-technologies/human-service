@@ -156,6 +156,7 @@ router.post(
     try {
       const candidates = await suggestAudiences(
         parsed.data.nlPrompt,
+        parsed.data.brandId,
         buildIdentity(res)
       );
       console.log(
