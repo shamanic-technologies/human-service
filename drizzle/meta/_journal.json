@@ -92,6 +92,13 @@
       "when": 1771587966883,
       "tag": "0012_widen_audience_name_unique_org",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1771587966884,
+      "tag": "0013_add_audience_avatar",
+      "breakpoints": true
     }
   ]
 }
