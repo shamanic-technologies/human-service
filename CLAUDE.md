@@ -37,7 +37,8 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Org-scoped (legacy) | `GET /humans/{id}/methodology` | apiKey + identity | Get cached methodology |
 | Org-scoped (legacy) | `POST /humans/{id}/extract` | apiKey + identity | Trigger scrape + AI extraction |
 | Internal | `POST /internal/transfer-brand` | apiKey | Move solo-brand methodology rows between orgs |
-| Internal | `POST /internal/backfill-audiences-from-personas` | apiKey | One-time: copy brand-service personas → audiences (id-preserving, idempotent, `?dryRun=true`, provenance-tagged) |
+| Internal | `POST /internal/backfill-audiences-from-personas` | apiKey | One-time: copy brand-service personas → audiences (id-preserving, idempotent, `?dryRun=true`, provenance-tagged, **maps persona vocab → canonical filters on insert**) |
+| Internal | `POST /internal/remap-audience-filters` | apiKey | One-time data fix: translate already-backfilled audiences' filters from legacy persona vocab → canonical `PeopleSearchFilters` vocab, in place (idempotent, `?dryRun=true`, reversible) |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
 | Org-scoped (CRM v1) | `GET /orgs/lists/{id}` | apiKey + `x-org-id` | Get a CRM list |
@@ -58,6 +59,8 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}/status` | apiKey + `x-org-id` | Change status (active / paused / archived) — mutates only status |
 | Org-scoped (Audiences v1) | `DELETE /orgs/audiences/{id}` | apiKey + `x-org-id` | Hard delete (cascades members) — archive is a soft state, not delete |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/refresh-count` | apiKey + `x-org-id` + `x-user-id` | Re-snapshot apollo + apify counts via free dry-run |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/serve-next` | apiKey + `x-org-id` + `x-user-id` | Serve the NEXT unserved person of the audience (real provider match on its stored filters; records served; never repeats; clean exhausted signal) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/avatar` | apiKey + `x-org-id` + `x-user-id` | (Re)generate the audience avatar via chat-service; persisted as a `data:` URI on `avatarUrl` |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/members` | apiKey + `x-org-id` | List canonical people in the audience (paginated) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/stats` | apiKey + `x-org-id` | Per-audience membership stats for a list of emails / personIds |
 
@@ -220,6 +223,57 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
 - **No cost declaration here** either — counting rides the providers' free
   dry-run; the billed reveal still belongs to apollo/apify.
 
+### Serve-next (lead primitive) — `POST /orgs/audiences/{id}/serve-next`
+
+The per-iteration lead primitive the new runtime calls: lead-service asks
+features-service for the most-relevant audienceId for a brand, then asks
+human-service here for the NEXT person of that audience. `requireOrgAndUser`
+(`x-user-id` needed for apollo/apify key resolution). `serveNextPerson` in
+`src/services/audiences.ts` owns it; `src/routes/audiences.ts` is the thin layer.
+
+- **It's a thin WRAPPER over the existing people-gateway, not new matching.** It
+  loads the audience (404 if missing/foreign), searches with the audience's
+  **STORED canonical `filters` via its committed `provider`**, brand-scoped to
+  **`audience.brandId`** (the route forces `identity.brandIds = [audience.brandId]`
+  — never a header), records the serve, tags `audience_members`, and returns
+  `{ status, person }`.
+- **No-repeat = the EXISTING per-brand cross-provider suppression**, reused, not a
+  new per-audience exclusion table. Once served for the brand (under ANY audience),
+  a person is excluded brand-wide within the 3-month window — a strictly stronger
+  guarantee than "never twice for this audience". Membership tagging is provenance
+  only. (The 3-mo window lapsing is the existing designed semantic; not a new
+  forever-exclusion.)
+- **Per provider**: apify → `peopleSearch(limit 1)` (exclude-set pushed down, hit
+  is billed + recorded by the gateway) → that hit, or exhausted. apollo → free
+  teaser list (suppression-filtered + saturation-bounded) → enrich teasers one at
+  a time (`resolveEmail` by `providerPersonId`, billed, recorded in
+  `finalizeResolved`) until one reveals a non-suppressed person, then stop; all
+  teasers dry ⟹ exhausted.
+- **Exhaustion is explicit**: `{ status: "exhausted", person: null }` — never a
+  silent empty. An audience with **no committed provider OR no stored filters**
+  fails loud: `AudienceNotServableError` → **422** (can't serve without them).
+- **No cost declared here** — apollo/apify own the billed reveal; the gateway only
+  forwards `x-run-id` for downstream tracing.
+
+### Avatar — `POST /orgs/audiences/{id}/avatar`
+
+An audience carries a nullable **`avatarUrl`** (migration `0013`, `audiences.avatar_url
+text`). The route (re)generates it by delegating image generation to
+**chat-service `POST /orgs/images/generate`** (`src/lib/chat-client.ts`
+`generateImage`) — the same delegation brand-service used for persona avatars.
+`requireOrgAndUser` (`x-user-id` for chat-service key resolution).
+
+- chat-service returns image **bytes** (`imageBase64` + `mimeType`), not a hosted
+  URL; human-service stores them as a **self-contained `data:` URI** in
+  `avatar_url` (no blob store — the row is fully self-describing). `GET
+  /orgs/audiences/{id}` reflects it.
+- Optional `prompt` body lets the dashboard AI-chat tool steer the image; omitted
+  ⟹ the prompt is derived from the audience's own descriptors (`buildAvatarPrompt`).
+- **No cost declared here** — chat-service OWNS the image-gen cost (it does the
+  provision→authorize→execute→actualize against the org balance, exactly like
+  `/complete` for `/suggest`); the invariant holds. Fail loud: a chat-service
+  non-2xx / missing env → `ChatServiceError`/`ChatConfigError` → **502**.
+
 ### Status lifecycle + persona migration (Wave 2)
 
 Audiences carry a **status lifecycle** mirroring brand-service persona
@@ -251,6 +305,32 @@ wave drops brand-service personas entirely + switches consumers'
   writing; real run inserts `ON CONFLICT (id) DO NOTHING` (idempotent — re-run
   is a no-op); inserted rows are tagged `source = 'brand_persona_backfill'`
   (reversible: `DELETE FROM audiences WHERE source = 'brand_persona_backfill'`).
+  - **Filter vocabulary is MAPPED, not copied verbatim.** brand-service personas
+    speak the LEGACY persona vocab (`industry`, `jobTitles`, `location`,
+    `employeeRange`, `seniority`, `department`, `fundingStage`, `revenueRange`,
+    `keywords`, `technologies`); audiences (+ the people gateway) speak the
+    canonical `PeopleSearchFilters` vocab (`industries`, `titles`,
+    `locationCountries`, `employeeMin`/`Max`, `seniorities`, `functions`,
+    `fundingStages`, `revenueRanges`, `keywords`, `technologies`). The audiences
+    Zod silently STRIPS any non-canonical key on write, so a verbatim copy would
+    lose the filter. `src/services/persona-filter-map.ts`
+    (`mapPersonaFiltersToCanonical`) translates one vocab into the other and runs
+    on BOTH the backfill (on insert) and the re-map endpoint. Lossy edges (owned
+    deliberately): `location` → `locationCountries` (all values, NO city/state
+    split — apollo flattens location tiers anyway); `employeeRange` buckets →
+    `employeeMin`/`employeeMax` (numeric range honored by both providers; `"N+"`
+    → open max); `seniority` keeps only enum values; `department` → `functions`
+    (lowercase, spaces→`_`). FAIL LOUD (`PersonaFilterMapError` → 502) on a
+    persona key with no canonical target or an unparseable value — never a silent
+    drop of a representable filter.
+  - **Re-map of already-backfilled rows** — `POST /internal/remap-audience-filters`
+    (`src/routes/backfill.ts`, service-auth) translates the filters of existing
+    `source='brand_persona_backfill'` audiences in place. Scoped to rows still
+    holding persona vocab; idempotent (a canonical row is `alreadyCanonical`, not
+    re-written, so re-run is a no-op); `?dryRun=true` returns counts + a per-row
+    before/after sample without writing; reversible (rows stay provenance-tagged;
+    brand-service personas — the SoT — untouched). **Must be run in BOTH staging
+    AND prod after deploy** (the live backfilled rows are in prod).
   - **`audiences.source`** = provenance: `'brand_persona_backfill'` for
     backfilled rows, null for native rows. (Distinct from
     `audience_members.source` = provider.)

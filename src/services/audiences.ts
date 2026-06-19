@@ -27,12 +27,20 @@ import {
 import {
   dryRun,
   filtersPrompt,
+  peopleSearch,
+  resolveEmail,
+  toServedContact,
   ProviderError,
   type Identity,
+  type Person,
   type PeopleSearchFilters,
   type Provider,
 } from "./people-providers.js";
-import { completeJson, ChatServiceError } from "../lib/chat-client.js";
+import {
+  completeJson,
+  generateImage,
+  ChatServiceError,
+} from "../lib/chat-client.js";
 import { PeopleSearchFiltersSchema } from "../schemas.js";
 
 // The transaction handle drizzle passes to the `db.transaction` callback.
@@ -773,4 +781,138 @@ export async function getAudienceInOrg(
     .where(and(eq(audiences.id, audienceId), eq(audiences.orgId, orgId)))
     .limit(1);
   return row ?? null;
+}
+
+// Thrown when an audience cannot serve people because it lacks the stored state
+// serve-next needs (a committed provider, or a non-empty filter set). Fail loud
+// (route → 422) rather than silently returning an empty / wrong result.
+export class AudienceNotServableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AudienceNotServableError";
+  }
+}
+
+export interface ServeNextResult {
+  status: "served" | "exhausted";
+  person: Person | null;
+}
+
+// Serve the NEXT unserved person of an audience — the per-iteration lead
+// primitive lead-service calls. A thin wrapper over the existing people-gateway
+// machinery: it searches with the audience's STORED canonical filters via its
+// committed provider, scoped to the audience's brand so the per-brand cross-
+// provider suppression excludes anyone already served (the no-repeat guarantee),
+// records the serve, tags audience membership, and signals exhaustion cleanly.
+//
+// The caller (route) MUST pass identity.brandIds = [audience.brandId] — that is
+// what drives suppression. The audience is assumed already org-validated.
+export async function serveNextPerson(
+  audience: typeof audiences.$inferSelect,
+  identity: Identity
+): Promise<ServeNextResult> {
+  const provider = audience.provider;
+  if (provider !== "apollo" && provider !== "apify") {
+    throw new AudienceNotServableError(
+      "Audience has no committed provider — cannot serve people."
+    );
+  }
+  const filters = (audience.filters ?? null) as PeopleSearchFilters | null;
+  if (!filters || Object.keys(filters).length === 0) {
+    throw new AudienceNotServableError(
+      "Audience has no stored filters — cannot serve people."
+    );
+  }
+
+  if (provider === "apify") {
+    // apify BILLS per returned lead and pushes the brand exclude-set down, so a
+    // single hit is already an unserved, suppression-recorded serve. limit 1.
+    const result = await peopleSearch({
+      provider: "apify",
+      filters,
+      limit: 1,
+      audienceId: audience.id,
+      identity,
+    });
+    const person = result.people[0] ?? null;
+    if (!person) return { status: "exhausted", person: null };
+    await tagAudienceServe(identity.orgId, audience.id, [
+      toServedContact(person),
+    ]);
+    return { status: "served", person };
+  }
+
+  // apollo: search is a FREE teaser list (already suppression-filtered + bounded
+  // by the saturation stop). Enrich teasers one at a time until one reveals a
+  // non-suppressed person (the billed reveal records the serve in finalizeResolved),
+  // then stop. All teasers exhausted / saturated ⟹ no fresh person.
+  const search = await peopleSearch({
+    provider: "apollo",
+    filters,
+    audienceId: audience.id,
+    identity,
+  });
+  for (const teaser of search.people) {
+    if (!teaser.providerPersonId) continue;
+    const revealed = await resolveEmail({
+      provider: "apollo",
+      providerPersonId: teaser.providerPersonId,
+      audienceId: audience.id,
+      identity,
+    });
+    if (revealed.person) {
+      await tagAudienceServe(identity.orgId, audience.id, [
+        toServedContact(revealed.person),
+      ]);
+      return { status: "served", person: revealed.person };
+    }
+  }
+  return { status: "exhausted", person: null };
+}
+
+// Build the default image prompt from the audience's own descriptors, so the
+// generated avatar visually represents the persona the filters target.
+export function buildAvatarPrompt(
+  audience: typeof audiences.$inferSelect
+): string {
+  const parts = [
+    `Generate a square professional avatar portrait representing the B2B buyer persona "${audience.name}".`,
+  ];
+  if (audience.nlPrompt) parts.push(`Audience: ${audience.nlPrompt}.`);
+  const f = (audience.filters ?? {}) as PeopleSearchFilters;
+  const traits: string[] = [];
+  if (f.titles?.length) traits.push(`titles like ${f.titles.slice(0, 3).join(", ")}`);
+  if (f.seniorities?.length) traits.push(`${f.seniorities.slice(0, 3).join(", ")} seniority`);
+  if (f.industries?.length) traits.push(`in ${f.industries.slice(0, 3).join(", ")}`);
+  if (traits.length) parts.push(`Persona traits: ${traits.join("; ")}.`);
+  parts.push(
+    "Photorealistic headshot, clean studio lighting, neutral background, no text."
+  );
+  return parts.join(" ");
+}
+
+// (Re)generate an audience's avatar: delegate image generation to chat-service
+// (which owns the cost), store the bytes as a self-contained data: URI, and
+// return the updated row. The caller MUST have org-validated the audience.
+export async function generateAvatar(
+  orgId: string,
+  audienceId: string,
+  prompt: string,
+  identity: Identity
+): Promise<typeof audiences.$inferSelect> {
+  const img = await generateImage({
+    prompt,
+    identity: {
+      orgId: identity.orgId,
+      ...(identity.userId ? { userId: identity.userId } : {}),
+      ...(identity.runId ? { runId: identity.runId } : {}),
+    },
+  });
+  const dataUri = `data:${img.mimeType};base64,${img.imageBase64}`;
+  const [updated] = await db
+    .update(audiences)
+    .set({ avatarUrl: dataUri, updatedAt: new Date() })
+    .where(and(eq(audiences.id, audienceId), eq(audiences.orgId, orgId)))
+    .returning();
+  return updated;
 }

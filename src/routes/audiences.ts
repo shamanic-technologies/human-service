@@ -16,12 +16,17 @@ import {
   AudienceMembersQuerySchema,
   AudienceStatsRequestSchema,
   SuggestAudiencesRequestSchema,
+  GenerateAudienceAvatarRequestSchema,
 } from "../schemas.js";
 import {
   computeStats,
   getAudienceInOrg,
   refreshCounts,
   suggestAudiences,
+  serveNextPerson,
+  generateAvatar,
+  buildAvatarPrompt,
+  AudienceNotServableError,
 } from "../services/audiences.js";
 import {
   ProviderError,
@@ -368,6 +373,89 @@ router.post(
   }
 );
 
+// --- POST /orgs/audiences/:id/serve-next ---
+// The per-iteration lead primitive: return the NEXT unserved person of the
+// audience (real provider match on its STORED canonical filters + provider),
+// record it served (per-brand cross-provider suppression → never repeats), and
+// signal exhaustion cleanly. Needs x-user-id (apollo/apify key resolution), so
+// requireOrgAndUser. The audience's brand drives suppression — NOT a header.
+router.post(
+  "/orgs/audiences/:id/serve-next",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const orgId = res.locals.orgId as string;
+    const audience = await getAudienceInOrg(orgId, req.params.id);
+    if (!audience) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
+
+    // Suppression is scoped to the audience's brand, taken from the stored row —
+    // never the request headers (the caller serves "the next person of THIS
+    // audience", whose brand is fixed at creation).
+    const identity: Identity = {
+      ...buildIdentity(res),
+      brandIds: [audience.brandId],
+    };
+
+    try {
+      const result = await serveNextPerson(audience, identity);
+      console.log(
+        `[human-service] audience.serve_next org=${orgId} audience=${audience.id} provider=${audience.provider} status=${result.status}`
+      );
+      res.json(result);
+    } catch (err) {
+      if (err instanceof AudienceNotServableError) {
+        res.status(422).json({ error: err.message });
+        return;
+      }
+      sendProviderError(res, err);
+    }
+  }
+);
+
+// --- POST /orgs/audiences/:id/avatar ---
+// (Re)generate the audience's avatar via chat-service (which owns the cost) and
+// persist it as a self-contained data: URI on the audience. Optional `prompt`
+// body lets the dashboard AI-chat tool steer the image; omitted ⟹ derive from
+// the audience's descriptors. Needs x-user-id (chat-service key resolution).
+router.post(
+  "/orgs/audiences/:id/avatar",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const parsed = GenerateAudienceAvatarRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+
+    const orgId = res.locals.orgId as string;
+    const audience = await getAudienceInOrg(orgId, req.params.id);
+    if (!audience) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
+
+    const prompt = parsed.data.prompt ?? buildAvatarPrompt(audience);
+    try {
+      const updated = await generateAvatar(
+        orgId,
+        audience.id,
+        prompt,
+        buildIdentity(res)
+      );
+      console.log(
+        `[human-service] audience.avatar org=${orgId} audience=${audience.id}`
+      );
+      res.json({ audience: serializeAudience(updated) });
+    } catch (err) {
+      sendProviderError(res, err);
+    }
+  }
+);
+
 // --- GET /orgs/audiences/:id/members ---
 router.get(
   "/orgs/audiences/:id/members",
@@ -462,6 +550,7 @@ function serializeAudience(row: typeof audiences.$inferSelect) {
     status: row.status,
     source: row.source,
     filters: row.filters,
+    avatarUrl: row.avatarUrl,
     apolloCount: row.apolloCount,
     apifyCount: row.apifyCount,
     countedAt: row.countedAt ? row.countedAt.toISOString() : null,
