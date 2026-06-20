@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, asc, count, desc, eq } from "drizzle-orm";
+import { and, asc, count, desc, eq, isNotNull } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audienceMembers, audiences, people } from "../db/schema.js";
 import {
@@ -191,6 +191,13 @@ router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) 
   const conditions = [eq(audiences.orgId, orgId)];
   if (brandFilter) conditions.push(eq(audiences.brandId, brandFilter));
   if (statusFilter) conditions.push(eq(audiences.status, statusFilter));
+  // An audience is serveable only once it has a committed provider. The
+  // active list feeds downstream serve-ranking (campaign-service / lead-service
+  // pick a brand's top active audience to serve), so a provider-uncommitted row
+  // (provider IS NULL — never counted, half-finished) must never surface as
+  // active or serve-next 422s "no committed provider". Enforce serveability on
+  // the active read.
+  if (statusFilter === "active") conditions.push(isNotNull(audiences.provider));
   const whereClause = and(...conditions);
 
   const [rows, totalRows] = await Promise.all([
