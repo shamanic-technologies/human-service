@@ -61,7 +61,7 @@ describe("Audience status lifecycle", () => {
   });
 
   it("GET /orgs/audiences?status=active returns only active audiences", async () => {
-    await seedAudience({ name: "a-active", status: "active" });
+    await seedAudience({ name: "a-active", status: "active", provider: "apollo" });
     await seedAudience({ name: "a-paused", status: "paused" });
     await seedAudience({ name: "a-archived", status: "archived" });
 
@@ -72,6 +72,24 @@ describe("Audience status lifecycle", () => {
     expect(res.status).toBe(200);
     expect(res.body.audiences.map((a: { name: string }) => a.name)).toEqual([
       "a-active",
+    ]);
+    expect(res.body.total).toBe(1);
+  });
+
+  it("GET /orgs/audiences?status=active excludes provider-uncommitted (provider IS NULL) rows", async () => {
+    // A half-finished audience (active but never committed to a provider) must
+    // not leak into the serveable set — downstream ranking would pick it and
+    // serve-next would 422 "no committed provider".
+    await seedAudience({ name: "committed", status: "active", provider: "apollo" });
+    await seedAudience({ name: "uncommitted", status: "active", provider: null });
+
+    const res = await request(app)
+      .get("/orgs/audiences?status=active")
+      .set(headers);
+
+    expect(res.status).toBe(200);
+    expect(res.body.audiences.map((a: { name: string }) => a.name)).toEqual([
+      "committed",
     ]);
     expect(res.body.total).toBe(1);
   });
