@@ -269,6 +269,20 @@ text`). The route (re)generates it by delegating image generation to
   /orgs/audiences/{id}` reflects it.
 - Optional `prompt` body lets the dashboard AI-chat tool steer the image; omitted
   ⟹ the prompt is derived from the audience's own descriptors (`buildAvatarPrompt`).
+- **Default style = flat-vector character, NOT a photoreal headshot.** The old
+  "photorealistic headshot, neutral background" prompt collapsed every audience to
+  the same interchangeable person-in-a-suit. `buildAvatarPrompt` now renders a
+  **flat vector illustration** with role/industry-symbolising props on a **bold
+  solid background**, and seeds three separable axes DETERMINISTICALLY from
+  `audience.id` (FNV-1a `hashIndex`) — **background colour** (`pickAvatarPalette`,
+  exported; the primary differentiation lever), **gender**, **age band** — so each
+  audience keeps a stable look across regenerations AND the set spreads across
+  colours/appearances (easy to tell apart). Descriptor source priority:
+  `description` → `nlPrompt` → `name`. Prompt also requests `Square 1:1` + `no
+  text`. **Known gap (separate chat-service fix):** chat-service owns
+  `generationConfig` and does NOT yet set `aspectRatio:"1:1"`, so squareness rides
+  on the prompt text only — image bytes can come back non-square until chat-service
+  forces the aspect ratio.
 - **No cost declared here** — chat-service OWNS the image-gen cost (it does the
   provision→authorize→execute→actualize against the org balance, exactly like
   `/complete` for `/suggest`); the invariant holds. Fail loud: a chat-service
