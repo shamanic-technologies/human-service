@@ -1327,6 +1327,11 @@
             "type": "string",
             "nullable": true
           },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "description": "One-sentence summary of who THIS audience targets, distinct from the shared batch nlPrompt. LLM-generated at /suggest time. null for rows predating this field."
+          },
           "provider": {
             "type": "string",
             "nullable": true,
@@ -1388,6 +1393,7 @@
           "brandId",
           "name",
           "nlPrompt",
+          "description",
           "provider",
           "status",
           "source",
