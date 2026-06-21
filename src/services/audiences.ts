@@ -1096,6 +1096,9 @@ export async function generateAvatar(
       orgId: identity.orgId,
       ...(identity.userId ? { userId: identity.userId } : {}),
       ...(identity.runId ? { runId: identity.runId } : {}),
+      ...(identity.workflowTracking
+        ? { workflowTracking: identity.workflowTracking }
+        : {}),
     },
   });
   const dataUri = `data:${img.mimeType};base64,${img.imageBase64}`;
