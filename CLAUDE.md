@@ -603,6 +603,35 @@ Run tracking is wired through `src/services/runs.ts` for the legacy
 the caller's `x-run-id` for downstream tracing only — they don't create
 their own runs because list CRUD is short, idempotent, and free.
 
+## Workflow tracking headers (`x-campaign-id` / `x-brand-id` / `x-workflow-slug` / `x-audience-id`)
+
+workflow-service stamps these optional tracking headers on every campaign-DAG
+call. `parseOptionalTrackingHeaders` (`src/middleware/auth.ts`) reads them into
+`res.locals` and `WorkflowTrackingHeaders` is the single block carrying them;
+`workflowTrackingToHeaders` is the ONE downstream-header builder that serializes
+the whole block. Every internal sibling call forwards the block via that builder
+(`people-providers` → apollo/apify, `runs.ts` → runs-service, `keys.ts` →
+key-service, `scraping.ts` → scraping-service, `chat-client.ts` → chat-service)
+— never cherry-picked field-by-field. Add a new tracking header in ONE place
+(the builder) and it auto-propagates everywhere.
+
+- **`x-audience-id`** = the campaign's PRIORITY audience (the one campaign-service
+  picked at run start), the key for **per-audience cost attribution**
+  (runs-service aggregates `SUM(cost) GROUP BY COALESCE(runs_costs.audience_id,
+  runs.audience_id)` — flat, no rollup, so every cost row must carry it). human-
+  service **declares no cost** (apollo/apify own the search reveal; chat-service
+  owns the LLM/image), so its only job is **propagation**: read the header inbound,
+  forward it to those internal siblings so THEY tag their own runs-service cost
+  rows. Absent outside the campaign flow ⟹ omitted, never thrown.
+- **Egress guardrail**: every downstream URL human-service calls
+  (apollo/apify/chat/runs/key/scraping) is an INTERNAL sibling — the actual
+  vendor (anthropic/gemini/apollo.io/apify actor) is reached INSIDE those
+  services, so the tracking block never leaves the internal mesh. No external
+  egress here to strip.
+- Note: `lead_serves.audience_id` (bronze, provenance) is the audience a serve
+  was recorded UNDER (membership tagging) — distinct from the `x-audience-id`
+  cost-attribution header, though in the serve-next campaign flow they coincide.
+
 ## Cold-start instrumentation
 
 `src/instrumentation.ts` registers `HUMAN_SERVICE_API_KEY` as a platform key

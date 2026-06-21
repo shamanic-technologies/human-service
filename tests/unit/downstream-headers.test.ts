@@ -207,6 +207,7 @@ describe("downstream service headers", () => {
           campaignId: "camp-123",
           brandIds: ["brand-456"],
           workflowSlug: "extract-methodology",
+          audienceId: "aud-789",
         },
       });
 
@@ -214,6 +215,7 @@ describe("downstream service headers", () => {
       expect(opts.headers["x-campaign-id"]).toBe("camp-123");
       expect(opts.headers["x-brand-id"]).toBe("brand-456");
       expect(opts.headers["x-workflow-slug"]).toBe("extract-methodology");
+      expect(opts.headers["x-audience-id"]).toBe("aud-789");
     });
 
     it("createRun omits workflow tracking headers when not provided", async () => {
@@ -294,7 +296,7 @@ describe("downstream service headers", () => {
       expect(opts.headers["x-workflow-slug"]).toBe("extract-methodology");
     });
 
-    it("addCosts forwards workflow tracking headers", async () => {
+    it("addCosts forwards workflow tracking headers (incl x-audience-id)", async () => {
       process.env.RUNS_SERVICE_URL = "http://runs:3000";
       process.env.RUNS_SERVICE_API_KEY = "runs-key";
 
@@ -310,6 +312,7 @@ describe("downstream service headers", () => {
             campaignId: "camp-123",
             brandIds: ["brand-456"],
             workflowSlug: "extract-methodology",
+            audienceId: "aud-789",
           },
         }
       );
@@ -318,6 +321,94 @@ describe("downstream service headers", () => {
       expect(opts.headers["x-campaign-id"]).toBe("camp-123");
       expect(opts.headers["x-brand-id"]).toBe("brand-456");
       expect(opts.headers["x-workflow-slug"]).toBe("extract-methodology");
+      expect(opts.headers["x-audience-id"]).toBe("aud-789");
+    });
+  });
+
+  // chat-service is an internal sibling that OWNS the LLM / image cost; it needs
+  // the campaign's priority audience to attribute that cost. The whole tracking
+  // block (incl x-audience-id) is forwarded via the same builder.
+  describe("chat-service", () => {
+    it("completeJson forwards the tracking block (incl x-audience-id)", async () => {
+      process.env.CHAT_SERVICE_URL = "http://chat:3020";
+      process.env.CHAT_SERVICE_API_KEY = "chat-key";
+
+      fetchSpy.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ json: { ok: true } }),
+      });
+
+      const { completeJson } = await import("../../src/lib/chat-client.js");
+
+      await completeJson({
+        message: "m",
+        systemPrompt: "s",
+        provider: "google",
+        identity: {
+          orgId: "org-1",
+          userId: "user-1",
+          runId: "run-1",
+          workflowTracking: {
+            campaignId: "camp-123",
+            brandIds: ["brand-456"],
+            workflowSlug: "audiences-suggest",
+            audienceId: "aud-789",
+          },
+        },
+      });
+
+      const [url, opts] = fetchSpy.mock.calls[0];
+      expect(url).toBe("http://chat:3020/complete");
+      expect(opts.headers["x-org-id"]).toBe("org-1");
+      expect(opts.headers["x-audience-id"]).toBe("aud-789");
+      expect(opts.headers["x-campaign-id"]).toBe("camp-123");
+    });
+
+    it("completeJson emits no x-audience-id when the block is absent", async () => {
+      process.env.CHAT_SERVICE_URL = "http://chat:3020";
+      process.env.CHAT_SERVICE_API_KEY = "chat-key";
+
+      fetchSpy.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ json: { ok: true } }),
+      });
+
+      const { completeJson } = await import("../../src/lib/chat-client.js");
+
+      await completeJson({
+        message: "m",
+        systemPrompt: "s",
+        provider: "google",
+        identity: { orgId: "org-1", userId: "user-1" },
+      });
+
+      const [, opts] = fetchSpy.mock.calls[0];
+      expect(opts.headers["x-audience-id"]).toBeUndefined();
+    });
+
+    it("generateImage forwards x-audience-id", async () => {
+      process.env.CHAT_SERVICE_URL = "http://chat:3020";
+      process.env.CHAT_SERVICE_API_KEY = "chat-key";
+
+      fetchSpy.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ imageBase64: "aGk=", mimeType: "image/png" }),
+      });
+
+      const { generateImage } = await import("../../src/lib/chat-client.js");
+
+      await generateImage({
+        prompt: "draw",
+        identity: {
+          orgId: "org-1",
+          userId: "user-1",
+          workflowTracking: { audienceId: "aud-789" },
+        },
+      });
+
+      const [url, opts] = fetchSpy.mock.calls[0];
+      expect(url).toBe("http://chat:3020/orgs/images/generate");
+      expect(opts.headers["x-audience-id"]).toBe("aud-789");
     });
   });
 });

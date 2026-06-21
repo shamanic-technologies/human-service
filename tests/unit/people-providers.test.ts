@@ -148,6 +148,28 @@ describe("peopleSearch — apollo", () => {
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
     expect(body).toEqual({});
   });
+
+  it("forwards x-audience-id (tracking block) to apollo for cost attribution", async () => {
+    fetchSpy.mockResolvedValueOnce(ok({ people: [], done: true, totalEntries: 0 }));
+    await peopleSearch({
+      provider: "apollo",
+      filters: {},
+      identity: {
+        ...identity,
+        campaignId: "camp-9",
+        workflowTracking: { audienceId: "aud-789" },
+      },
+    });
+    const [, opts] = fetchSpy.mock.calls[0];
+    expect(opts.headers["x-audience-id"]).toBe("aud-789");
+  });
+
+  it("emits no x-audience-id when the tracking block is absent", async () => {
+    fetchSpy.mockResolvedValueOnce(ok({ people: [], done: true, totalEntries: 0 }));
+    await peopleSearch({ provider: "apollo", filters: {}, identity });
+    const [, opts] = fetchSpy.mock.calls[0];
+    expect(opts.headers["x-audience-id"]).toBeUndefined();
+  });
 });
 
 describe("peopleSearch — apify", () => {

@@ -18,6 +18,7 @@ function createApp() {
         campaignId: wt.campaignId ?? null,
         brandIds: wt.brandIds ?? null,
         workflowSlug: wt.workflowSlug ?? null,
+        audienceId: wt.audienceId ?? null,
       });
     }
   );
@@ -74,6 +75,18 @@ describe("workflow tracking middleware", () => {
     expect(res.body.brandIds).toEqual(["brand-1", "brand-2", "brand-3"]);
   });
 
+  it("extracts x-audience-id into the tracking block when present", async () => {
+    const res = await request(app)
+      .get("/test")
+      .set({
+        ...baseHeaders,
+        "x-audience-id": "aud-123",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.audienceId).toBe("aud-123");
+  });
+
   it("returns null for workflow tracking headers when absent", async () => {
     const res = await request(app)
       .get("/test")
@@ -83,6 +96,7 @@ describe("workflow tracking middleware", () => {
     expect(res.body.campaignId).toBeNull();
     expect(res.body.brandIds).toBeNull();
     expect(res.body.workflowSlug).toBeNull();
+    expect(res.body.audienceId).toBeNull();
   });
 
   it("handles partial workflow tracking headers", async () => {
