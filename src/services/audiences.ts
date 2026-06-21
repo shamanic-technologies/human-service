@@ -39,6 +39,7 @@ import {
 } from "./people-providers.js";
 import {
   completeJson,
+  platformCompleteJson,
   generateImage,
   ChatServiceError,
 } from "../lib/chat-client.js";
@@ -466,6 +467,62 @@ async function decomposeSegments(
   );
   const truncated = parsed.length > SUGGEST_MAX_CANDIDATES;
   return { segments: parsed.slice(0, SUGGEST_MAX_CANDIDATES), truncated };
+}
+
+// --- Backfill: one-sentence description from an audience's own name + filters ---
+
+// A row whose LLM generation produced no usable description. The backfill route
+// treats this as a per-row skip (logged, retried on re-run) — NOT a fatal sweep
+// error (that is reserved for a chat-service outage / missing config).
+export class AudienceDescriptionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AudienceDescriptionError";
+  }
+}
+
+function buildDescriptionSystemPrompt(): string {
+  return [
+    "You write a SINGLE concise sentence describing who a B2B people-search",
+    "audience targets, derived ONLY from its name and its structured filters.",
+    "The sentence pins down the persona (titles / seniority / function) and the",
+    "firmographic + geographic constraints the filters encode -- present tense,",
+    "at most 30 words, no preamble, no trailing notes. Do NOT invent any",
+    "constraint that is not in the filters, and do NOT restate the raw JSON. If",
+    "the filters are sparse, describe honestly what little they encode.",
+    "",
+    "Respond with ONLY valid JSON (no prose, no markdown):",
+    '{"description":"<one sentence>"}',
+  ].join("\n");
+}
+
+// Generate the per-audience description used by the dashboard "Described as"
+// line, from the row's OWN name + filters (NEVER the shared batch nlPrompt).
+// Runs via chat-service's ORG-LESS platform path (platformCompleteJson) so a
+// historical backfill does not bill users' orgs; chat-service owns the cost.
+// Same Gemini schemaless-JSON setup the /suggest layer-1 uses.
+export async function generateAudienceDescription(args: {
+  name: string;
+  filters: unknown;
+}): Promise<string> {
+  const message = [
+    `Audience name: ${JSON.stringify(args.name)}`,
+    "Filters (neutral PeopleSearchFilters JSON):",
+    JSON.stringify(args.filters ?? {}),
+  ].join("\n");
+  const json = await platformCompleteJson({
+    message,
+    systemPrompt: buildDescriptionSystemPrompt(),
+    provider: SUGGEST_LLM_PROVIDER,
+    model: SUGGEST_LLM_MODEL,
+  });
+  const description = json.description;
+  if (typeof description !== "string" || description.trim().length === 0) {
+    throw new AudienceDescriptionError(
+      "LLM response missing a non-empty `description`"
+    );
+  }
+  return description.trim();
 }
 
 // --- Layer 2: per (audience, provider) agentic filter-refinement loop ---
