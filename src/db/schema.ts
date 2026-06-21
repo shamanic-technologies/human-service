@@ -341,6 +341,11 @@ export const audiences = pgTable(
     brandId: uuid("brand_id").notNull(),
     name: text("name").notNull(),
     nlPrompt: text("nl_prompt"),
+    // Per-audience one-sentence summary of who THIS audience targets, distinct
+    // from the SHARED batch nlPrompt (which is the whole multi-audience request).
+    // Populated from the layer-1 segment description at /suggest time. Nullable —
+    // null for rows that predate this column (dashboard hides "Described as").
+    description: text("description"),
     // The provider this audience commits to ("apollo" | "apify"); null = neutral.
     // Set when a provider-specific candidate from /suggest is selected.
     provider: text("provider"),

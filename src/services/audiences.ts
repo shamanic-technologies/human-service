@@ -747,6 +747,7 @@ async function persistSuggestedAudience(args: {
             ...countCols,
             countedAt: new Date(),
             nlPrompt: args.nlPrompt,
+            description: args.segment.description,
             updatedAt: new Date(),
           })
           .where(eq(audiences.id, existing.id));
@@ -761,6 +762,7 @@ async function persistSuggestedAudience(args: {
         brandId: args.brandId,
         name: args.segment.name,
         nlPrompt: args.nlPrompt,
+        description: args.segment.description,
         provider: args.provider,
         status: SUGGEST_STATUS,
         filters: args.filters as Record<string, unknown>,
