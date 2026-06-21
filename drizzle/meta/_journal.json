@@ -99,6 +99,13 @@
       "when": 1771587966884,
       "tag": "0013_add_audience_avatar",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1771587966885,
+      "tag": "0014_add_audience_description",
+      "breakpoints": true
     }
   ]
 }

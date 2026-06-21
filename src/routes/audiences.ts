@@ -553,6 +553,7 @@ function serializeAudience(row: typeof audiences.$inferSelect) {
     brandId: row.brandId,
     name: row.name,
     nlPrompt: row.nlPrompt,
+    description: row.description,
     provider: row.provider,
     status: row.status,
     source: row.source,

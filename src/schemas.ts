@@ -906,6 +906,10 @@ export const AudienceSchema = z
     brandId: z.string().uuid(),
     name: z.string(),
     nlPrompt: z.string().nullable(),
+    description: z.string().nullable().openapi({
+      description:
+        "One-sentence summary of who THIS audience targets, distinct from the shared batch nlPrompt. LLM-generated at /suggest time. null for rows predating this field.",
+    }),
     provider: z.enum(["apollo", "apify"]).nullable(),
     status: AudienceStatusSchema,
     // Provenance: "brand_persona_backfill" for backfilled rows, else null.
