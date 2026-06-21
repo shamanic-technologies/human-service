@@ -992,23 +992,91 @@ export async function serveNextPerson(
   return { status: "exhausted", person: null };
 }
 
+// --- Avatar style: flat-vector character on a distinctive colour ------------
+//
+// Audiences used to render as a "photorealistic headshot" → the image model
+// collapsed every persona to the same generic person-in-a-suit, impossible to
+// tell apart. Instead we render a FLAT VECTOR character with role-symbolising
+// props on a BOLD solid background, and we pick three separable axes
+// DETERMINISTICALLY from the audience id — background colour, gender, age band —
+// so (a) each audience keeps a stable look across regenerations, and (b) the set
+// spreads across colours/appearances and is easy to differentiate at a glance.
+
+// Bold, high-contrast solid background colours spread around the hue wheel.
+const AVATAR_BG_PALETTE = [
+  "teal",
+  "coral",
+  "indigo",
+  "amber yellow",
+  "magenta",
+  "emerald green",
+  "crimson red",
+  "royal blue",
+  "bright orange",
+  "violet purple",
+  "lime green",
+  "deep pink",
+  "turquoise",
+  "golden yellow",
+  "slate blue",
+  "tomato red",
+] as const;
+
+// Appearance axes — break the "default man in a suit" while staying stable and
+// diverse across the audience set (each axis seeded independently from the id so
+// colour/gender/age don't correlate).
+const AVATAR_GENDERS = ["a woman", "a man", "a non-binary person"] as const;
+const AVATAR_AGES = [
+  "in their late 20s",
+  "in their 30s",
+  "in their 40s",
+  "in their 50s",
+] as const;
+
+// FNV-1a 32-bit hash → stable, well-distributed index from a uuid string.
+function hashIndex(seed: string, modulo: number): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0) % modulo;
+}
+
+// The audience's stable background colour — the primary separability lever.
+export function pickAvatarPalette(id: string): string {
+  return AVATAR_BG_PALETTE[hashIndex(id, AVATAR_BG_PALETTE.length)];
+}
+
 // Build the default image prompt from the audience's own descriptors, so the
-// generated avatar visually represents the persona the filters target.
+// generated avatar visually represents the persona the filters target — as a
+// unique, iconic flat-vector character rather than an interchangeable headshot.
 export function buildAvatarPrompt(
   audience: typeof audiences.$inferSelect
 ): string {
-  const parts = [
-    `Generate a square professional avatar portrait representing the B2B buyer persona "${audience.name}".`,
-  ];
-  if (audience.nlPrompt) parts.push(`Audience: ${audience.nlPrompt}.`);
+  const bg = pickAvatarPalette(audience.id);
+  const gender =
+    AVATAR_GENDERS[hashIndex(`${audience.id}:gender`, AVATAR_GENDERS.length)];
+  const age = AVATAR_AGES[hashIndex(`${audience.id}:age`, AVATAR_AGES.length)];
+
   const f = (audience.filters ?? {}) as PeopleSearchFilters;
   const traits: string[] = [];
-  if (f.titles?.length) traits.push(`titles like ${f.titles.slice(0, 3).join(", ")}`);
-  if (f.seniorities?.length) traits.push(`${f.seniorities.slice(0, 3).join(", ")} seniority`);
-  if (f.industries?.length) traits.push(`in ${f.industries.slice(0, 3).join(", ")}`);
-  if (traits.length) parts.push(`Persona traits: ${traits.join("; ")}.`);
+  if (f.titles?.length) traits.push(`role/titles: ${f.titles.slice(0, 3).join(", ")}`);
+  if (f.seniorities?.length) traits.push(`seniority: ${f.seniorities.slice(0, 3).join(", ")}`);
+  if (f.industries?.length) traits.push(`industry: ${f.industries.slice(0, 3).join(", ")}`);
+  if (f.functions?.length) traits.push(`function: ${f.functions.slice(0, 3).join(", ")}`);
+
+  const descriptor = audience.description ?? audience.nlPrompt ?? audience.name;
+
+  const parts = [
+    `Flat vector illustration avatar representing the B2B buyer persona "${audience.name}".`,
+    `Persona: ${descriptor}.`,
+  ];
+  if (traits.length) parts.push(`Persona traits — ${traits.join("; ")}.`);
   parts.push(
-    "Photorealistic headshot, clean studio lighting, neutral background, no text."
+    `Depict ${gender} ${age} as a friendly character, bust framing, centered, holding or surrounded by 1-2 simple objects that symbolise their role / industry. Diverse, modern, approachable.`,
+    `Bold SINGLE solid ${bg} background. Thick clean outlines, simple geometric shapes, modern corporate vector illustration, high contrast.`,
+    `Square 1:1 composition. No photorealism, no text, no logos, no letters.`
   );
   return parts.join(" ");
 }
