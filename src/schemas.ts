@@ -1363,6 +1363,70 @@ export const RemapAudienceFiltersResponseSchema = z
   })
   .openapi("RemapAudienceFiltersResponse");
 
+// --- Internal: one-time backfill of per-audience descriptions (pre-#82 rows) ---
+export const BackfillAudienceDescriptionsQuerySchema = z.object({
+  dryRun: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({
+      description:
+        "When 'true', count null-description audiences + return an {id,name} sample WITHOUT calling the LLM or writing. Defaults to false (real run).",
+    }),
+});
+
+export const BackfillAudienceDescriptionsResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    scanned: z.number().int().openapi({
+      description: "Audiences with description IS NULL found by this sweep.",
+    }),
+    wouldBackfill: z.number().int().openapi({
+      description: "Null-description audiences that would be backfilled (= scanned).",
+    }),
+    backfilled: z.number().int().openapi({
+      description: "Audiences whose description was generated + written (0 on a dry-run).",
+    }),
+    failed: z
+      .array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          error: z.string(),
+        })
+      )
+      .openapi({
+        description:
+          "Rows whose LLM generation failed (left null, retried on re-run).",
+      }),
+    sample: z
+      .array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          description: z.string().nullable(),
+        })
+      )
+      .openapi({
+        description:
+          "Per-audience preview (capped): {id,name,description} — description is null on a dry-run, the generated sentence on a real run.",
+      }),
+  })
+  .openapi("BackfillAudienceDescriptionsResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/backfill-audience-descriptions",
+  summary:
+    "One-time data fix: generate a per-audience one-sentence description (from name + filters via chat-service) for every audience whose description is null (idempotent, dry-runnable)",
+  security: [{ apiKey: [] }],
+  request: { query: BackfillAudienceDescriptionsQuerySchema },
+  responses: {
+    200: { description: "Backfill result", content: { "application/json": { schema: BackfillAudienceDescriptionsResponseSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "chat-service outage / missing config", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 registry.registerPath({
   method: "post",
   path: "/internal/remap-audience-filters",

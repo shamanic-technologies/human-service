@@ -155,6 +155,62 @@ export async function completeJson(args: {
   return data.json;
 }
 
+// One-shot JSON LLM completion via chat-service POST /internal/platform-complete
+// — the ORG-LESS, service-auth platform path (auth = x-api-key only, no
+// x-org-id/x-user-id/x-run-id). chat-service resolves the PLATFORM provider key
+// and OWNS whatever cost the call incurs (platform-run declaration lives there),
+// so human-service declares none. Use this for internal service-to-service LLM
+// work that does NOT belong to a specific org/user (e.g. a one-time historical
+// backfill we owe users — billing their orgs retroactively would be wrong, and a
+// sweep-all-orgs job has no x-user-id anyway). Same JSON-mode contract as
+// /complete: with `google` (used here) native JSON mode needs NO responseSchema.
+// Fail loud: a non-2xx throws ChatServiceError; an unreachable host throws
+// ChatServiceError(0). Returns the parsed `json` object.
+export async function platformCompleteJson(args: {
+  message: string;
+  systemPrompt: string;
+  provider?: "anthropic" | "google";
+  model?: string;
+  temperature?: number;
+}): Promise<Record<string, unknown>> {
+  const { url, key } = requireChat();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-API-Key": key,
+  };
+  const body = {
+    message: args.message,
+    systemPrompt: args.systemPrompt,
+    responseFormat: "json",
+    provider: args.provider ?? "anthropic",
+    model: args.model ?? "sonnet",
+    ...(args.temperature !== undefined ? { temperature: args.temperature } : {}),
+  };
+
+  let res: Response;
+  try {
+    res = await fetchWithConnectRetry(`${url}/internal/platform-complete`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    throw new ChatServiceError(0, `chat-service unreachable: ${String(err)}`);
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ChatServiceError(res.status, text);
+  }
+  const data = (await res.json()) as { json?: Record<string, unknown> };
+  if (!data.json || typeof data.json !== "object") {
+    throw new ChatServiceError(
+      502,
+      "chat-service returned no parsed json field"
+    );
+  }
+  return data.json;
+}
+
 export interface GeneratedImage {
   imageBase64: string;
   mimeType: string;
