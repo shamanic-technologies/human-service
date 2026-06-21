@@ -97,16 +97,24 @@ function parseOptionalTrackingHeaders(req: Request, res: Response): void {
     ? String(rawBrandId).split(",").map(s => s.trim()).filter(Boolean)
     : [];
   const workflowSlug = req.headers["x-workflow-slug"] as string | undefined;
+  // x-audience-id — the campaign's priority audience, stamped by workflow-service
+  // on every campaign-run call. Carried through the tracking block so it
+  // auto-forwards to every internal sibling (apollo/apify/chat/runs/keys/scraping)
+  // for per-audience cost attribution. Absent outside the campaign flow → omitted,
+  // never thrown (same optional treatment as x-run-id / x-workflow-slug).
+  const audienceId = req.headers["x-audience-id"] as string | undefined;
 
   if (campaignId) res.locals.campaignId = campaignId;
   if (brandIds.length > 0) res.locals.brandIds = brandIds;
   if (workflowSlug) res.locals.workflowSlug = workflowSlug;
+  if (audienceId) res.locals.audienceId = audienceId;
 }
 
 export interface WorkflowTrackingHeaders {
   campaignId?: string;
   brandIds?: string[];
   workflowSlug?: string;
+  audienceId?: string;
 }
 
 export function getWorkflowTracking(locals: Record<string, unknown>): WorkflowTrackingHeaders {
@@ -114,6 +122,7 @@ export function getWorkflowTracking(locals: Record<string, unknown>): WorkflowTr
     ...(locals.campaignId ? { campaignId: locals.campaignId as string } : {}),
     ...(locals.brandIds ? { brandIds: locals.brandIds as string[] } : {}),
     ...(locals.workflowSlug ? { workflowSlug: locals.workflowSlug as string } : {}),
+    ...(locals.audienceId ? { audienceId: locals.audienceId as string } : {}),
   };
 }
 
@@ -122,5 +131,6 @@ export function workflowTrackingToHeaders(tracking: WorkflowTrackingHeaders): Re
     ...(tracking.campaignId ? { "x-campaign-id": tracking.campaignId } : {}),
     ...(tracking.brandIds?.length ? { "x-brand-id": tracking.brandIds.join(",") } : {}),
     ...(tracking.workflowSlug ? { "x-workflow-slug": tracking.workflowSlug } : {}),
+    ...(tracking.audienceId ? { "x-audience-id": tracking.audienceId } : {}),
   };
 }

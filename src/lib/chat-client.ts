@@ -26,10 +26,18 @@ export class ChatConfigError extends Error {
   }
 }
 
+import type { WorkflowTrackingHeaders } from "../middleware/auth.js";
+import { workflowTrackingToHeaders } from "../middleware/auth.js";
+
 export interface ChatIdentity {
   orgId: string;
   userId?: string;
   runId?: string;
+  // Workflow tracking block (incl. x-audience-id) — forwarded verbatim to
+  // chat-service so it can attribute its LLM/image cost to the campaign's
+  // priority audience. chat-service is an internal sibling; the block carries
+  // no vendor-bound secrets. Absent outside the campaign flow → omitted.
+  workflowTracking?: WorkflowTrackingHeaders;
 }
 
 const TRANSIENT_CODES = ["ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "EAI_AGAIN"];
@@ -120,6 +128,7 @@ export async function completeJson(args: {
     "x-org-id": args.identity.orgId,
     ...(args.identity.userId ? { "x-user-id": args.identity.userId } : {}),
     ...(args.identity.runId ? { "x-run-id": args.identity.runId } : {}),
+    ...workflowTrackingToHeaders(args.identity.workflowTracking ?? {}),
   };
   const body = {
     message: args.message,
@@ -236,6 +245,7 @@ export async function generateImage(args: {
     "x-org-id": args.identity.orgId,
     ...(args.identity.userId ? { "x-user-id": args.identity.userId } : {}),
     ...(args.identity.runId ? { "x-run-id": args.identity.runId } : {}),
+    ...workflowTrackingToHeaders(args.identity.workflowTracking ?? {}),
   };
 
   let res: Response;
