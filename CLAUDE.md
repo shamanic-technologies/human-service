@@ -38,6 +38,7 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Org-scoped (legacy) | `POST /humans/{id}/extract` | apiKey + identity | Trigger scrape + AI extraction |
 | Internal | `POST /internal/transfer-brand` | apiKey | Move solo-brand methodology rows between orgs |
 | Internal | `POST /internal/remap-audience-filters` | apiKey | One-time data fix: translate already-backfilled audiences' filters from legacy persona vocab → canonical `PeopleSearchFilters` vocab, in place (idempotent, `?dryRun=true`, reversible) |
+| Internal | `POST /internal/backfill-audience-descriptions` | apiKey | One-time data fix: generate a per-audience one-sentence `description` (from name + filters via chat-service platform LLM) for every audience whose `description IS NULL` — pre-#82 rows (idempotent, `?dryRun=true`) |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
 | Org-scoped (CRM v1) | `GET /orgs/lists/{id}` | apiKey + `x-org-id` | Get a CRM list |
@@ -334,6 +335,39 @@ wave drops brand-service personas entirely + switches consumers'
   - **`audiences.source`** = provenance: `'brand_persona_backfill'` for
     backfilled rows, null for native rows. (Distinct from
     `audience_members.source` = provider.)
+
+### Description backfill (pre-#82 rows) — `POST /internal/backfill-audience-descriptions`
+
+#82 added + persisted the per-audience `description` and `serializeAudience`
+returns it, but it only WRITES it for NEW audiences (the `/suggest` layer-1).
+Rows created before #82 have `description = null`, so the dashboard "Described
+as" line stays blank for them (it deliberately NEVER falls back to the shared
+batch `nlPrompt`). This one-time sweep (`src/routes/backfill.ts`, service-auth)
+generates a one-sentence `description` for every `description IS NULL` audience
+from the row's **own name + filters** and writes it.
+
+- **Idempotent** — scoped to `description IS NULL`, so a re-run only sees rows
+  still null; already-described audiences are untouched and a clean re-run
+  reports `backfilled:0`. **Dry-runnable** — `?dryRun=true` counts the null rows
+  + returns an `{id,name}` sample WITHOUT calling the LLM or writing (free
+  preview, no spend). **Never the `nlPrompt`** — derived only from name+filters
+  (`generateAudienceDescription` in `src/services/audiences.ts`).
+- **LLM via chat-service's ORG-LESS platform path** — `platformCompleteJson` →
+  `POST /internal/platform-complete` (service-auth, no org/user), Gemini
+  schemaless JSON (`google`/`flash-pro`, same as `/suggest` layer-1).
+  **chat-service OWNS the cost** (platform-run declaration lives there) — so
+  human-service declares none, and a historical backfill we owe users does NOT
+  retroactively bill their orgs (and a sweep-all-orgs job has no `x-user-id`
+  anyway). The invariant holds, exactly as for `/suggest` + avatar.
+- **Per-row resilience + fail-loud split** — a row whose generation yields no
+  usable description is logged + counted in `failed` + left null (retried on the
+  next re-run); a real chat-service outage (`ChatServiceError` status 0 /
+  unreachable) or missing config (`ChatConfigError`) aborts the sweep loudly
+  (502) — partial progress persists, a re-run resumes (only null rows remain).
+- **NOT on boot** — O(N) over the audiences table × one LLM call each would
+  block port-bind; trigger MANUALLY after deploy (`?dryRun=true` to size, then
+  `?dryRun=false`). Kept idempotent + harmless after the one run, like the
+  filter re-map above.
 
 ### Audience suggestion (onboarding) — `POST /orgs/audiences/suggest`
 

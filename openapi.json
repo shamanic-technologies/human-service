@@ -1750,6 +1750,81 @@
           "lastServedAt"
         ]
       },
+      "BackfillAudienceDescriptionsResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "scanned": {
+            "type": "integer",
+            "description": "Audiences with description IS NULL found by this sweep."
+          },
+          "wouldBackfill": {
+            "type": "integer",
+            "description": "Null-description audiences that would be backfilled (= scanned)."
+          },
+          "backfilled": {
+            "type": "integer",
+            "description": "Audiences whose description was generated + written (0 on a dry-run)."
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "error"
+              ]
+            },
+            "description": "Rows whose LLM generation failed (left null, retried on re-run)."
+          },
+          "sample": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "description"
+              ]
+            },
+            "description": "Per-audience preview (capped): {id,name,description} — description is null on a dry-run, the generated sentence on a real run."
+          }
+        },
+        "required": [
+          "dryRun",
+          "scanned",
+          "wouldBackfill",
+          "backfilled",
+          "failed",
+          "sample"
+        ]
+      },
       "RemapAudienceFiltersResponse": {
         "type": "object",
         "properties": {
@@ -4583,6 +4658,57 @@
           },
           "404": {
             "description": "Audience not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/backfill-audience-descriptions": {
+      "post": {
+        "summary": "One-time data fix: generate a per-audience one-sentence description (from name + filters via chat-service) for every audience whose description is null (idempotent, dry-runnable)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', count null-description audiences + return an {id,name} sample WITHOUT calling the LLM or writing. Defaults to false (real run)."
+            },
+            "required": false,
+            "description": "When 'true', count null-description audiences + return an {id,name} sample WITHOUT calling the LLM or writing. Defaults to false (real run).",
+            "name": "dryRun",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Backfill result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillAudienceDescriptionsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "chat-service outage / missing config",
             "content": {
               "application/json": {
                 "schema": {
