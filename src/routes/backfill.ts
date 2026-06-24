@@ -19,6 +19,7 @@ import {
   type ApifyToApolloMigrationResult,
 } from "../services/audiences.js";
 import { ChatConfigError, ChatServiceError } from "../lib/chat-client.js";
+import { ProviderConfigError } from "../services/people-providers.js";
 
 const router = Router();
 
@@ -296,8 +297,23 @@ async function runApifyToApolloMigration(
       result = await migrateApifyAudienceToApollo(row);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[human-service] migrate_apify.abort id=${row.id} ${msg}`);
-      throw new MigrationAborted(msg, migrated, failed);
+      // ONLY a missing-config error is truly systemic (every row would fail the
+      // same way) -> abort the sweep. A per-audience provider/LLM hiccup
+      // (apollo 5xx, chat 502/unreachable, a flaky refine) must NOT halt the
+      // whole sweep: log it, count it failed, and keep migrating the rest. The
+      // failed row stays apify (untouched) and is retried on the next re-run.
+      if (
+        err instanceof ChatConfigError ||
+        err instanceof ProviderConfigError
+      ) {
+        console.error(`[human-service] migrate_apify.abort id=${row.id} ${msg}`);
+        throw new MigrationAborted(msg, migrated, failed);
+      }
+      console.warn(
+        `[human-service] migrate_apify.row_failed id=${row.id} ${msg}`
+      );
+      failed.push({ id: row.id, name: row.name, error: msg });
+      continue;
     }
     if (!result) {
       console.warn(
