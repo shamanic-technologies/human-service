@@ -469,6 +469,154 @@ interface Segment {
   description: string;
 }
 
+const COUNTRY_ALIASES: Array<{ pattern: RegExp; value: string }> = [
+  { pattern: /\b(?:us|u\.s\.|usa|u\.s\.a\.|united states|america)\b/i, value: "United States" },
+  { pattern: /\bunited kingdom\b|\buk\b|\bu\.k\.\b/i, value: "United Kingdom" },
+  { pattern: /\bfrance\b/i, value: "France" },
+  { pattern: /\bgermany\b/i, value: "Germany" },
+  { pattern: /\bcanada\b/i, value: "Canada" },
+  { pattern: /\baustralia\b/i, value: "Australia" },
+  { pattern: /\bspain\b/i, value: "Spain" },
+  { pattern: /\bitaly\b/i, value: "Italy" },
+  { pattern: /\bnetherlands\b/i, value: "Netherlands" },
+];
+
+const INDUSTRY_ALIASES: Array<{ pattern: RegExp; names: string[] }> = [
+  { pattern: /\b(?:software|saas|b2b software)\b/i, names: ["Computer Software", "Software", "Information Technology & Services"] },
+  { pattern: /\bprofessional services?\b/i, names: ["Professional Services"] },
+  { pattern: /\bconsult(?:ing|ancies|ants?)\b/i, names: ["Management Consulting", "Professional Services"] },
+  { pattern: /\bfintech\b|\bfinancial services?\b/i, names: ["Financial Services", "Banking"] },
+  { pattern: /\bmarketing agenc(?:y|ies)\b|\badvertising agenc(?:y|ies)\b/i, names: ["Marketing & Advertising"] },
+  { pattern: /\be-?commerce\b|\becommerce\b/i, names: ["Internet", "Retail"] },
+];
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter((v) => v.trim().length > 0))];
+}
+
+function mergeStringArrays(a?: string[], b?: string[]): string[] | undefined {
+  const merged = uniqueStrings([...(a ?? []), ...(b ?? [])]);
+  return merged.length > 0 ? merged : undefined;
+}
+
+function mergeFilters(
+  base: PeopleSearchFilters,
+  required: PeopleSearchFilters
+): PeopleSearchFilters {
+  return {
+    ...base,
+    titles: mergeStringArrays(base.titles, required.titles),
+    seniorities: mergeStringArrays(base.seniorities, required.seniorities),
+    functions: mergeStringArrays(base.functions, required.functions),
+    locationCountries: mergeStringArrays(
+      base.locationCountries,
+      required.locationCountries
+    ),
+    locationStates: mergeStringArrays(base.locationStates, required.locationStates),
+    locationCities: mergeStringArrays(base.locationCities, required.locationCities),
+    companyNames: mergeStringArrays(base.companyNames, required.companyNames),
+    companyDomains: mergeStringArrays(base.companyDomains, required.companyDomains),
+    industries: mergeStringArrays(base.industries, required.industries),
+    keywords: mergeStringArrays(base.keywords, required.keywords),
+    companySizes: mergeStringArrays(base.companySizes, required.companySizes),
+    revenueRanges: mergeStringArrays(base.revenueRanges, required.revenueRanges),
+    fundingStages: mergeStringArrays(base.fundingStages, required.fundingStages),
+    technologies: mergeStringArrays(base.technologies, required.technologies),
+    employeeMin: required.employeeMin ?? base.employeeMin,
+    employeeMax: required.employeeMax ?? base.employeeMax,
+  };
+}
+
+function compactNumber(raw: string, unit?: string): number {
+  const n = Number(raw.replace(/,/g, ""));
+  const u = unit?.toLowerCase();
+  if (u === "k" || u === "thousand") return Math.round(n * 1_000);
+  if (u === "m" || u === "mm" || u === "million") return Math.round(n * 1_000_000);
+  if (u === "b" || u === "bn" || u === "billion") return Math.round(n * 1_000_000_000);
+  return Math.round(n);
+}
+
+function extractEmployeeRange(text: string): Pick<PeopleSearchFilters, "employeeMin" | "employeeMax"> {
+  const m = text.match(
+    /\b(\d[\d,]*(?:\.\d+)?)\s*(k|thousand)?\s*(?:-|to|through|and)\s*(\d[\d,]*(?:\.\d+)?)\s*(k|thousand)?\s*(?:employees?|people|headcount)\b/i
+  );
+  if (!m) return {};
+  const maxUnit = m[4];
+  const min = compactNumber(m[1], m[2] ?? maxUnit);
+  const max = compactNumber(m[3], maxUnit);
+  return min > 0 && max >= min ? { employeeMin: min, employeeMax: max } : {};
+}
+
+function extractRevenueRanges(text: string): string[] {
+  const re =
+    /\$?\s*(\d[\d,]*(?:\.\d+)?)\s*(k|m|mm|b|bn|thousand|million|billion)?\s*(?:-|to|through|and)\s*\$?\s*(\d[\d,]*(?:\.\d+)?)\s*(k|m|mm|b|bn|thousand|million|billion)?\s*(?:\/?\s*(?:yr|year|annum)|annual(?:ly)?|revenue|arr|sales)?/gi;
+  const matches = [...text.matchAll(re)];
+  const m = matches.find((match) => {
+    const matched = match[0];
+    return /\$|\/?\s*(?:yr|year|annum)|annual(?:ly)?|revenue|arr|sales/i.test(
+      matched
+    );
+  });
+  if (!m) return [];
+  const maxUnit = m[4];
+  const min = compactNumber(m[1], m[2] ?? maxUnit);
+  const max = compactNumber(m[3], maxUnit);
+  if (min <= 0 || max < min) return [];
+  return [`${min},${max}`];
+}
+
+function findCanonicalIndustry(
+  vocab: string[],
+  names: string[]
+): string | null {
+  const byLower = new Map(vocab.map((v) => [v.toLowerCase(), v]));
+  for (const name of names) {
+    const exact = byLower.get(name.toLowerCase());
+    if (exact) return exact;
+  }
+  for (const name of names) {
+    const needle = name.toLowerCase();
+    const contains = vocab.find((v) => v.toLowerCase().includes(needle));
+    if (contains) return contains;
+  }
+  return null;
+}
+
+function extractSupportedConstraints(args: {
+  text: string;
+  industriesVocab?: string[];
+}): PeopleSearchFilters {
+  const filters: PeopleSearchFilters = {
+    ...extractEmployeeRange(args.text),
+  };
+
+  const revenueRanges = extractRevenueRanges(args.text);
+  if (revenueRanges.length > 0) filters.revenueRanges = revenueRanges;
+
+  const locationCountries = COUNTRY_ALIASES
+    .filter((alias) => alias.pattern.test(args.text))
+    .map((alias) => alias.value);
+  if (locationCountries.length > 0) {
+    filters.locationCountries = uniqueStrings(locationCountries);
+  }
+
+  if (args.industriesVocab && args.industriesVocab.length > 0) {
+    const industries = INDUSTRY_ALIASES
+      .filter((alias) => alias.pattern.test(args.text))
+      .map((alias) => findCanonicalIndustry(args.industriesVocab ?? [], alias.names))
+      .filter((x): x is string => x !== null);
+    if (industries.length > 0) filters.industries = uniqueStrings(industries);
+  }
+
+  const keywords: string[] = [];
+  if (/\bb2b\b/i.test(args.text)) keywords.push("B2B");
+  if (/\bbasic crm tools?\b/i.test(args.text)) keywords.push("basic CRM tools");
+  if (/\bspreadsheets?\b/i.test(args.text)) keywords.push("spreadsheets");
+  if (keywords.length > 0) filters.keywords = uniqueStrings(keywords);
+
+  return filters;
+}
+
 function buildLayer1SystemPrompt(): string {
   return [
     "You decompose a natural-language audience request into a SET of distinct,",
@@ -747,6 +895,7 @@ function parseLayer2Action(obj: Record<string, unknown>): Layer2Action {
 async function refineFilters(
   provider: Provider,
   segment: Segment,
+  requestText: string,
   identity: Identity,
   // When true, route the layer-2 LLM calls through chat-service's ORG-LESS
   // platform path (platformCompleteJson) instead of the org-billed /complete.
@@ -765,12 +914,24 @@ async function refineFilters(
     provider === "apollo"
       ? await apolloIndustriesReference({ identity })
       : undefined;
+  const requiredFilters = extractSupportedConstraints({
+    text: `${requestText}\n${segment.description}`,
+    industriesVocab,
+  });
   const systemPrompt = buildLayer2SystemPrompt(provider, rules, industriesVocab);
   const transcript: string[] = [
     [
       "TARGET AUDIENCE:",
       `name: ${segment.name}`,
       `description: ${segment.description}`,
+      Object.keys(requiredFilters).length > 0
+        ? [
+            "",
+            "LOCKED EXPLICIT FILTERS:",
+            JSON.stringify(requiredFilters),
+            "These constraints came from the user's request and MUST remain in every tested filter set.",
+          ].join("\n")
+        : "",
       "",
       `Propose your first "test" filter set for ${provider}.`,
     ].join("\n"),
@@ -828,20 +989,21 @@ async function refineFilters(
     }
 
     if (action.type === "test") {
-      const r = await dryRunSafe(provider, action.filters, identity);
-      lastFilters = action.filters;
+      const filters = mergeFilters(action.filters, requiredFilters);
+      const r = await dryRunSafe(provider, filters, identity);
+      lastFilters = filters;
       if (r.validationError) {
         lastHadError = true;
         lastValidationError = r.validationError;
         transcript.push(
-          `Round ${round + 1}: filters=${JSON.stringify(action.filters)} -> REJECTED as invalid: ${r.validationError}. Propose corrected filters, or declare exhausted.`
+          `Round ${round + 1}: filters=${JSON.stringify(filters)} -> REJECTED as invalid: ${r.validationError}. Propose corrected filters, or declare exhausted.`
         );
       } else {
         lastHadError = false;
         lastValidationError = null;
         lastCleanCount = r.count;
         transcript.push(
-          `Round ${round + 1}: filters=${JSON.stringify(action.filters)} -> count=${r.count}. Confirm this set, test another, or declare exhausted.`
+          `Round ${round + 1}: filters=${JSON.stringify(filters)} -> count=${r.count}. Confirm this set, test another, or declare exhausted.`
         );
       }
       continue;
@@ -954,7 +1116,7 @@ export async function suggestAudiences(
       const perProviderSettled = await Promise.allSettled(
         SUGGEST_PROVIDERS.map(async (provider) => ({
           provider,
-          ...(await refineFilters(provider, segment, identity)),
+          ...(await refineFilters(provider, segment, nlPrompt, identity)),
         }))
       );
       const perProvider = perProviderSettled
@@ -1067,9 +1229,13 @@ export async function migrateApifyAudienceToApollo(
     name: row.name,
     description: row.description ?? row.name,
   };
-  const refined = await refineFilters("apollo", segment, identity, {
-    usePlatformLLM: true,
-  });
+  const refined = await refineFilters(
+    "apollo",
+    segment,
+    row.nlPrompt ?? row.description ?? row.name,
+    identity,
+    { usePlatformLLM: true }
+  );
   if (!refined.filters || Object.keys(refined.filters).length === 0) {
     return null;
   }
