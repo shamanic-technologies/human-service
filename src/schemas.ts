@@ -1103,7 +1103,8 @@ export const AudienceCandidateSchema = z
       description: "Set when the winning provider rejected the filters as invalid after the iteration budget was exhausted.",
     }),
     truncated: z.boolean().openapi({
-      description: "True when the NL implied more audiences than the cap and the LLM grouped coarser.",
+      description:
+        "Reserved for response compatibility. Current Layer 1 has no hard cap, so freshly suggested candidates return false.",
     }),
   })
   .openapi("AudienceCandidate");
