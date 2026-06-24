@@ -569,7 +569,7 @@ describe("POST /orgs/audiences/suggest", () => {
     );
     expect(layer2Bodies.length).toBeGreaterThan(0);
     for (const body of layer2Bodies) {
-      expect(body.model).toBe("pro");
+      expect(body.model).toBe("flash-pro");
       expect(body.disableThinking).toBeUndefined();
       const filtersSchema = (
         body.responseSchema as {

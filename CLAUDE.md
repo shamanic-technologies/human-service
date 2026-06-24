@@ -499,7 +499,7 @@ is the chat-service client.
 
 - **LLM runs via chat-service `POST /complete`** (`google`, Gemini JSON mode
   **+ a Gemini `responseSchema`**). Layer 1 uses `flash-pro` +
-  `disableThinking:true`; Layer 2 uses `pro` and intentionally leaves
+  `disableThinking:true`; Layer 2 also uses `flash-pro` and intentionally leaves
   `disableThinking` unset.
   **chat-service OWNS the LLM cost** — it does the
   provision→authorize→execute→actualize against the org balance — so
@@ -539,13 +539,10 @@ is the chat-service client.
   NL audience → Apollo filters is the quality-critical reasoning step, and
   disabling thinking caused `flash-pro` to keep producing title-only Apollo
   filters for firmographic prompts.
-  **Models:** Layer 1 stays on `flash-pro` for cheap segmentation. Layer 2 uses
-  `pro` because the suggested audience's relevance is entirely the LLM's
-  NL→filters mapping (apollo/apify match structured filters deterministically —
-  **no LLM on the provider side**), so the model tier IS the filter-quality
-  lever. `flash-pro` kept confirming title-only Apollo filters for firmographic
-  prompts even after the strict Layer 2 prompt + thinking toggle. (History: #44
-  shipped sonnet + no schema; chat-service later added the upfront anthropic
+  **Models:** Layer 1 and Layer 2 both use `flash-pro`; the filter-quality lever
+  is the strict nullable `FILTERS_RESPONSE_SCHEMA` + the stronger Layer 1
+  decomposition prompt + apollo taxonomy injection, while Layer 2 keeps thinking
+  enabled. (History: #44 shipped sonnet + no schema; chat-service later added the upfront anthropic
   guard → every call 400'd (#50/v0.13.1). The first fix tried an anthropic strict
   envelope with an open `filters` — Anthropic 400'd *`additionalProperties` must
   be explicitly set to false* on the open object. Then v0.13.2 / #54 switched to
