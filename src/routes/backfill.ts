@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, eq, isNull, ne } from "drizzle-orm";
+import { and, eq, isNull, isNotNull, ne, count as countFn } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audiences } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
@@ -7,6 +7,7 @@ import {
   RemapAudienceFiltersQuerySchema,
   BackfillAudienceDescriptionsQuerySchema,
   MigrateApifyAudiencesQuerySchema,
+  BackfillAudienceAvatarsQuerySchema,
 } from "../schemas.js";
 import {
   mapPersonaFiltersToCanonical,
@@ -16,6 +17,8 @@ import {
 import {
   generateAudienceDescription,
   migrateApifyAudienceToApollo,
+  buildAvatarPrompt,
+  generateAvatar,
   type ApifyToApolloMigrationResult,
 } from "../services/audiences.js";
 import { ChatConfigError, ChatServiceError } from "../lib/chat-client.js";
@@ -441,6 +444,161 @@ router.post(
           migrated: err.migrated,
           failed: err.failed,
         });
+        return;
+      }
+      throw err;
+    }
+  }
+);
+
+// How many {id,name} previews the avatar backfill returns.
+const AVATAR_SAMPLE_LIMIT = 25;
+
+// Generate + store a flat-vector avatar for each avatar-less audience, one row at
+// a time. A per-row failure (e.g. a zero-balance org → chat-service 402) is
+// logged + counted in `failed` and the row left null (retried on re-run); only a
+// missing chat-service config (ChatConfigError — every row fails identically)
+// aborts the sweep loud (502).
+async function runAvatarBackfill(
+  rows: Array<typeof audiences.$inferSelect>
+): Promise<{
+  filled: number;
+  failed: Array<{ id: string; name: string; error: string }>;
+}> {
+  let filled = 0;
+  const failed: Array<{ id: string; name: string; error: string }> = [];
+  for (const row of rows) {
+    try {
+      const prompt = buildAvatarPrompt(row);
+      await generateAvatar(row.orgId, row.id, prompt, {
+        orgId: row.orgId,
+        ...(row.createdByUserId ? { userId: row.createdByUserId } : {}),
+      });
+      filled++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof ChatConfigError) {
+        console.error(`[human-service] backfill_avatars.abort id=${row.id} ${msg}`);
+        throw new MigrationAborted(msg, [], failed);
+      }
+      console.warn(
+        `[human-service] backfill_avatars.row_failed id=${row.id} ${msg}`
+      );
+      failed.push({ id: row.id, name: row.name, error: msg });
+    }
+  }
+  return { filled, failed };
+}
+
+// POST /internal/backfill-audience-avatars?dryRun=true|false&async=true|false
+//
+// One-time DATA fix: generate + store a flat-vector avatar (data: URI, via
+// chat-service) for every LIVE audience whose avatar_url is null. Mirrors the
+// avatar route's generation, swept server-side over all orgs.
+//
+// - Scoped to status<>'deprecated' AND avatar_url IS NULL AND created_by_user_id
+//   IS NOT NULL -> idempotent (a re-run only sees still-null rows). Rows WITHOUT
+//   a created_by_user_id are skipped + reported (`skippedNoUser`) — chat-service
+//   image gen needs a user for key resolution.
+// - Dry-runnable: ?dryRun=true counts + samples WITHOUT calling chat-service.
+// - Async: ?async=true responds 202 then runs in the background (image gen is
+//   slow; a whole-table run exceeds an HTTP timeout). Each row is its own write,
+//   so progress is durable + observable via dry-run.
+// - COST: image generation is BILLED TO THE AUDIENCE'S ORG (chat-service owns the
+//   cost; there is no org-less platform image path). A zero-balance org → 402 →
+//   per-row skip (reported in `failed`), not a sweep abort.
+//
+// Service-auth only (x-api-key). Trigger MANUALLY after deploy — never on boot.
+router.post(
+  "/internal/backfill-audience-avatars",
+  requireApiKey,
+  async (req, res) => {
+    const parsedQuery = BackfillAudienceAvatarsQuerySchema.safeParse(req.query);
+    if (!parsedQuery.success) {
+      res.status(400).json({ error: parsedQuery.error.message });
+      return;
+    }
+    const dryRun = parsedQuery.data.dryRun === "true";
+    const asyncMode = parsedQuery.data.async === "true";
+
+    const liveNullAvatar = and(
+      ne(audiences.status, "deprecated"),
+      isNull(audiences.avatarUrl)
+    );
+
+    const rows = await db
+      .select()
+      .from(audiences)
+      .where(and(liveNullAvatar, isNotNull(audiences.createdByUserId)));
+
+    const [noUser] = await db
+      .select({ value: countFn() })
+      .from(audiences)
+      .where(and(liveNullAvatar, isNull(audiences.createdByUserId)));
+    const skippedNoUser = noUser?.value ?? 0;
+
+    const scanned = rows.length;
+
+    if (dryRun) {
+      const sample = rows
+        .slice(0, AVATAR_SAMPLE_LIMIT)
+        .map((r) => ({ id: r.id, name: r.name }));
+      console.log(
+        `[human-service] backfill_avatars.dry_run scanned=${scanned} skipped_no_user=${skippedNoUser}`
+      );
+      res.json({
+        dryRun: true,
+        scanned,
+        skippedNoUser,
+        wouldFill: scanned,
+        filled: 0,
+        failed: [],
+        sample,
+      });
+      return;
+    }
+
+    if (asyncMode) {
+      res.status(202).json({
+        dryRun: false,
+        started: true,
+        scanned,
+        skippedNoUser,
+        wouldFill: scanned,
+        filled: 0,
+        failed: [],
+        sample: [],
+      });
+      void runAvatarBackfill(rows)
+        .then(({ filled, failed }) =>
+          console.log(
+            `[human-service] backfill_avatars.run_async scanned=${scanned} filled=${filled} failed=${failed.length}`
+          )
+        )
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`[human-service] backfill_avatars.run_async_aborted ${msg}`);
+        });
+      return;
+    }
+
+    try {
+      const { filled, failed } = await runAvatarBackfill(rows);
+      console.log(
+        `[human-service] backfill_avatars.run scanned=${scanned} filled=${filled} failed=${failed.length}`
+      );
+      res.json({
+        dryRun: false,
+        scanned,
+        skippedNoUser,
+        wouldFill: scanned,
+        filled,
+        failed,
+        sample: [],
+      });
+    } catch (err) {
+      if (err instanceof MigrationAborted) {
+        res.status(502).json({ error: err.message, failed: err.failed });
         return;
       }
       throw err;
