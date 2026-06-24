@@ -364,12 +364,11 @@ const SUGGEST_STATUS = "suggested"; // inactive default for suggest-created rows
 // Gemini's native JSON mode needs no schema, so the shape stays prompt-described
 // + caller-validated.
 //
-// Layer 1 uses `flash-pro` for cheap NL segmentation. Layer 2 uses `pro` because
-// the whole relevance of a suggested audience is the LLM's NL->provider-filters
-// mapping -- apollo/apify then match structured filters deterministically.
+// Layer 1 and Layer 2 use `flash-pro`; Layer 2 still leaves thinking enabled
+// because NL->provider-filters is the quality-critical reasoning step.
 const SUGGEST_LLM_PROVIDER = "google" as const;
 const SUGGEST_LLM_MODEL = "flash-pro";
-const SUGGEST_LAYER2_LLM_MODEL = "pro";
+const SUGGEST_LAYER2_LLM_MODEL = "flash-pro";
 
 // Gemini structured-output schemas (passed as `responseSchema` so the provider
 // ENFORCES the shape server-side → the response always parses, eliminating the
