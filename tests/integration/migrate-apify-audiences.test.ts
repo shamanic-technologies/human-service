@@ -274,11 +274,36 @@ describe("POST /internal/migrate-apify-audiences-to-apollo", () => {
     expect(a.status).toBe("deprecated");
   });
 
-  it("fails loud (502) when apollo / chat-service is unreachable", async () => {
+  it("a provider/LLM outage is a PER-ROW failure (200, nothing migrated), not a whole-sweep abort", async () => {
     await seed();
+    // Every provider call throws — each audience fails its refine, but the sweep
+    // continues and reports them all in `failed` (a single flaky audience must
+    // not block the others).
     fetchSpy.mockImplementation(async () => {
       throw new Error("connect refused");
     });
+
+    const res = await request(app)
+      .post("/internal/migrate-apify-audiences-to-apollo?dryRun=false")
+      .set(apiKeyHeader);
+
+    expect(res.status).toBe(200);
+    expect(res.body.migrated).toEqual([]);
+    expect(res.body.failed).toHaveLength(2);
+
+    // Both apify rows untouched (retried on re-run).
+    const [a] = await db
+      .select({ provider: audiences.provider, status: audiences.status })
+      .from(audiences)
+      .where(eq(audiences.id, APIFY_ACTIVE));
+    expect(a.provider).toBe("apify");
+    expect(a.status).toBe("active");
+  });
+
+  it("fails loud (502) on missing provider config (truly systemic)", async () => {
+    await seed();
+    wire();
+    delete process.env.APOLLO_SERVICE_URL; // requireApollo → ProviderConfigError
 
     const res = await request(app)
       .post("/internal/migrate-apify-audiences-to-apollo?dryRun=false")
