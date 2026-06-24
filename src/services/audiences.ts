@@ -41,6 +41,7 @@ import {
   completeJson,
   platformCompleteJson,
   generateImage,
+  platformGenerateImage,
   ChatServiceError,
 } from "../lib/chat-client.js";
 import { PeopleSearchFiltersSchema } from "../schemas.js";
@@ -1329,4 +1330,21 @@ export async function generateAvatar(
     .where(and(eq(audiences.id, audienceId), eq(audiences.orgId, orgId)))
     .returning();
   return updated;
+}
+
+// Platform-path avatar generation for internal sweeps (the avatar backfill). Uses
+// chat-service's ORG-LESS platform image endpoint — no org/user/run identity, no
+// org billing (platform-run cost) — so it works for EVERY audience including the
+// ones with no created_by_user_id, and bills no one. Writes the same data: URI.
+export async function generateAudienceAvatarViaPlatform(
+  orgId: string,
+  audienceId: string,
+  prompt: string
+): Promise<void> {
+  const img = await platformGenerateImage({ prompt });
+  const dataUri = `data:${img.mimeType};base64,${img.imageBase64}`;
+  await db
+    .update(audiences)
+    .set({ avatarUrl: dataUri, updatedAt: new Date() })
+    .where(and(eq(audiences.id, audienceId), eq(audiences.orgId, orgId)));
 }
