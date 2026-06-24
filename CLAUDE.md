@@ -466,14 +466,17 @@ is the chat-service client.
    `refineFilters` hands the segment + that provider's `filters-prompt` rulebook
    to the LLM, which `{action:"test",filters}` → server runs the **free dry-run**
    → count fed back into the transcript → LLM decides for itself: `confirm`
-   (satisfied with the count), `test` again (refine — too few/too loose), or
-   `exhausted`. Bounded by `SUGGEST_MAX_ITERATION_ROUNDS = 8`. Mirrors
-   lead-service's `generateNextStrategy` self-iteration mechanism (slated for
-   deprecation later — parity for now). The layer-2 system prompt also carries a
-   **healthy-count band** (~500–50k, guides not hard limits) so the LLM judges
-   too-narrow vs too-loose consistently, and an **exact-vocabulary** rule (copy
-   enum values verbatim from the rulebook, never invent one — an unrecognized
-   value is silently dropped by the provider and under-matches).
+  (satisfied with the count), `test` again (refine), or
+  `exhausted`. Bounded by `SUGGEST_MAX_ITERATION_ROUNDS = 8`. Mirrors
+  lead-service's `generateNextStrategy` self-iteration mechanism (slated for
+  deprecation later — parity for now). `FILTERS_RESPONSE_SCHEMA` requires every
+  neutral filter key and makes each nullable, so the LLM must explicitly choose
+  value vs `null` for all 16 filter surfaces instead of silently returning a
+  title-only partial object. `null`s are normalized away before validation and
+  provider dry-run. No rule-based count gate or ICP regex merge is allowed here.
+  The prompt also carries an **exact-vocabulary** rule (copy enum values verbatim
+  from the rulebook, never invent one — an unrecognized value is silently dropped
+  by the provider and under-matches).
    - **Apollo industries are injected from the canonical taxonomy.** apollo's
      `industries` filter (`qOrganizationIndustryTagIds`) is free-text `string[]`
      against a hidden 148-entry LinkedIn list, so apollo's `filters-prompt`
@@ -517,9 +520,9 @@ is the chat-service client.
   outage): **(1)** every suggest LLM call ships a `responseSchema`
   (`LAYER1_RESPONSE_SCHEMA` `{audiences:[{name,description}]}`,
   `LAYER2_RESPONSE_SCHEMA` `{action enum, filters, reasoning, reason}` incl.
-  `FILTERS_RESPONSE_SCHEMA` = the 16 neutral fields, `DESCRIPTION_RESPONSE_SCHEMA`)
-  so the provider enforces valid JSON server-side → the malformed-JSON 502 is
-  structurally eliminated; **(2)** `chat-client` retries a **transient response
+  `FILTERS_RESPONSE_SCHEMA` = the 16 required nullable neutral fields,
+  `DESCRIPTION_RESPONSE_SCHEMA`) so the provider enforces valid JSON server-side
+  → the malformed-JSON 502 is structurally eliminated; **(2)** `chat-client` retries a **transient response
   status (502/429/503) + a missing/malformed `json` field** (bounded
   250/500/1000ms), in addition to the existing connect-phase retry — NOT 4xx
   (400/401/402 are deterministic); **(3)** `Promise.allSettled` at both fan-out

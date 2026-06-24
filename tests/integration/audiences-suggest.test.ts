@@ -212,7 +212,7 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(c.validationError).toBeNull();
   });
 
-  it("does not inject rule-based filters from the original prompt after layer-1 split", async () => {
+  it("normalizes nullable layer-2 filters without injecting rule-based fields", async () => {
     const dryRunBodies: Array<Record<string, unknown>> = [];
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
@@ -249,7 +249,24 @@ describe("POST /orgs/audiences/suggest", () => {
             cleanTests === 0
               ? {
                   action: "test",
-                  filters: { titles: ["Founder", "Head of Growth"] },
+                  filters: {
+                    titles: ["Founder", "Head of Growth"],
+                    seniorities: null,
+                    functions: null,
+                    locationCountries: null,
+                    locationStates: null,
+                    locationCities: null,
+                    companyNames: null,
+                    companyDomains: null,
+                    industries: null,
+                    keywords: null,
+                    employeeMin: null,
+                    employeeMax: null,
+                    companySizes: null,
+                    revenueRanges: null,
+                    fundingStages: null,
+                    technologies: null,
+                  },
                   reasoning: "title-only draft",
                 }
               : { action: "confirm", reasoning: "confirmed" },
@@ -512,6 +529,37 @@ describe("POST /orgs/audiences/suggest", () => {
     for (const body of layer2Bodies) {
       expect(body.model).toBe("pro");
       expect(body.disableThinking).toBeUndefined();
+      const filtersSchema = (
+        body.responseSchema as {
+          properties?: {
+            filters?: {
+              required?: string[];
+              properties?: Record<string, unknown>;
+            };
+          };
+        }
+      ).properties?.filters;
+      expect(filtersSchema?.required).toEqual([
+        "titles",
+        "seniorities",
+        "functions",
+        "locationCountries",
+        "locationStates",
+        "locationCities",
+        "companyNames",
+        "companyDomains",
+        "industries",
+        "keywords",
+        "employeeMin",
+        "employeeMax",
+        "companySizes",
+        "revenueRanges",
+        "fundingStages",
+        "technologies",
+      ]);
+      expect(filtersSchema?.properties?.employeeMin).toEqual({
+        anyOf: [{ type: "integer" }, { type: "null" }],
+      });
       expect(body.systemPrompt).toContain(
         "every filterable constraint in TARGET AUDIENCE"
       );
