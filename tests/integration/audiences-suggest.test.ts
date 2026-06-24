@@ -397,18 +397,60 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(res.body.candidates[0].count).toBe(0);
   });
 
-  it("caps layer-1 audiences and flags truncated", async () => {
+  it("keeps every layer-1 audience and prompts for persona x company-type combinations", async () => {
     wire({
-      segments: Array.from({ length: 9 }, (_, i) => ({
-        name: `Seg ${i}`,
-        description: `segment ${i}`,
-      })),
+      segments: [
+        {
+          name: "B2B SaaS Founders",
+          description:
+            "Founders at bootstrapped or seed-stage B2B SaaS companies with 1-50 employees and under $2M yearly revenue, evaluating low-cost organic customer acquisition, Reddit marketing, or social listening tools.",
+        },
+        {
+          name: "Digital Founders",
+          description:
+            "Founders at bootstrapped or seed-stage digital product companies with 1-50 employees and under $2M yearly revenue, evaluating low-cost organic customer acquisition, Reddit marketing, or social listening tools.",
+        },
+        {
+          name: "B2B SaaS Growth",
+          description:
+            "Heads of Growth at bootstrapped or seed-stage B2B SaaS companies with 1-50 employees and under $2M yearly revenue, evaluating low-cost organic customer acquisition, Reddit marketing, or social listening tools.",
+        },
+        {
+          name: "Digital Growth",
+          description:
+            "Heads of Growth at bootstrapped or seed-stage digital product companies with 1-50 employees and under $2M yearly revenue, evaluating low-cost organic customer acquisition, Reddit marketing, or social listening tools.",
+        },
+        {
+          name: "B2B SaaS Solo",
+          description:
+            "Solo marketers at bootstrapped or seed-stage B2B SaaS companies with 1-50 employees and under $2M yearly revenue, evaluating low-cost organic customer acquisition, Reddit marketing, or social listening tools.",
+        },
+        {
+          name: "Digital Solo",
+          description:
+            "Solo marketers at bootstrapped or seed-stage digital product companies with 1-50 employees and under $2M yearly revenue, evaluating low-cost organic customer acquisition, Reddit marketing, or social listening tools.",
+        },
+      ],
     });
-    const res = await suggest("every country");
+    const res = await suggest(
+      "Founders, Heads of Growth, or Solo Marketers at bootstrapped or seed-stage B2B SaaS and digital product companies"
+    );
     expect(res.status).toBe(200);
-    expect(res.body.candidates).toHaveLength(6); // capped
+    expect(res.body.candidates).toHaveLength(6);
     expect(res.body.candidates.every((c: { truncated: boolean }) => c.truncated)).toBe(
-      true
+      false
+    );
+    const layer1Call = fetchSpy.mock.calls
+      .filter(([url]) => String(url).endsWith("/complete"))
+      .map(([, init]) => JSON.parse(init?.body ?? "{}") as { systemPrompt: string })
+      .find((body) =>
+        body.systemPrompt.includes("decompose a natural-language audience")
+      );
+    expect(layer1Call?.systemPrompt).toContain(
+      "When multiple independent axes are explicitly present"
+    );
+    expect(layer1Call?.systemPrompt).toMatch(
+      /Example: 3 personas\s+x 2 company types = 6 audiences/
     );
   });
 

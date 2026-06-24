@@ -1251,7 +1251,7 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "True when the NL implied more audiences than the cap and the LLM grouped coarser."
+            "description": "Reserved for response compatibility. Current Layer 1 has no hard cap, so freshly suggested candidates return false."
           }
         },
         "required": [
