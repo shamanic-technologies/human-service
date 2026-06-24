@@ -365,14 +365,12 @@ const SUGGEST_STATUS = "suggested"; // inactive default for suggest-created rows
 // Gemini's native JSON mode needs no schema, so the shape stays prompt-described
 // + caller-validated.
 //
-// Model = `flash-pro` (Gemini 3.5 Flash, mid-tier). The whole relevance of a
-// suggested audience is the LLM's NL->filters mapping -- apollo/apify just match
-// structured filters deterministically, no LLM on their side -- so the model
-// tier IS the filter-quality lever. `flash-pro` reasons over the segment +
-// provider rulebook noticeably better than plain `flash` (which under-targets),
-// while staying far cheaper than `pro`/`sonnet`.
+// Layer 1 uses `flash-pro` for cheap NL segmentation. Layer 2 uses `pro` because
+// the whole relevance of a suggested audience is the LLM's NL->provider-filters
+// mapping -- apollo/apify then match structured filters deterministically.
 const SUGGEST_LLM_PROVIDER = "google" as const;
 const SUGGEST_LLM_MODEL = "flash-pro";
+const SUGGEST_LAYER2_LLM_MODEL = "pro";
 
 // Gemini structured-output schemas (passed as `responseSchema` so the provider
 // ENFORCES the shape server-side → the response always parses, eliminating the
@@ -827,7 +825,7 @@ async function refineFilters(
       message: transcript.join("\n\n---\n\n"),
       systemPrompt,
       provider: SUGGEST_LLM_PROVIDER,
-      model: SUGGEST_LLM_MODEL,
+      model: SUGGEST_LAYER2_LLM_MODEL,
       responseSchema: LAYER2_RESPONSE_SCHEMA,
     };
     const action = parseLayer2Action(
