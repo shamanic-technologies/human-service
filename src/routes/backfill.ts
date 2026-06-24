@@ -266,6 +266,55 @@ router.post(
 // How many {id,name,status} previews the apify→apollo migration returns.
 const MIGRATE_SAMPLE_LIMIT = 25;
 
+class MigrationAborted extends Error {
+  constructor(
+    message: string,
+    readonly migrated: ApifyToApolloMigrationResult[],
+    readonly failed: Array<{ id: string; name: string; error: string }>
+  ) {
+    super(message);
+    this.name = "MigrationAborted";
+  }
+}
+
+// Migrate a batch of apify rows to apollo, one atomic txn each. A row whose
+// apollo re-derivation yields no usable filter set is per-row `failed` (left
+// untouched, retried on re-run). A SYSTEMIC error (apollo/chat outage / missing
+// config) throws `MigrationAborted` carrying the partial progress — every row
+// already migrated persists (its own committed txn), a re-run resumes.
+async function runApifyToApolloMigration(
+  rows: Array<typeof audiences.$inferSelect>
+): Promise<{
+  migrated: ApifyToApolloMigrationResult[];
+  failed: Array<{ id: string; name: string; error: string }>;
+}> {
+  const migrated: ApifyToApolloMigrationResult[] = [];
+  const failed: Array<{ id: string; name: string; error: string }> = [];
+  for (const row of rows) {
+    let result: ApifyToApolloMigrationResult | null;
+    try {
+      result = await migrateApifyAudienceToApollo(row);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[human-service] migrate_apify.abort id=${row.id} ${msg}`);
+      throw new MigrationAborted(msg, migrated, failed);
+    }
+    if (!result) {
+      console.warn(
+        `[human-service] migrate_apify.row_failed id=${row.id} no usable apollo filters`
+      );
+      failed.push({
+        id: row.id,
+        name: row.name,
+        error: "apollo re-derivation yielded no usable filter set",
+      });
+      continue;
+    }
+    migrated.push(result);
+  }
+  return { migrated, failed };
+}
+
 // POST /internal/migrate-apify-audiences-to-apollo?dryRun=true|false
 //
 // One-time DATA fix: the people gateway is now apollo-only (apify removed from
@@ -303,6 +352,12 @@ router.post(
       return;
     }
     const dryRun = parsedQuery.data.dryRun === "true";
+    // Each row's agentic refine (up to 8 LLM rounds + apollo dry-runs) can exceed
+    // a caller's HTTP timeout, and a whole-table sweep certainly does. `async=true`
+    // decouples the work from the request: respond 202 immediately, then run the
+    // sweep in the background (each row is its own committed txn, so progress is
+    // durable + observable via ?dryRun=true). Poll until scanned hits 0.
+    const asyncMode = parsedQuery.data.async === "true";
 
     const rows = await db
       .select()
@@ -331,50 +386,49 @@ router.post(
       return;
     }
 
-    const migrated: ApifyToApolloMigrationResult[] = [];
-    const failed: Array<{ id: string; name: string; error: string }> = [];
-
-    for (const row of rows) {
-      let result: ApifyToApolloMigrationResult | null;
-      try {
-        result = await migrateApifyAudienceToApollo(row);
-      } catch (err) {
-        // apollo / chat-service outage or missing config is SYSTEMIC, not this
-        // row's fault -> fail loud + abort. Already-migrated rows persist (each
-        // is its own transaction); a re-run resumes (migrated rows are now
-        // deprecated and skipped).
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[human-service] migrate_apify.abort id=${row.id} ${msg}`);
-        res.status(502).json({ error: msg, migrated, failed });
-        return;
-      }
-      if (!result) {
-        // apollo re-derivation produced no usable filter set: skip this row (left
-        // untouched, retried on re-run).
-        console.warn(
-          `[human-service] migrate_apify.row_failed id=${row.id} no usable apollo filters`
-        );
-        failed.push({
-          id: row.id,
-          name: row.name,
-          error: "apollo re-derivation yielded no usable filter set",
+    if (asyncMode) {
+      // Fire-and-forget: respond before the sweep so the work survives a caller
+      // timeout. Progress is durable (per-row txn) and observable via dry-run.
+      res.status(202).json({ started: true, scanned });
+      void runApifyToApolloMigration(rows)
+        .then(({ migrated, failed }) =>
+          console.log(
+            `[human-service] migrate_apify.run_async scanned=${scanned} migrated=${migrated.length} failed=${failed.length}`
+          )
+        )
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`[human-service] migrate_apify.run_async_aborted ${msg}`);
         });
-        continue;
-      }
-      migrated.push(result);
+      return;
     }
 
-    console.log(
-      `[human-service] migrate_apify.run scanned=${scanned} migrated=${migrated.length} failed=${failed.length}`
-    );
-    res.json({
-      dryRun: false,
-      scanned,
-      wouldMigrate: scanned,
-      migrated,
-      failed,
-      sample: [],
-    });
+    try {
+      const { migrated, failed } = await runApifyToApolloMigration(rows);
+      console.log(
+        `[human-service] migrate_apify.run scanned=${scanned} migrated=${migrated.length} failed=${failed.length}`
+      );
+      res.json({
+        dryRun: false,
+        scanned,
+        wouldMigrate: scanned,
+        migrated,
+        failed,
+        sample: [],
+      });
+    } catch (err) {
+      // Systemic apollo/chat outage -> fail loud (502). Already-migrated rows
+      // persist; a re-run resumes (migrated rows are now deprecated, skipped).
+      if (err instanceof MigrationAborted) {
+        res.status(502).json({
+          error: err.message,
+          migrated: err.migrated,
+          failed: err.failed,
+        });
+        return;
+      }
+      throw err;
+    }
   }
 );
 
