@@ -56,7 +56,7 @@ afterAll(async () => {
 });
 
 describe("POST /internal/backfill-audience-avatars", () => {
-  it("dry-run counts live avatar-less rows + reports skippedNoUser, calls nothing", async () => {
+  it("dry-run counts ALL live avatar-less rows (incl. no-user), calls nothing", async () => {
     await seed();
     fetchSpy.mockImplementation(async () => imageOk());
 
@@ -66,15 +66,15 @@ describe("POST /internal/backfill-audience-avatars", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.dryRun).toBe(true);
-    expect(res.body.scanned).toBe(2); // NO_AV_A + NO_AV_B (HAS_AV/DEPRECATED/NO_USER excluded)
-    expect(res.body.skippedNoUser).toBe(1); // NO_USER
-    expect(res.body.wouldFill).toBe(2);
+    expect(res.body.scanned).toBe(3); // NO_AV_A + NO_AV_B + NO_USER (HAS_AV/DEPRECATED excluded)
+    expect(res.body.skippedNoUser).toBeUndefined();
+    expect(res.body.wouldFill).toBe(3);
     expect(res.body.filled).toBe(0);
-    expect(res.body.sample).toHaveLength(2);
+    expect(res.body.sample).toHaveLength(3);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("real run fills avatars for live avatar-less rows; re-run is idempotent", async () => {
+  it("real run fills avatars (incl. no-user rows via platform path); re-run is idempotent", async () => {
     await seed();
     fetchSpy.mockImplementation(async () => imageOk());
 
@@ -83,7 +83,7 @@ describe("POST /internal/backfill-audience-avatars", () => {
       .set(apiKeyHeader);
 
     expect(res.status).toBe(200);
-    expect(res.body.filled).toBe(2);
+    expect(res.body.filled).toBe(3);
     expect(res.body.failed).toEqual([]);
 
     const [a] = await db
@@ -99,14 +99,14 @@ describe("POST /internal/backfill-audience-avatars", () => {
       .where(eq(audiences.id, HAS_AV));
     expect(h.avatarUrl).toBe("data:image/png;base64,XXXX");
 
-    // NO_USER never generated.
+    // NO_USER IS filled now (platform path needs no user).
     const [n] = await db
       .select({ avatarUrl: audiences.avatarUrl })
       .from(audiences)
       .where(eq(audiences.id, NO_USER));
-    expect(n.avatarUrl).toBeNull();
+    expect(n.avatarUrl).toBe("data:image/png;base64,AAAA");
 
-    // Re-run: no avatar-less rows with a user left.
+    // Re-run: no avatar-less live rows left.
     const reRun = await request(app)
       .post("/internal/backfill-audience-avatars?dryRun=false")
       .set(apiKeyHeader);
@@ -114,12 +114,12 @@ describe("POST /internal/backfill-audience-avatars", () => {
     expect(reRun.body.filled).toBe(0);
   });
 
-  it("a per-row image failure (e.g. zero-balance org 402) is reported, others still fill", async () => {
+  it("a per-row image failure is reported, others still fill", async () => {
     await seed();
     let call = 0;
     fetchSpy.mockImplementation(async () => {
       call++;
-      if (call === 1) return { ok: false, status: 402, json: async () => ({}), text: async () => "insufficient balance" };
+      if (call === 1) return { ok: false, status: 502, json: async () => ({}), text: async () => "gemini blip" };
       return imageOk();
     });
 
@@ -128,7 +128,7 @@ describe("POST /internal/backfill-audience-avatars", () => {
       .set(apiKeyHeader);
 
     expect(res.status).toBe(200);
-    expect(res.body.filled).toBe(1);
+    expect(res.body.filled).toBe(2);
     expect(res.body.failed).toHaveLength(1);
   });
 
@@ -142,7 +142,7 @@ describe("POST /internal/backfill-audience-avatars", () => {
 
     expect(res.status).toBe(202);
     expect(res.body.started).toBe(true);
-    expect(res.body.scanned).toBe(2);
+    expect(res.body.scanned).toBe(3);
 
     let filled: Array<{ id: string }> = [];
     for (let i = 0; i < 50; i++) {
@@ -150,10 +150,10 @@ describe("POST /internal/backfill-audience-avatars", () => {
         .select({ id: audiences.id })
         .from(audiences)
         .where(eq(audiences.avatarUrl, "data:image/png;base64,AAAA"));
-      if (filled.length >= 2) break;
+      if (filled.length >= 3) break;
       await new Promise((r) => setTimeout(r, 50));
     }
-    expect(filled.length).toBe(2);
+    expect(filled.length).toBe(3);
   });
 
   it("requires api key", async () => {

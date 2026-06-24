@@ -314,3 +314,43 @@ export async function generateImage(args: {
   }
   return data as GeneratedImage;
 }
+
+// Platform twin of generateImage — POST /internal/platform-images/generate, the
+// ORG-LESS, service-auth path (x-api-key only, no x-org-id/x-user-id/x-run-id).
+// chat-service uses the platform Google key and declares the image-gen spend on a
+// PLATFORM run, so the caller passes NO org/user/run and the org is NOT billed.
+// Use this for internal sweeps (e.g. backfilling audience avatars) that don't
+// belong to a specific org/user and shouldn't bill anyone. Fail loud: a non-2xx
+// throws ChatServiceError; an unreachable host throws ChatServiceError(0).
+export async function platformGenerateImage(args: {
+  prompt: string;
+}): Promise<GeneratedImage> {
+  const { url, key } = requireChat();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-API-Key": key,
+  };
+
+  let res: Response;
+  try {
+    res = await fetchWithConnectRetry(`${url}/internal/platform-images/generate`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ prompt: args.prompt }),
+    });
+  } catch (err) {
+    throw new ChatServiceError(0, `chat-service unreachable: ${String(err)}`);
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ChatServiceError(res.status, text);
+  }
+  const data = (await res.json()) as Partial<GeneratedImage>;
+  if (!data.imageBase64 || !data.mimeType) {
+    throw new ChatServiceError(
+      502,
+      "chat-service returned no image bytes / mime type"
+    );
+  }
+  return data as GeneratedImage;
+}

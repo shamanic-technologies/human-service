@@ -1556,12 +1556,7 @@ export const BackfillAudienceAvatarsResponseSchema = z
       description: "Present (true) only on an async run — the sweep runs in the background.",
     }),
     scanned: z.number().int().openapi({
-      description:
-        "Live audiences (status<>'deprecated') with avatar_url IS NULL AND created_by_user_id IS NOT NULL.",
-    }),
-    skippedNoUser: z.number().int().openapi({
-      description:
-        "Avatar-less audiences SKIPPED because they have no created_by_user_id (chat-service image gen needs a user for key resolution). Reported, not generated.",
+      description: "Live audiences (status<>'deprecated') with avatar_url IS NULL.",
     }),
     wouldFill: z.number().int().openapi({
       description: "Audiences that would get an avatar (= scanned on a dry-run).",
@@ -1575,7 +1570,7 @@ export const BackfillAudienceAvatarsResponseSchema = z
       )
       .openapi({
         description:
-          "Audiences whose image generation failed (e.g. a zero-balance org → 402); left null, retried on re-run.",
+          "Audiences whose image generation failed (transient chat error); left null, retried on re-run.",
       }),
     sample: z
       .array(z.object({ id: z.string(), name: z.string() }))
@@ -1587,7 +1582,7 @@ registry.registerPath({
   method: "post",
   path: "/internal/backfill-audience-avatars",
   summary:
-    "One-time data fix: generate + store a flat-vector avatar (via chat-service, billed to the audience's org) for every live audience whose avatar_url is null and that has a created_by_user_id (idempotent, dry-runnable, async)",
+    "One-time data fix: generate + store a flat-vector avatar for every live audience whose avatar_url is null, via chat-service's org-less platform image path (no org billing, no user needed) — idempotent, dry-runnable, async",
   security: [{ apiKey: [] }],
   request: { query: BackfillAudienceAvatarsQuerySchema },
   responses: {

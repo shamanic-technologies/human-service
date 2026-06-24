@@ -2010,11 +2010,7 @@
           },
           "scanned": {
             "type": "integer",
-            "description": "Live audiences (status<>'deprecated') with avatar_url IS NULL AND created_by_user_id IS NOT NULL."
-          },
-          "skippedNoUser": {
-            "type": "integer",
-            "description": "Avatar-less audiences SKIPPED because they have no created_by_user_id (chat-service image gen needs a user for key resolution). Reported, not generated."
+            "description": "Live audiences (status<>'deprecated') with avatar_url IS NULL."
           },
           "wouldFill": {
             "type": "integer",
@@ -2045,7 +2041,7 @@
                 "error"
               ]
             },
-            "description": "Audiences whose image generation failed (e.g. a zero-balance org → 402); left null, retried on re-run."
+            "description": "Audiences whose image generation failed (transient chat error); left null, retried on re-run."
           },
           "sample": {
             "type": "array",
@@ -2070,7 +2066,6 @@
         "required": [
           "dryRun",
           "scanned",
-          "skippedNoUser",
           "wouldFill",
           "filled",
           "failed",
@@ -5025,7 +5020,7 @@
     },
     "/internal/backfill-audience-avatars": {
       "post": {
-        "summary": "One-time data fix: generate + store a flat-vector avatar (via chat-service, billed to the audience's org) for every live audience whose avatar_url is null and that has a created_by_user_id (idempotent, dry-runnable, async)",
+        "summary": "One-time data fix: generate + store a flat-vector avatar for every live audience whose avatar_url is null, via chat-service's org-less platform image path (no org billing, no user needed) — idempotent, dry-runnable, async",
         "security": [
           {
             "apiKey": []
