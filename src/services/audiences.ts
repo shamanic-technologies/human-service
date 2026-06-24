@@ -368,6 +368,82 @@ const SUGGEST_STATUS = "suggested"; // inactive default for suggest-created rows
 const SUGGEST_LLM_PROVIDER = "google" as const;
 const SUGGEST_LLM_MODEL = "flash-pro";
 
+// Gemini structured-output schemas (passed as `responseSchema` so the provider
+// ENFORCES the shape server-side → the response always parses, eliminating the
+// schemaless-JSON "non-parsable → 502" failure that made /suggest flake ~50% of
+// the time). These are GEMINI responseSchemas (a permissive OpenAPI subset) —
+// NOT Anthropic strict schemas, so we don't enumerate `additionalProperties`.
+// The open `filters` blob (#54's reason for going schemaless) IS expressible
+// here: it's a fixed 16-field set. Values are still validated caller-side
+// (PeopleSearchFiltersSchema in dryRunSafe / parseCandidates) — the schema
+// guarantees valid JSON + the action enum, not semantic correctness.
+//
+// `disableThinking` is set on every suggest LLM call: structured JSON needs no
+// chain-of-thought, and freeing the output budget also avoids truncated JSON.
+const SUGGEST_DISABLE_THINKING = true;
+
+const LAYER1_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    audiences: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          description: { type: "string" },
+        },
+        required: ["name", "description"],
+      },
+    },
+  },
+  required: ["audiences"],
+};
+
+// The 16 neutral PeopleSearchFilters fields (mirrors src/schemas.ts) as a Gemini
+// schema. All optional — the model populates only what this provider honors.
+const FILTERS_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    titles: { type: "array", items: { type: "string" } },
+    seniorities: { type: "array", items: { type: "string" } },
+    functions: { type: "array", items: { type: "string" } },
+    locationCountries: { type: "array", items: { type: "string" } },
+    locationStates: { type: "array", items: { type: "string" } },
+    locationCities: { type: "array", items: { type: "string" } },
+    companyNames: { type: "array", items: { type: "string" } },
+    companyDomains: { type: "array", items: { type: "string" } },
+    industries: { type: "array", items: { type: "string" } },
+    keywords: { type: "array", items: { type: "string" } },
+    employeeMin: { type: "integer" },
+    employeeMax: { type: "integer" },
+    companySizes: { type: "array", items: { type: "string" } },
+    revenueRanges: { type: "array", items: { type: "string" } },
+    fundingStages: { type: "array", items: { type: "string" } },
+    technologies: { type: "array", items: { type: "string" } },
+  },
+};
+
+// Layer-2 agentic action. `filters` only meaningful for action:"test", `reason`
+// only for "exhausted" — both kept optional (Gemini has no clean discriminated
+// union); parseLayer2Action handles the conditional caller-side.
+const LAYER2_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    action: { type: "string", enum: ["test", "confirm", "exhausted"] },
+    filters: FILTERS_RESPONSE_SCHEMA,
+    reasoning: { type: "string" },
+    reason: { type: "string" },
+  },
+  required: ["action"],
+};
+
+const DESCRIPTION_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: { description: { type: "string" } },
+  required: ["description"],
+};
+
 export interface AudienceCandidate {
   audienceId: string;
   name: string;
@@ -463,6 +539,8 @@ async function decomposeSegments(
       identity,
       provider: SUGGEST_LLM_PROVIDER,
       model: SUGGEST_LLM_MODEL,
+      responseSchema: LAYER1_RESPONSE_SCHEMA,
+      disableThinking: SUGGEST_DISABLE_THINKING,
     })
   );
   const truncated = parsed.length > SUGGEST_MAX_CANDIDATES;
@@ -515,6 +593,8 @@ export async function generateAudienceDescription(args: {
     systemPrompt: buildDescriptionSystemPrompt(),
     provider: SUGGEST_LLM_PROVIDER,
     model: SUGGEST_LLM_MODEL,
+    responseSchema: DESCRIPTION_RESPONSE_SCHEMA,
+    disableThinking: SUGGEST_DISABLE_THINKING,
   });
   const description = json.description;
   if (typeof description !== "string" || description.trim().length === 0) {
@@ -695,6 +775,8 @@ async function refineFilters(
         identity,
         provider: SUGGEST_LLM_PROVIDER,
         model: SUGGEST_LLM_MODEL,
+        responseSchema: LAYER2_RESPONSE_SCHEMA,
+        disableThinking: SUGGEST_DISABLE_THINKING,
       })
     );
 
@@ -846,23 +928,64 @@ export async function suggestAudiences(
   const { segments, truncated } = await decomposeSegments(nlPrompt, identity);
 
   // Layer 2 + collapse, per segment. Segments run concurrently; the two providers
-  // within a segment run concurrently too.
-  const collapsed = await Promise.all(
+  // within a segment run concurrently too. Both fan-outs are FAULT-TOLERANT
+  // (allSettled): one provider's outage doesn't drop the other's good result for
+  // that segment, and one segment's total failure doesn't nuke the whole batch.
+  // We still FAIL LOUD when there's nothing to return — if every segment failed,
+  // the first error propagates (502) rather than a misleading empty success.
+  const settled = await Promise.allSettled(
     segments.map(async (segment) => {
-      const perProvider = await Promise.all(
+      const perProviderSettled = await Promise.allSettled(
         SUGGEST_PROVIDERS.map(async (provider) => ({
           provider,
           ...(await refineFilters(provider, segment, identity)),
         }))
       );
+      const perProvider = perProviderSettled
+        .filter((r): r is PromiseFulfilledResult<{ provider: Provider } & RefineResult> =>
+          r.status === "fulfilled"
+        )
+        .map((r) => r.value);
+      // Both providers errored for this segment — surface it (the segment fails;
+      // the outer allSettled keeps the other segments).
+      if (perProvider.length === 0) {
+        throw (perProviderSettled.find((r) => r.status === "rejected") as
+          | PromiseRejectedResult
+          | undefined)?.reason ?? new Error("both providers failed");
+      }
       // Pick the larger count; reduce keeps the incumbent on a tie, and apollo is
-      // first in SUGGEST_PROVIDERS, so ties resolve to apollo.
+      // first in SUGGEST_PROVIDERS, so (when both succeeded) ties resolve to apollo.
       const winner = perProvider.reduce((best, cur) =>
         cur.count > best.count ? cur : best
       );
       return { segment, winner };
     })
   );
+
+  const collapsed = settled
+    .filter(
+      (
+        r
+      ): r is PromiseFulfilledResult<{
+        segment: Segment;
+        winner: { provider: Provider } & RefineResult;
+      }> => r.status === "fulfilled"
+    )
+    .map((r) => r.value);
+
+  const failures = settled.filter(
+    (r): r is PromiseRejectedResult => r.status === "rejected"
+  );
+  if (failures.length > 0) {
+    console.error(
+      `[human-service] audience.suggest partial: ${failures.length}/${segments.length} segment(s) failed`,
+      failures[0].reason
+    );
+  }
+  // Nothing survived — fail loud with the first underlying error.
+  if (collapsed.length === 0 && segments.length > 0) {
+    throw failures[0]?.reason ?? new ChatServiceError(502, "all segments failed");
+  }
 
   // Persist sequentially (one row per segment; names are distinct, so no
   // intra-request collision; the unique index guards cross-request races).
