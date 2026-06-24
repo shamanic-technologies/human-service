@@ -243,6 +243,37 @@ describe("POST /internal/migrate-apify-audiences-to-apollo", () => {
     expect(a.name).toBe("Active Apify");
   });
 
+  it("async=true responds 202 immediately + runs the sweep in the background", async () => {
+    await seed();
+    wire({ dryRunCount: 123 });
+
+    const res = await request(app)
+      .post("/internal/migrate-apify-audiences-to-apollo?dryRun=false&async=true")
+      .set(apiKeyHeader);
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ started: true, scanned: 2 });
+
+    // Background sweep is fire-and-forget; poll the DB until it lands.
+    let twins: Array<{ id: string }> = [];
+    for (let i = 0; i < 50; i++) {
+      twins = await db
+        .select({ id: audiences.id })
+        .from(audiences)
+        .where(eq(audiences.source, "migrated_from_apify"));
+      if (twins.length >= 2) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(twins.length).toBe(2);
+
+    // apify rows deprecated.
+    const [a] = await db
+      .select({ status: audiences.status })
+      .from(audiences)
+      .where(eq(audiences.id, APIFY_ACTIVE));
+    expect(a.status).toBe("deprecated");
+  });
+
   it("fails loud (502) when apollo / chat-service is unreachable", async () => {
     await seed();
     fetchSpy.mockImplementation(async () => {

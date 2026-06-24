@@ -1458,6 +1458,13 @@ export const MigrateApifyAudiencesQuerySchema = z.object({
       description:
         "When 'true', scan the non-deprecated apify audiences + return a sample WITHOUT calling the LLM/apollo or writing. Defaults to false (real run).",
     }),
+  async: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({
+      description:
+        "When 'true', respond 202 immediately and run the sweep in the background (each row's agentic refine can exceed an HTTP timeout; a whole-table run certainly does). Progress is durable per-row + observable via ?dryRun=true. Ignored when dryRun=true.",
+    }),
 });
 
 export const MigrateApifyAudiencesResponseSchema = z
