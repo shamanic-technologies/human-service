@@ -1998,6 +1998,85 @@
           "sample"
         ]
       },
+      "BackfillAudienceAvatarsResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "started": {
+            "type": "boolean",
+            "description": "Present (true) only on an async run — the sweep runs in the background."
+          },
+          "scanned": {
+            "type": "integer",
+            "description": "Live audiences (status<>'deprecated') with avatar_url IS NULL AND created_by_user_id IS NOT NULL."
+          },
+          "skippedNoUser": {
+            "type": "integer",
+            "description": "Avatar-less audiences SKIPPED because they have no created_by_user_id (chat-service image gen needs a user for key resolution). Reported, not generated."
+          },
+          "wouldFill": {
+            "type": "integer",
+            "description": "Audiences that would get an avatar (= scanned on a dry-run)."
+          },
+          "filled": {
+            "type": "integer",
+            "description": "Audiences whose avatar was generated + stored (0 on a dry-run / async)."
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "error"
+              ]
+            },
+            "description": "Audiences whose image generation failed (e.g. a zero-balance org → 402); left null, retried on re-run."
+          },
+          "sample": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name"
+              ]
+            },
+            "description": "Per-audience preview (capped) of rows that would be filled."
+          }
+        },
+        "required": [
+          "dryRun",
+          "scanned",
+          "skippedNoUser",
+          "wouldFill",
+          "filled",
+          "failed",
+          "sample"
+        ]
+      },
       "HealthResponse": {
         "type": "object",
         "properties": {
@@ -4933,6 +5012,81 @@
           },
           "502": {
             "description": "apollo / chat-service outage / missing config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/backfill-audience-avatars": {
+      "post": {
+        "summary": "One-time data fix: generate + store a flat-vector avatar (via chat-service, billed to the audience's org) for every live audience whose avatar_url is null and that has a created_by_user_id (idempotent, dry-runnable, async)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', count the live audiences missing an avatar + return a sample WITHOUT calling chat-service or writing. Defaults to false (real run)."
+            },
+            "required": false,
+            "description": "When 'true', count the live audiences missing an avatar + return a sample WITHOUT calling chat-service or writing. Defaults to false (real run).",
+            "name": "dryRun",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', respond 202 immediately and run the sweep in the background (image generation is slow; a whole-table run exceeds an HTTP timeout). Progress is durable per-row + observable via ?dryRun=true. Ignored when dryRun=true."
+            },
+            "required": false,
+            "description": "When 'true', respond 202 immediately and run the sweep in the background (image generation is slow; a whole-table run exceeds an HTTP timeout). Progress is durable per-row + observable via ?dryRun=true. Ignored when dryRun=true.",
+            "name": "async",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Backfill result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillAudienceAvatarsResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Async sweep started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillAudienceAvatarsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "chat-service missing config",
             "content": {
               "application/json": {
                 "schema": {
