@@ -300,7 +300,7 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(after.body.audience.status).toBe("active"); // untouched
   });
 
-  it("calls chat-service with google JSON mode and NO responseSchema", async () => {
+  it("calls chat-service with google JSON mode, a responseSchema, and disableThinking", async () => {
     const completeBodies: Array<Record<string, unknown>> = [];
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
@@ -333,8 +333,102 @@ describe("POST /orgs/audiences/suggest", () => {
       expect(body.provider).toBe("google");
       expect(body.model).toBe("flash-pro");
       expect(body.responseFormat).toBe("json");
-      expect(body.responseSchema).toBeUndefined();
+      // Provider-enforced shape: every suggest call now ships a responseSchema
+      // (layer-1 audiences object OR layer-2 action object) + disableThinking.
+      expect(body.responseSchema).toBeDefined();
+      expect((body.responseSchema as { type?: string }).type).toBe("object");
+      expect(body.disableThinking).toBe(true);
     }
+  });
+
+  it("retries a transient chat-service 502 (malformed-JSON / blip) and still succeeds", async () => {
+    // The FIRST layer-1 /complete returns a 502 (chat-service's response for a
+    // non-parsable LLM output); the retry returns a clean parse. Pre-fix this
+    // single 502 anywhere in the fan-out 502'd the whole request (~50% flake).
+    let layer1Calls = 0;
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/search/filters-prompt"))
+        return ok({ prompt: "RULES", schemaVersion: "1" });
+      if (u.endsWith("/reference/industries"))
+        return ok({ industries: [{ name: "Computer Software" }] });
+      if (u.endsWith("/complete")) {
+        const body = JSON.parse(init.body ?? "{}") as { systemPrompt: string; message: string };
+        if (body.systemPrompt.includes("decompose a natural-language audience")) {
+          layer1Calls++;
+          if (layer1Calls === 1) return err(502, "model returned non-parsable JSON");
+          return ok({ json: { audiences: [{ name: "CMOs", description: "cmos" }] } });
+        }
+        const cleanTests = (body.message.match(/-> count=/g) ?? []).length;
+        return ok({
+          json: cleanTests === 0 ? { action: "test", filters: { titles: ["CMO"] } } : { action: "confirm" },
+        });
+      }
+      if (u.endsWith("/search/dry-run")) return ok({ totalEntries: 100 });
+      if (u.endsWith("/search/count")) return ok({ totalMatched: 50 });
+      throw new Error("unexpected url " + u);
+    });
+    const res = await suggest("CMOs");
+    expect(res.status).toBe(200);
+    expect(layer1Calls).toBe(2); // retried once
+    expect(res.body.candidates).toHaveLength(1);
+  });
+
+  it("does NOT retry a chat-service 402 (insufficient credits) — fails fast", async () => {
+    let layer1Calls = 0;
+    fetchSpy.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.endsWith("/complete")) {
+        layer1Calls++;
+        return err(402, "Insufficient credits");
+      }
+      throw new Error("unexpected url " + u);
+    });
+    const res = await suggest("CMOs");
+    expect(res.status).toBe(502); // surfaced as 502 to the front
+    expect(layer1Calls).toBe(1); // NOT retried — deterministic 4xx
+  });
+
+  it("tolerates one segment failing on BOTH providers and still returns the others", async () => {
+    // The "Bad" segment's layer-2 /complete 5xx's on BOTH providers (a real
+    // chat-service outage that survives the retry budget); "Good" is fine. The
+    // segment description is reliably present in the layer-2 transcript message,
+    // so we key the outage on it. Pre-fix the Promise.all rejected the WHOLE
+    // batch on one segment's failure; now Good still returns.
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/search/filters-prompt"))
+        return ok({ prompt: "RULES", schemaVersion: "1" });
+      if (u.endsWith("/reference/industries"))
+        return ok({ industries: [{ name: "Computer Software" }] });
+      if (u.endsWith("/complete")) {
+        const body = JSON.parse(init.body ?? "{}") as { systemPrompt: string; message: string };
+        if (body.systemPrompt.includes("decompose a natural-language audience")) {
+          return ok({
+            json: {
+              audiences: [
+                { name: "Good", description: "good seg" },
+                { name: "Bad", description: "bad seg" },
+              ],
+            },
+          });
+        }
+        // Persistent 5xx for the Bad segment's layer-2 (both providers) — even
+        // the retry can't recover it, so the segment fails.
+        if (body.message.includes("bad seg")) return err(503, "model overloaded");
+        const cleanTests = (body.message.match(/-> count=/g) ?? []).length;
+        return ok({
+          json: cleanTests === 0 ? { action: "test", filters: { titles: ["X"] } } : { action: "confirm" },
+        });
+      }
+      if (u.endsWith("/search/dry-run")) return ok({ totalEntries: 300 });
+      if (u.endsWith("/search/count")) return ok({ totalMatched: 80 });
+      throw new Error("unexpected url " + u);
+    });
+    const res = await suggest("good and bad");
+    expect(res.status).toBe(200);
+    expect(res.body.candidates).toHaveLength(1); // Bad dropped, Good kept
+    expect(res.body.candidates[0].name).toBe("Good");
   });
 
   it("injects apollo's canonical industries list into the apollo layer-2 prompt, not the apify one", async () => {

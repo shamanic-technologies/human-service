@@ -68,6 +68,18 @@ function isTransientConnectError(err: unknown): boolean {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Response statuses worth retrying. chat-service returns 502 on a non-parsable
+// LLM response (Gemini schemaless JSON occasionally emits invalid JSON) and on a
+// transient upstream blip; 429/503 are rate-limit / unavailable. All are
+// re-rollable: the SAME prompt re-run almost always parses. We do NOT retry
+// 4xx (400 bad request, 401 auth, 402 insufficient credits) — those are
+// deterministic, a retry only wastes calls.
+const RETRIABLE_STATUSES = new Set([429, 502, 503]);
+
+function isRetriableStatus(status: number): boolean {
+  return RETRIABLE_STATUSES.has(status);
+}
+
 async function fetchWithConnectRetry(
   url: string,
   init: RequestInit
@@ -86,6 +98,57 @@ async function fetchWithConnectRetry(
     }
   }
   throw lastErr;
+}
+
+// POST a /complete-shaped request and return its parsed `json` object, with a
+// bounded retry covering BOTH the connect phase (thrown rejection — Neon
+// cold-start, write-safe: never reached the server) AND a completed-but-
+// transient response (retriable status, or a 200 whose `json` is missing/
+// malformed). LLM JSON-mode output is stochastic; one bad roll in a fan-out of
+// dozens of calls must not 502 the whole request. Fail loud after the budget is
+// spent: the last ChatServiceError propagates. A non-retriable status (4xx)
+// throws immediately with no retry.
+async function postCompleteForJson(
+  url: string,
+  init: RequestInit
+): Promise<Record<string, unknown>> {
+  let lastErr: ChatServiceError | null = null;
+  for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt++) {
+    const canRetry = attempt < RETRY_BACKOFF_MS.length;
+
+    let res: Response;
+    try {
+      res = await fetch(url, init);
+    } catch (err) {
+      // Thrown rejection = connect-phase / network — transient, write-safe.
+      lastErr = new ChatServiceError(0, `chat-service unreachable: ${String(err)}`);
+      if (canRetry && isTransientConnectError(err)) {
+        await sleep(RETRY_BACKOFF_MS[attempt]);
+        continue;
+      }
+      throw lastErr;
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      lastErr = new ChatServiceError(res.status, text);
+      if (canRetry && isRetriableStatus(res.status)) {
+        await sleep(RETRY_BACKOFF_MS[attempt]);
+        continue;
+      }
+      throw lastErr;
+    }
+
+    const data = (await res.json()) as { json?: Record<string, unknown> };
+    if (data.json && typeof data.json === "object") return data.json;
+    lastErr = new ChatServiceError(502, "chat-service returned no parsed json field");
+    if (canRetry) {
+      await sleep(RETRY_BACKOFF_MS[attempt]);
+      continue;
+    }
+    throw lastErr;
+  }
+  throw lastErr ?? new ChatServiceError(0, "chat-service request failed");
 }
 
 function requireChat(): { url: string; key: string } {
@@ -120,6 +183,11 @@ export async function completeJson(args: {
   provider?: "anthropic" | "google";
   model?: string;
   temperature?: number;
+  // Minimize the model's internal reasoning so the whole output budget goes to
+  // the answer — recommended for structured-JSON / extraction tasks (also
+  // reduces truncated-output risk). Provider-floored (Gemini 3.5 flash-pro →
+  // "minimal"); omit ⇒ service default.
+  disableThinking?: boolean;
 }): Promise<Record<string, unknown>> {
   const { url, key } = requireChat();
   const headers: Record<string, string> = {
@@ -138,30 +206,16 @@ export async function completeJson(args: {
     provider: args.provider ?? "anthropic",
     model: args.model ?? "sonnet",
     ...(args.temperature !== undefined ? { temperature: args.temperature } : {}),
+    ...(args.disableThinking !== undefined
+      ? { disableThinking: args.disableThinking }
+      : {}),
   };
 
-  let res: Response;
-  try {
-    res = await fetchWithConnectRetry(`${url}/complete`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-  } catch (err) {
-    throw new ChatServiceError(0, `chat-service unreachable: ${String(err)}`);
-  }
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new ChatServiceError(res.status, text);
-  }
-  const data = (await res.json()) as { json?: Record<string, unknown> };
-  if (!data.json || typeof data.json !== "object") {
-    throw new ChatServiceError(
-      502,
-      "chat-service returned no parsed json field"
-    );
-  }
-  return data.json;
+  return postCompleteForJson(`${url}/complete`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
 }
 
 // One-shot JSON LLM completion via chat-service POST /internal/platform-complete
@@ -178,9 +232,11 @@ export async function completeJson(args: {
 export async function platformCompleteJson(args: {
   message: string;
   systemPrompt: string;
+  responseSchema?: Record<string, unknown>;
   provider?: "anthropic" | "google";
   model?: string;
   temperature?: number;
+  disableThinking?: boolean;
 }): Promise<Record<string, unknown>> {
   const { url, key } = requireChat();
   const headers: Record<string, string> = {
@@ -191,33 +247,20 @@ export async function platformCompleteJson(args: {
     message: args.message,
     systemPrompt: args.systemPrompt,
     responseFormat: "json",
+    ...(args.responseSchema ? { responseSchema: args.responseSchema } : {}),
     provider: args.provider ?? "anthropic",
     model: args.model ?? "sonnet",
     ...(args.temperature !== undefined ? { temperature: args.temperature } : {}),
+    ...(args.disableThinking !== undefined
+      ? { disableThinking: args.disableThinking }
+      : {}),
   };
 
-  let res: Response;
-  try {
-    res = await fetchWithConnectRetry(`${url}/internal/platform-complete`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-  } catch (err) {
-    throw new ChatServiceError(0, `chat-service unreachable: ${String(err)}`);
-  }
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new ChatServiceError(res.status, text);
-  }
-  const data = (await res.json()) as { json?: Record<string, unknown> };
-  if (!data.json || typeof data.json !== "object") {
-    throw new ChatServiceError(
-      502,
-      "chat-service returned no parsed json field"
-    );
-  }
-  return data.json;
+  return postCompleteForJson(`${url}/internal/platform-complete`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
 }
 
 export interface GeneratedImage {
