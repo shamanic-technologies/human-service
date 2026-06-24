@@ -352,7 +352,6 @@ export async function computeStats(
 // "apify" here. Existing apify audiences are migrated separately via
 // POST /internal/migrate-apify-audiences-to-apollo.
 const SUGGEST_PROVIDERS: Provider[] = ["apollo"];
-const SUGGEST_MAX_CANDIDATES = 6; // cap on layer-1 audiences (not a knob)
 const SUGGEST_MAX_ITERATION_ROUNDS = 8; // layer-2 agentic loop bound per (audience, provider)
 const SUGGEST_STATUS = "suggested"; // inactive default for suggest-created rows
 
@@ -498,20 +497,24 @@ function buildLayer1SystemPrompt(): string {
     "audience per clearly-distinct facet -- you do NOT need the caller to write",
     '"separately" or "split by". A facet is distinct when the request spans more',
     "than one value on any ICP axis below: different PERSONAS (e.g. founders AND",
-    "marketing-agency owners AND heads of growth), different GEOGRAPHIES (e.g. US",
-    "AND France AND Germany), different INDUSTRIES (e.g. SaaS AND e-commerce), or",
-    "different COMPANY TYPES (e.g. early-stage startups AND enterprises). Each",
-    "such facet becomes its OWN audience -- because each maps to a different",
-    "people-search filter set. If the caller is explicit about grouping",
-    '("US and Europe separately", "one broad list"), honor that intent exactly.',
+    "heads of growth AND solo marketers), different GEOGRAPHIES (e.g. US AND",
+    "France AND Germany), different INDUSTRIES (e.g. SaaS AND e-commerce), or",
+    "different COMPANY TYPES (e.g. B2B SaaS AND digital product companies).",
+    "When multiple independent axes are explicitly present, output the concrete",
+    "COMBINATIONS of those axes, not a broad merged bucket. Example: 3 personas",
+    "x 2 company types = 6 audiences. Each combination gets its OWN audience",
+    "because each maps to a different people-search filter set. If the caller is",
+    "explicit about grouping (\"US and Europe separately\", \"one broad list\"),",
+    "honor that intent exactly.",
     "",
     "BUT do NOT over-split a genuinely COHESIVE request. A single persona in a",
     "single geography/industry (e.g. \"founders of B2B SaaS startups in the US\")",
     "is ONE audience -- splitting it into noise (e.g. by arbitrary sub-titles or",
     "company sizes the caller never mentioned) is wrong. Split only on axes the",
-    "caller actually spans; never invent a grouping dimension.",
-    `Never produce more than ${SUGGEST_MAX_CANDIDATES} audiences -- if the request`,
-    "spans more distinct facets than that, group the closest ones coarser.",
+    "caller actually spans; never invent a grouping dimension. Do not merge two",
+    "different personas merely because they share the same company constraints,",
+    "and do not merge two different company types merely because they share the",
+    "same persona constraints.",
     "",
     "An ICP (ideal customer profile) for a people-search database is defined by",
     "THREE filterable axes -- make each audience concrete on the axes the caller",
@@ -561,8 +564,8 @@ function parseSegments(obj: Record<string, unknown>): Segment[] {
 async function decomposeSegments(
   nlPrompt: string,
   identity: Identity
-): Promise<{ segments: Segment[]; truncated: boolean }> {
-  const parsed = parseSegments(
+): Promise<Segment[]> {
+  return parseSegments(
     await completeJson({
       message: nlPrompt,
       systemPrompt: buildLayer1SystemPrompt(),
@@ -573,8 +576,6 @@ async function decomposeSegments(
       disableThinking: SUGGEST_DISABLE_THINKING,
     })
   );
-  const truncated = parsed.length > SUGGEST_MAX_CANDIDATES;
-  return { segments: parsed.slice(0, SUGGEST_MAX_CANDIDATES), truncated };
 }
 
 // --- Backfill: one-sentence description from an audience's own name + filters ---
@@ -1009,7 +1010,7 @@ export async function suggestAudiences(
   brandId: string,
   identity: Identity
 ): Promise<AudienceCandidate[]> {
-  const { segments, truncated } = await decomposeSegments(nlPrompt, identity);
+  const segments = await decomposeSegments(nlPrompt, identity);
 
   // Layer 2 + collapse, per segment. Segments run concurrently; the two providers
   // within a segment run concurrently too. Both fan-outs are FAULT-TOLERANT
@@ -1093,7 +1094,7 @@ export async function suggestAudiences(
       count: winner.count,
       status: SUGGEST_STATUS,
       validationError: winner.validationError,
-      truncated,
+      truncated: false,
     });
   }
   return out;

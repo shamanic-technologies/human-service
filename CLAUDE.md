@@ -455,13 +455,16 @@ is the chat-service client.
    reads the caller's segmentation intent ("US and Europe separately", "split by
    seniority", "one broad list") and emits a SET of **named** audiences
    `{ name (≤4 words), description }`. The names are SHARED so layer-2's two
-   provider runs map to the SAME segments and are comparable head-to-head. Cap
-   `SUGGEST_MAX_CANDIDATES = 6` (LLM told to group coarser + `truncated:true`).
-   Each `description` is the complete prompt for layer 2: it must carry every
-   shared and segment-specific constraint. **No rule-based post-processing is
-   allowed after layer 1** (no regex extraction from the original prompt, no
-   forced filter merge); if constraints are missing, fix the layer-1 prompt/schema
-   so the audience description is self-contained.
+   provider runs map to the SAME segments and are comparable head-to-head. There
+   is **no hard cap**: Layer 1 must emit every distinct audience it infers. When
+   the prompt explicitly spans independent axes that both change provider filters,
+   Layer 1 should produce the combinations, not a broad merged bucket (e.g.
+   founders + heads of growth + solo marketers × B2B SaaS + digital product
+   companies = 6 audiences). Each `description` is the complete prompt for layer
+   2: it must carry every shared and segment-specific constraint. **No rule-based
+   post-processing is allowed after layer 1** (no regex extraction from the
+   original prompt, no forced filter merge); if constraints are missing, fix the
+   layer-1 prompt/schema so the audience description is self-contained.
 2. **LAYER 2 (per audience × per provider, agentic multi-turn loop)** —
    `refineFilters` hands the segment + that provider's `filters-prompt` rulebook
    to the LLM, which `{action:"test",filters}` → server runs the **free dry-run**
@@ -511,8 +514,8 @@ is the chat-service client.
   16-field set) IS expressible there — without the Anthropic over-constraining
   pain.
   **Reliability — responseSchema + retry + tolerance (v0.18.5, #93).** `/suggest`
-  fans out MANY independent Gemini calls (1 layer-1 + up to 6 segments × 2
-  providers × up to 8 refine rounds) under `Promise.allSettled`. chat-service
+  fans out MANY independent Gemini calls (1 layer-1 + N segments × 2 providers
+  × up to 8 refine rounds) under `Promise.allSettled`. chat-service
   returns **502 on a non-parsable LLM response**; pre-v0.18.5 the flow was
   schemaless with NO retry, so a single malformed-JSON 502 anywhere in the fan-out
   rejected the WHOLE request → aggregate failure `1−(1−p)^N` compounded to **~50%
