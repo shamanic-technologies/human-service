@@ -182,7 +182,12 @@ export function resolveProvider(opts: {
   need?: "verified_email";
 }): Provider {
   if (opts.provider) return opts.provider;
-  if (opts.need === "verified_email") return "apify";
+  // APOLLO-ONLY (2026-06): apify is no longer auto-selected. The default
+  // (incl. `need: "verified_email"`, formerly → apify) now resolves to apollo —
+  // apollo reveals verified emails via the billed `resolve-email` enrich path.
+  // An EXPLICIT `provider: "apify"` is still honored above (existing apify
+  // audiences' serve-next), but nothing selects apify by default anymore.
+  // if (opts.need === "verified_email") return "apify";
   return "apollo";
 }
 

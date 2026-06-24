@@ -345,7 +345,12 @@ export async function computeStats(
 // No cost declared here -- chat-service meters the LLM spend; dry-run is free;
 // the DB write is free. The cost invariant holds.
 
-const SUGGEST_PROVIDERS: Provider[] = ["apollo", "apify"]; // apollo first => wins ties
+// APOLLO-ONLY (2026-06): apify removed from the suggest fan-out so /suggest no
+// longer creates apify audiences. The collapse + best-provider logic below is
+// unchanged (it just degenerates to a single provider). Restore by re-adding
+// "apify" here. Existing apify audiences are migrated separately via
+// POST /internal/migrate-apify-audiences-to-apollo.
+const SUGGEST_PROVIDERS: Provider[] = ["apollo"];
 const SUGGEST_MAX_CANDIDATES = 6; // cap on layer-1 audiences (not a knob)
 const SUGGEST_MAX_ITERATION_ROUNDS = 8; // layer-2 agentic loop bound per (audience, provider)
 const SUGGEST_STATUS = "suggested"; // inactive default for suggest-created rows
@@ -741,7 +746,15 @@ function parseLayer2Action(obj: Record<string, unknown>): Layer2Action {
 async function refineFilters(
   provider: Provider,
   segment: Segment,
-  identity: Identity
+  identity: Identity,
+  // When true, route the layer-2 LLM calls through chat-service's ORG-LESS
+  // platform path (platformCompleteJson) instead of the org-billed /complete.
+  // Used by the apify→apollo migration: re-deriving filters for a migration we
+  // owe users must NOT bill their orgs (same rationale as the description
+  // backfill). The apollo dry-run / filters-prompt / industries calls STILL use
+  // `identity` (apollo needs org+user for key resolution) — only the LLM is
+  // platform-routed. Default false (the /suggest flow bills the org as before).
+  opts: { usePlatformLLM?: boolean } = {}
 ): Promise<RefineResult> {
   const rules = (await filtersPrompt({ provider, identity })).prompt;
   // apollo's industries filter is free-text against a hidden canonical taxonomy;
@@ -768,16 +781,18 @@ async function refineFilters(
   let lastHadError = false;
 
   for (let round = 0; round < SUGGEST_MAX_ITERATION_ROUNDS; round++) {
+    const llmArgs = {
+      message: transcript.join("\n\n---\n\n"),
+      systemPrompt,
+      provider: SUGGEST_LLM_PROVIDER,
+      model: SUGGEST_LLM_MODEL,
+      responseSchema: LAYER2_RESPONSE_SCHEMA,
+      disableThinking: SUGGEST_DISABLE_THINKING,
+    };
     const action = parseLayer2Action(
-      await completeJson({
-        message: transcript.join("\n\n---\n\n"),
-        systemPrompt,
-        identity,
-        provider: SUGGEST_LLM_PROVIDER,
-        model: SUGGEST_LLM_MODEL,
-        responseSchema: LAYER2_RESPONSE_SCHEMA,
-        disableThinking: SUGGEST_DISABLE_THINKING,
-      })
+      opts.usePlatformLLM
+        ? await platformCompleteJson(llmArgs)
+        : await completeJson({ ...llmArgs, identity })
     );
 
     if (action.type === "exhausted") {
@@ -1013,6 +1028,89 @@ export async function suggestAudiences(
     });
   }
   return out;
+}
+
+// --- apify→apollo migration (one-time) ---
+
+// Provenance tag on the apollo audiences created by the migration, for
+// reversibility (DELETE WHERE source=this + un-deprecate the apify rows).
+export const MIGRATED_FROM_APIFY_SOURCE = "migrated_from_apify";
+
+export interface ApifyToApolloMigrationResult {
+  apifyAudienceId: string;
+  apolloAudienceId: string;
+  name: string;
+  status: string;
+  apolloCount: number;
+}
+
+// Re-derive an equivalent APOLLO audience for one apify audience and retire the
+// apify one. The apify filters are NOT copied — each provider's layer-2 loop
+// tunes the neutral filter set differently (esp. apollo `industries`, a hidden
+// LinkedIn taxonomy vs apify free-text), so we re-run the agentic refine FOR
+// apollo (LLM via the platform path — no org bill; apollo dry-runs via the
+// audience's own creator identity). Then, atomically: deprecate + rename the
+// apify row (freeing the unique name) and insert a new apollo audience that
+// MIRRORS the source status (an active apify audience becomes an active apollo
+// one; a suggested one stays suggested). Returns null when apollo refinement
+// yields no usable filter set — the caller logs + skips, leaving the apify row
+// untouched (retried on re-run).
+export async function migrateApifyAudienceToApollo(
+  row: typeof audiences.$inferSelect
+): Promise<ApifyToApolloMigrationResult | null> {
+  const identity: Identity = {
+    orgId: row.orgId,
+    userId: row.createdByUserId ?? undefined,
+  };
+  const segment: Segment = {
+    name: row.name,
+    description: row.description ?? row.name,
+  };
+  const refined = await refineFilters("apollo", segment, identity, {
+    usePlatformLLM: true,
+  });
+  if (!refined.filters || Object.keys(refined.filters).length === 0) {
+    return null;
+  }
+
+  return db.transaction(async (tx) => {
+    // Rename + deprecate the apify row FIRST so the original name is free for the
+    // new apollo audience (the unique index is on (org, brand, lower(name))).
+    await tx
+      .update(audiences)
+      .set({
+        name: `${row.name} [Apify]`,
+        status: "deprecated",
+        updatedAt: new Date(),
+      })
+      .where(eq(audiences.id, row.id));
+
+    const [apollo] = await tx
+      .insert(audiences)
+      .values({
+        orgId: row.orgId,
+        brandId: row.brandId,
+        name: row.name,
+        nlPrompt: row.nlPrompt,
+        description: row.description,
+        provider: "apollo",
+        status: row.status,
+        source: MIGRATED_FROM_APIFY_SOURCE,
+        filters: refined.filters as Record<string, unknown>,
+        apolloCount: refined.count,
+        countedAt: new Date(),
+        createdByUserId: row.createdByUserId,
+      })
+      .returning({ id: audiences.id });
+
+    return {
+      apifyAudienceId: row.id,
+      apolloAudienceId: apollo.id,
+      name: row.name,
+      status: row.status,
+      apolloCount: refined.count,
+    };
+  });
 }
 
 // Verify an audience exists and belongs to the org. Returns the row or null.

@@ -39,6 +39,7 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Internal | `POST /internal/transfer-brand` | apiKey | Move solo-brand methodology rows between orgs |
 | Internal | `POST /internal/remap-audience-filters` | apiKey | One-time data fix: translate already-backfilled audiences' filters from legacy persona vocab → canonical `PeopleSearchFilters` vocab, in place (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/backfill-audience-descriptions` | apiKey | One-time data fix: generate a per-audience one-sentence `description` (from name + filters via chat-service platform LLM) for every audience whose `description IS NULL` — pre-#82 rows (idempotent, `?dryRun=true`) |
+| Internal | `POST /internal/migrate-apify-audiences-to-apollo` | apiKey | One-time data fix (APOLLO-ONLY cutover): for every non-deprecated `provider='apify'` audience, re-derive equivalent apollo filters (agentic refine, platform LLM), create a new apollo audience mirroring the source status, and mark the apify one `deprecated` (idempotent, `?dryRun=true`, reversible) |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
 | Org-scoped (CRM v1) | `GET /orgs/lists/{id}` | apiKey + `x-org-id` | Get a CRM list |
@@ -83,8 +84,16 @@ the people gateway needs `x-user-id` because apollo/apify require it for key
 resolution / attribution — accepting a request without it would only produce a
 confusing downstream 502.
 
+- **APOLLO-ONLY (2026-06).** apify is no longer **auto-selected**: `resolveProvider`
+  default + the former `need: "verified_email"` → apify branch (commented) now
+  resolve to **apollo**, and `SUGGEST_PROVIDERS = ["apollo"]` so `/suggest` never
+  creates apify audiences. An **explicit** `provider: "apify"` is STILL honored
+  (existing apify audiences' serve-next), and all apify functions remain compiled
+  but unreachable-by-default (inert, not deleted — re-enable by restoring those two
+  lines). Existing apify audiences were migrated to apollo equivalents via
+  `POST /internal/migrate-apify-audiences-to-apollo` (see Audiences below).
 - **Routing**: explicit `provider: "apollo" | "apify"` wins; else
-  `need: "verified_email"` → apify; else default **apollo** (richest, fully
+  ~~`need: "verified_email"` → apify;~~ default **apollo** (richest, fully
   ready). `resolve-email` **also defaults to apollo** (same provider as search;
   the reveal follows the provider that searched — a `providerPersonId` is
   provider-specific, so we never cross providers).
@@ -297,16 +306,26 @@ half of the platform migration that makes audiences the SINGLE owner; a later
 wave drops brand-service personas entirely + switches consumers'
 (features-service / campaign-service / dashboard) reads.
 
-- **`audiences.status`** = `suggested | active | paused | archived`, default
-  `active` (migration `0011`; column is free-text `text`, no DB CHECK — values
-  enforced app-level in `AudienceStatusSchema`). `suggested` is the **inactive**
-  default for rows created by `/suggest` (never live for the brand until flipped
-  to `active`). An audience is **immutable except its status** — `PATCH
-  /orgs/audiences/{id}` accepts only `name`/`nlPrompt` metadata; `brandId` and
-  `filters` are rejected (`.strict()` → 400) because editing filters = a new
+- **`audiences.status`** = `suggested | active | paused | archived | deprecated`,
+  default `active` (migration `0011`; column is free-text `text`, no DB CHECK —
+  values enforced app-level in `AudienceStatusSchema`). `suggested` is the
+  **inactive** default for rows created by `/suggest` (never live for the brand
+  until flipped to `active`). An audience is **immutable except its status** —
+  `PATCH /orgs/audiences/{id}` accepts only `name`/`nlPrompt` metadata; `brandId`
+  and `filters` are rejected (`.strict()` → 400) because editing filters = a new
   audience (evidence attribution is keyed on the audience id). `PATCH
   /orgs/audiences/{id}/status` is the dedicated status-only mutator. The hard
   `DELETE` stays for true cleanup — **archive is a soft state, NOT a delete**.
+- **`deprecated` is TERMINAL + admin-only** (the apify→apollo migration's retire
+  state). It is NOT in the `ChangeAudienceStatusRequestSchema` user-settable enum
+  (`PATCH /status {status:"deprecated"}` → **400**), and the status mutator's
+  `WHERE` carries `ne(status, "deprecated")` so a deprecated row can't transition
+  out (**404** — so a user can never reactivate a retired apify audience). `GET
+  /orgs/audiences` **hides** `deprecated` by default (`ne(status,"deprecated")`
+  unless `?status=deprecated` is passed explicitly), so the user dashboard stays
+  clean with NO dashboard-side change. The migration also **renames** the retired
+  apify row `"<name> [Apify]"` to free the unique `(org, brand, lower(name))` name
+  for its apollo twin.
 - **Name-unique per (org, brand)** (case-insensitive): unique index
   `idx_audiences_org_brand_lower_name` on `(org_id, brand_id, lower(name))`
   (migration `0012` widened it from brand-only so a name can repeat across orgs
@@ -367,8 +386,9 @@ from the row's **own name + filters** and writes it.
   preview, no spend). **Never the `nlPrompt`** — derived only from name+filters
   (`generateAudienceDescription` in `src/services/audiences.ts`).
 - **LLM via chat-service's ORG-LESS platform path** — `platformCompleteJson` →
-  `POST /internal/platform-complete` (service-auth, no org/user), Gemini
-  schemaless JSON (`google`/`flash-pro`, same as `/suggest` layer-1).
+  `POST /internal/platform-complete` (service-auth, no org/user), Gemini JSON
+  with a `responseSchema` + `disableThinking` (`google`/`flash-pro`, same
+  reliability setup as `/suggest`, v0.18.5).
   **chat-service OWNS the cost** (platform-run declaration lives there) — so
   human-service declares none, and a historical backfill we owe users does NOT
   retroactively bill their orgs (and a sweep-all-orgs job has no `x-user-id`
@@ -382,6 +402,44 @@ from the row's **own name + filters** and writes it.
   block port-bind; trigger MANUALLY after deploy (`?dryRun=true` to size, then
   `?dryRun=false`). Kept idempotent + harmless after the one run, like the
   filter re-map above.
+
+### apify→apollo migration (APOLLO-ONLY cutover) — `POST /internal/migrate-apify-audiences-to-apollo`
+
+One-time sweep that retires every existing apify audience and replaces it with an
+equivalent **apollo** audience, paired with the code cutover (apify dropped from
+default routing + the suggest fan-out — see "APOLLO-ONLY" in the people gateway
+section). `src/routes/backfill.ts` (service-auth); `migrateApifyAudienceToApollo`
+in `src/services/audiences.ts` owns the per-row work.
+
+- **Filters are RE-DERIVED for apollo, NOT copied.** Each provider's layer-2 loop
+  tunes the neutral `PeopleSearchFilters` differently (esp. apollo `industries` =
+  a hidden LinkedIn taxonomy vs apify free-text), so copying an apify-tuned set to
+  apollo would under-match. Per audience we re-run the agentic refine FOR apollo
+  (`refineFilters("apollo", {name, description}, identity, { usePlatformLLM:true })`)
+  → apollo-correct filters + a real apollo count snapshot. The apify `filters`/
+  `apify_count` of the retired row are left intact (reversibility).
+- **Two-row, status-mirrored.** Atomically (one txn/row): the apify row is renamed
+  `"<name> [Apify]"` + set `status='deprecated'`, and a NEW apollo audience is
+  inserted with the original name, `provider='apollo'`, **the source row's status
+  mirrored** (an `active` apify audience → `active` apollo; a `suggested` one stays
+  `suggested` — never auto-activate what the user never chose), `apolloCount` from
+  the refine, and `source='migrated_from_apify'` (provenance for reversibility).
+- **Identity.** apollo dry-runs need org+user for key resolution; the sweep uses
+  each row's own `org_id` + `created_by_user_id` (all prod apify rows have it). The
+  **LLM** runs via the ORG-LESS platform path (`platformCompleteJson`) so a
+  migration we owe users does NOT bill their orgs — chat-service owns the cost,
+  human-service declares none (invariant holds, as for `/suggest` + the backfills).
+- **Idempotent** — scoped to `provider='apify' AND status<>'deprecated'`, so a
+  re-run skips already-migrated rows (now `deprecated`) → clean re-run migrates 0.
+  **Dry-runnable** — `?dryRun=true` counts the apify rows + samples `{id,name,status}`
+  WITHOUT calling the LLM/apollo or writing. **Reversible** — DELETE the
+  `source='migrated_from_apify'` rows + un-rename/un-deprecate the apify rows.
+- **Per-row resilience + fail-loud split** — a row whose apollo re-derivation
+  yields **no usable filter set** (empty) is counted in `failed` + left untouched
+  (retried on re-run); a real apollo/chat-service outage or missing config aborts
+  the sweep loudly (502) — already-migrated rows persist (each is one atomic txn).
+- **NOT on boot** — O(N) × an agentic LLM loop each; trigger MANUALLY after deploy
+  (`?dryRun=true` to size, then `?dryRun=false`).
 
 ### Audience suggestion (onboarding) — `POST /orgs/audiences/suggest`
 
@@ -429,20 +487,43 @@ is the chat-service client.
    row in place, never mutates an `active`/`paused`/`archived` one.
 
 - **LLM runs via chat-service `POST /complete`** (`google`/`flash-pro`,
-  `responseFormat:"json"`, **no `responseSchema`**). **chat-service OWNS the LLM
-  cost** — it does the provision→authorize→execute→actualize against the org
-  balance — so **human-service still declares no cost** (the invariant holds;
-  chat-service is the LLM-cost owner exactly as apollo/apify own search cost).
+  `responseFormat:"json"` **+ a Gemini `responseSchema`** + `disableThinking:true`).
+  **chat-service OWNS the LLM cost** — it does the
+  provision→authorize→execute→actualize against the org balance — so
+  **human-service still declares no cost** (the invariant holds; chat-service is
+  the LLM-cost owner exactly as apollo/apify own search cost).
   **Why Gemini, not Anthropic:** chat-service rejects `provider:"anthropic"` +
   `responseFormat:"json"` with **400 unless a `responseSchema` is supplied**, and
   Anthropic enforces that schema STRICTLY — `additionalProperties:false` + an
   explicit `properties` map on **every** object (open/permissive objects are
-  rejected). Our candidate `filters` is an OPEN blob (~16 optional neutral
-  fields) that can't be expressed as an Anthropic strict schema without
-  enumerating + over-constraining it. Gemini's native JSON mode
-  (`responseMimeType:"application/json"`) needs **no schema**, so the shape stays
-  **prompt-described + validated caller-side** (`parseCandidates` → fail loud 502
-  on a malformed LLM response; the per-filter dry-run validates the values).
+  rejected). Gemini's `responseSchema` is a **permissive OpenAPI subset** (no
+  `additionalProperties:false` requirement), so our candidate `filters` (a fixed
+  16-field set) IS expressible there — without the Anthropic over-constraining
+  pain.
+  **Reliability — responseSchema + retry + tolerance (v0.18.5, #93).** `/suggest`
+  fans out MANY independent Gemini calls (1 layer-1 + up to 6 segments × 2
+  providers × up to 8 refine rounds) under `Promise.allSettled`. chat-service
+  returns **502 on a non-parsable LLM response**; pre-v0.18.5 the flow was
+  schemaless with NO retry, so a single malformed-JSON 502 anywhere in the fan-out
+  rejected the WHOLE request → aggregate failure `1−(1−p)^N` compounded to **~50%
+  in prod**. Three layers now drive it to ~100% (barring no-credits / full
+  outage): **(1)** every suggest LLM call ships a `responseSchema`
+  (`LAYER1_RESPONSE_SCHEMA` `{audiences:[{name,description}]}`,
+  `LAYER2_RESPONSE_SCHEMA` `{action enum, filters, reasoning, reason}` incl.
+  `FILTERS_RESPONSE_SCHEMA` = the 16 neutral fields, `DESCRIPTION_RESPONSE_SCHEMA`)
+  so the provider enforces valid JSON server-side → the malformed-JSON 502 is
+  structurally eliminated; **(2)** `chat-client` retries a **transient response
+  status (502/429/503) + a missing/malformed `json` field** (bounded
+  250/500/1000ms), in addition to the existing connect-phase retry — NOT 4xx
+  (400/401/402 are deterministic); **(3)** `Promise.allSettled` at both fan-out
+  levels — one provider's outage doesn't drop the other's result for a segment,
+  one segment's total failure doesn't nuke the batch; still **fails loud (502)**
+  when nothing survives. Values are STILL validated caller-side
+  (`PeopleSearchFiltersSchema` in `dryRunSafe`, `parseCandidates`) — the schema
+  guarantees valid JSON + the action enum, not semantic correctness.
+  `disableThinking:true` on every suggest call: structured JSON needs no
+  chain-of-thought; it frees the output budget (cuts truncated-JSON risk) and
+  `flash-pro` (Gemini 3.5 Flash) floors it to `minimal`.
   **Model = `flash-pro`** (Gemini 3.5 Flash, mid-tier): the suggested audience's
   relevance is entirely the LLM's NL→filters mapping (apollo/apify match
   structured filters deterministically — **no LLM on the provider side**), so the
@@ -452,9 +533,12 @@ is the chat-service client.
   schema; chat-service later added the upfront anthropic guard → every call 400'd
   (#50/v0.13.1). The first fix tried an anthropic strict envelope with an open
   `filters` — Anthropic 400'd *`additionalProperties` must be explicitly set to
-  false* on the open object. Then v0.13.2 / #54 switched to Gemini schemaless
+  false* on the open object. Then v0.13.2 / #54 switched to Gemini **schemaless**
   JSON on `flash`; later bumped to `flash-pro` + ICP-axis layer-1 prompt + apollo
-  canonical-industries injection to raise filter relevance.)
+  canonical-industries injection to raise filter relevance. v0.18.5 / #93 then
+  RE-ADDED a `responseSchema` — on Gemini, not Anthropic — because schemaless was
+  the root cause of a ~50% prod flake; the #54 "no schema" rationale was
+  Anthropic-strictness pain, which Gemini's permissive schema does not have.)
 - **Granularity is emergent from the NL, not an input.** Input is ONLY
   `{nlPrompt, brandId}` — no `strategy`/count knob. Layer 1 reads the caller's
   own segmentation intent and emits one **named** audience per implied segment.

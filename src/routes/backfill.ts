@@ -1,18 +1,23 @@
 import { Router } from "express";
-import { eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, ne } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audiences } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
 import {
   RemapAudienceFiltersQuerySchema,
   BackfillAudienceDescriptionsQuerySchema,
+  MigrateApifyAudiencesQuerySchema,
 } from "../schemas.js";
 import {
   mapPersonaFiltersToCanonical,
   hasPersonaVocab,
   PersonaFilterMapError,
 } from "../services/persona-filter-map.js";
-import { generateAudienceDescription } from "../services/audiences.js";
+import {
+  generateAudienceDescription,
+  migrateApifyAudienceToApollo,
+  type ApifyToApolloMigrationResult,
+} from "../services/audiences.js";
 import { ChatConfigError, ChatServiceError } from "../lib/chat-client.js";
 
 const router = Router();
@@ -254,6 +259,121 @@ router.post(
       wouldRemap: toMap.length,
       alreadyCanonical,
       sample,
+    });
+  }
+);
+
+// How many {id,name,status} previews the apify→apollo migration returns.
+const MIGRATE_SAMPLE_LIMIT = 25;
+
+// POST /internal/migrate-apify-audiences-to-apollo?dryRun=true|false
+//
+// One-time DATA fix: the people gateway is now apollo-only (apify removed from
+// the suggest fan-out + default routing). This sweep retires every existing
+// apify audience and replaces it with an equivalent APOLLO audience. The apify
+// filters are NOT copied — apollo and apify tune the neutral filter set
+// differently (esp. apollo's `industries` taxonomy), so we re-derive apollo
+// filters via the agentic refine loop (LLM on the org-less platform path — no
+// org bill — apollo dry-runs via each audience's creator identity), then create
+// a new apollo audience MIRRORING the source status and mark the apify one
+// `deprecated` (terminal, hidden from the dashboard, non-reactivable).
+//
+// - Scoped to provider='apify' AND status<>'deprecated' -> idempotent: a re-run
+//   skips already-migrated rows (they are now deprecated), so a clean re-run
+//   migrates 0.
+// - Dry-runnable: ?dryRun=true counts the apify rows + returns an {id,name,status}
+//   sample WITHOUT calling the LLM/apollo or writing (free preview).
+// - Reversible: new apollo rows are tagged source='migrated_from_apify'; undo by
+//   DELETE WHERE source=that + un-rename/un-deprecate the apify rows.
+// - Per-row resilience: a row whose apollo re-derivation yields no usable filter
+//   set is counted in `failed` + left untouched (retried on re-run). A real
+//   apollo/chat-service outage / missing config aborts the sweep loudly (502);
+//   already-migrated rows persist (each migration is one atomic transaction).
+//
+// Service-auth only (x-api-key); sweeps all orgs. Trigger MANUALLY after deploy —
+// never on boot (O(N) over the table x an agentic LLM loop each would block
+// port-bind).
+router.post(
+  "/internal/migrate-apify-audiences-to-apollo",
+  requireApiKey,
+  async (req, res) => {
+    const parsedQuery = MigrateApifyAudiencesQuerySchema.safeParse(req.query);
+    if (!parsedQuery.success) {
+      res.status(400).json({ error: parsedQuery.error.message });
+      return;
+    }
+    const dryRun = parsedQuery.data.dryRun === "true";
+
+    const rows = await db
+      .select()
+      .from(audiences)
+      .where(
+        and(eq(audiences.provider, "apify"), ne(audiences.status, "deprecated"))
+      );
+
+    const scanned = rows.length;
+
+    if (dryRun) {
+      const sample = rows
+        .slice(0, MIGRATE_SAMPLE_LIMIT)
+        .map((r) => ({ id: r.id, name: r.name, status: r.status }));
+      console.log(
+        `[human-service] migrate_apify.dry_run scanned=${scanned}`
+      );
+      res.json({
+        dryRun: true,
+        scanned,
+        wouldMigrate: scanned,
+        migrated: [],
+        failed: [],
+        sample,
+      });
+      return;
+    }
+
+    const migrated: ApifyToApolloMigrationResult[] = [];
+    const failed: Array<{ id: string; name: string; error: string }> = [];
+
+    for (const row of rows) {
+      let result: ApifyToApolloMigrationResult | null;
+      try {
+        result = await migrateApifyAudienceToApollo(row);
+      } catch (err) {
+        // apollo / chat-service outage or missing config is SYSTEMIC, not this
+        // row's fault -> fail loud + abort. Already-migrated rows persist (each
+        // is its own transaction); a re-run resumes (migrated rows are now
+        // deprecated and skipped).
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[human-service] migrate_apify.abort id=${row.id} ${msg}`);
+        res.status(502).json({ error: msg, migrated, failed });
+        return;
+      }
+      if (!result) {
+        // apollo re-derivation produced no usable filter set: skip this row (left
+        // untouched, retried on re-run).
+        console.warn(
+          `[human-service] migrate_apify.row_failed id=${row.id} no usable apollo filters`
+        );
+        failed.push({
+          id: row.id,
+          name: row.name,
+          error: "apollo re-derivation yielded no usable filter set",
+        });
+        continue;
+      }
+      migrated.push(result);
+    }
+
+    console.log(
+      `[human-service] migrate_apify.run scanned=${scanned} migrated=${migrated.length} failed=${failed.length}`
+    );
+    res.json({
+      dryRun: false,
+      scanned,
+      wouldMigrate: scanned,
+      migrated,
+      failed,
+      sample: [],
     });
   }
 );
