@@ -491,9 +491,10 @@ is the chat-service client.
    `(org_id, brand_id, lower(name))`; re-running refreshes a still-`suggested`
    row in place, never mutates an `active`/`paused`/`archived` one.
 
-- **LLM runs via chat-service `POST /complete`** (`google`/`flash-pro`,
-  `responseFormat:"json"` **+ a Gemini `responseSchema`**). Layer 1 keeps
-  `disableThinking:true`; Layer 2 intentionally leaves thinking enabled.
+- **LLM runs via chat-service `POST /complete`** (`google`, Gemini JSON mode
+  **+ a Gemini `responseSchema`**). Layer 1 uses `flash-pro` +
+  `disableThinking:true`; Layer 2 uses `pro` and intentionally leaves
+  `disableThinking` unset.
   **chat-service OWNS the LLM cost** — it does the
   provision→authorize→execute→actualize against the org balance — so
   **human-service still declares no cost** (the invariant holds; chat-service is
@@ -532,20 +533,21 @@ is the chat-service client.
   NL audience → Apollo filters is the quality-critical reasoning step, and
   disabling thinking caused `flash-pro` to keep producing title-only Apollo
   filters for firmographic prompts.
-  **Model = `flash-pro`** (Gemini 3.5 Flash, mid-tier): the suggested audience's
-  relevance is entirely the LLM's NL→filters mapping (apollo/apify match
-  structured filters deterministically — **no LLM on the provider side**), so the
-  model tier IS the filter-quality lever. `flash-pro` reasons over the segment +
-  rulebook noticeably better than plain `flash` (which under-targets) while
-  staying far cheaper than `pro`/`sonnet`. (History: #44 shipped sonnet + no
-  schema; chat-service later added the upfront anthropic guard → every call 400'd
-  (#50/v0.13.1). The first fix tried an anthropic strict envelope with an open
-  `filters` — Anthropic 400'd *`additionalProperties` must be explicitly set to
-  false* on the open object. Then v0.13.2 / #54 switched to Gemini **schemaless**
-  JSON on `flash`; later bumped to `flash-pro` + ICP-axis layer-1 prompt + apollo
-  canonical-industries injection to raise filter relevance. v0.18.5 / #93 then
-  RE-ADDED a `responseSchema` — on Gemini, not Anthropic — because schemaless was
-  the root cause of a ~50% prod flake; the #54 "no schema" rationale was
+  **Models:** Layer 1 stays on `flash-pro` for cheap segmentation. Layer 2 uses
+  `pro` because the suggested audience's relevance is entirely the LLM's
+  NL→filters mapping (apollo/apify match structured filters deterministically —
+  **no LLM on the provider side**), so the model tier IS the filter-quality
+  lever. `flash-pro` kept confirming title-only Apollo filters for firmographic
+  prompts even after the strict Layer 2 prompt + thinking toggle. (History: #44
+  shipped sonnet + no schema; chat-service later added the upfront anthropic
+  guard → every call 400'd (#50/v0.13.1). The first fix tried an anthropic strict
+  envelope with an open `filters` — Anthropic 400'd *`additionalProperties` must
+  be explicitly set to false* on the open object. Then v0.13.2 / #54 switched to
+  Gemini **schemaless** JSON on `flash`; later bumped to `flash-pro` + ICP-axis
+  layer-1 prompt + apollo canonical-industries injection to raise filter
+  relevance. v0.18.5 / #93 then RE-ADDED a `responseSchema` — on Gemini, not
+  Anthropic — because schemaless was the root cause of a ~50% prod flake; the
+  #54 "no schema" rationale was
   Anthropic-strictness pain, which Gemini's permissive schema does not have.)
 - **Granularity is emergent from the NL, not an input.** Input is ONLY
   `{nlPrompt, brandId}` — no `strategy`/count knob. Layer 1 reads the caller's

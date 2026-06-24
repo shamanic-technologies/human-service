@@ -488,7 +488,6 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(completeBodies.length).toBeGreaterThan(0);
     for (const body of completeBodies) {
       expect(body.provider).toBe("google");
-      expect(body.model).toBe("flash-pro");
       expect(body.responseFormat).toBe("json");
       // Provider-enforced shape: every suggest call ships a responseSchema
       // (layer-1 audiences object OR layer-2 action object).
@@ -501,6 +500,7 @@ describe("POST /orgs/audiences/suggest", () => {
         body.systemPrompt.includes("decompose a natural-language audience")
     );
     expect(layer1Bodies.length).toBe(1);
+    expect(layer1Bodies[0].model).toBe("flash-pro");
     expect(layer1Bodies[0].disableThinking).toBe(true);
 
     const layer2Bodies = completeBodies.filter(
@@ -510,6 +510,7 @@ describe("POST /orgs/audiences/suggest", () => {
     );
     expect(layer2Bodies.length).toBeGreaterThan(0);
     for (const body of layer2Bodies) {
+      expect(body.model).toBe("pro");
       expect(body.disableThinking).toBeUndefined();
       expect(body.systemPrompt).toContain(
         "every filterable constraint in TARGET AUDIENCE"
