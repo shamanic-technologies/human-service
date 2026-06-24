@@ -457,6 +457,11 @@ is the chat-service client.
    `{ name (≤4 words), description }`. The names are SHARED so layer-2's two
    provider runs map to the SAME segments and are comparable head-to-head. Cap
    `SUGGEST_MAX_CANDIDATES = 6` (LLM told to group coarser + `truncated:true`).
+   Each `description` is the complete prompt for layer 2: it must carry every
+   shared and segment-specific constraint. **No rule-based post-processing is
+   allowed after layer 1** (no regex extraction from the original prompt, no
+   forced filter merge); if constraints are missing, fix the layer-1 prompt/schema
+   so the audience description is self-contained.
 2. **LAYER 2 (per audience × per provider, agentic multi-turn loop)** —
    `refineFilters` hands the segment + that provider's `filters-prompt` rulebook
    to the LLM, which `{action:"test",filters}` → server runs the **free dry-run**
