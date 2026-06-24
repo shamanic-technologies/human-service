@@ -212,6 +212,92 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(c.validationError).toBeNull();
   });
 
+  it("carries explicit firmographic constraints into Apollo filters even when layer-2 only proposes titles", async () => {
+    const dryRunBodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/search/filters-prompt"))
+        return ok({ prompt: "RULES", schemaVersion: "1" });
+      if (u.endsWith("/reference/industries"))
+        return ok({
+          industries: [
+            { name: "Computer Software" },
+            { name: "Professional Services" },
+            { name: "Banking" },
+          ],
+        });
+      if (u.endsWith("/complete")) {
+        const body = JSON.parse(init.body ?? "{}") as {
+          systemPrompt: string;
+          message: string;
+        };
+        if (body.systemPrompt.includes("decompose a natural-language audience")) {
+          return ok({
+            json: {
+              audiences: [
+                {
+                  name: "Sales B2B SMB",
+                  description:
+                    "Heads of Sales, VP of Sales, or Founders at B2B professional services and software companies with 10-100 employees and $1M-$10M annual revenue.",
+                },
+              ],
+            },
+          });
+        }
+        const cleanTests = (body.message.match(/-> count=/g) ?? []).length;
+        return ok({
+          json:
+            cleanTests === 0
+              ? {
+                  action: "test",
+                  filters: { titles: ["Head of Sales", "VP of Sales", "Founder"] },
+                  reasoning: "title-only draft",
+                }
+              : { action: "confirm", reasoning: "confirmed" },
+        });
+      }
+      if (u.endsWith("/search/dry-run")) {
+        dryRunBodies.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
+        return ok({ totalEntries: 12500 });
+      }
+      throw new Error("unexpected url " + u);
+    });
+
+    const res = await suggest(
+      "Heads of Sales, VP of Sales, or Founders at B2B professional services and software companies with 10-100 employees and $1M-$10M/yr revenue, who are currently using basic CRM tools or spreadsheets and are looking to consolidate outbound prospecting, email sequencing, and contact database into a single affordable platform."
+    );
+
+    expect(res.status).toBe(200);
+    const c = res.body.candidates[0];
+    expect(c.provider).toBe("apollo");
+    expect(c.filters).toMatchObject({
+      titles: ["Head of Sales", "VP of Sales", "Founder"],
+      employeeMin: 10,
+      employeeMax: 100,
+      revenueRanges: ["1000000,10000000"],
+      industries: ["Computer Software", "Professional Services"],
+    });
+    expect(c.filters.keywords).toEqual(
+      expect.arrayContaining(["B2B", "basic CRM tools", "spreadsheets"])
+    );
+    expect(c.rationale).toContain("10-100 employees");
+    expect(c.rationale).toContain("$1M-$10M annual revenue");
+
+    const lastDryRun = dryRunBodies.at(-1);
+    expect(lastDryRun).toMatchObject({
+      personTitles: ["Head of Sales", "VP of Sales", "Founder"],
+      organizationNumEmployeesRanges: ["1,10", "11,20", "21,50", "51,100"],
+      revenueRange: ["1000000,10000000"],
+      qOrganizationIndustryTagIds: ["Computer Software", "Professional Services"],
+    });
+
+    const persisted = await request(app)
+      .get(`/orgs/audiences/${c.audienceId}`)
+      .set(getAuthHeaders());
+    expect(persisted.status).toBe(200);
+    expect(persisted.body.audience.filters).toMatchObject(c.filters);
+  });
+
   it("surfaces count:0 honestly when neither provider yields matches", async () => {
     wire({
       segments: [{ name: "Impossible", description: "nobody" }],
