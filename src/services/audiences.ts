@@ -384,8 +384,9 @@ const SUGGEST_LLM_MODEL = "flash-pro";
 // (PeopleSearchFiltersSchema in dryRunSafe / parseCandidates) — the schema
 // guarantees valid JSON + the action enum, not semantic correctness.
 //
-// `disableThinking` is set on every suggest LLM call: structured JSON needs no
-// chain-of-thought, and freeing the output budget also avoids truncated JSON.
+// Layer 1 and description generation keep `disableThinking`: they are narrow
+// structured JSON tasks. Layer 2 does NOT set it because NL -> provider filters
+// is the quality-critical reasoning step.
 const SUGGEST_DISABLE_THINKING = true;
 
 const LAYER1_RESPONSE_SCHEMA: Record<string, unknown> = {
@@ -828,7 +829,6 @@ async function refineFilters(
       provider: SUGGEST_LLM_PROVIDER,
       model: SUGGEST_LLM_MODEL,
       responseSchema: LAYER2_RESPONSE_SCHEMA,
-      disableThinking: SUGGEST_DISABLE_THINKING,
     };
     const action = parseLayer2Action(
       opts.usePlatformLLM
