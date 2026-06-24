@@ -457,7 +457,7 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(after.body.audience.status).toBe("active"); // untouched
   });
 
-  it("calls chat-service with google JSON mode, a responseSchema, disableThinking, and the strict layer-2 prompt", async () => {
+  it("calls chat-service with google JSON mode, a responseSchema, thinking enabled for layer 2, and the strict prompt", async () => {
     const completeBodies: Array<Record<string, unknown>> = [];
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
@@ -490,19 +490,27 @@ describe("POST /orgs/audiences/suggest", () => {
       expect(body.provider).toBe("google");
       expect(body.model).toBe("flash-pro");
       expect(body.responseFormat).toBe("json");
-      // Provider-enforced shape: every suggest call now ships a responseSchema
-      // (layer-1 audiences object OR layer-2 action object) + disableThinking.
+      // Provider-enforced shape: every suggest call ships a responseSchema
+      // (layer-1 audiences object OR layer-2 action object).
       expect(body.responseSchema).toBeDefined();
       expect((body.responseSchema as { type?: string }).type).toBe("object");
-      expect(body.disableThinking).toBe(true);
     }
+    const layer1Bodies = completeBodies.filter(
+      (body) =>
+        typeof body.systemPrompt === "string" &&
+        body.systemPrompt.includes("decompose a natural-language audience")
+    );
+    expect(layer1Bodies.length).toBe(1);
+    expect(layer1Bodies[0].disableThinking).toBe(true);
+
     const layer2Bodies = completeBodies.filter(
       (body) =>
         typeof body.systemPrompt === "string" &&
-        body.systemPrompt.includes("expert apollo audience builder")
+        body.systemPrompt.includes("audience builder")
     );
     expect(layer2Bodies.length).toBeGreaterThan(0);
     for (const body of layer2Bodies) {
+      expect(body.disableThinking).toBeUndefined();
       expect(body.systemPrompt).toContain(
         "every filterable constraint in TARGET AUDIENCE"
       );
