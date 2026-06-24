@@ -405,28 +405,51 @@ const LAYER1_RESPONSE_SCHEMA: Record<string, unknown> = {
   required: ["audiences"],
 };
 
+const nullable = (schema: Record<string, unknown>): Record<string, unknown> => ({
+  anyOf: [schema, { type: "null" }],
+});
+
 // The 16 neutral PeopleSearchFilters fields (mirrors src/schemas.ts) as a Gemini
-// schema. All optional — the model populates only what this provider honors.
+// schema. Every key is required and nullable so the model must explicitly decide
+// value vs null for each available filter surface.
 const FILTERS_RESPONSE_SCHEMA: Record<string, unknown> = {
   type: "object",
   properties: {
-    titles: { type: "array", items: { type: "string" } },
-    seniorities: { type: "array", items: { type: "string" } },
-    functions: { type: "array", items: { type: "string" } },
-    locationCountries: { type: "array", items: { type: "string" } },
-    locationStates: { type: "array", items: { type: "string" } },
-    locationCities: { type: "array", items: { type: "string" } },
-    companyNames: { type: "array", items: { type: "string" } },
-    companyDomains: { type: "array", items: { type: "string" } },
-    industries: { type: "array", items: { type: "string" } },
-    keywords: { type: "array", items: { type: "string" } },
-    employeeMin: { type: "integer" },
-    employeeMax: { type: "integer" },
-    companySizes: { type: "array", items: { type: "string" } },
-    revenueRanges: { type: "array", items: { type: "string" } },
-    fundingStages: { type: "array", items: { type: "string" } },
-    technologies: { type: "array", items: { type: "string" } },
+    titles: nullable({ type: "array", items: { type: "string" } }),
+    seniorities: nullable({ type: "array", items: { type: "string" } }),
+    functions: nullable({ type: "array", items: { type: "string" } }),
+    locationCountries: nullable({ type: "array", items: { type: "string" } }),
+    locationStates: nullable({ type: "array", items: { type: "string" } }),
+    locationCities: nullable({ type: "array", items: { type: "string" } }),
+    companyNames: nullable({ type: "array", items: { type: "string" } }),
+    companyDomains: nullable({ type: "array", items: { type: "string" } }),
+    industries: nullable({ type: "array", items: { type: "string" } }),
+    keywords: nullable({ type: "array", items: { type: "string" } }),
+    employeeMin: nullable({ type: "integer" }),
+    employeeMax: nullable({ type: "integer" }),
+    companySizes: nullable({ type: "array", items: { type: "string" } }),
+    revenueRanges: nullable({ type: "array", items: { type: "string" } }),
+    fundingStages: nullable({ type: "array", items: { type: "string" } }),
+    technologies: nullable({ type: "array", items: { type: "string" } }),
   },
+  required: [
+    "titles",
+    "seniorities",
+    "functions",
+    "locationCountries",
+    "locationStates",
+    "locationCities",
+    "companyNames",
+    "companyDomains",
+    "industries",
+    "keywords",
+    "employeeMin",
+    "employeeMax",
+    "companySizes",
+    "revenueRanges",
+    "fundingStages",
+    "technologies",
+  ],
 };
 
 // Layer-2 agentic action. `filters` only meaningful for action:"test", `reason`
@@ -628,7 +651,7 @@ async function dryRunSafe(
   // string instead of string[], or a non-enum seniority) is the LLM's fault and
   // is fed back into the loop via the SAME validationError channel as a provider
   // 4xx -- never a crash, never a silent coercion.
-  const parsed = PeopleSearchFiltersSchema.safeParse(filters);
+  const parsed = PeopleSearchFiltersSchema.safeParse(stripNullFilters(filters));
   if (!parsed.success) {
     const issues = parsed.error.issues
       .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
@@ -676,7 +699,8 @@ function buildLayer2SystemPrompt(
     "PROVIDER FILTER RULES (authoritative -- only these values are valid):",
     rules,
     "",
-    'Your "filters" MUST use ONLY these neutral fields (omit any you don\'t use):',
+    'Your "filters" MUST include EVERY neutral field below. Use null for fields',
+    "you do not use:",
     "titles[], seniorities[] (one of: entry, senior, manager, director, vp,",
     "c_suite, owner, founder, partner), functions[], locationCountries[],",
     "locationStates[], locationCities[], companyNames[], companyDomains[],",
@@ -738,8 +762,6 @@ function buildLayer2SystemPrompt(
     "and test again. A count inside the band that faithfully matches the segment",
     "-> confirm. These are guides, not hard limits: a genuinely niche segment may",
     "legitimately sit under 200 -- confirm it rather than widening beyond scope.",
-    "Never confirm a broad count unless all target constraints are already encoded",
-    "and no remaining stated constraint can be represented by this provider.",
     "Iterate as many test rounds as you need before confirming. Stay STRICTLY",
     "within the segment description -- never widen beyond its titles/geography/",
     "company traits. If a test returns a validation error, propose corrected",
@@ -754,10 +776,17 @@ interface RefineResult {
 }
 
 type Layer2Action =
-  | { type: "test"; filters: PeopleSearchFilters }
+  | { type: "test"; filters: Record<string, unknown> }
   | { type: "confirm" }
   | { type: "exhausted"; reason: string }
   | { type: "unknown" };
+
+function stripNullFilters(filters: unknown): Record<string, unknown> {
+  if (!filters || typeof filters !== "object" || Array.isArray(filters)) return {};
+  return Object.fromEntries(
+    Object.entries(filters).filter(([, value]) => value !== null)
+  );
+}
 
 function parseLayer2Action(obj: Record<string, unknown>): Layer2Action {
   const action = typeof obj.action === "string" ? obj.action : "";
@@ -777,7 +806,7 @@ function parseLayer2Action(obj: Record<string, unknown>): Layer2Action {
       typeof obj.filters === "object" &&
       !Array.isArray(obj.filters)
     ) {
-      return { type: "test", filters: obj.filters as PeopleSearchFilters };
+      return { type: "test", filters: obj.filters as Record<string, unknown> };
     }
   }
   return { type: "unknown" };
@@ -866,7 +895,7 @@ async function refineFilters(
     }
 
     if (action.type === "test") {
-      const filters = action.filters;
+      const filters = stripNullFilters(action.filters);
       const r = await dryRunSafe(provider, filters, identity);
       lastFilters = filters;
       if (r.validationError) {
