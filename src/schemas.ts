@@ -1531,6 +1531,73 @@ registry.registerPath({
   },
 });
 
+// --- Internal: one-time backfill of audience avatars (avatar_url IS NULL) ---
+export const BackfillAudienceAvatarsQuerySchema = z.object({
+  dryRun: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({
+      description:
+        "When 'true', count the live audiences missing an avatar + return a sample WITHOUT calling chat-service or writing. Defaults to false (real run).",
+    }),
+  async: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({
+      description:
+        "When 'true', respond 202 immediately and run the sweep in the background (image generation is slow; a whole-table run exceeds an HTTP timeout). Progress is durable per-row + observable via ?dryRun=true. Ignored when dryRun=true.",
+    }),
+});
+
+export const BackfillAudienceAvatarsResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    started: z.boolean().optional().openapi({
+      description: "Present (true) only on an async run — the sweep runs in the background.",
+    }),
+    scanned: z.number().int().openapi({
+      description:
+        "Live audiences (status<>'deprecated') with avatar_url IS NULL AND created_by_user_id IS NOT NULL.",
+    }),
+    skippedNoUser: z.number().int().openapi({
+      description:
+        "Avatar-less audiences SKIPPED because they have no created_by_user_id (chat-service image gen needs a user for key resolution). Reported, not generated.",
+    }),
+    wouldFill: z.number().int().openapi({
+      description: "Audiences that would get an avatar (= scanned on a dry-run).",
+    }),
+    filled: z.number().int().openapi({
+      description: "Audiences whose avatar was generated + stored (0 on a dry-run / async).",
+    }),
+    failed: z
+      .array(
+        z.object({ id: z.string(), name: z.string(), error: z.string() })
+      )
+      .openapi({
+        description:
+          "Audiences whose image generation failed (e.g. a zero-balance org → 402); left null, retried on re-run.",
+      }),
+    sample: z
+      .array(z.object({ id: z.string(), name: z.string() }))
+      .openapi({ description: "Per-audience preview (capped) of rows that would be filled." }),
+  })
+  .openapi("BackfillAudienceAvatarsResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/backfill-audience-avatars",
+  summary:
+    "One-time data fix: generate + store a flat-vector avatar (via chat-service, billed to the audience's org) for every live audience whose avatar_url is null and that has a created_by_user_id (idempotent, dry-runnable, async)",
+  security: [{ apiKey: [] }],
+  request: { query: BackfillAudienceAvatarsQuerySchema },
+  responses: {
+    200: { description: "Backfill result", content: { "application/json": { schema: BackfillAudienceAvatarsResponseSchema } } },
+    202: { description: "Async sweep started", content: { "application/json": { schema: BackfillAudienceAvatarsResponseSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "chat-service missing config", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 // --- GET /health ---
 
 export const HealthResponseSchema = z
