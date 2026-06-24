@@ -212,7 +212,71 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(c.validationError).toBeNull();
   });
 
-  it("carries explicit firmographic constraints into Apollo filters even when layer-2 only proposes titles", async () => {
+  it("does not inject rule-based filters from the original prompt after layer-1 split", async () => {
+    const dryRunBodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/search/filters-prompt"))
+        return ok({ prompt: "RULES", schemaVersion: "1" });
+      if (u.endsWith("/reference/industries"))
+        return ok({
+          industries: [
+            { name: "Computer Software" },
+            { name: "Professional Services" },
+          ],
+        });
+      if (u.endsWith("/complete")) {
+        const body = JSON.parse(init.body ?? "{}") as {
+          systemPrompt: string;
+          message: string;
+        };
+        if (body.systemPrompt.includes("decompose a natural-language audience")) {
+          return ok({
+            json: {
+              audiences: [
+                {
+                  name: "B2B SaaS Leaders",
+                  description:
+                    "Founders and Heads of Growth at bootstrapped B2B SaaS companies with 1-50 employees.",
+                },
+              ],
+            },
+          });
+        }
+        const cleanTests = (body.message.match(/-> count=/g) ?? []).length;
+        return ok({
+          json:
+            cleanTests === 0
+              ? {
+                  action: "test",
+                  filters: { titles: ["Founder", "Head of Growth"] },
+                  reasoning: "title-only draft",
+                }
+              : { action: "confirm", reasoning: "confirmed" },
+        });
+      }
+      if (u.endsWith("/search/dry-run")) {
+        dryRunBodies.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
+        return ok({ totalEntries: 12500 });
+      }
+      throw new Error("unexpected url " + u);
+    });
+
+    const res = await suggest(
+      "Founders and Heads of Growth at bootstrapped B2B SaaS companies with 1-50 employees and $1M-$10M/yr revenue."
+    );
+
+    expect(res.status).toBe(200);
+    const c = res.body.candidates[0];
+    expect(c.filters).toEqual({ titles: ["Founder", "Head of Growth"] });
+
+    const lastDryRun = dryRunBodies.at(-1);
+    expect(lastDryRun).toEqual({
+      personTitles: ["Founder", "Head of Growth"],
+    });
+  });
+
+  it("carries explicit firmographic constraints when layer-2 proposes them", async () => {
     const dryRunBodies: Array<Record<string, unknown>> = [];
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
@@ -250,8 +314,15 @@ describe("POST /orgs/audiences/suggest", () => {
             cleanTests === 0
               ? {
                   action: "test",
-                  filters: { titles: ["Head of Sales", "VP of Sales", "Founder"] },
-                  reasoning: "title-only draft",
+                  filters: {
+                    titles: ["Head of Sales", "VP of Sales", "Founder"],
+                    employeeMin: 10,
+                    employeeMax: 100,
+                    revenueRanges: ["1000000,10000000"],
+                    industries: ["Computer Software", "Professional Services"],
+                    keywords: ["B2B", "basic CRM tools", "spreadsheets"],
+                  },
+                  reasoning: "self-contained segment filters",
                 }
               : { action: "confirm", reasoning: "confirmed" },
         });
