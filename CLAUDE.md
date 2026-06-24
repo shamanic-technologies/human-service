@@ -492,7 +492,8 @@ is the chat-service client.
    row in place, never mutates an `active`/`paused`/`archived` one.
 
 - **LLM runs via chat-service `POST /complete`** (`google`/`flash-pro`,
-  `responseFormat:"json"` **+ a Gemini `responseSchema`** + `disableThinking:true`).
+  `responseFormat:"json"` **+ a Gemini `responseSchema`**). Layer 1 keeps
+  `disableThinking:true`; Layer 2 intentionally leaves thinking enabled.
   **chat-service OWNS the LLM cost** — it does the
   provision→authorize→execute→actualize against the org balance — so
   **human-service still declares no cost** (the invariant holds; chat-service is
@@ -526,9 +527,11 @@ is the chat-service client.
   when nothing survives. Values are STILL validated caller-side
   (`PeopleSearchFiltersSchema` in `dryRunSafe`, `parseCandidates`) — the schema
   guarantees valid JSON + the action enum, not semantic correctness.
-  `disableThinking:true` on every suggest call: structured JSON needs no
-  chain-of-thought; it frees the output budget (cuts truncated-JSON risk) and
-  `flash-pro` (Gemini 3.5 Flash) floors it to `minimal`.
+  `disableThinking:true` is ONLY for narrow structured tasks (Layer 1 segment
+  split and description/avatar-style generation). **Do not set it on Layer 2**:
+  NL audience → Apollo filters is the quality-critical reasoning step, and
+  disabling thinking caused `flash-pro` to keep producing title-only Apollo
+  filters for firmographic prompts.
   **Model = `flash-pro`** (Gemini 3.5 Flash, mid-tier): the suggested audience's
   relevance is entirely the LLM's NL→filters mapping (apollo/apify match
   structured filters deterministically — **no LLM on the provider side**), so the
