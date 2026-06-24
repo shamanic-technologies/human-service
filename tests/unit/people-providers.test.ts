@@ -37,8 +37,8 @@ describe("resolveProvider", () => {
     expect(resolveProvider({ provider: "apify", need: "verified_email" })).toBe("apify");
     expect(resolveProvider({ provider: "apollo", need: "verified_email" })).toBe("apollo");
   });
-  it("need verified_email routes to apify", () => {
-    expect(resolveProvider({ need: "verified_email" })).toBe("apify");
+  it("need verified_email defaults to apollo (apollo-only — apify no longer auto-selected)", () => {
+    expect(resolveProvider({ need: "verified_email" })).toBe("apollo");
   });
   it("defaults to apollo", () => {
     expect(resolveProvider({})).toBe("apollo");
@@ -206,7 +206,9 @@ describe("peopleSearch — apify", () => {
     );
 
     const result = await peopleSearch({
-      need: "verified_email",
+      // apify is no longer auto-selected via `need` — exercise its branch via an
+      // explicit provider (still honored for existing apify audiences).
+      provider: "apify",
       filters: { titles: ["CTO"], functions: ["engineering"], companyNames: ["Acme"], employeeMin: 10 },
       limit: 25,
       identity,

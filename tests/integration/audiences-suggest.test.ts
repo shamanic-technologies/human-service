@@ -431,7 +431,7 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(res.body.candidates[0].name).toBe("Good");
   });
 
-  it("injects apollo's canonical industries list into the apollo layer-2 prompt, not the apify one", async () => {
+  it("injects apollo's canonical industries list into the apollo layer-2 prompt (apollo-only — apify is never queried)", async () => {
     const layer2: Array<{ provider: "apollo" | "apify"; systemPrompt: string }> = [];
     let referenceCalls = 0;
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
@@ -473,9 +473,9 @@ describe("POST /orgs/audiences/suggest", () => {
     const apifyPrompt = layer2.find((l) => l.provider === "apify")?.systemPrompt;
     expect(apolloPrompt).toContain("CANONICAL INDUSTRIES");
     expect(apolloPrompt).toContain("Computer Software");
-    // apify carries no injected industries block (its own rulebook already has them).
-    expect(apifyPrompt).toBeDefined();
-    expect(apifyPrompt).not.toContain("CANONICAL INDUSTRIES");
+    // APOLLO-ONLY: apify is no longer part of the suggest fan-out, so its
+    // layer-2 prompt is never built.
+    expect(apifyPrompt).toBeUndefined();
   });
 
   it("502 when chat-service env is not configured", async () => {

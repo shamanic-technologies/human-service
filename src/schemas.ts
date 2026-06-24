@@ -895,8 +895,13 @@ registry.registerPath({
 // "suggested" is the INACTIVE default for rows created by POST /orgs/audiences/
 // suggest — the audience is never live for the brand until the caller flips it
 // to "active" via PATCH /orgs/audiences/{id}/status.
+// "deprecated" is a TERMINAL, admin-only state set by the apify→apollo migration
+// (POST /internal/migrate-apify-audiences-to-apollo). It is NOT user-settable and
+// cannot be transitioned out of (so a user can never reactivate a retired apify
+// audience), and GET /orgs/audiences hides it by default — see
+// ChangeAudienceStatusRequestSchema (user-settable subset) and the list route.
 export const AudienceStatusSchema = z
-  .enum(["suggested", "active", "paused", "archived"])
+  .enum(["suggested", "active", "paused", "archived", "deprecated"])
   .openapi("AudienceStatus");
 
 export const AudienceSchema = z
@@ -962,9 +967,12 @@ export const UpdateAudienceRequestSchema = z
   .strict()
   .openapi("UpdateAudienceRequest");
 
+// User-settable status subset: "deprecated" is admin-only (set solely by the
+// apify→apollo migration), so a PATCH /status that tries to set it fails loud
+// (400). "suggested" stays settable for parity with the prior behavior.
 export const ChangeAudienceStatusRequestSchema = z
   .object({
-    status: AudienceStatusSchema,
+    status: z.enum(["suggested", "active", "paused", "archived"]),
   })
   .strict()
   .openapi("ChangeAudienceStatusRequest");
@@ -1438,6 +1446,81 @@ registry.registerPath({
     200: { description: "Re-map result", content: { "application/json": { schema: RemapAudienceFiltersResponseSchema } } },
     401: { description: "Unauthorized" },
     502: { description: "unrepresentable persona filter", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+// --- Internal: one-time apify→apollo audience migration ---
+export const MigrateApifyAudiencesQuerySchema = z.object({
+  dryRun: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({
+      description:
+        "When 'true', scan the non-deprecated apify audiences + return a sample WITHOUT calling the LLM/apollo or writing. Defaults to false (real run).",
+    }),
+});
+
+export const MigrateApifyAudiencesResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    scanned: z.number().int().openapi({
+      description: "Non-deprecated apify audiences inspected by this sweep.",
+    }),
+    wouldMigrate: z.number().int().openapi({
+      description: "Apify audiences that would be migrated (= scanned on a dry-run).",
+    }),
+    migrated: z
+      .array(
+        z.object({
+          apifyAudienceId: z.string(),
+          apolloAudienceId: z.string(),
+          name: z.string(),
+          status: z.string(),
+          apolloCount: z.number().int(),
+        })
+      )
+      .openapi({
+        description:
+          "Per-audience result: the deprecated apify id, the new active apollo id (mirrored status), and the apollo count from the re-derived filters. Empty on a dry-run.",
+      }),
+    failed: z
+      .array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          error: z.string(),
+        })
+      )
+      .openapi({
+        description:
+          "Apify audiences whose apollo re-derivation yielded no usable filter set (left untouched, retried on re-run).",
+      }),
+    sample: z
+      .array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          status: z.string(),
+        })
+      )
+      .openapi({
+        description:
+          "Per-audience preview (capped): {id,name,status} of the apify rows that would migrate.",
+      }),
+  })
+  .openapi("MigrateApifyAudiencesResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/migrate-apify-audiences-to-apollo",
+  summary:
+    "One-time data fix: for every non-deprecated apify audience, re-derive an equivalent apollo filter set (agentic refine, platform LLM), create a new apollo audience mirroring the source status, and mark the apify one 'deprecated' (idempotent, dry-runnable, reversible)",
+  security: [{ apiKey: [] }],
+  request: { query: MigrateApifyAudiencesQuerySchema },
+  responses: {
+    200: { description: "Migration result", content: { "application/json": { schema: MigrateApifyAudiencesResponseSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "apollo / chat-service outage / missing config", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, asc, count, desc, eq, isNotNull } from "drizzle-orm";
+import { and, asc, count, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audienceMembers, audiences, people } from "../db/schema.js";
 import {
@@ -191,6 +191,10 @@ router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) 
   const conditions = [eq(audiences.orgId, orgId)];
   if (brandFilter) conditions.push(eq(audiences.brandId, brandFilter));
   if (statusFilter) conditions.push(eq(audiences.status, statusFilter));
+  // "deprecated" is an admin-only terminal state (retired apify audiences from
+  // the apify→apollo migration). Hide it from the user dashboard by default —
+  // only an explicit ?status=deprecated surfaces them (admin/audit).
+  else conditions.push(ne(audiences.status, "deprecated"));
   // An audience is serveable only once it has a committed provider. The
   // active list feeds downstream serve-ranking (campaign-service / lead-service
   // pick a brand's top active audience to serve), so a provider-uncommitted row
@@ -308,10 +312,21 @@ router.patch(
     }
 
     const orgId = res.locals.orgId as string;
+    // "deprecated" is terminal + admin-only: setting it is rejected by the
+    // schema (400 above), and transitioning OUT of it is blocked here via the
+    // `ne(status, "deprecated")` guard — a deprecated row simply doesn't match,
+    // so a reactivation attempt returns 404 (it is hidden anyway). This is what
+    // prevents a user from re-enabling a retired apify audience.
     const [updated] = await db
       .update(audiences)
       .set({ status: parsed.data.status, updatedAt: new Date() })
-      .where(and(eq(audiences.id, req.params.id), eq(audiences.orgId, orgId)))
+      .where(
+        and(
+          eq(audiences.id, req.params.id),
+          eq(audiences.orgId, orgId),
+          ne(audiences.status, "deprecated")
+        )
+      )
       .returning();
 
     if (!updated) {
