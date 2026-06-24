@@ -457,7 +457,7 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(after.body.audience.status).toBe("active"); // untouched
   });
 
-  it("calls chat-service with google JSON mode, a responseSchema, and disableThinking", async () => {
+  it("calls chat-service with google JSON mode, a responseSchema, disableThinking, and the strict layer-2 prompt", async () => {
     const completeBodies: Array<Record<string, unknown>> = [];
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
@@ -495,6 +495,21 @@ describe("POST /orgs/audiences/suggest", () => {
       expect(body.responseSchema).toBeDefined();
       expect((body.responseSchema as { type?: string }).type).toBe("object");
       expect(body.disableThinking).toBe(true);
+    }
+    const layer2Bodies = completeBodies.filter(
+      (body) =>
+        typeof body.systemPrompt === "string" &&
+        body.systemPrompt.includes("expert apollo audience builder")
+    );
+    expect(layer2Bodies.length).toBeGreaterThan(0);
+    for (const body of layer2Bodies) {
+      expect(body.systemPrompt).toContain(
+        "every filterable constraint in TARGET AUDIENCE"
+      );
+      expect(body.systemPrompt).toContain("Do not produce title-only filters");
+      expect(body.systemPrompt).toContain(
+        "never drop a stated constraint just because it is not perfect"
+      );
     }
   });
 
