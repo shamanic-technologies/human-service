@@ -39,6 +39,7 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Internal | `POST /internal/transfer-brand` | apiKey | Move solo-brand methodology rows between orgs |
 | Internal | `POST /internal/remap-audience-filters` | apiKey | One-time data fix: translate already-backfilled audiences' filters from legacy persona vocab → canonical `PeopleSearchFilters` vocab, in place (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/backfill-audience-descriptions` | apiKey | One-time data fix: generate a per-audience one-sentence `description` (from name + filters via chat-service platform LLM) for every audience whose `description IS NULL` — pre-#82 rows (idempotent, `?dryRun=true`) |
+| Internal | `POST /internal/migrate-apify-audiences-to-apollo` | apiKey | One-time data fix (APOLLO-ONLY cutover): for every non-deprecated `provider='apify'` audience, re-derive equivalent apollo filters (agentic refine, platform LLM), create a new apollo audience mirroring the source status, and mark the apify one `deprecated` (idempotent, `?dryRun=true`, reversible) |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
 | Org-scoped (CRM v1) | `GET /orgs/lists/{id}` | apiKey + `x-org-id` | Get a CRM list |
@@ -83,8 +84,16 @@ the people gateway needs `x-user-id` because apollo/apify require it for key
 resolution / attribution — accepting a request without it would only produce a
 confusing downstream 502.
 
+- **APOLLO-ONLY (2026-06).** apify is no longer **auto-selected**: `resolveProvider`
+  default + the former `need: "verified_email"` → apify branch (commented) now
+  resolve to **apollo**, and `SUGGEST_PROVIDERS = ["apollo"]` so `/suggest` never
+  creates apify audiences. An **explicit** `provider: "apify"` is STILL honored
+  (existing apify audiences' serve-next), and all apify functions remain compiled
+  but unreachable-by-default (inert, not deleted — re-enable by restoring those two
+  lines). Existing apify audiences were migrated to apollo equivalents via
+  `POST /internal/migrate-apify-audiences-to-apollo` (see Audiences below).
 - **Routing**: explicit `provider: "apollo" | "apify"` wins; else
-  `need: "verified_email"` → apify; else default **apollo** (richest, fully
+  ~~`need: "verified_email"` → apify;~~ default **apollo** (richest, fully
   ready). `resolve-email` **also defaults to apollo** (same provider as search;
   the reveal follows the provider that searched — a `providerPersonId` is
   provider-specific, so we never cross providers).
@@ -297,16 +306,26 @@ half of the platform migration that makes audiences the SINGLE owner; a later
 wave drops brand-service personas entirely + switches consumers'
 (features-service / campaign-service / dashboard) reads.
 
-- **`audiences.status`** = `suggested | active | paused | archived`, default
-  `active` (migration `0011`; column is free-text `text`, no DB CHECK — values
-  enforced app-level in `AudienceStatusSchema`). `suggested` is the **inactive**
-  default for rows created by `/suggest` (never live for the brand until flipped
-  to `active`). An audience is **immutable except its status** — `PATCH
-  /orgs/audiences/{id}` accepts only `name`/`nlPrompt` metadata; `brandId` and
-  `filters` are rejected (`.strict()` → 400) because editing filters = a new
+- **`audiences.status`** = `suggested | active | paused | archived | deprecated`,
+  default `active` (migration `0011`; column is free-text `text`, no DB CHECK —
+  values enforced app-level in `AudienceStatusSchema`). `suggested` is the
+  **inactive** default for rows created by `/suggest` (never live for the brand
+  until flipped to `active`). An audience is **immutable except its status** —
+  `PATCH /orgs/audiences/{id}` accepts only `name`/`nlPrompt` metadata; `brandId`
+  and `filters` are rejected (`.strict()` → 400) because editing filters = a new
   audience (evidence attribution is keyed on the audience id). `PATCH
   /orgs/audiences/{id}/status` is the dedicated status-only mutator. The hard
   `DELETE` stays for true cleanup — **archive is a soft state, NOT a delete**.
+- **`deprecated` is TERMINAL + admin-only** (the apify→apollo migration's retire
+  state). It is NOT in the `ChangeAudienceStatusRequestSchema` user-settable enum
+  (`PATCH /status {status:"deprecated"}` → **400**), and the status mutator's
+  `WHERE` carries `ne(status, "deprecated")` so a deprecated row can't transition
+  out (**404** — so a user can never reactivate a retired apify audience). `GET
+  /orgs/audiences` **hides** `deprecated` by default (`ne(status,"deprecated")`
+  unless `?status=deprecated` is passed explicitly), so the user dashboard stays
+  clean with NO dashboard-side change. The migration also **renames** the retired
+  apify row `"<name> [Apify]"` to free the unique `(org, brand, lower(name))` name
+  for its apollo twin.
 - **Name-unique per (org, brand)** (case-insensitive): unique index
   `idx_audiences_org_brand_lower_name` on `(org_id, brand_id, lower(name))`
   (migration `0012` widened it from brand-only so a name can repeat across orgs
@@ -383,6 +402,44 @@ from the row's **own name + filters** and writes it.
   block port-bind; trigger MANUALLY after deploy (`?dryRun=true` to size, then
   `?dryRun=false`). Kept idempotent + harmless after the one run, like the
   filter re-map above.
+
+### apify→apollo migration (APOLLO-ONLY cutover) — `POST /internal/migrate-apify-audiences-to-apollo`
+
+One-time sweep that retires every existing apify audience and replaces it with an
+equivalent **apollo** audience, paired with the code cutover (apify dropped from
+default routing + the suggest fan-out — see "APOLLO-ONLY" in the people gateway
+section). `src/routes/backfill.ts` (service-auth); `migrateApifyAudienceToApollo`
+in `src/services/audiences.ts` owns the per-row work.
+
+- **Filters are RE-DERIVED for apollo, NOT copied.** Each provider's layer-2 loop
+  tunes the neutral `PeopleSearchFilters` differently (esp. apollo `industries` =
+  a hidden LinkedIn taxonomy vs apify free-text), so copying an apify-tuned set to
+  apollo would under-match. Per audience we re-run the agentic refine FOR apollo
+  (`refineFilters("apollo", {name, description}, identity, { usePlatformLLM:true })`)
+  → apollo-correct filters + a real apollo count snapshot. The apify `filters`/
+  `apify_count` of the retired row are left intact (reversibility).
+- **Two-row, status-mirrored.** Atomically (one txn/row): the apify row is renamed
+  `"<name> [Apify]"` + set `status='deprecated'`, and a NEW apollo audience is
+  inserted with the original name, `provider='apollo'`, **the source row's status
+  mirrored** (an `active` apify audience → `active` apollo; a `suggested` one stays
+  `suggested` — never auto-activate what the user never chose), `apolloCount` from
+  the refine, and `source='migrated_from_apify'` (provenance for reversibility).
+- **Identity.** apollo dry-runs need org+user for key resolution; the sweep uses
+  each row's own `org_id` + `created_by_user_id` (all prod apify rows have it). The
+  **LLM** runs via the ORG-LESS platform path (`platformCompleteJson`) so a
+  migration we owe users does NOT bill their orgs — chat-service owns the cost,
+  human-service declares none (invariant holds, as for `/suggest` + the backfills).
+- **Idempotent** — scoped to `provider='apify' AND status<>'deprecated'`, so a
+  re-run skips already-migrated rows (now `deprecated`) → clean re-run migrates 0.
+  **Dry-runnable** — `?dryRun=true` counts the apify rows + samples `{id,name,status}`
+  WITHOUT calling the LLM/apollo or writing. **Reversible** — DELETE the
+  `source='migrated_from_apify'` rows + un-rename/un-deprecate the apify rows.
+- **Per-row resilience + fail-loud split** — a row whose apollo re-derivation
+  yields **no usable filter set** (empty) is counted in `failed` + left untouched
+  (retried on re-run); a real apollo/chat-service outage or missing config aborts
+  the sweep loudly (502) — already-migrated rows persist (each is one atomic txn).
+- **NOT on boot** — O(N) × an agentic LLM loop each; trigger MANUALLY after deploy
+  (`?dryRun=true` to size, then `?dryRun=false`).
 
 ### Audience suggestion (onboarding) — `POST /orgs/audiences/suggest`
 

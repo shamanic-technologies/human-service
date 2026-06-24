@@ -4,6 +4,9 @@ import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { tagAudienceServe, computeStats } from "../../src/services/audiences.js";
 import type { ServedContact } from "../../src/services/suppression.js";
+import { db } from "../../src/db/index.js";
+import { audiences } from "../../src/db/schema.js";
+import { eq } from "drizzle-orm";
 
 const app = createTestApp();
 
@@ -222,6 +225,55 @@ describe("Audiences CRUD", () => {
           .set(headersForOrg(ORG_B))
       ).status
     ).toBe(404);
+  });
+});
+
+describe("deprecated status (admin-only, terminal, hidden)", () => {
+  async function deprecate(id: string) {
+    await db
+      .update(audiences)
+      .set({ status: "deprecated" })
+      .where(eq(audiences.id, id));
+  }
+
+  it("PATCH /status rejects setting 'deprecated' (400 — not user-settable)", async () => {
+    const id = await createAudience(ORG_A, { name: "x", brandId: BRAND_1 });
+    const res = await request(app)
+      .patch(`/orgs/audiences/${id}/status`)
+      .set(headersForOrg(ORG_A))
+      .send({ status: "deprecated" });
+    expect(res.status).toBe(400);
+  });
+
+  it("a deprecated audience cannot be reactivated (404 — can't transition out)", async () => {
+    const id = await createAudience(ORG_A, { name: "retired", brandId: BRAND_1 });
+    await deprecate(id);
+    const res = await request(app)
+      .patch(`/orgs/audiences/${id}/status`)
+      .set(headersForOrg(ORG_A))
+      .send({ status: "active" });
+    expect(res.status).toBe(404);
+  });
+
+  it("list hides deprecated by default; ?status=deprecated surfaces it", async () => {
+    const live = await createAudience(ORG_A, { name: "live", brandId: BRAND_1 });
+    const dead = await createAudience(ORG_A, { name: "dead", brandId: BRAND_1 });
+    await deprecate(dead);
+
+    const def = await request(app)
+      .get("/orgs/audiences")
+      .set(headersForOrg(ORG_A));
+    expect(def.status).toBe(200);
+    const defIds = def.body.audiences.map((a: { id: string }) => a.id);
+    expect(defIds).toContain(live);
+    expect(defIds).not.toContain(dead);
+
+    const dep = await request(app)
+      .get("/orgs/audiences?status=deprecated")
+      .set(headersForOrg(ORG_A));
+    expect(dep.status).toBe(200);
+    const depIds = dep.body.audiences.map((a: { id: string }) => a.id);
+    expect(depIds).toEqual([dead]);
   });
 });
 
