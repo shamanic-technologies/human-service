@@ -367,8 +367,9 @@ from the row's **own name + filters** and writes it.
   preview, no spend). **Never the `nlPrompt`** — derived only from name+filters
   (`generateAudienceDescription` in `src/services/audiences.ts`).
 - **LLM via chat-service's ORG-LESS platform path** — `platformCompleteJson` →
-  `POST /internal/platform-complete` (service-auth, no org/user), Gemini
-  schemaless JSON (`google`/`flash-pro`, same as `/suggest` layer-1).
+  `POST /internal/platform-complete` (service-auth, no org/user), Gemini JSON
+  with a `responseSchema` + `disableThinking` (`google`/`flash-pro`, same
+  reliability setup as `/suggest`, v0.18.5).
   **chat-service OWNS the cost** (platform-run declaration lives there) — so
   human-service declares none, and a historical backfill we owe users does NOT
   retroactively bill their orgs (and a sweep-all-orgs job has no `x-user-id`
@@ -429,20 +430,43 @@ is the chat-service client.
    row in place, never mutates an `active`/`paused`/`archived` one.
 
 - **LLM runs via chat-service `POST /complete`** (`google`/`flash-pro`,
-  `responseFormat:"json"`, **no `responseSchema`**). **chat-service OWNS the LLM
-  cost** — it does the provision→authorize→execute→actualize against the org
-  balance — so **human-service still declares no cost** (the invariant holds;
-  chat-service is the LLM-cost owner exactly as apollo/apify own search cost).
+  `responseFormat:"json"` **+ a Gemini `responseSchema`** + `disableThinking:true`).
+  **chat-service OWNS the LLM cost** — it does the
+  provision→authorize→execute→actualize against the org balance — so
+  **human-service still declares no cost** (the invariant holds; chat-service is
+  the LLM-cost owner exactly as apollo/apify own search cost).
   **Why Gemini, not Anthropic:** chat-service rejects `provider:"anthropic"` +
   `responseFormat:"json"` with **400 unless a `responseSchema` is supplied**, and
   Anthropic enforces that schema STRICTLY — `additionalProperties:false` + an
   explicit `properties` map on **every** object (open/permissive objects are
-  rejected). Our candidate `filters` is an OPEN blob (~16 optional neutral
-  fields) that can't be expressed as an Anthropic strict schema without
-  enumerating + over-constraining it. Gemini's native JSON mode
-  (`responseMimeType:"application/json"`) needs **no schema**, so the shape stays
-  **prompt-described + validated caller-side** (`parseCandidates` → fail loud 502
-  on a malformed LLM response; the per-filter dry-run validates the values).
+  rejected). Gemini's `responseSchema` is a **permissive OpenAPI subset** (no
+  `additionalProperties:false` requirement), so our candidate `filters` (a fixed
+  16-field set) IS expressible there — without the Anthropic over-constraining
+  pain.
+  **Reliability — responseSchema + retry + tolerance (v0.18.5, #93).** `/suggest`
+  fans out MANY independent Gemini calls (1 layer-1 + up to 6 segments × 2
+  providers × up to 8 refine rounds) under `Promise.allSettled`. chat-service
+  returns **502 on a non-parsable LLM response**; pre-v0.18.5 the flow was
+  schemaless with NO retry, so a single malformed-JSON 502 anywhere in the fan-out
+  rejected the WHOLE request → aggregate failure `1−(1−p)^N` compounded to **~50%
+  in prod**. Three layers now drive it to ~100% (barring no-credits / full
+  outage): **(1)** every suggest LLM call ships a `responseSchema`
+  (`LAYER1_RESPONSE_SCHEMA` `{audiences:[{name,description}]}`,
+  `LAYER2_RESPONSE_SCHEMA` `{action enum, filters, reasoning, reason}` incl.
+  `FILTERS_RESPONSE_SCHEMA` = the 16 neutral fields, `DESCRIPTION_RESPONSE_SCHEMA`)
+  so the provider enforces valid JSON server-side → the malformed-JSON 502 is
+  structurally eliminated; **(2)** `chat-client` retries a **transient response
+  status (502/429/503) + a missing/malformed `json` field** (bounded
+  250/500/1000ms), in addition to the existing connect-phase retry — NOT 4xx
+  (400/401/402 are deterministic); **(3)** `Promise.allSettled` at both fan-out
+  levels — one provider's outage doesn't drop the other's result for a segment,
+  one segment's total failure doesn't nuke the batch; still **fails loud (502)**
+  when nothing survives. Values are STILL validated caller-side
+  (`PeopleSearchFiltersSchema` in `dryRunSafe`, `parseCandidates`) — the schema
+  guarantees valid JSON + the action enum, not semantic correctness.
+  `disableThinking:true` on every suggest call: structured JSON needs no
+  chain-of-thought; it frees the output budget (cuts truncated-JSON risk) and
+  `flash-pro` (Gemini 3.5 Flash) floors it to `minimal`.
   **Model = `flash-pro`** (Gemini 3.5 Flash, mid-tier): the suggested audience's
   relevance is entirely the LLM's NL→filters mapping (apollo/apify match
   structured filters deterministically — **no LLM on the provider side**), so the
@@ -452,9 +476,12 @@ is the chat-service client.
   schema; chat-service later added the upfront anthropic guard → every call 400'd
   (#50/v0.13.1). The first fix tried an anthropic strict envelope with an open
   `filters` — Anthropic 400'd *`additionalProperties` must be explicitly set to
-  false* on the open object. Then v0.13.2 / #54 switched to Gemini schemaless
+  false* on the open object. Then v0.13.2 / #54 switched to Gemini **schemaless**
   JSON on `flash`; later bumped to `flash-pro` + ICP-axis layer-1 prompt + apollo
-  canonical-industries injection to raise filter relevance.)
+  canonical-industries injection to raise filter relevance. v0.18.5 / #93 then
+  RE-ADDED a `responseSchema` — on Gemini, not Anthropic — because schemaless was
+  the root cause of a ~50% prod flake; the #54 "no schema" rationale was
+  Anthropic-strictness pain, which Gemini's permissive schema does not have.)
 - **Granularity is emergent from the NL, not an input.** Input is ONLY
   `{nlPrompt, brandId}` — no `strategy`/count knob. Layer 1 reads the caller's
   own segmentation intent and emits one **named** audience per implied segment.
