@@ -1068,15 +1068,20 @@ export async function serveNextPerson(
   }
 
   // apollo: search is a FREE teaser list (already suppression-filtered + bounded
-  // by the saturation stop). The stored filters are ALREADY Apollo's faithful
-  // shape, so forward them VERBATIM as the apollo search params (no neutral→apollo
-  // remap). Enrich teasers one at a time until one reveals a non-suppressed person
-  // (the billed reveal records the serve in finalizeResolved), then stop. All
-  // teasers exhausted / saturated ⟹ no fresh person.
+  // by the saturation stop). Pointer rows (apollo_audience_id set) store Apollo's
+  // FAITHFUL filter shape → forward it VERBATIM as the apollo search params (no
+  // neutral→apollo remap). A LEGACY pre-Wave-2 apollo row (no pointer) still holds
+  // the old NEUTRAL blob → let toApolloSearchParams remap it (the pre-Wave-2
+  // behavior), so it keeps serving correctly until the backfill gives it a pointer.
+  // Mirrors the same guard in refreshAudienceCounts. Enrich teasers one at a time
+  // until one reveals a non-suppressed person (the billed reveal records the serve
+  // in finalizeResolved), then stop. All teasers exhausted / saturated ⟹ none.
   const search = await peopleSearch({
     provider: "apollo",
-    filters: {},
-    apolloSearchParams: storedFilters,
+    filters: audience.apolloAudienceId
+      ? {}
+      : (storedFilters as PeopleSearchFilters),
+    apolloSearchParams: audience.apolloAudienceId ? storedFilters : undefined,
     audienceId: audience.id,
     identity,
   });
