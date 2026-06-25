@@ -288,7 +288,7 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(after.body.audience.status).toBe("active"); // untouched
   });
 
-  it("calls chat-service Layer 1 with google JSON mode, a responseSchema, flash-pro + thinking disabled", async () => {
+  it("calls chat-service Layer 1 with google JSON mode, a responseSchema, flash + thinking disabled", async () => {
     const completeBodies: Array<Record<string, unknown>> = [];
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
@@ -308,7 +308,7 @@ describe("POST /orgs/audiences/suggest", () => {
     const body = completeBodies[0];
     expect(body.provider).toBe("google");
     expect(body.responseFormat).toBe("json");
-    expect(body.model).toBe("flash-pro");
+    expect(body.model).toBe("flash");
     expect(body.disableThinking).toBe(true);
     expect((body.responseSchema as { type?: string }).type).toBe("object");
     expect(body.systemPrompt).toContain("decompose a natural-language audience");
