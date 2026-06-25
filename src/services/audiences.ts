@@ -452,7 +452,9 @@ const FILTERS_RESPONSE_SCHEMA: Record<string, unknown> = {
 
 // Layer-2 agentic action. `filters` only meaningful for action:"test", `reason`
 // only for "exhausted" — both kept optional (Gemini has no clean discriminated
-// union); parseLayer2Action handles the conditional caller-side.
+// union); parseLayer2Action handles the conditional caller-side. Used by the
+// APIFY branch (its filters-prompt already embeds apify's native vocab in the
+// neutral field names). Apollo uses APOLLO_LAYER2_RESPONSE_SCHEMA below.
 const LAYER2_RESPONSE_SCHEMA: Record<string, unknown> = {
   type: "object",
   properties: {
@@ -463,6 +465,177 @@ const LAYER2_RESPONSE_SCHEMA: Record<string, unknown> = {
   },
   required: ["action"],
 };
+
+// --- Apollo-native Layer-2 vocabulary ---
+//
+// The apollo Layer-2 LLM speaks Apollo's OWN people-search filter field names
+// directly, NOT the neutral PeopleSearchFilters. Reason: the previous design told
+// the LLM to emit neutral fields (`revenueRanges`, `employeeMin/Max`) while
+// injecting Apollo's authoritative rulebook (which documents `revenueRange`,
+// `organizationNumEmployeesRanges` enum) + a "use only values verbatim from the
+// rules" rule — two conflicting vocabularies. flash-pro obeyed the authoritative
+// rulebook, couldn't find `revenueRanges` there → dropped revenue; and Apollo's
+// employee-bucket enums look like the neutral `companySizes` array → double-
+// encoded size. Speaking ONE vocabulary (Apollo's) removes the conflict.
+//
+// apolloDslToNeutral() maps the LLM output back to the neutral blob the rest of
+// the pipeline (dry-run, storage, serve-next, stats) already uses — so this is a
+// surface-only change; nothing downstream of refineFilters moves.
+//
+// qKeywords is a single free-text string (Apollo's OR/AND syntax); every other
+// field is a string[]. Each is nullable+required so the model must explicitly
+// decide value-vs-null per field (no silent omission).
+const APOLLO_LAYER2_ARRAY_FIELDS = [
+  "personTitles",
+  "personSeniorities",
+  "qOrganizationIndustryTagIds",
+  "organizationNumEmployeesRanges",
+  "revenueRange",
+  "personLocations",
+  "organizationLocations",
+  "qOrganizationDomains",
+  "currentlyUsingAnyOfTechnologyUids",
+] as const;
+// Full field list (array fields + the single string field qKeywords), in prompt /
+// schema / rationale order.
+const APOLLO_LAYER2_FIELDS = [
+  ...APOLLO_LAYER2_ARRAY_FIELDS,
+  "qKeywords",
+] as const;
+
+const apolloFieldSchema = (field: string): Record<string, unknown> =>
+  field === "qKeywords"
+    ? nullable({ type: "string" })
+    : nullable({ type: "array", items: { type: "string" } });
+
+const APOLLO_FILTERS_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: Object.fromEntries(
+    APOLLO_LAYER2_FIELDS.map((f) => [f, apolloFieldSchema(f)])
+  ),
+  required: [...APOLLO_LAYER2_FIELDS],
+};
+
+// One short (5-10 word) justification per filter field — value OR null — so the
+// LLM must consciously decide every field and we can SEE why a field was left
+// null (logged each round). Debug aid; safe to remove once filter quality holds.
+const APOLLO_RATIONALE_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: Object.fromEntries(
+    APOLLO_LAYER2_FIELDS.map((f) => [f, { type: "string" }])
+  ),
+  required: [...APOLLO_LAYER2_FIELDS],
+};
+
+const APOLLO_LAYER2_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    action: { type: "string", enum: ["test", "confirm", "exhausted"] },
+    filters: APOLLO_FILTERS_RESPONSE_SCHEMA,
+    filterRationale: APOLLO_RATIONALE_RESPONSE_SCHEMA,
+    reasoning: { type: "string" },
+    reason: { type: "string" },
+  },
+  required: ["action"],
+};
+
+function layer2ResponseSchema(provider: Provider): Record<string, unknown> {
+  return provider === "apollo"
+    ? APOLLO_LAYER2_RESPONSE_SCHEMA
+    : LAYER2_RESPONSE_SCHEMA;
+}
+
+// Coerce an LLM array field to a clean string[] (drop non-strings / blanks).
+function asStringArray(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out = v
+    .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+    .map((s) => s.trim());
+  return out.length ? out : undefined;
+}
+
+// Parse Apollo employee-range bucket strings ("1,10", "51,100", open-ended
+// "10001,") into a neutral [min,max] window. The neutral->apollo mapper
+// (apolloEmployeeRanges) expands the window back to the covering buckets at
+// dry-run time, so the round-trip is faithful for contiguous bucket selections.
+// An open-ended bucket ("N,") leaves employeeMax unset (no upper bound).
+function apolloEmployeeBucketsToMinMax(buckets: string[]): {
+  employeeMin?: number;
+  employeeMax?: number;
+} {
+  let min: number | undefined;
+  let max: number | undefined;
+  let openMax = false;
+  for (const b of buckets) {
+    const [loStr, hiStr] = b.split(",");
+    const lo = Number.parseInt(loStr ?? "", 10);
+    if (Number.isFinite(lo)) min = min === undefined ? lo : Math.min(min, lo);
+    if (hiStr === undefined || hiStr.trim() === "") {
+      openMax = true;
+      continue;
+    }
+    const hi = Number.parseInt(hiStr, 10);
+    if (Number.isFinite(hi)) max = max === undefined ? hi : Math.max(max, hi);
+  }
+  return { employeeMin: min, employeeMax: openMax ? undefined : max };
+}
+
+// Map the Apollo-native Layer-2 LLM output to the neutral PeopleSearchFilters the
+// rest of the pipeline stores + serves on. The dry-run / serve-next paths convert
+// neutral->apollo again via the existing toApolloSearchParams, so this is the
+// inverse of that single mapper. Defensive (won't throw on a malformed field —
+// it just drops it; the neutral schema validation in dryRunSafe is the gate).
+function apolloDslToNeutral(raw: Record<string, unknown>): PeopleSearchFilters {
+  const f: PeopleSearchFilters = {};
+  const titles = asStringArray(raw.personTitles);
+  if (titles) f.titles = titles;
+  const seniorities = asStringArray(raw.personSeniorities);
+  if (seniorities) f.seniorities = seniorities;
+  const industries = asStringArray(raw.qOrganizationIndustryTagIds);
+  if (industries) f.industries = industries;
+  const revenue = asStringArray(raw.revenueRange);
+  if (revenue) f.revenueRanges = revenue;
+  const domains = asStringArray(raw.qOrganizationDomains);
+  if (domains) f.companyDomains = domains;
+  const technologies = asStringArray(raw.currentlyUsingAnyOfTechnologyUids);
+  if (technologies) f.technologies = technologies;
+  // Apollo flattens person + org HQ location into one `personLocations`; the
+  // neutral mapper concatenates locationCountries back into personLocations, so
+  // collapse both apollo location fields into locationCountries here.
+  const locations = [
+    ...(asStringArray(raw.personLocations) ?? []),
+    ...(asStringArray(raw.organizationLocations) ?? []),
+  ];
+  if (locations.length) f.locationCountries = locations;
+  const buckets = asStringArray(raw.organizationNumEmployeesRanges);
+  if (buckets) {
+    const { employeeMin, employeeMax } = apolloEmployeeBucketsToMinMax(buckets);
+    if (employeeMin !== undefined) f.employeeMin = employeeMin;
+    if (employeeMax !== undefined) f.employeeMax = employeeMax;
+  }
+  // qKeywords is Apollo's single free-text field with OR/AND syntax; neutral
+  // `keywords[]` is joined back with " OR " by the neutral->apollo mapper.
+  if (typeof raw.qKeywords === "string" && raw.qKeywords.trim()) {
+    const kws = raw.qKeywords
+      .split(/\s+OR\s+/i)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (kws.length) f.keywords = kws;
+  }
+  return f;
+}
+
+// Convert a Layer-2 LLM filter object to the neutral shape. Apollo speaks its own
+// DSL (mapped here); apify already emits neutral fields (its filters-prompt embeds
+// apify's accepted values under the neutral names).
+function toNeutralFilters(
+  provider: Provider,
+  raw: Record<string, unknown>
+): PeopleSearchFilters {
+  return provider === "apollo"
+    ? apolloDslToNeutral(raw)
+    : (raw as PeopleSearchFilters);
+}
 
 const DESCRIPTION_RESPONSE_SCHEMA: Record<string, unknown> = {
   type: "object",
@@ -673,85 +846,19 @@ async function dryRunSafe(
   }
 }
 
-function buildLayer2SystemPrompt(
-  provider: Provider,
-  rules: string,
-  industriesVocab?: string[]
-): string {
+// Shared multi-turn loop + count-judgment instructions (identical for both
+// providers). `withRationale` adds the filterRationale key to the TEST example.
+function layer2LoopAndCountInstructions(withRationale: boolean): string[] {
   return [
-    `You are an expert ${provider} audience builder. Your job is to translate`,
-    "ONE self-contained target audience into the strongest valid people-search",
-    "filters this provider can support.",
-    "",
-    "The TARGET AUDIENCE description is the full source of truth. Do not use the",
-    "original user prompt. Do not expect any caller-side patching after your",
-    "answer.",
-    "",
-    "CRITICAL RULE: every filterable constraint in TARGET AUDIENCE must be either:",
-    "1. represented in filters, or",
-    "2. explicitly marked unfilterable in reasoning.",
-    "",
-    "Do not produce title-only filters when TARGET AUDIENCE contains company,",
-    "industry, employee count, revenue, geography, technology, funding, or intent",
-    "constraints. Title-only is valid only when the segment itself contains no",
-    "filterable company or market constraints.",
-    "",
-    "PROVIDER FILTER RULES (authoritative -- only these values are valid):",
-    rules,
-    "",
-    'Your "filters" MUST include EVERY neutral field below. Use null for fields',
-    "you do not use:",
-    "titles[], seniorities[] (one of: entry, senior, manager, director, vp,",
-    "c_suite, owner, founder, partner), functions[], locationCountries[],",
-    "locationStates[], locationCities[], companyNames[], companyDomains[],",
-    "industries[], keywords[], employeeMin (int), employeeMax (int),",
-    "companySizes[], revenueRanges[], fundingStages[], technologies[].",
-    "Populate the fields THIS provider honors best per the rules above.",
-    "",
-    "VOCABULARY IS EXACT. For any enum-constrained field (seniorities, functions,",
-    "industries, companySizes, revenueRanges, fundingStages) use ONLY values that",
-    "appear verbatim in the rules / lists above -- copy them character-for-",
-    "character. NEVER invent or paraphrase an enum value (e.g. do not write 'SaaS'",
-    "or 'Tech' for an industry): an unrecognized value is silently dropped by the",
-    "provider and quietly under-matches. Free-text fields (titles, keywords,",
-    "locations, companyNames, companyDomains, technologies) accept any string.",
-    ...(industriesVocab && industriesVocab.length > 0
-      ? [
-          "",
-          "CANONICAL INDUSTRIES (the ONLY accepted values for industries[] -- pick",
-          "the closest one or more; do not use any industry name not in this list):",
-          industriesVocab.join(", ") + ".",
-        ]
-      : []),
-    "",
-    "Build filters in this priority order:",
-    "1. persona: titles, seniorities, functions",
-    "2. company type or market: industries and/or keywords",
-    "3. company size: employeeMin, employeeMax, companySizes",
-    "4. revenue and funding if stated",
-    "5. geography if stated",
-    "6. technologies or intent keywords if stated",
-    ...(provider === "apollo"
-      ? [
-          "",
-          "For Apollo specifically:",
-          "- use employeeMin / employeeMax when the audience states an employee range",
-          "- use revenueRanges when the audience states revenue",
-          "- use industries for broad canonical sectors",
-          "- use keywords for terms like B2B, SaaS, Reddit marketing, social listening,",
-          "  organic acquisition, bootstrapped, seed-stage, or digital product when they",
-          "  are part of the target definition",
-          "- never drop a stated constraint just because it is not perfect",
-        ]
-      : []),
-    "",
     "You operate in a MULTI-TURN loop. Each turn respond with EXACTLY ONE JSON",
     "object (no prose, no markdown):",
-    '- TEST a filter set (server replies with its live match count):',
-    '  {"action":"test","filters":{ ... },"reasoning":"mapped constraints: ...; unfilterable: ..."}',
+    "- TEST a filter set (server replies with its live match count):",
+    withRationale
+      ? '  {"action":"test","filters":{ ... },"filterRationale":{ ... },"reasoning":"<one sentence>"}'
+      : '  {"action":"test","filters":{ ... },"reasoning":"mapped constraints: ...; unfilterable: ..."}',
     "- CONFIRM the last tested set when you are SATISFIED its count is a healthy,",
     '  well-targeted audience for this segment: {"action":"confirm","reasoning":"why the last tested filters cover the target audience"}',
-    '- EXHAUSTED if no valid in-scope filter set yields a usable audience:',
+    "- EXHAUSTED if no valid in-scope filter set yields a usable audience:",
     '  {"action":"exhausted","reason":"<why>"}',
     "",
     "JUDGE THE COUNT YOURSELF: aim for a focused, addressable audience -- roughly",
@@ -766,7 +873,129 @@ function buildLayer2SystemPrompt(
     "within the segment description -- never widen beyond its titles/geography/",
     "company traits. If a test returns a validation error, propose corrected",
     "filters; NEVER confirm a set with unresolved validation errors.",
+  ];
+}
+
+// Apollo-native Layer-2 prompt. The model reasons in Apollo's OWN filter
+// vocabulary (one vocabulary, no neutral/apify noise) with maximum clarity on
+// each field's type, enum values, and range/format. apolloDslToNeutral maps the
+// output back to the neutral blob the pipeline stores.
+function buildApolloLayer2SystemPrompt(
+  rules: string,
+  industriesVocab?: string[]
+): string {
+  return [
+    "You are an expert Apollo people-search audience builder. Translate ONE",
+    "self-contained target audience into the strongest valid Apollo people-search",
+    "filters.",
+    "",
+    "The TARGET AUDIENCE description is the full source of truth. Do not use the",
+    "original user prompt. Do not expect any caller-side patching after your",
+    "answer.",
+    "",
+    "CRITICAL RULE: every filterable constraint in TARGET AUDIENCE must be either:",
+    "1. represented in filters, or",
+    "2. explicitly justified as unfilterable in its filterRationale.",
+    "",
+    "Do not produce title-only filters when TARGET AUDIENCE contains company,",
+    "industry, employee count, revenue, geography, technology, or intent",
+    "constraints. Title-only is valid only when the segment itself contains no",
+    "filterable company or market constraints.",
+    "",
+    "APOLLO FILTER RULES (authoritative -- field names, types, accepted values):",
+    rules,
+    ...(industriesVocab && industriesVocab.length > 0
+      ? [
+          "",
+          "CANONICAL INDUSTRIES (the ONLY accepted values for",
+          "qOrganizationIndustryTagIds -- pick the closest one or more; never use",
+          "an industry name not in this list):",
+          industriesVocab.join(", ") + ".",
+        ]
+      : []),
+    "",
+    'Your "filters" object MUST use ONLY these exact Apollo field names, and MUST',
+    "include EVERY one of them (use null for any you do not use):",
+    "- personTitles: string[] -- job titles, free text (e.g. [\"Founder\",\"Head of Growth\"]).",
+    "- personSeniorities: string[] -- ENUM, copy verbatim from the rules (entry,",
+    "  senior, manager, director, vp, c_suite, owner, founder, partner).",
+    "- qOrganizationIndustryTagIds: string[] -- ENUM, copy verbatim from the",
+    "  CANONICAL INDUSTRIES list ONLY.",
+    "- organizationNumEmployeesRanges: string[] -- ENUM buckets, copy verbatim",
+    "  from the rules (e.g. \"1,10\",\"11,20\"). You CANNOT write an arbitrary range",
+    "  like \"1,50\"; instead select EVERY bucket that overlaps the target span",
+    "  (e.g. 1-50 employees -> [\"1,10\",\"11,20\",\"21,50\"]; 10-100 ->",
+    "  [\"1,10\",\"11,20\",\"21,50\",\"51,100\"]).",
+    "- revenueRange: string[] -- annual revenue as \"min,max\" DOLLAR strings you",
+    "  CONSTRUCT (not looked up in the rules): e.g. under $2M -> [\"0,2000000\"];",
+    "  $1M-$10M -> [\"1000000,10000000\"]. Open-ended max: \"2000000,\" means $2M+.",
+    "- qKeywords: string -- a SINGLE free-text query across person + org fields,",
+    "  Apollo OR/AND syntax (e.g. \"SaaS OR digital product\"). Use for market /",
+    "  intent terms (B2B, SaaS, Reddit marketing, social listening, organic",
+    "  acquisition, bootstrapped, seed-stage, digital product) when stated.",
+    "- personLocations: string[] -- person location (e.g. [\"United States\"]).",
+    "- organizationLocations: string[] -- company HQ location.",
+    "- qOrganizationDomains: string[] -- specific company domains.",
+    "- currentlyUsingAnyOfTechnologyUids: string[] -- technology stack.",
+    "",
+    "VOCABULARY IS EXACT for the ENUM fields ONLY (personSeniorities,",
+    "qOrganizationIndustryTagIds, organizationNumEmployeesRanges): copy values",
+    "character-for-character from the rules / industries list -- an unrecognized",
+    "enum value is silently dropped by Apollo and under-matches. The other fields",
+    "are values you CONSTRUCT (personTitles, qKeywords, revenueRange dollar",
+    "strings, locations, domains, technologies) -- never drop a stated constraint just because it is not perfect.",
+    "",
+    "filterRationale: for EVERY field above give ONE short (5-10 word) reason for",
+    "your choice -- the value you put OR why you left it null. Mandatory: a field",
+    "with no rationale is an error.",
+    "",
+    ...layer2LoopAndCountInstructions(true),
   ].join("\n");
+}
+
+// apify Layer-2 prompt (neutral PeopleSearchFilters vocabulary). apify's own
+// filters-prompt already embeds its accepted values under the neutral field
+// names, so apify keeps the neutral contract. Inert under APOLLO-ONLY /suggest;
+// reached only if apify is restored to SUGGEST_PROVIDERS.
+function buildApifyLayer2SystemPrompt(rules: string): string {
+  return [
+    "You build a apify people-search audience for ONE target segment. Translate",
+    "the self-contained TARGET AUDIENCE into the strongest valid apify filters.",
+    "",
+    "The TARGET AUDIENCE description is the full source of truth. Do not use the",
+    "original user prompt. Do not expect any caller-side patching after your",
+    "answer.",
+    "",
+    "CRITICAL RULE: every filterable constraint in TARGET AUDIENCE must be either",
+    "represented in filters or explicitly marked unfilterable in reasoning.",
+    "",
+    "PROVIDER FILTER RULES (authoritative -- only these values are valid):",
+    rules,
+    "",
+    'Your "filters" MUST include EVERY neutral field below. Use null for fields',
+    "you do not use:",
+    "titles[], seniorities[] (one of: entry, senior, manager, director, vp,",
+    "c_suite, owner, founder, partner), functions[], locationCountries[],",
+    "locationStates[], locationCities[], companyNames[], companyDomains[],",
+    "industries[], keywords[], employeeMin (int), employeeMax (int),",
+    "companySizes[], revenueRanges[], fundingStages[], technologies[].",
+    "",
+    "VOCABULARY IS EXACT for enum-constrained fields (seniorities, functions,",
+    "industries, companySizes, revenueRanges, fundingStages): use ONLY values that",
+    "appear verbatim in the rules above. Free-text fields accept any string.",
+    "",
+    ...layer2LoopAndCountInstructions(false),
+  ].join("\n");
+}
+
+function buildLayer2SystemPrompt(
+  provider: Provider,
+  rules: string,
+  industriesVocab?: string[]
+): string {
+  return provider === "apollo"
+    ? buildApolloLayer2SystemPrompt(rules, industriesVocab)
+    : buildApifyLayer2SystemPrompt(rules);
 }
 
 interface RefineResult {
@@ -855,13 +1084,21 @@ async function refineFilters(
       systemPrompt,
       provider: SUGGEST_LLM_PROVIDER,
       model: SUGGEST_LAYER2_LLM_MODEL,
-      responseSchema: LAYER2_RESPONSE_SCHEMA,
+      responseSchema: layer2ResponseSchema(provider),
     };
-    const action = parseLayer2Action(
-      opts.usePlatformLLM
-        ? await platformCompleteJson(llmArgs)
-        : await completeJson({ ...llmArgs, identity })
-    );
+    const raw = opts.usePlatformLLM
+      ? await platformCompleteJson(llmArgs)
+      : await completeJson({ ...llmArgs, identity });
+    // Debug visibility: log the model's per-field justification so we can SEE why
+    // a filter was set or left null (the previous single `reasoning` blob was
+    // never surfaced). Removable once filter quality is confirmed.
+    if (raw.filterRationale && typeof raw.filterRationale === "object") {
+      console.log(
+        `[human-service] audience.suggest layer2 ${provider} round ${round + 1} rationale:`,
+        JSON.stringify(raw.filterRationale)
+      );
+    }
+    const action = parseLayer2Action(raw);
 
     if (action.type === "exhausted") {
       // Best-effort: if a clean filter set was tested before giving up, return it
@@ -895,21 +1132,26 @@ async function refineFilters(
     }
 
     if (action.type === "test") {
-      const filters = stripNullFilters(action.filters);
+      // The LLM speaks Apollo's native vocabulary (apify: the neutral one); map
+      // to the neutral PeopleSearchFilters the pipeline stores + dry-runs on. The
+      // transcript echoes the RAW (provider-native) filters back so the model
+      // sees its own vocabulary, while `lastFilters` keeps the neutral shape.
+      const rawFilters = stripNullFilters(action.filters);
+      const filters = toNeutralFilters(provider, rawFilters);
       const r = await dryRunSafe(provider, filters, identity);
       lastFilters = filters;
       if (r.validationError) {
         lastHadError = true;
         lastValidationError = r.validationError;
         transcript.push(
-          `Round ${round + 1}: filters=${JSON.stringify(filters)} -> REJECTED as invalid: ${r.validationError}. Propose corrected filters, or declare exhausted.`
+          `Round ${round + 1}: filters=${JSON.stringify(rawFilters)} -> REJECTED as invalid: ${r.validationError}. Propose corrected filters, or declare exhausted.`
         );
       } else {
         lastHadError = false;
         lastValidationError = null;
         lastCleanCount = r.count;
         transcript.push(
-          `Round ${round + 1}: filters=${JSON.stringify(filters)} -> count=${r.count}. Confirm this set, test another, or declare exhausted.`
+          `Round ${round + 1}: filters=${JSON.stringify(rawFilters)} -> count=${r.count}. Confirm this set, test another, or declare exhausted.`
         );
       }
       continue;
