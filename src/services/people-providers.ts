@@ -311,6 +311,29 @@ function requireApollo(): { url: string; key: string } {
   return { url, key };
 }
 
+// Thin apollo HTTP helpers exported for the apollo-audiences client (the "one
+// filter vocabulary" Wave 2 pointer endpoints live in src/lib/apollo-audiences.ts
+// but reuse this module's single apollo HTTP layer — requireApollo + the
+// connect-phase retry + the downstream-header builder + ProviderError — so there
+// is exactly ONE place that talks to apollo-service). Fail loud: a non-2xx /
+// network error throws ProviderError, a missing env throws ProviderConfigError.
+export async function apolloPost(
+  path: string,
+  body: unknown,
+  identity: Identity
+): Promise<unknown> {
+  const { url, key } = requireApollo();
+  return postProvider("apollo", url, key, path, body, identity);
+}
+
+export async function apolloGet(
+  path: string,
+  identity: Identity
+): Promise<unknown> {
+  const { url, key } = requireApollo();
+  return getProvider("apollo", url, key, path, identity);
+}
+
 function requireApify(): { url: string; key: string } {
   const url = process.env.APIFY_SERVICE_URL;
   const key = process.env.APIFY_SERVICE_API_KEY;
@@ -553,6 +576,13 @@ export async function peopleSearch(args: {
   provider?: Provider;
   need?: "verified_email";
   filters: PeopleSearchFilters;
+  // Apollo-native search params forwarded VERBATIM as the apollo /search body
+  // ("one filter vocabulary" Wave 2): an audience's stored filters are ALREADY
+  // Apollo's faithful shape (sourced from apollo-service), so serve-next passes
+  // them through here instead of remapping a neutral set via toApolloSearchParams.
+  // apollo-only; ignored on the apify branch (apify keeps the neutral filters).
+  // When set, it takes precedence over `filters` for the apollo search body.
+  apolloSearchParams?: Record<string, unknown>;
   isNextPage?: boolean;
   limit?: number;
   offset?: number;
@@ -577,7 +607,10 @@ export async function peopleSearch(args: {
     // a saturated audience exhausts without the caller deep-paging forever.
     const firstBody = args.isNextPage
       ? {}
-      : { searchParams: toApolloSearchParams(args.filters) };
+      : {
+          searchParams:
+            args.apolloSearchParams ?? toApolloSearchParams(args.filters),
+        };
 
     const collected: Person[] = [];
     let total = 0;

@@ -31,38 +31,34 @@ afterAll(async () => {
   await closeDb();
 });
 
-type Action = Record<string, unknown>;
+interface ApolloResp {
+  apolloAudienceId: string;
+  filters: Record<string, unknown>;
+  count: number;
+}
 
-// Mock the chat-service + provider fleet by URL.
-// - /complete LAYER 1 (systemPrompt mentions "decompose"): returns the segments.
-// - /complete LAYER 2 (systemPrompt mentions "build a <provider>"): a multi-turn
-//   agentic loop. `act(provider, cleanTests)` decides the next action; default is
-//   "test until one clean count, then confirm". `cleanTests` = number of prior
-//   non-rejected tests, derived from "-> count=" markers in the transcript.
-// - /search/dry-run (apollo) and /search/count (apify) return the dry-run counts.
+// "One filter vocabulary" Wave 2: human-service runs ONLY Layer 1 (segment
+// decompose, via chat-service /complete) and then asks apollo-service to BUILD +
+// COUNT a faithful Apollo audience per segment (POST /audiences/suggest-from-
+// segment). No in-human-service Layer-2 loop / vocabulary anymore.
+//
+// Mock both:
+// - chat-service /complete (Layer 1 — systemPrompt mentions "decompose"): segments.
+// - apollo-service /audiences/suggest-from-segment: {apolloAudienceId, filters, count}.
 function wire(opts: {
   segments: Array<{ name: string; description: string }>;
-  act?: (provider: "apollo" | "apify", cleanTests: number, msg: string) => Action;
-  apolloCount?: (call: number) => number | "400";
-  apifyCount?: (call: number) => number | "400";
+  apollo?: (name: string, description: string) => ApolloResp | "503";
 }) {
-  const dryCalls = { apollo: 0, apify: 0 };
-  const defaultAct = (_p: string, cleanTests: number): Action =>
-    cleanTests === 0
-      ? { action: "test", filters: { personTitles: ["X"] }, reasoning: "r" }
-      : { action: "confirm", reasoning: "r" };
-
+  let seq = 0;
+  const defaultApollo = (name: string): ApolloResp => ({
+    apolloAudienceId: `apollo-aud-${++seq}`,
+    filters: { personTitles: [name] },
+    count: 100,
+  });
   fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
     const u = String(url);
-    if (u.endsWith("/search/filters-prompt"))
-      return ok({ prompt: "RULES", schemaVersion: "1" });
-    if (u.endsWith("/reference/industries"))
-      return ok({ industries: [{ name: "Computer Software" }, { name: "Banking" }] });
     if (u.endsWith("/complete")) {
-      const body = JSON.parse(init.body ?? "{}") as {
-        systemPrompt: string;
-        message: string;
-      };
+      const body = JSON.parse(init.body ?? "{}") as { systemPrompt: string };
       if (body.systemPrompt.includes("decompose a natural-language audience")) {
         return ok({
           json: { audiences: opts.segments },
@@ -72,26 +68,15 @@ function wire(opts: {
           model: "gemini-flash",
         });
       }
-      const provider = body.systemPrompt.includes("build a apify")
-        ? "apify"
-        : "apollo";
-      const cleanTests = (body.message.match(/-> count=/g) ?? []).length;
-      const action = (opts.act ?? defaultAct)(provider, cleanTests, body.message);
-      return ok({
-        json: action,
-        content: "",
-        tokensInput: 1,
-        tokensOutput: 1,
-        model: "gemini-flash",
-      });
+      throw new Error("unexpected /complete (no layer-2 in the pointer model)");
     }
-    if (u.endsWith("/search/dry-run")) {
-      const v = (opts.apolloCount ?? (() => 100))(dryCalls.apollo++);
-      return v === "400" ? err(400, "invalid filter") : ok({ totalEntries: v });
-    }
-    if (u.endsWith("/search/count")) {
-      const v = (opts.apifyCount ?? (() => 50))(dryCalls.apify++);
-      return v === "400" ? err(400, "invalid filter") : ok({ totalMatched: v });
+    if (u.endsWith("/audiences/suggest-from-segment")) {
+      const body = JSON.parse(init.body ?? "{}") as {
+        name: string;
+        description: string;
+      };
+      const r = (opts.apollo ?? defaultApollo)(body.name, body.description);
+      return r === "503" ? err(503, "apollo overloaded") : ok(r);
     }
     throw new Error("unexpected url " + u);
   });
@@ -105,7 +90,7 @@ function suggest(nlPrompt: string) {
 }
 
 describe("POST /orgs/audiences/suggest", () => {
-  it("layer 1 decomposes into N named audiences; one candidate per audience", async () => {
+  it("layer 1 decomposes into N named audiences; one apollo candidate per audience", async () => {
     wire({
       segments: [
         { name: "US companies", description: "companies in the US" },
@@ -114,290 +99,90 @@ describe("POST /orgs/audiences/suggest", () => {
     });
     const res = await suggest("companies in US and Europe separately");
     expect(res.status).toBe(200);
-    // ONE candidate per layer-1 audience (NOT one per provider).
     expect(res.body.candidates).toHaveLength(2);
     const names = res.body.candidates.map((c: { name: string }) => c.name).sort();
     expect(names).toEqual(["Europe companies", "US companies"]);
     for (const c of res.body.candidates) {
       expect(c.audienceId).toMatch(/^[0-9a-f-]{36}$/);
       expect(c.status).toBe("suggested");
-      expect(["apollo", "apify"]).toContain(c.provider);
+      expect(c.provider).toBe("apollo"); // always apollo (pointer model)
+      expect(c.apolloAudienceId).toMatch(/^apollo-aud-/);
+      expect(c.validationError).toBeNull();
+      expect(c.truncated).toBe(false);
     }
   });
 
-  it("collapses to the provider with the larger count", async () => {
+  it("returns + persists the apollo-service pointer, faithful filters and count", async () => {
     wire({
-      segments: [{ name: "CMOs", description: "CMOs in fintech" }],
-      apolloCount: () => 120,
-      apifyCount: () => 45,
+      segments: [{ name: "Fintech CMOs", description: "CMOs in fintech" }],
+      apollo: () => ({
+        apolloAudienceId: "apollo-xyz",
+        filters: {
+          personTitles: ["CMO"],
+          qOrganizationIndustryTagIds: ["Financial Services"],
+          revenueRange: ["1000000,10000000"],
+        },
+        count: 1234,
+      }),
     });
     const res = await suggest("CMOs in fintech");
     expect(res.status).toBe(200);
-    expect(res.body.candidates).toHaveLength(1);
-    expect(res.body.candidates[0].provider).toBe("apollo");
-    expect(res.body.candidates[0].count).toBe(120);
-  });
-
-  it("resolves a count tie to apollo", async () => {
-    wire({
-      segments: [{ name: "VPs", description: "VPs of eng" }],
-      apolloCount: () => 50,
-      apifyCount: () => 50,
-    });
-    const res = await suggest("VPs of engineering");
-    expect(res.status).toBe(200);
-    expect(res.body.candidates[0].provider).toBe("apollo");
-    expect(res.body.candidates[0].count).toBe(50);
-  });
-
-  it("lets layer-2 iterate (test again) when not satisfied with the count, before confirming", async () => {
-    let apolloDryRuns = 0;
-    wire({
-      segments: [{ name: "Founders", description: "startup founders" }],
-      // test twice (narrow then broad), then confirm
-      act: (_p, cleanTests) =>
-        cleanTests < 2
-          ? { action: "test", filters: { personTitles: [`T${cleanTests}`] }, reasoning: "r" }
-          : { action: "confirm", reasoning: "r" },
-      apolloCount: (call) => {
-        apolloDryRuns = Math.max(apolloDryRuns, call + 1);
-        return call === 0 ? 50 : 500; // first attempt too few, second healthy
-      },
-      apifyCount: () => 10,
-    });
-    const res = await suggest("startup founders");
-    expect(res.status).toBe(200);
-    const c = res.body.candidates[0];
-    expect(c.provider).toBe("apollo"); // 500 > apify's 10
-    expect(c.count).toBe(500); // the confirmed (second) test's count
-    expect(apolloDryRuns).toBeGreaterThanOrEqual(2); // it iterated, not one-shot
-  });
-
-  it("feeds a provider 4xx back to layer-2 to revise, then confirms the valid set", async () => {
-    wire({
-      segments: [{ name: "Seniors", description: "senior ICs" }],
-      apolloCount: (call) => (call === 0 ? "400" : 200), // first invalid, then valid
-      apifyCount: () => 30,
-    });
-    const res = await suggest("senior individual contributors");
-    expect(res.status).toBe(200);
     const c = res.body.candidates[0];
     expect(c.provider).toBe("apollo");
-    expect(c.count).toBe(200);
-    expect(c.validationError).toBeNull();
-  });
-
-  it("feeds a malformed LLM filter shape back to layer-2 (no crash), then confirms the valid set", async () => {
-    // The LLM returns a non-enum `personSeniorities` value on its first test.
-    // After apolloDslToNeutral, the neutral schema rejects the bad enum -> it
-    // must surface as a validation error fed back into the loop (no crash),
-    // exactly like a provider 4xx, then the LLM revises to a valid set.
-    wire({
-      segments: [{ name: "Founders", description: "startup founders" }],
-      act: (_p, _cleanTests, msg) => {
-        if (msg.includes("-> count=")) return { action: "confirm", reasoning: "r" };
-        if (msg.includes("Invalid filter shape"))
-          return { action: "test", filters: { personTitles: ["Founder"] }, reasoning: "r" };
-        // malformed: personSeniorities must be a valid enum value
-        return {
-          action: "test",
-          filters: { personSeniorities: ["not_a_seniority"] },
-          reasoning: "r",
-        };
-      },
-      apolloCount: () => 200,
-      apifyCount: () => 30,
-    });
-    const res = await suggest("startup founders");
-    expect(res.status).toBe(200);
-    const c = res.body.candidates[0];
-    expect(c.provider).toBe("apollo");
-    expect(c.count).toBe(200);
-    expect(c.validationError).toBeNull();
-  });
-
-  it("normalizes nullable layer-2 filters without injecting rule-based fields", async () => {
-    const dryRunBodies: Array<Record<string, unknown>> = [];
-    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
-      const u = String(url);
-      if (u.endsWith("/search/filters-prompt"))
-        return ok({ prompt: "RULES", schemaVersion: "1" });
-      if (u.endsWith("/reference/industries"))
-        return ok({
-          industries: [
-            { name: "Computer Software" },
-            { name: "Professional Services" },
-          ],
-        });
-      if (u.endsWith("/complete")) {
-        const body = JSON.parse(init.body ?? "{}") as {
-          systemPrompt: string;
-          message: string;
-        };
-        if (body.systemPrompt.includes("decompose a natural-language audience")) {
-          return ok({
-            json: {
-              audiences: [
-                {
-                  name: "B2B SaaS Leaders",
-                  description:
-                    "Founders and Heads of Growth at bootstrapped B2B SaaS companies with 1-50 employees.",
-                },
-              ],
-            },
-          });
-        }
-        const cleanTests = (body.message.match(/-> count=/g) ?? []).length;
-        return ok({
-          json:
-            cleanTests === 0
-              ? {
-                  action: "test",
-                  filters: {
-                    personTitles: ["Founder", "Head of Growth"],
-                    personSeniorities: null,
-                    qOrganizationIndustryTagIds: null,
-                    organizationNumEmployeesRanges: null,
-                    revenueRange: null,
-                    qKeywords: null,
-                    personLocations: null,
-                    organizationLocations: null,
-                    qOrganizationDomains: null,
-                    currentlyUsingAnyOfTechnologyUids: null,
-                  },
-                  reasoning: "title-only draft",
-                }
-              : { action: "confirm", reasoning: "confirmed" },
-        });
-      }
-      if (u.endsWith("/search/dry-run")) {
-        dryRunBodies.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
-        return ok({ totalEntries: 12500 });
-      }
-      throw new Error("unexpected url " + u);
-    });
-
-    const res = await suggest(
-      "Founders and Heads of Growth at bootstrapped B2B SaaS companies with 1-50 employees and $1M-$10M/yr revenue."
-    );
-
-    expect(res.status).toBe(200);
-    const c = res.body.candidates[0];
-    expect(c.filters).toEqual({ titles: ["Founder", "Head of Growth"] });
-
-    const lastDryRun = dryRunBodies.at(-1);
-    expect(lastDryRun).toEqual({
-      personTitles: ["Founder", "Head of Growth"],
-    });
-  });
-
-  it("carries explicit firmographic constraints when layer-2 proposes them", async () => {
-    const dryRunBodies: Array<Record<string, unknown>> = [];
-    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
-      const u = String(url);
-      if (u.endsWith("/search/filters-prompt"))
-        return ok({ prompt: "RULES", schemaVersion: "1" });
-      if (u.endsWith("/reference/industries"))
-        return ok({
-          industries: [
-            { name: "Computer Software" },
-            { name: "Professional Services" },
-            { name: "Banking" },
-          ],
-        });
-      if (u.endsWith("/complete")) {
-        const body = JSON.parse(init.body ?? "{}") as {
-          systemPrompt: string;
-          message: string;
-        };
-        if (body.systemPrompt.includes("decompose a natural-language audience")) {
-          return ok({
-            json: {
-              audiences: [
-                {
-                  name: "Sales B2B SMB",
-                  description:
-                    "Heads of Sales, VP of Sales, or Founders at B2B professional services and software companies with 10-100 employees and $1M-$10M annual revenue.",
-                },
-              ],
-            },
-          });
-        }
-        const cleanTests = (body.message.match(/-> count=/g) ?? []).length;
-        return ok({
-          json:
-            cleanTests === 0
-              ? {
-                  action: "test",
-                  filters: {
-                    personTitles: ["Head of Sales", "VP of Sales", "Founder"],
-                    organizationNumEmployeesRanges: [
-                      "1,10",
-                      "11,20",
-                      "21,50",
-                      "51,100",
-                    ],
-                    revenueRange: ["1000000,10000000"],
-                    qOrganizationIndustryTagIds: [
-                      "Computer Software",
-                      "Professional Services",
-                    ],
-                    qKeywords: "B2B OR basic CRM tools OR spreadsheets",
-                  },
-                  reasoning: "self-contained segment filters",
-                }
-              : { action: "confirm", reasoning: "confirmed" },
-        });
-      }
-      if (u.endsWith("/search/dry-run")) {
-        dryRunBodies.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
-        return ok({ totalEntries: 12500 });
-      }
-      throw new Error("unexpected url " + u);
-    });
-
-    const res = await suggest(
-      "Heads of Sales, VP of Sales, or Founders at B2B professional services and software companies with 10-100 employees and $1M-$10M/yr revenue, who are currently using basic CRM tools or spreadsheets and are looking to consolidate outbound prospecting, email sequencing, and contact database into a single affordable platform."
-    );
-
-    expect(res.status).toBe(200);
-    const c = res.body.candidates[0];
-    expect(c.provider).toBe("apollo");
-    // Apollo filters by employee BUCKET, not an arbitrary range: "10-100" maps
-    // to buckets 1,10 / 11,20 / 21,50 / 51,100, so the neutral window is 1-100.
-    expect(c.filters).toMatchObject({
-      titles: ["Head of Sales", "VP of Sales", "Founder"],
-      employeeMin: 1,
-      employeeMax: 100,
-      revenueRanges: ["1000000,10000000"],
-      industries: ["Computer Software", "Professional Services"],
-    });
-    expect(c.filters.keywords).toEqual(
-      expect.arrayContaining(["B2B", "basic CRM tools", "spreadsheets"])
-    );
-    expect(c.rationale).toContain("10-100 employees");
-    expect(c.rationale).toContain("$1M-$10M annual revenue");
-
-    const lastDryRun = dryRunBodies.at(-1);
-    expect(lastDryRun).toMatchObject({
-      personTitles: ["Head of Sales", "VP of Sales", "Founder"],
-      organizationNumEmployeesRanges: ["1,10", "11,20", "21,50", "51,100"],
+    expect(c.apolloAudienceId).toBe("apollo-xyz");
+    expect(c.count).toBe(1234);
+    // The faithful Apollo filter object is echoed back verbatim (opaque).
+    expect(c.filters).toEqual({
+      personTitles: ["CMO"],
+      qOrganizationIndustryTagIds: ["Financial Services"],
       revenueRange: ["1000000,10000000"],
-      qOrganizationIndustryTagIds: ["Computer Software", "Professional Services"],
     });
 
+    // Persisted row carries the pointer + cached faithful filters + count.
     const persisted = await request(app)
       .get(`/orgs/audiences/${c.audienceId}`)
       .set(getAuthHeaders());
     expect(persisted.status).toBe(200);
-    expect(persisted.body.audience.filters).toMatchObject(c.filters);
+    expect(persisted.body.audience.apolloAudienceId).toBe("apollo-xyz");
+    expect(persisted.body.audience.provider).toBe("apollo");
+    expect(persisted.body.audience.apolloCount).toBe(1234);
+    expect(persisted.body.audience.filters).toEqual(c.filters);
   });
 
-  it("surfaces count:0 honestly when neither provider yields matches", async () => {
+  it("calls apollo-service suggest-from-segment with the segment name + description + brandId", async () => {
+    const segmentCalls: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/complete")) {
+        return ok({
+          json: {
+            audiences: [
+              { name: "Fintech CTOs", description: "CTOs at US fintech firms" },
+            ],
+          },
+        });
+      }
+      if (u.endsWith("/audiences/suggest-from-segment")) {
+        segmentCalls.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
+        return ok({ apolloAudienceId: "a1", filters: { personTitles: ["CTO"] }, count: 42 });
+      }
+      throw new Error("unexpected url " + u);
+    });
+    const res = await suggest("CTOs in fintech");
+    expect(res.status).toBe(200);
+    expect(segmentCalls).toHaveLength(1);
+    expect(segmentCalls[0]).toEqual({
+      name: "Fintech CTOs",
+      description: "CTOs at US fintech firms",
+      brandId: BRAND,
+    });
+  });
+
+  it("surfaces count:0 honestly when apollo-service returns an empty audience", async () => {
     wire({
       segments: [{ name: "Impossible", description: "nobody" }],
-      apolloCount: () => 0,
-      apifyCount: () => 0,
+      // apollo-service returns a valid (non-empty) filter object with count 0.
+      apollo: () => ({ apolloAudienceId: "a0", filters: { personTitles: ["Nobody"] }, count: 0 }),
     });
     const res = await suggest("impossible audience");
     expect(res.status).toBe(200);
@@ -407,36 +192,12 @@ describe("POST /orgs/audiences/suggest", () => {
   it("keeps every layer-1 audience and prompts for persona x company-type combinations", async () => {
     wire({
       segments: [
-        {
-          name: "B2B SaaS Founders",
-          description:
-            "Founders at bootstrapped or seed-stage B2B SaaS companies with 1-50 employees and under $2M yearly revenue, evaluating low-cost organic customer acquisition, Reddit marketing, or social listening tools.",
-        },
-        {
-          name: "Digital Founders",
-          description:
-            "Founders at bootstrapped or seed-stage digital product companies with 1-50 employees and under $2M yearly revenue, evaluating low-cost organic customer acquisition, Reddit marketing, or social listening tools.",
-        },
-        {
-          name: "B2B SaaS Growth",
-          description:
-            "Heads of Growth at bootstrapped or seed-stage B2B SaaS companies with 1-50 employees and under $2M yearly revenue, evaluating low-cost organic customer acquisition, Reddit marketing, or social listening tools.",
-        },
-        {
-          name: "Digital Growth",
-          description:
-            "Heads of Growth at bootstrapped or seed-stage digital product companies with 1-50 employees and under $2M yearly revenue, evaluating low-cost organic customer acquisition, Reddit marketing, or social listening tools.",
-        },
-        {
-          name: "B2B SaaS Solo",
-          description:
-            "Solo marketers at bootstrapped or seed-stage B2B SaaS companies with 1-50 employees and under $2M yearly revenue, evaluating low-cost organic customer acquisition, Reddit marketing, or social listening tools.",
-        },
-        {
-          name: "Digital Solo",
-          description:
-            "Solo marketers at bootstrapped or seed-stage digital product companies with 1-50 employees and under $2M yearly revenue, evaluating low-cost organic customer acquisition, Reddit marketing, or social listening tools.",
-        },
+        { name: "B2B SaaS Founders", description: "Founders at B2B SaaS" },
+        { name: "Digital Founders", description: "Founders at digital product cos" },
+        { name: "B2B SaaS Growth", description: "Heads of Growth at B2B SaaS" },
+        { name: "Digital Growth", description: "Heads of Growth at digital product cos" },
+        { name: "B2B SaaS Solo", description: "Solo marketers at B2B SaaS" },
+        { name: "Digital Solo", description: "Solo marketers at digital product cos" },
       ],
     });
     const res = await suggest(
@@ -496,8 +257,7 @@ describe("POST /orgs/audiences/suggest", () => {
   it("re-running suggest refreshes a still-suggested row (no duplicate), never an active one", async () => {
     wire({
       segments: [{ name: "Repeat", description: "repeat audience" }],
-      apolloCount: () => 11,
-      apifyCount: () => 5,
+      apollo: () => ({ apolloAudienceId: "apollo-repeat", filters: { personTitles: ["X"] }, count: 11 }),
     });
     const first = await suggest("repeat audience");
     const id = first.body.candidates[0].audienceId;
@@ -523,143 +283,47 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(after.body.audience.status).toBe("active"); // untouched
   });
 
-  it("calls chat-service with google JSON mode, a responseSchema, thinking enabled for layer 2, and the strict prompt", async () => {
+  it("calls chat-service Layer 1 with google JSON mode, a responseSchema, flash-pro + thinking disabled", async () => {
     const completeBodies: Array<Record<string, unknown>> = [];
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
-      if (u.endsWith("/search/filters-prompt"))
-        return ok({ prompt: "RULES", schemaVersion: "1" });
-      if (u.endsWith("/reference/industries"))
-        return ok({ industries: [{ name: "Computer Software" }] });
       if (u.endsWith("/complete")) {
         const body = JSON.parse(init.body ?? "{}");
         completeBodies.push(body);
-        if (body.systemPrompt.includes("decompose a natural-language audience")) {
-          return ok({ json: { audiences: [{ name: "CMOs", description: "cmos" }] } });
-        }
-        const cleanTests = (String(body.message).match(/-> count=/g) ?? []).length;
-        return ok({
-          json:
-            cleanTests === 0
-              ? { action: "test", filters: { personSeniorities: ["c_suite"] } }
-              : { action: "confirm" },
-        });
+        return ok({ json: { audiences: [{ name: "CMOs", description: "cmos" }] } });
       }
-      if (u.endsWith("/search/dry-run")) return ok({ totalEntries: 100 });
-      if (u.endsWith("/search/count")) return ok({ totalMatched: 50 });
+      if (u.endsWith("/audiences/suggest-from-segment"))
+        return ok({ apolloAudienceId: "a1", filters: { personTitles: ["CMO"] }, count: 50 });
       throw new Error("unexpected url " + u);
     });
     const res = await suggest("CMOs");
     expect(res.status).toBe(200);
-    expect(completeBodies.length).toBeGreaterThan(0);
-    for (const body of completeBodies) {
-      expect(body.provider).toBe("google");
-      expect(body.responseFormat).toBe("json");
-      // Provider-enforced shape: every suggest call ships a responseSchema
-      // (layer-1 audiences object OR layer-2 action object).
-      expect(body.responseSchema).toBeDefined();
-      expect((body.responseSchema as { type?: string }).type).toBe("object");
-    }
-    const layer1Bodies = completeBodies.filter(
-      (body) =>
-        typeof body.systemPrompt === "string" &&
-        body.systemPrompt.includes("decompose a natural-language audience")
-    );
-    expect(layer1Bodies.length).toBe(1);
-    expect(layer1Bodies[0].model).toBe("flash-pro");
-    expect(layer1Bodies[0].disableThinking).toBe(true);
-
-    const layer2Bodies = completeBodies.filter(
-      (body) =>
-        typeof body.systemPrompt === "string" &&
-        body.systemPrompt.includes("audience builder")
-    );
-    expect(layer2Bodies.length).toBeGreaterThan(0);
-    for (const body of layer2Bodies) {
-      expect(body.model).toBe("flash-pro");
-      expect(body.disableThinking).toBeUndefined();
-      const schema = body.responseSchema as {
-        properties?: {
-          filters?: {
-            required?: string[];
-            properties?: Record<string, unknown>;
-          };
-          filterRationale?: { required?: string[] };
-        };
-      };
-      const filtersSchema = schema.properties?.filters;
-      // Apollo speaks its NATIVE filter vocabulary (not the neutral fields), and
-      // the apollo-honored set EXCLUDES companySizes / functions / fundingStages
-      // / companyNames (apollo has no search filter for them — the source of the
-      // size doublon).
-      expect(filtersSchema?.required).toEqual([
-        "personTitles",
-        "personSeniorities",
-        "qOrganizationIndustryTagIds",
-        "organizationNumEmployeesRanges",
-        "revenueRange",
-        "personLocations",
-        "organizationLocations",
-        "qOrganizationDomains",
-        "currentlyUsingAnyOfTechnologyUids",
-        "qKeywords",
-      ]);
-      for (const dropped of [
-        "companySizes",
-        "functions",
-        "fundingStages",
-        "companyNames",
-        "employeeMin",
-      ]) {
-        expect(filtersSchema?.required).not.toContain(dropped);
-      }
-      // qKeywords is Apollo's single free-text string field (not an array).
-      expect(filtersSchema?.properties?.qKeywords).toEqual({
-        anyOf: [{ type: "string" }, { type: "null" }],
-      });
-      // Per-field rationale is forced (one string required per filter field).
-      expect(schema.properties?.filterRationale?.required).toEqual(
-        filtersSchema?.required
-      );
-      expect(body.systemPrompt).toContain(
-        "every filterable constraint in TARGET AUDIENCE"
-      );
-      expect(body.systemPrompt).toContain("Do not produce title-only filters");
-      expect(body.systemPrompt).toContain(
-        "never drop a stated constraint just because it is not perfect"
-      );
-      // Apollo-native clarity: bucket-combine + revenue min,max construction.
-      expect(body.systemPrompt).toContain("expert Apollo people-search audience builder");
-      expect(body.systemPrompt).toContain('You CANNOT write an arbitrary range');
-      expect(body.systemPrompt).toContain('"min,max" DOLLAR strings');
-    }
+    // ONLY Layer 1 hits chat-service now — no Layer-2 fan-out.
+    expect(completeBodies).toHaveLength(1);
+    const body = completeBodies[0];
+    expect(body.provider).toBe("google");
+    expect(body.responseFormat).toBe("json");
+    expect(body.model).toBe("flash-pro");
+    expect(body.disableThinking).toBe(true);
+    expect((body.responseSchema as { type?: string }).type).toBe("object");
+    expect(body.systemPrompt).toContain("decompose a natural-language audience");
   });
 
-  it("retries a transient chat-service 502 (malformed-JSON / blip) and still succeeds", async () => {
-    // The FIRST layer-1 /complete returns a 502 (chat-service's response for a
-    // non-parsable LLM output); the retry returns a clean parse. Pre-fix this
-    // single 502 anywhere in the fan-out 502'd the whole request (~50% flake).
+  it("retries a transient chat-service 502 (malformed-JSON / blip) on Layer 1 and still succeeds", async () => {
     let layer1Calls = 0;
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
-      if (u.endsWith("/search/filters-prompt"))
-        return ok({ prompt: "RULES", schemaVersion: "1" });
-      if (u.endsWith("/reference/industries"))
-        return ok({ industries: [{ name: "Computer Software" }] });
       if (u.endsWith("/complete")) {
-        const body = JSON.parse(init.body ?? "{}") as { systemPrompt: string; message: string };
+        const body = JSON.parse(init.body ?? "{}") as { systemPrompt: string };
         if (body.systemPrompt.includes("decompose a natural-language audience")) {
           layer1Calls++;
           if (layer1Calls === 1) return err(502, "model returned non-parsable JSON");
           return ok({ json: { audiences: [{ name: "CMOs", description: "cmos" }] } });
         }
-        const cleanTests = (body.message.match(/-> count=/g) ?? []).length;
-        return ok({
-          json: cleanTests === 0 ? { action: "test", filters: { personTitles: ["CMO"] } } : { action: "confirm" },
-        });
+        throw new Error("unexpected /complete");
       }
-      if (u.endsWith("/search/dry-run")) return ok({ totalEntries: 100 });
-      if (u.endsWith("/search/count")) return ok({ totalMatched: 50 });
+      if (u.endsWith("/audiences/suggest-from-segment"))
+        return ok({ apolloAudienceId: "a1", filters: { personTitles: ["CMO"] }, count: 100 });
       throw new Error("unexpected url " + u);
     });
     const res = await suggest("CMOs");
@@ -683,40 +347,25 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(layer1Calls).toBe(1); // NOT retried — deterministic 4xx
   });
 
-  it("tolerates one segment failing on BOTH providers and still returns the others", async () => {
-    // The "Bad" segment's layer-2 /complete 5xx's on BOTH providers (a real
-    // chat-service outage that survives the retry budget); "Good" is fine. The
-    // segment description is reliably present in the layer-2 transcript message,
-    // so we key the outage on it. Pre-fix the Promise.all rejected the WHOLE
-    // batch on one segment's failure; now Good still returns.
+  it("tolerates one segment's apollo-service failure and still returns the others", async () => {
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
-      if (u.endsWith("/search/filters-prompt"))
-        return ok({ prompt: "RULES", schemaVersion: "1" });
-      if (u.endsWith("/reference/industries"))
-        return ok({ industries: [{ name: "Computer Software" }] });
       if (u.endsWith("/complete")) {
-        const body = JSON.parse(init.body ?? "{}") as { systemPrompt: string; message: string };
-        if (body.systemPrompt.includes("decompose a natural-language audience")) {
-          return ok({
-            json: {
-              audiences: [
-                { name: "Good", description: "good seg" },
-                { name: "Bad", description: "bad seg" },
-              ],
-            },
-          });
-        }
-        // Persistent 5xx for the Bad segment's layer-2 (both providers) — even
-        // the retry can't recover it, so the segment fails.
-        if (body.message.includes("bad seg")) return err(503, "model overloaded");
-        const cleanTests = (body.message.match(/-> count=/g) ?? []).length;
         return ok({
-          json: cleanTests === 0 ? { action: "test", filters: { personTitles: ["X"] } } : { action: "confirm" },
+          json: {
+            audiences: [
+              { name: "Good", description: "good seg" },
+              { name: "Bad", description: "bad seg" },
+            ],
+          },
         });
       }
-      if (u.endsWith("/search/dry-run")) return ok({ totalEntries: 300 });
-      if (u.endsWith("/search/count")) return ok({ totalMatched: 80 });
+      if (u.endsWith("/audiences/suggest-from-segment")) {
+        const body = JSON.parse(init.body ?? "{}") as { description: string };
+        // Persistent 5xx for the Bad segment (survives the connect retry budget).
+        if (body.description.includes("bad seg")) return err(503, "apollo overloaded");
+        return ok({ apolloAudienceId: "a-good", filters: { personTitles: ["X"] }, count: 300 });
+      }
       throw new Error("unexpected url " + u);
     });
     const res = await suggest("good and bad");
@@ -725,51 +374,13 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(res.body.candidates[0].name).toBe("Good");
   });
 
-  it("injects apollo's canonical industries list into the apollo layer-2 prompt (apollo-only — apify is never queried)", async () => {
-    const layer2: Array<{ provider: "apollo" | "apify"; systemPrompt: string }> = [];
-    let referenceCalls = 0;
-    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
-      const u = String(url);
-      if (u.endsWith("/search/filters-prompt"))
-        return ok({ prompt: "RULES", schemaVersion: "1" });
-      if (u.endsWith("/reference/industries")) {
-        referenceCalls++;
-        return ok({ industries: [{ name: "Computer Software" }, { name: "Banking" }] });
-      }
-      if (u.endsWith("/complete")) {
-        const body = JSON.parse(init.body ?? "{}") as {
-          systemPrompt: string;
-          message: string;
-        };
-        if (body.systemPrompt.includes("decompose a natural-language audience")) {
-          return ok({ json: { audiences: [{ name: "Fintech CTOs", description: "CTOs in fintech" }] } });
-        }
-        const provider = body.systemPrompt.includes("build a apify") ? "apify" : "apollo";
-        layer2.push({ provider, systemPrompt: body.systemPrompt });
-        const cleanTests = (body.message.match(/-> count=/g) ?? []).length;
-        return ok({
-          json: cleanTests === 0
-            ? { action: "test", filters: { personTitles: ["CTO"] } }
-            : { action: "confirm" },
-        });
-      }
-      if (u.endsWith("/search/dry-run")) return ok({ totalEntries: 800 });
-      if (u.endsWith("/search/count")) return ok({ totalMatched: 40 });
-      throw new Error("unexpected url " + u);
+  it("502 when every segment's apollo-service build fails", async () => {
+    wire({
+      segments: [{ name: "X", description: "x" }],
+      apollo: () => "503",
     });
-
-    const res = await suggest("CTOs in fintech");
-    expect(res.status).toBe(200);
-
-    // apollo reference fetched (at least once); injected into the apollo prompt.
-    expect(referenceCalls).toBeGreaterThanOrEqual(1);
-    const apolloPrompt = layer2.find((l) => l.provider === "apollo")?.systemPrompt;
-    const apifyPrompt = layer2.find((l) => l.provider === "apify")?.systemPrompt;
-    expect(apolloPrompt).toContain("CANONICAL INDUSTRIES");
-    expect(apolloPrompt).toContain("Computer Software");
-    // APOLLO-ONLY: apify is no longer part of the suggest fan-out, so its
-    // layer-2 prompt is never built.
-    expect(apifyPrompt).toBeUndefined();
+    const res = await suggest("anyone");
+    expect(res.status).toBe(502);
   });
 
   it("502 when chat-service env is not configured", async () => {

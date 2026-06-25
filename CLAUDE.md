@@ -39,8 +39,9 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Internal | `POST /internal/transfer-brand` | apiKey | Move solo-brand methodology rows between orgs |
 | Internal | `POST /internal/remap-audience-filters` | apiKey | One-time data fix: translate already-backfilled audiences' filters from legacy persona vocab → canonical `PeopleSearchFilters` vocab, in place (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/backfill-audience-descriptions` | apiKey | One-time data fix: generate a per-audience one-sentence `description` (from name + filters via chat-service platform LLM) for every audience whose `description IS NULL` — pre-#82 rows (idempotent, `?dryRun=true`) |
-| Internal | `POST /internal/migrate-apify-audiences-to-apollo` | apiKey | One-time data fix (APOLLO-ONLY cutover): for every non-deprecated `provider='apify'` audience, re-derive equivalent apollo filters (agentic refine, platform LLM), create a new apollo audience mirroring the source status, and mark the apify one `deprecated` (idempotent, `?dryRun=true`, reversible) |
+| Internal | `POST /internal/migrate-apify-audiences-to-apollo` | apiKey | One-time data fix (APOLLO-ONLY cutover): for every non-deprecated `provider='apify'` audience, build an equivalent apollo audience via apollo-service (`POST /audiences/suggest-from-segment`), store the pointer + faithful filters, create a new apollo audience mirroring the source status, and mark the apify one `deprecated` (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/backfill-canonical-audience-links` | apiKey | One-time data fix: link each EXISTING deprecated provider-variant audience (`<base> [Apify]`) to its active same-`(org,brand)`-base-name canonical sibling (`audiences.canonical_audience_id`), so membership/stats reads resolve a deprecated match to the clean active audience. Pre-link rows from the apify→apollo migration (which now sets the link going forward). Skips 0/ambiguous-sibling rows (fail loud, never guess). Idempotent, `?dryRun=true`, reversible |
+| Internal | `POST /internal/backfill-apollo-audience-pointers` | apiKey | One-time data fix ("one filter vocabulary" Wave 2): for every `provider='apollo'` audience lacking `apollo_audience_id`, build a faithful Apollo audience via apollo-service `POST /audiences/suggest-from-segment` (from the row's name + description), then store the **pointer** + cached faithful filters (replacing the old lossy neutral blob) + count. Idempotent (scoped to `apollo_audience_id IS NULL`), `?dryRun=true`, `?async=true`, reversible |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
 | Org-scoped (CRM v1) | `GET /orgs/lists/{id}` | apiKey + `x-org-id` | Get a CRM list |
@@ -189,6 +190,26 @@ membership**. Then `/orgs/audiences/stats` answers "which audiences are these
 emails/people in?". `src/services/audiences.ts` owns the engine;
 `src/routes/audiences.ts` is the thin HTTP layer.
 
+- **"One filter vocabulary" Wave 2 — apollo audiences are a POINTER, not a
+  human-built filter set.** human-service NO LONGER holds Apollo's filter
+  vocabulary. For an apollo audience the row stores `apollo_audience_id` (migration
+  `0016`) — a pointer to a **faithful Apollo audience owned by apollo-service**,
+  which runs the NL→faithful-Apollo-filters agentic refine loop internally and owns
+  its filter shape + count. The `filters` jsonb column is KEPT but, for apollo rows,
+  now **caches the OPAQUE faithful Apollo filter object** (verbatim from
+  apollo-service) — so serve-next forwards it to apollo `/search` with NO
+  neutral→apollo remap, and there is zero Apollo filter-building code here. The
+  in-human-service Layer-2 loop + apolloDslToNeutral mapper (the interim v0.20.8
+  approach) are DELETED. human-service stays the NEUTRAL cross-provider layer: its
+  silver/gold (canonical `people`, membership, `/stats`, the `Person` output) +
+  outward contracts are unchanged + byte-stable. `src/lib/apollo-audiences.ts` is
+  the client (`suggestApolloAudience` / `getApolloAudience` / `apolloAudienceDryRun`
+  → apollo-service `POST /audiences/suggest-from-segment`, `GET /audiences/{id}`,
+  `POST /audiences/{id}/dry-run`), reusing the gateway's single apollo HTTP layer
+  (`apolloPost`/`apolloGet`, connect-retry, fail-loud `ProviderError`). apify
+  (legacy/inert) audiences are UNCHANGED — they still store their own neutral
+  filters; only the apollo path moved to the pointer model.
+
 - **Naming follows CDP/CRM canon, deliberately** (Segment / Salesforce CDP /
   Adobe AEP / HubSpot, + Kimball/medallion): **`audience`** = a saved filter-set
   whose membership is computed dynamically ("dynamic audience"). NOT `persona`
@@ -198,12 +219,14 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
   different concept) — the API exposes its id as `personId`. The many-to-many is
   the **Kimball bridge** `audience_members` with effective dates (`joined_at` /
   `last_served_at`) for point-in-time membership.
-- **One neutral filter set, two counts.** The gateway's neutral
-  `PeopleSearchFilters` maps to BOTH providers, so an audience stores ONE
-  `filters` blob + `apollo_count` + `apify_count` (the same filters match a
-  different number of people in each provider's DB). Counts are a snapshot:
-  caller may pass them at create (it already ran `/search/dry-run`), or
-  `POST /{id}/refresh-count` re-runs the free dry-run server-side. **No cost** —
+- **Counts: by pointer (apollo) or dual dry-run (legacy).** `apollo_count` +
+  `apify_count` are a snapshot. `POST /{id}/refresh-count` re-counts FOR FREE:
+  an apollo audience (has `apollo_audience_id`) re-counts **by pointer** via
+  apollo-service `POST /audiences/{id}/dry-run` (sets `apollo_count`; its
+  `apify_count` is not meaningful and is left as-is); a legacy/neutral audience
+  (apify, or a pre-Wave-2 row with no pointer) keeps the dual free dry-run on its
+  stored NEUTRAL filters (apollo `/search/dry-run` + apify `/search/count`).
+  `refreshAudienceCounts(audience, identity)` owns the branch. **No cost** —
   dry-run is the free count path; refresh-count needs `x-user-id` (apollo/apify
   key resolution), the CRUD routes use `requireOrgIdOnly`.
 - **Membership = PROVENANCE, not local matching.** A person joins an audience
@@ -268,10 +291,15 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
 
 - **It's a thin WRAPPER over the existing people-gateway, not new matching.** It
   loads the audience (404 if missing/foreign), searches with the audience's
-  **STORED canonical `filters` via its committed `provider`**, brand-scoped to
+  **STORED `filters` via its committed `provider`**, brand-scoped to
   **`audience.brandId`** (the route forces `identity.brandIds = [audience.brandId]`
   — never a header), records the serve, tags `audience_members`, and returns
-  `{ status, person }`.
+  `{ status, person }`. For an **apollo** audience the stored filters are ALREADY
+  Apollo's faithful shape (sourced from apollo-service), so they are forwarded
+  **VERBATIM** as the apollo search params (`peopleSearch({ apolloSearchParams })`,
+  no neutral→apollo remap); for an **apify** audience the stored neutral filters are
+  mapped to apify as before. The suppression / reveal / saturation machinery is
+  UNCHANGED and still operates on the neutral `Person` output.
 - **No-repeat = the EXISTING per-brand cross-provider suppression**, reused, not a
   new per-audience exclusion table. Once served for the brand (under ANY audience),
   a person is excluded brand-wide within the 3-month window — a strictly stronger
@@ -437,37 +465,39 @@ default routing + the suggest fan-out — see "APOLLO-ONLY" in the people gatewa
 section). `src/routes/backfill.ts` (service-auth); `migrateApifyAudienceToApollo`
 in `src/services/audiences.ts` owns the per-row work.
 
-- **Filters are RE-DERIVED for apollo, NOT copied.** Each provider's layer-2 loop
-  tunes the neutral `PeopleSearchFilters` differently (esp. apollo `industries` =
-  a hidden LinkedIn taxonomy vs apify free-text), so copying an apify-tuned set to
-  apollo would under-match. Per audience we re-run the agentic refine FOR apollo
-  (`refineFilters("apollo", {name, description}, identity, { usePlatformLLM:true })`)
-  → apollo-correct filters + a real apollo count snapshot. The apify `filters`/
+- **Filters are BUILT by apollo-service, NOT copied** ("one filter vocabulary"
+  Wave 2). Copying an apify-tuned neutral set to apollo would under-match, and
+  human-service no longer holds Apollo's filter vocabulary anyway. Per audience we
+  call apollo-service `POST /audiences/suggest-from-segment` with the row's name +
+  description (`suggestApolloAudience` → apollo-service's own agentic refine loop)
+  → `{ apolloAudienceId, faithful filters, count }`. The apify `filters`/
   `apify_count` of the retired row are left intact (reversibility).
 - **Two-row, status-mirrored.** Atomically (one txn/row): the apify row is renamed
   `"<name> [Apify]"` + set `status='deprecated'`, and a NEW apollo audience is
-  inserted with the original name, `provider='apollo'`, **the source row's status
-  mirrored** (an `active` apify audience → `active` apollo; a `suggested` one stays
-  `suggested` — never auto-activate what the user never chose), `apolloCount` from
-  the refine, and `source='migrated_from_apify'` (provenance for reversibility).
-  The deprecated apify row's `canonical_audience_id` is set to the new apollo id
-  in the SAME txn, so membership/stats reads resolve it to the live twin (see
-  "Canonical resolution" above). Pre-existing deprecated rows (migrated before
-  this link existed) are linked by `POST /internal/backfill-canonical-audience-links`.
-- **Identity.** apollo dry-runs need org+user for key resolution; the sweep uses
-  each row's own `org_id` + `created_by_user_id` (all prod apify rows have it). The
-  **LLM** runs via the ORG-LESS platform path (`platformCompleteJson`) so a
-  migration we owe users does NOT bill their orgs — chat-service owns the cost,
-  human-service declares none (invariant holds, as for `/suggest` + the backfills).
+  inserted with the original name, `provider='apollo'`, the `apollo_audience_id`
+  pointer + cached faithful filters, **the source row's status mirrored** (an
+  `active` apify audience → `active` apollo; a `suggested` one stays `suggested` —
+  never auto-activate what the user never chose), `apolloCount` from the build, and
+  `source='migrated_from_apify'` (provenance for reversibility). The deprecated
+  apify row's `canonical_audience_id` is set to the new apollo id in the SAME txn,
+  so membership/stats reads resolve it to the live twin (see "Canonical resolution"
+  above). Pre-existing deprecated rows (migrated before this link existed) are
+  linked by `POST /internal/backfill-canonical-audience-links`.
+- **Identity.** apollo-service's suggest endpoint is org-scoped (it owns + meters
+  the LLM cost it incurs against the row's org); the sweep uses each row's own
+  `org_id` + `created_by_user_id` (all prod apify rows have it). human-service
+  declares no cost (apollo-service is the cost owner). NOTE: unlike the prior
+  platform-LLM path, this org-bills the small set of migrated rows — it is a
+  one-time admin sweep.
 - **Idempotent** — scoped to `provider='apify' AND status<>'deprecated'`, so a
   re-run skips already-migrated rows (now `deprecated`) → clean re-run migrates 0.
   **Dry-runnable** — `?dryRun=true` counts the apify rows + samples `{id,name,status}`
-  WITHOUT calling the LLM/apollo or writing. **Reversible** — DELETE the
+  WITHOUT calling apollo-service or writing. **Reversible** — DELETE the
   `source='migrated_from_apify'` rows + un-rename/un-deprecate the apify rows.
-- **Per-row resilience + fail-loud split** — a row whose apollo re-derivation
+- **Per-row resilience + fail-loud split** — a row whose apollo-service build
   yields **no usable filter set** (empty) is counted in `failed` + left untouched
-  (retried on re-run); a real apollo/chat-service outage or missing config aborts
-  the sweep loudly (502) — already-migrated rows persist (each is one atomic txn).
+  (retried on re-run); a missing apollo/chat config aborts the sweep loudly
+  (502) — already-migrated rows persist (each is one atomic txn).
 - **NOT on boot** — O(N) × an agentic LLM loop each; trigger MANUALLY after deploy
   (`?dryRun=true` to size, then `?dryRun=false`).
 
@@ -479,162 +509,72 @@ candidate audiences** the user picks from, during onboarding. `requireOrgAndUser
 `src/services/audiences.ts` `suggestAudiences` owns it; `src/lib/chat-client.ts`
 is the chat-service client.
 
-**Three stages — layer-1 decompose → layer-2 agentic refine → collapse + persist:**
+**Two stages — layer-1 decompose (human-service) → per-segment faithful-Apollo
+build (apollo-service) → persist:** ("one filter vocabulary" Wave 2 — the
+in-human-service Layer-2 agentic loop + apolloDslToNeutral mapper are DELETED;
+apollo-service owns the NL→faithful-Apollo-filters loop now.)
 
-1. **LAYER 1 (shared, provider-agnostic, ONE LLM call)** — `decomposeSegments`
-   reads the caller's segmentation intent ("US and Europe separately", "split by
-   seniority", "one broad list") and emits a SET of **named** audiences
-   `{ name (≤4 words), description }`. The names are SHARED so layer-2's two
-   provider runs map to the SAME segments and are comparable head-to-head. There
-   is **no hard cap**: Layer 1 must emit every distinct audience it infers. When
-   the prompt explicitly spans independent axes that both change provider filters,
-   Layer 1 should produce the combinations, not a broad merged bucket (e.g.
-   founders + heads of growth + solo marketers × B2B SaaS + digital product
-   companies = 6 audiences). Each `description` is the complete prompt for layer
-   2: it must carry every shared and segment-specific constraint. **No rule-based
-   post-processing is allowed after layer 1** (no regex extraction from the
-   original prompt, no forced filter merge); if constraints are missing, fix the
-   layer-1 prompt/schema so the audience description is self-contained.
-2. **LAYER 2 (per audience × per provider, agentic multi-turn loop)** —
-   `refineFilters` hands the segment + that provider's `filters-prompt` rulebook
-   to the LLM, which `{action:"test",filters}` → server runs the **free dry-run**
-   → count fed back into the transcript → LLM decides for itself: `confirm`
-  (satisfied with the count), `test` again (refine), or
-  `exhausted`. Bounded by `SUGGEST_MAX_ITERATION_ROUNDS = 8`. Mirrors
-  lead-service's `generateNextStrategy` self-iteration mechanism (slated for
-  deprecation later — parity for now). **The Apollo Layer-2 LLM speaks Apollo's
-  OWN filter vocabulary**, not the neutral `PeopleSearchFilters` — there are two
-  distinct Layer-2 prompts/schemas (`buildApolloLayer2SystemPrompt` +
-  `APOLLO_LAYER2_RESPONSE_SCHEMA` for apollo; `buildApifyLayer2SystemPrompt` +
-  `LAYER2_RESPONSE_SCHEMA`/`FILTERS_RESPONSE_SCHEMA` for apify). Reason: the prior
-  design told the LLM to emit neutral fields (`revenueRanges`, `employeeMin/Max`)
-  while injecting Apollo's authoritative rulebook (which documents `revenueRange`,
-  `organizationNumEmployeesRanges` enum) + a "use only values verbatim from the
-  rules" rule — two conflicting vocabularies. flash-pro obeyed the rulebook,
-  couldn't find `revenueRanges` there → **dropped revenue**; and Apollo's
-  employee-bucket enums look like the neutral `companySizes` array → **double-
-  encoded size**. Speaking ONE vocabulary (Apollo's) removes the conflict.
-  `APOLLO_FILTERS_RESPONSE_SCHEMA` requires + nullables every Apollo field
-  (`personTitles`, `personSeniorities`, `qOrganizationIndustryTagIds`,
-  `organizationNumEmployeesRanges`, `revenueRange`, `qKeywords`, `personLocations`,
-  `organizationLocations`, `qOrganizationDomains`,
-  `currentlyUsingAnyOfTechnologyUids`) and **excludes the fields Apollo does NOT
-  honor** (`companySizes`/`functions`/`fundingStages`/`companyNames` — the size-
-  doublon source). `apolloDslToNeutral` maps the LLM output back to the neutral
-  blob the rest of the pipeline (dry-run, storage, serve-next, stats) stores —
-  surface-only change; nothing downstream of `refineFilters` moved. `null`s are
-  normalized away before validation/dry-run. No rule-based count gate or ICP regex
-  merge is allowed here. The exact-vocabulary rule is scoped to the true ENUM
-  fields ONLY (`personSeniorities`, `qOrganizationIndustryTagIds`,
-  `organizationNumEmployeesRanges` — copy verbatim); `revenueRange` (`"min,max"`
-  dollar strings) and employee buckets are values the LLM CONSTRUCTS. A
-  `filterRationale` object forces a short per-field justification (value or null),
-  logged each round for debugging (removable later).
-   - **Apollo industries are injected from the canonical taxonomy.** apollo's
-     `industries` filter (`qOrganizationIndustryTagIds`) is free-text `string[]`
-     against a hidden 148-entry LinkedIn list, so apollo's `filters-prompt`
-     documents only an *example*, not the accepted values — the LLM would guess
-     ("SaaS" → zero match). `refineFilters` fetches apollo `GET
-     /reference/industries` (`apolloIndustriesReference`) and injects the full
-     list into the apollo layer-2 prompt. **apify needs no equivalent** — its
-     `filters-prompt` already embeds every enum's accepted values.
-3. **COLLAPSE + PERSIST** — per audience, keep the provider with the **larger
-   count** (tie → apollo); we return **ONE candidate per audience, not one per
-   provider**. Each collapsed audience is written as an `audiences` row at status
-   **`suggested`** (INACTIVE — never live for the brand until the caller flips it
-   to `active` via `PATCH /orgs/audiences/{id}/status`). The `audienceId`s are
-   returned so the front activates the chosen ones. Unique per
-   `(org_id, brand_id, lower(name))`; re-running refreshes a still-`suggested`
-   row in place, never mutates an `active`/`paused`/`archived` one.
+1. **LAYER 1 (provider-agnostic, ONE LLM call via chat-service)** —
+   `decomposeSegments` reads the caller's segmentation intent ("US and Europe
+   separately", "split by seniority", "one broad list") and emits a SET of
+   **named** audiences `{ name (≤4 words), description }`. There is **no hard cap**:
+   Layer 1 emits every distinct audience it infers. When the prompt explicitly
+   spans independent axes that both change provider filters, Layer 1 produces the
+   combinations, not a broad merged bucket (e.g. founders + heads of growth + solo
+   marketers × B2B SaaS + digital product companies = 6 audiences). Each
+   `description` is the complete, self-contained prompt for the apollo build: it
+   must carry every shared and segment-specific constraint. **No rule-based
+   post-processing after layer 1** (no regex extraction, no forced filter merge) —
+   fix the layer-1 prompt/schema if a constraint is missing.
+2. **APOLLO BUILD (per segment, apollo-service owns it)** — `suggestApolloAudience`
+   calls apollo-service `POST /audiences/suggest-from-segment` with
+   `{ name, description, brandId }`; apollo-service runs its agentic NL→faithful-
+   Apollo-filters refine loop (LLM via chat-service, free Apollo dry-runs for live
+   counts) INTERNALLY and returns `{ apolloAudienceId, filters (faithful, opaque),
+   count }`. human-service does NOT build, validate, or even understand Apollo's
+   filter vocabulary — it just routes + caches the opaque result. Best-provider
+   collapse **degenerates to apollo** (apify is inert; existing apify audiences are
+   migrated separately).
+3. **PERSIST** — each segment's result is written as an `audiences` row at status
+   **`suggested`** (INACTIVE — never live until flipped to `active` via
+   `PATCH /orgs/audiences/{id}/status`), storing `apollo_audience_id` (the pointer)
+   + the cached faithful `filters` + `apollo_count`. The `audienceId`s are returned
+   so the front activates the chosen ones. Unique per `(org_id, brand_id,
+   lower(name))`; re-running refreshes a still-`suggested` row in place, never
+   mutates an `active`/`paused`/`archived` one.
 
-- **LLM runs via chat-service `POST /complete`** (`google`, Gemini JSON mode
-  **+ a Gemini `responseSchema`**). Layer 1 uses `flash-pro` +
-  `disableThinking:true`; Layer 2 also uses `flash-pro` and intentionally leaves
-  `disableThinking` unset.
-  **chat-service OWNS the LLM cost** — it does the
-  provision→authorize→execute→actualize against the org balance — so
-  **human-service still declares no cost** (the invariant holds; chat-service is
-  the LLM-cost owner exactly as apollo/apify own search cost).
-  **Why Gemini, not Anthropic:** chat-service rejects `provider:"anthropic"` +
-  `responseFormat:"json"` with **400 unless a `responseSchema` is supplied**, and
-  Anthropic enforces that schema STRICTLY — `additionalProperties:false` + an
-  explicit `properties` map on **every** object (open/permissive objects are
-  rejected). Gemini's `responseSchema` is a **permissive OpenAPI subset** (no
-  `additionalProperties:false` requirement), so our candidate `filters` (a fixed
-  16-field set) IS expressible there — without the Anthropic over-constraining
-  pain.
-  **Reliability — responseSchema + retry + tolerance (v0.18.5, #93).** `/suggest`
-  fans out MANY independent Gemini calls (1 layer-1 + N segments × 2 providers
-  × up to 8 refine rounds) under `Promise.allSettled`. chat-service
-  returns **502 on a non-parsable LLM response**; pre-v0.18.5 the flow was
-  schemaless with NO retry, so a single malformed-JSON 502 anywhere in the fan-out
-  rejected the WHOLE request → aggregate failure `1−(1−p)^N` compounded to **~50%
-  in prod**. Three layers now drive it to ~100% (barring no-credits / full
-  outage): **(1)** every suggest LLM call ships a `responseSchema`
-  (`LAYER1_RESPONSE_SCHEMA` `{audiences:[{name,description}]}`,
-  `LAYER2_RESPONSE_SCHEMA` `{action enum, filters, reasoning, reason}` incl.
-  `FILTERS_RESPONSE_SCHEMA` = the 16 required nullable neutral fields,
-  `DESCRIPTION_RESPONSE_SCHEMA`) so the provider enforces valid JSON server-side
-  → the malformed-JSON 502 is structurally eliminated; **(2)** `chat-client` retries a **transient response
-  status (502/429/503) + a missing/malformed `json` field** (bounded
-  250/500/1000ms), in addition to the existing connect-phase retry — NOT 4xx
-  (400/401/402 are deterministic); **(3)** `Promise.allSettled` at both fan-out
-  levels — one provider's outage doesn't drop the other's result for a segment,
-  one segment's total failure doesn't nuke the batch; still **fails loud (502)**
-  when nothing survives. Values are STILL validated caller-side
-  (`PeopleSearchFiltersSchema` in `dryRunSafe`, `parseCandidates`) — the schema
-  guarantees valid JSON + the action enum, not semantic correctness.
-  `disableThinking:true` is ONLY for narrow structured tasks (Layer 1 segment
-  split and description/avatar-style generation). **Do not set it on Layer 2**:
-  NL audience → Apollo filters is the quality-critical reasoning step, and
-  disabling thinking caused `flash-pro` to keep producing title-only Apollo
-  filters for firmographic prompts.
-  **Models:** Layer 1 and Layer 2 both use `flash-pro`; the filter-quality lever
-  is the strict nullable `FILTERS_RESPONSE_SCHEMA` + the stronger Layer 1
-  decomposition prompt + apollo taxonomy injection, while Layer 2 keeps thinking
-  enabled. (History: #44 shipped sonnet + no schema; chat-service later added the upfront anthropic
-  guard → every call 400'd (#50/v0.13.1). The first fix tried an anthropic strict
-  envelope with an open `filters` — Anthropic 400'd *`additionalProperties` must
-  be explicitly set to false* on the open object. Then v0.13.2 / #54 switched to
-  Gemini **schemaless** JSON on `flash`; later bumped to `flash-pro` + ICP-axis
-  layer-1 prompt + apollo canonical-industries injection to raise filter
-  relevance. v0.18.5 / #93 then RE-ADDED a `responseSchema` — on Gemini, not
-  Anthropic — because schemaless was the root cause of a ~50% prod flake; the
-  #54 "no schema" rationale was
-  Anthropic-strictness pain, which Gemini's permissive schema does not have.)
+- **Two cost owners, none here.** Layer 1's LLM runs via chat-service `POST
+  /complete` (`google`, `flash-pro`, `disableThinking:true`, a Gemini
+  `responseSchema` = `LAYER1_RESPONSE_SCHEMA`); chat-service owns that cost. The
+  apollo build's LLM + dry-runs are owned by **apollo-service** (which calls
+  chat-service internally). So **human-service still declares no cost** — the
+  invariant holds.
+- **Reliability — Layer-1 retry + per-segment fault tolerance.** `chat-client`
+  retries a transient response status (502/429/503) + a missing/malformed `json`
+  field (bounded 250/500/1000ms) in addition to the connect-phase retry (NOT 4xx —
+  400/401/402 are deterministic). The per-segment apollo builds run under
+  `Promise.allSettled`: one segment's apollo-service failure doesn't nuke the
+  batch; still **fails loud (502)** when EVERY segment failed. apollo-service's
+  HTTP failures surface as a fail-loud `ProviderError` → 502 (connect-phase
+  retry via the gateway's `fetchWithConnectRetry`). An empty filter set from
+  apollo-service is honestly returned as a candidate (apollo-service confirms a
+  real audience or fails loud, so `validationError` is always null, `truncated`
+  always false — both retained for response-shape stability only).
 - **Granularity is emergent from the NL, not an input.** Input is ONLY
-  `{nlPrompt, brandId}` — no `strategy`/count knob. Layer 1 reads the caller's
-  own segmentation intent and emits one **named** audience per implied segment.
-- **Best provider only, not both.** We query apollo AND apify for each audience
-  (free dry-runs), then return **only the higher-count provider** per audience
-  (tie → apollo). The neutral filter set is provider-specific (each provider's
-  layer-2 loop fills the fields IT honors best). `dryRunSafe` distinguishes a
-  provider **4xx (invalid filters → fed back to the layer-2 loop to revise)**
-  from a **5xx / network / config error (real outage → rethrow, fail loud 502)**
-  — the 4xx is the validation signal the loop consumes, NOT a swallow. An
-  audience the LLM can't fill on either provider is returned `count:0` honestly
-  (no infinite loop, no silent drop).
-- **Candidates use the NEUTRAL `PeopleSearchFilters` shape** (not raw
-  provider-DSL). Raw provider-only filters beyond the neutral vocabulary are a
-  deliberate future option (would need a gateway raw-passthrough dry-run/search
-  path) — not built; nothing downstream needs it.
-- **Stateful — persists `suggested` rows, returns `audienceId`s.** `/suggest`
-  writes each collapsed audience as an `audiences` row at status `suggested`
-  (inactive) and returns its `audienceId`. The front displays them, the user
-  picks, and the front **activates** the chosen ones via
-  `PATCH /orgs/audiences/{id}/status {status:"active"}` (existing endpoint, no
-  new save). Unselected `suggested` rows stay inactive (filterable via
-  `GET /orgs/audiences?status=suggested`; never surface in the brand's active
-  view). A selected audience is **provider-specific**
-  (`audiences.provider` = `apollo`|`apify`); the audience id is our own
-  cross-provider-unique uuid. (History: #44 was stateless + two-providers-flat +
-  revise-only-on-failure; this rev made it layer-1-shared + agentic-refine +
-  best-provider-collapse + stateful-`suggested`.)
-- **Env vars (NEW)**: `CHAT_SERVICE_URL`, `CHAT_SERVICE_API_KEY` (read at call
-  time, fail the request loudly if absent — `ChatConfigError` → 502).
-- **Onboarding-before-balance caveat**: `/complete` authorizes against the org
-  balance; a zero-balance org → 502. The product fix is onboarding credits at
-  the billing layer, not a cost-skip here.
+  `{nlPrompt, brandId}` — no `strategy`/count knob. Layer 1 reads the caller's own
+  segmentation intent and emits one **named** audience per implied segment.
+- **Stateful — persists `suggested` rows, returns `audienceId`s.** The front
+  displays them, the user picks, and the front **activates** the chosen ones via
+  `PATCH /orgs/audiences/{id}/status {status:"active"}` (existing endpoint, no new
+  save). Unselected `suggested` rows stay inactive (filterable via
+  `GET /orgs/audiences?status=suggested`; never surface in the brand's active view).
+- **Env vars**: `CHAT_SERVICE_URL`, `CHAT_SERVICE_API_KEY` (Layer 1) +
+  `APOLLO_SERVICE_URL`, `APOLLO_SERVICE_API_KEY` (the apollo build) — read at call
+  time, fail the request loudly if absent (`ChatConfigError`/`ProviderConfigError`
+  → 502).
+- **Onboarding-before-balance caveat**: the LLM authorizes against the org balance
+  (in chat-service / apollo-service); a zero-balance org → 502. The product fix is
+  onboarding credits at the billing layer, not a cost-skip here.
 
 ## Org isolation
 

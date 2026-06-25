@@ -113,6 +113,13 @@
       "when": 1771587966886,
       "tag": "0015_add_audience_canonical_link",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1771587966887,
+      "tag": "0016_add_audience_apollo_pointer",
+      "breakpoints": true
     }
   ]
 }
