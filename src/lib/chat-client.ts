@@ -264,7 +264,8 @@ export async function platformCompleteJson(args: {
 }
 
 export interface GeneratedImage {
-  imageBase64: string;
+  url?: string;
+  imageBase64?: string;
   mimeType: string;
   model: string;
   tokensInput: number;
@@ -306,10 +307,10 @@ export async function generateImage(args: {
     throw new ChatServiceError(res.status, text);
   }
   const data = (await res.json()) as Partial<GeneratedImage>;
-  if (!data.imageBase64 || !data.mimeType) {
+  if ((!data.url && !data.imageBase64) || !data.mimeType) {
     throw new ChatServiceError(
       502,
-      "chat-service returned no image bytes / mime type"
+      "chat-service returned no image URL or bytes / mime type"
     );
   }
   return data as GeneratedImage;
@@ -346,10 +347,10 @@ export async function platformGenerateImage(args: {
     throw new ChatServiceError(res.status, text);
   }
   const data = (await res.json()) as Partial<GeneratedImage>;
-  if (!data.imageBase64 || !data.mimeType) {
+  if ((!data.url && !data.imageBase64) || !data.mimeType) {
     throw new ChatServiceError(
       502,
-      "chat-service returned no image bytes / mime type"
+      "chat-service returned no image URL or bytes / mime type"
     );
   }
   return data as GeneratedImage;
