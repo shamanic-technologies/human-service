@@ -35,6 +35,10 @@ import {
   type Identity,
 } from "../services/people-providers.js";
 import { ChatServiceError, ChatConfigError } from "../lib/chat-client.js";
+import {
+  CloudflareConfigError,
+  CloudflareServiceError,
+} from "../lib/cloudflare-client.js";
 
 const router = Router();
 
@@ -67,6 +71,17 @@ function sendProviderError(
   if (err instanceof ChatServiceError) {
     console.error(
       `[human-service] audiences.chat_error status=${err.status}`
+    );
+    res.status(502).json({ error: err.message, upstreamStatus: err.status });
+    return;
+  }
+  if (err instanceof CloudflareConfigError) {
+    res.status(502).json({ error: err.message });
+    return;
+  }
+  if (err instanceof CloudflareServiceError) {
+    console.error(
+      `[human-service] audiences.cloudflare_error status=${err.status}`
     );
     res.status(502).json({ error: err.message, upstreamStatus: err.status });
     return;
