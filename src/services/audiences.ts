@@ -40,7 +40,14 @@ import {
   generateImage,
   platformGenerateImage,
   ChatServiceError,
+  type GeneratedImage,
 } from "../lib/chat-client.js";
+import {
+  uploadAudienceAvatarBase64,
+  uploadAudienceAvatarBase64Platform,
+  parseDataUriAvatar,
+  CloudflareServiceError,
+} from "../lib/cloudflare-client.js";
 import {
   suggestApolloAudience,
   apolloAudienceDryRun,
@@ -1192,9 +1199,62 @@ export function buildAvatarPrompt(
   return parts.join(" ");
 }
 
+async function avatarUrlFromGeneratedImage(
+  img: GeneratedImage,
+  audience: typeof audiences.$inferSelect,
+  identity: Identity
+): Promise<string> {
+  if (img.url) return img.url;
+  if (!img.imageBase64) {
+    throw new ChatServiceError(502, "chat-service returned no image URL or bytes");
+  }
+  if (!identity.userId || !identity.runId) {
+    throw new CloudflareServiceError(
+      400,
+      "legacy avatar upload requires x-user-id and x-run-id"
+    );
+  }
+  const uploaded = await uploadAudienceAvatarBase64({
+    contentBase64: img.imageBase64,
+    contentType: img.mimeType,
+    orgId: audience.orgId,
+    brandId: audience.brandId,
+    audienceId: audience.id,
+    identity: {
+      orgId: identity.orgId,
+      userId: identity.userId,
+      runId: identity.runId,
+      ...(identity.workflowTracking
+        ? { workflowTracking: identity.workflowTracking }
+        : {}),
+    },
+  });
+  return uploaded.url;
+}
+
+async function platformAvatarUrlFromGeneratedImage(
+  img: GeneratedImage,
+  audience: typeof audiences.$inferSelect
+): Promise<string> {
+  if (img.url) return img.url;
+  if (!img.imageBase64) {
+    throw new ChatServiceError(502, "chat-service returned no image URL or bytes");
+  }
+  const uploaded = await uploadAudienceAvatarBase64Platform({
+    contentBase64: img.imageBase64,
+    contentType: img.mimeType,
+    orgId: audience.orgId,
+    brandId: audience.brandId,
+    audienceId: audience.id,
+  });
+  return uploaded.url;
+}
+
 // (Re)generate an audience's avatar: delegate image generation to chat-service
-// (which owns the cost), store the bytes as a self-contained data: URI, and
-// return the updated row. The caller MUST have org-validated the audience.
+// (which owns the image-gen cost), store the hosted URL, and return the updated
+// row. Temporary rollout fallback: legacy chat-service bytes are uploaded to
+// Cloudflare here, then this helper can be removed once chat-service URL
+// responses are fully deployed.
 export async function generateAvatar(
   orgId: string,
   audienceId: string,
@@ -1212,10 +1272,18 @@ export async function generateAvatar(
         : {}),
     },
   });
-  const dataUri = `data:${img.mimeType};base64,${img.imageBase64}`;
+  const [audience] = await db
+    .select()
+    .from(audiences)
+    .where(and(eq(audiences.id, audienceId), eq(audiences.orgId, orgId)))
+    .limit(1);
+  if (!audience) {
+    throw new Error(`Audience not found: ${audienceId}`);
+  }
+  const avatarUrl = await avatarUrlFromGeneratedImage(img, audience, identity);
   const [updated] = await db
     .update(audiences)
-    .set({ avatarUrl: dataUri, updatedAt: new Date() })
+    .set({ avatarUrl, updatedAt: new Date() })
     .where(and(eq(audiences.id, audienceId), eq(audiences.orgId, orgId)))
     .returning();
   return updated;
@@ -1224,16 +1292,43 @@ export async function generateAvatar(
 // Platform-path avatar generation for internal sweeps (the avatar backfill). Uses
 // chat-service's ORG-LESS platform image endpoint — no org/user/run identity, no
 // org billing (platform-run cost) — so it works for EVERY audience including the
-// ones with no created_by_user_id, and bills no one. Writes the same data: URI.
+// ones with no created_by_user_id, and bills no one. Stores hosted URLs; legacy
+// chat-service bytes are uploaded via Cloudflare's internal base64 path.
 export async function generateAudienceAvatarViaPlatform(
   orgId: string,
   audienceId: string,
   prompt: string
 ): Promise<void> {
+  const [audience] = await db
+    .select()
+    .from(audiences)
+    .where(and(eq(audiences.id, audienceId), eq(audiences.orgId, orgId)))
+    .limit(1);
+  if (!audience) return;
   const img = await platformGenerateImage({ prompt });
-  const dataUri = `data:${img.mimeType};base64,${img.imageBase64}`;
+  const avatarUrl = await platformAvatarUrlFromGeneratedImage(img, audience);
   await db
     .update(audiences)
-    .set({ avatarUrl: dataUri, updatedAt: new Date() })
+    .set({ avatarUrl, updatedAt: new Date() })
     .where(and(eq(audiences.id, audienceId), eq(audiences.orgId, orgId)));
+}
+
+export async function convertAudienceDataUriAvatarViaPlatform(
+  audience: typeof audiences.$inferSelect
+): Promise<void> {
+  if (!audience.avatarUrl) return;
+  const parsed = parseDataUriAvatar(audience.avatarUrl);
+  if (!parsed) return;
+  const uploaded = await uploadAudienceAvatarBase64Platform({
+    contentBase64: parsed.contentBase64,
+    contentType: parsed.contentType,
+    orgId: audience.orgId,
+    brandId: audience.brandId,
+    audienceId: audience.id,
+    suffix: "legacy",
+  });
+  await db
+    .update(audiences)
+    .set({ avatarUrl: uploaded.url, updatedAt: new Date() })
+    .where(and(eq(audiences.id, audience.id), eq(audiences.orgId, audience.orgId)));
 }

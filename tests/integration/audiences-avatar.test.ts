@@ -17,6 +17,8 @@ beforeEach(async () => {
   fetchSpy.mockReset();
   process.env.CHAT_SERVICE_URL = "http://chat:8080";
   process.env.CHAT_SERVICE_API_KEY = "chat-key";
+  process.env.CLOUDFLARE_SERVICE_URL = "http://cloudflare:8080";
+  process.env.CLOUDFLARE_SERVICE_API_KEY = "cloudflare-key";
   await cleanTestData();
 });
 
@@ -40,45 +42,72 @@ function avatar(id: string, body?: unknown) {
 }
 
 describe("POST /orgs/audiences/:id/avatar", () => {
-  it("generates an avatar via chat-service and persists it as a data: URI", async () => {
+  it("generates an avatar via chat-service and persists the returned hosted URL", async () => {
     fetchSpy.mockImplementation(async (url: string) => {
       if (String(url).endsWith("/orgs/images/generate"))
-        return ok({ imageBase64: IMG, mimeType: "image/png", model: "gemini-3.1-flash-image", tokensInput: 10, tokensOutput: 20 });
+        return ok({ url: "https://cdn.test/audiences/cmos.png", mimeType: "image/png", model: "gemini-3.1-flash-image", tokensInput: 10, tokensOutput: 20 });
       throw new Error("unexpected url " + url);
     });
     const id = await createAudience("CMOs");
     const res = await avatar(id);
     expect(res.status).toBe(200);
-    expect(res.body.audience.avatarUrl).toBe(`data:image/png;base64,${IMG}`);
+    expect(res.body.audience.avatarUrl).toBe("https://cdn.test/audiences/cmos.png");
   });
 
   it("the audience GET reflects the persisted avatarUrl", async () => {
     fetchSpy.mockImplementation(async (url: string) => {
       if (String(url).endsWith("/orgs/images/generate"))
-        return ok({ imageBase64: IMG, mimeType: "image/png", model: "m", tokensInput: 1, tokensOutput: 1 });
+        return ok({ url: "https://cdn.test/audiences/get.png", mimeType: "image/png", model: "m", tokensInput: 1, tokensOutput: 1 });
       throw new Error("unexpected url " + url);
     });
     const id = await createAudience("CMOs Get");
     await avatar(id);
     const got = await request(app).get(`/orgs/audiences/${id}`).set(getAuthHeaders());
-    expect(got.body.audience.avatarUrl).toBe(`data:image/png;base64,${IMG}`);
+    expect(got.body.audience.avatarUrl).toBe("https://cdn.test/audiences/get.png");
   });
 
   it("regenerate overwrites the existing avatarUrl", async () => {
-    const SECOND = "ABC123differentbytes==";
     let call = 0;
     fetchSpy.mockImplementation(async (url: string) => {
       if (String(url).endsWith("/orgs/images/generate")) {
         call++;
-        return ok({ imageBase64: call === 1 ? IMG : SECOND, mimeType: "image/png", model: "m", tokensInput: 1, tokensOutput: 1 });
+        return ok({ url: `https://cdn.test/audiences/${call}.png`, mimeType: "image/png", model: "m", tokensInput: 1, tokensOutput: 1 });
       }
       throw new Error("unexpected url " + url);
     });
     const id = await createAudience("CMOs Regen");
     const first = await avatar(id);
-    expect(first.body.audience.avatarUrl).toBe(`data:image/png;base64,${IMG}`);
+    expect(first.body.audience.avatarUrl).toBe("https://cdn.test/audiences/1.png");
     const second = await avatar(id);
-    expect(second.body.audience.avatarUrl).toBe(`data:image/png;base64,${SECOND}`);
+    expect(second.body.audience.avatarUrl).toBe("https://cdn.test/audiences/2.png");
+  });
+
+  it("legacy chat-service imageBase64 response is uploaded to Cloudflare and stored as a URL", async () => {
+    const uploadBodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string; headers?: Record<string, string> }) => {
+      if (String(url).endsWith("/orgs/images/generate")) {
+        return ok({ imageBase64: IMG, mimeType: "image/png", model: "m", tokensInput: 1, tokensOutput: 1 });
+      }
+      if (String(url).endsWith("/upload/base64")) {
+        uploadBodies.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
+        expect(init.headers?.["x-org-id"]).toBe(getAuthHeaders()["x-org-id"]);
+        expect(init.headers?.["x-user-id"]).toBe(getAuthHeaders()["x-user-id"]);
+        expect(init.headers?.["x-run-id"]).toBe(getAuthHeaders()["x-run-id"]);
+        return ok({ id: "file-1", url: "https://cdn.test/audiences/legacy.png", size: 68, contentType: "image/png" });
+      }
+      throw new Error("unexpected url " + url);
+    });
+
+    const id = await createAudience("CMOs Legacy");
+    const res = await avatar(id);
+
+    expect(res.status).toBe(200);
+    expect(res.body.audience.avatarUrl).toBe("https://cdn.test/audiences/legacy.png");
+    expect(uploadBodies).toHaveLength(1);
+    expect(uploadBodies[0]).toMatchObject({
+      contentBase64: IMG,
+      contentType: "image/png",
+    });
   });
 
   it("forwards an optional prompt override to chat-service", async () => {
@@ -86,7 +115,7 @@ describe("POST /orgs/audiences/:id/avatar", () => {
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       if (String(url).endsWith("/orgs/images/generate")) {
         sentPrompt = (JSON.parse(init.body ?? "{}") as { prompt?: string }).prompt;
-        return ok({ imageBase64: IMG, mimeType: "image/png", model: "m", tokensInput: 1, tokensOutput: 1 });
+        return ok({ url: "https://cdn.test/audiences/prompt.png", mimeType: "image/png", model: "m", tokensInput: 1, tokensOutput: 1 });
       }
       throw new Error("unexpected url " + url);
     });
