@@ -472,14 +472,34 @@ is the chat-service client.
   (satisfied with the count), `test` again (refine), or
   `exhausted`. Bounded by `SUGGEST_MAX_ITERATION_ROUNDS = 8`. Mirrors
   lead-service's `generateNextStrategy` self-iteration mechanism (slated for
-  deprecation later — parity for now). `FILTERS_RESPONSE_SCHEMA` requires every
-  neutral filter key and makes each nullable, so the LLM must explicitly choose
-  value vs `null` for all 16 filter surfaces instead of silently returning a
-  title-only partial object. `null`s are normalized away before validation and
-  provider dry-run. No rule-based count gate or ICP regex merge is allowed here.
-  The prompt also carries an **exact-vocabulary** rule (copy enum values verbatim
-  from the rulebook, never invent one — an unrecognized value is silently dropped
-  by the provider and under-matches).
+  deprecation later — parity for now). **The Apollo Layer-2 LLM speaks Apollo's
+  OWN filter vocabulary**, not the neutral `PeopleSearchFilters` — there are two
+  distinct Layer-2 prompts/schemas (`buildApolloLayer2SystemPrompt` +
+  `APOLLO_LAYER2_RESPONSE_SCHEMA` for apollo; `buildApifyLayer2SystemPrompt` +
+  `LAYER2_RESPONSE_SCHEMA`/`FILTERS_RESPONSE_SCHEMA` for apify). Reason: the prior
+  design told the LLM to emit neutral fields (`revenueRanges`, `employeeMin/Max`)
+  while injecting Apollo's authoritative rulebook (which documents `revenueRange`,
+  `organizationNumEmployeesRanges` enum) + a "use only values verbatim from the
+  rules" rule — two conflicting vocabularies. flash-pro obeyed the rulebook,
+  couldn't find `revenueRanges` there → **dropped revenue**; and Apollo's
+  employee-bucket enums look like the neutral `companySizes` array → **double-
+  encoded size**. Speaking ONE vocabulary (Apollo's) removes the conflict.
+  `APOLLO_FILTERS_RESPONSE_SCHEMA` requires + nullables every Apollo field
+  (`personTitles`, `personSeniorities`, `qOrganizationIndustryTagIds`,
+  `organizationNumEmployeesRanges`, `revenueRange`, `qKeywords`, `personLocations`,
+  `organizationLocations`, `qOrganizationDomains`,
+  `currentlyUsingAnyOfTechnologyUids`) and **excludes the fields Apollo does NOT
+  honor** (`companySizes`/`functions`/`fundingStages`/`companyNames` — the size-
+  doublon source). `apolloDslToNeutral` maps the LLM output back to the neutral
+  blob the rest of the pipeline (dry-run, storage, serve-next, stats) stores —
+  surface-only change; nothing downstream of `refineFilters` moved. `null`s are
+  normalized away before validation/dry-run. No rule-based count gate or ICP regex
+  merge is allowed here. The exact-vocabulary rule is scoped to the true ENUM
+  fields ONLY (`personSeniorities`, `qOrganizationIndustryTagIds`,
+  `organizationNumEmployeesRanges` — copy verbatim); `revenueRange` (`"min,max"`
+  dollar strings) and employee buckets are values the LLM CONSTRUCTS. A
+  `filterRationale` object forces a short per-field justification (value or null),
+  logged each round for debugging (removable later).
    - **Apollo industries are injected from the canonical taxonomy.** apollo's
      `industries` filter (`qOrganizationIndustryTagIds`) is free-text `string[]`
      against a hidden 148-entry LinkedIn list, so apollo's `filters-prompt`

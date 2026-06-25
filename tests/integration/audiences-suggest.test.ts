@@ -49,7 +49,7 @@ function wire(opts: {
   const dryCalls = { apollo: 0, apify: 0 };
   const defaultAct = (_p: string, cleanTests: number): Action =>
     cleanTests === 0
-      ? { action: "test", filters: { titles: ["X"] }, reasoning: "r" }
+      ? { action: "test", filters: { personTitles: ["X"] }, reasoning: "r" }
       : { action: "confirm", reasoning: "r" };
 
   fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
@@ -157,7 +157,7 @@ describe("POST /orgs/audiences/suggest", () => {
       // test twice (narrow then broad), then confirm
       act: (_p, cleanTests) =>
         cleanTests < 2
-          ? { action: "test", filters: { titles: [`T${cleanTests}`] }, reasoning: "r" }
+          ? { action: "test", filters: { personTitles: [`T${cleanTests}`] }, reasoning: "r" }
           : { action: "confirm", reasoning: "r" },
       apolloCount: (call) => {
         apolloDryRuns = Math.max(apolloDryRuns, call + 1);
@@ -188,18 +188,22 @@ describe("POST /orgs/audiences/suggest", () => {
   });
 
   it("feeds a malformed LLM filter shape back to layer-2 (no crash), then confirms the valid set", async () => {
-    // The LLM returns `keywords` as a STRING instead of string[] on its first
-    // test. Pre-fix this crashed in toApolloSearchParams (`.join is not a
-    // function`) -> uncaught -> 500. It must instead surface as a validation
-    // error fed back into the loop, exactly like a provider 4xx.
+    // The LLM returns a non-enum `personSeniorities` value on its first test.
+    // After apolloDslToNeutral, the neutral schema rejects the bad enum -> it
+    // must surface as a validation error fed back into the loop (no crash),
+    // exactly like a provider 4xx, then the LLM revises to a valid set.
     wire({
       segments: [{ name: "Founders", description: "startup founders" }],
       act: (_p, _cleanTests, msg) => {
         if (msg.includes("-> count=")) return { action: "confirm", reasoning: "r" };
         if (msg.includes("Invalid filter shape"))
-          return { action: "test", filters: { titles: ["Founder"] }, reasoning: "r" };
-        // malformed: keywords must be string[], not a string
-        return { action: "test", filters: { keywords: "founders" }, reasoning: "r" };
+          return { action: "test", filters: { personTitles: ["Founder"] }, reasoning: "r" };
+        // malformed: personSeniorities must be a valid enum value
+        return {
+          action: "test",
+          filters: { personSeniorities: ["not_a_seniority"] },
+          reasoning: "r",
+        };
       },
       apolloCount: () => 200,
       apifyCount: () => 30,
@@ -250,22 +254,16 @@ describe("POST /orgs/audiences/suggest", () => {
               ? {
                   action: "test",
                   filters: {
-                    titles: ["Founder", "Head of Growth"],
-                    seniorities: null,
-                    functions: null,
-                    locationCountries: null,
-                    locationStates: null,
-                    locationCities: null,
-                    companyNames: null,
-                    companyDomains: null,
-                    industries: null,
-                    keywords: null,
-                    employeeMin: null,
-                    employeeMax: null,
-                    companySizes: null,
-                    revenueRanges: null,
-                    fundingStages: null,
-                    technologies: null,
+                    personTitles: ["Founder", "Head of Growth"],
+                    personSeniorities: null,
+                    qOrganizationIndustryTagIds: null,
+                    organizationNumEmployeesRanges: null,
+                    revenueRange: null,
+                    qKeywords: null,
+                    personLocations: null,
+                    organizationLocations: null,
+                    qOrganizationDomains: null,
+                    currentlyUsingAnyOfTechnologyUids: null,
                   },
                   reasoning: "title-only draft",
                 }
@@ -332,12 +330,19 @@ describe("POST /orgs/audiences/suggest", () => {
               ? {
                   action: "test",
                   filters: {
-                    titles: ["Head of Sales", "VP of Sales", "Founder"],
-                    employeeMin: 10,
-                    employeeMax: 100,
-                    revenueRanges: ["1000000,10000000"],
-                    industries: ["Computer Software", "Professional Services"],
-                    keywords: ["B2B", "basic CRM tools", "spreadsheets"],
+                    personTitles: ["Head of Sales", "VP of Sales", "Founder"],
+                    organizationNumEmployeesRanges: [
+                      "1,10",
+                      "11,20",
+                      "21,50",
+                      "51,100",
+                    ],
+                    revenueRange: ["1000000,10000000"],
+                    qOrganizationIndustryTagIds: [
+                      "Computer Software",
+                      "Professional Services",
+                    ],
+                    qKeywords: "B2B OR basic CRM tools OR spreadsheets",
                   },
                   reasoning: "self-contained segment filters",
                 }
@@ -358,9 +363,11 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(res.status).toBe(200);
     const c = res.body.candidates[0];
     expect(c.provider).toBe("apollo");
+    // Apollo filters by employee BUCKET, not an arbitrary range: "10-100" maps
+    // to buckets 1,10 / 11,20 / 21,50 / 51,100, so the neutral window is 1-100.
     expect(c.filters).toMatchObject({
       titles: ["Head of Sales", "VP of Sales", "Founder"],
-      employeeMin: 10,
+      employeeMin: 1,
       employeeMax: 100,
       revenueRanges: ["1000000,10000000"],
       industries: ["Computer Software", "Professional Services"],
@@ -534,7 +541,7 @@ describe("POST /orgs/audiences/suggest", () => {
         return ok({
           json:
             cleanTests === 0
-              ? { action: "test", filters: { seniorities: ["c_suite"] } }
+              ? { action: "test", filters: { personSeniorities: ["c_suite"] } }
               : { action: "confirm" },
         });
       }
@@ -571,37 +578,49 @@ describe("POST /orgs/audiences/suggest", () => {
     for (const body of layer2Bodies) {
       expect(body.model).toBe("flash-pro");
       expect(body.disableThinking).toBeUndefined();
-      const filtersSchema = (
-        body.responseSchema as {
-          properties?: {
-            filters?: {
-              required?: string[];
-              properties?: Record<string, unknown>;
-            };
+      const schema = body.responseSchema as {
+        properties?: {
+          filters?: {
+            required?: string[];
+            properties?: Record<string, unknown>;
           };
-        }
-      ).properties?.filters;
+          filterRationale?: { required?: string[] };
+        };
+      };
+      const filtersSchema = schema.properties?.filters;
+      // Apollo speaks its NATIVE filter vocabulary (not the neutral fields), and
+      // the apollo-honored set EXCLUDES companySizes / functions / fundingStages
+      // / companyNames (apollo has no search filter for them — the source of the
+      // size doublon).
       expect(filtersSchema?.required).toEqual([
-        "titles",
-        "seniorities",
-        "functions",
-        "locationCountries",
-        "locationStates",
-        "locationCities",
-        "companyNames",
-        "companyDomains",
-        "industries",
-        "keywords",
-        "employeeMin",
-        "employeeMax",
-        "companySizes",
-        "revenueRanges",
-        "fundingStages",
-        "technologies",
+        "personTitles",
+        "personSeniorities",
+        "qOrganizationIndustryTagIds",
+        "organizationNumEmployeesRanges",
+        "revenueRange",
+        "personLocations",
+        "organizationLocations",
+        "qOrganizationDomains",
+        "currentlyUsingAnyOfTechnologyUids",
+        "qKeywords",
       ]);
-      expect(filtersSchema?.properties?.employeeMin).toEqual({
-        anyOf: [{ type: "integer" }, { type: "null" }],
+      for (const dropped of [
+        "companySizes",
+        "functions",
+        "fundingStages",
+        "companyNames",
+        "employeeMin",
+      ]) {
+        expect(filtersSchema?.required).not.toContain(dropped);
+      }
+      // qKeywords is Apollo's single free-text string field (not an array).
+      expect(filtersSchema?.properties?.qKeywords).toEqual({
+        anyOf: [{ type: "string" }, { type: "null" }],
       });
+      // Per-field rationale is forced (one string required per filter field).
+      expect(schema.properties?.filterRationale?.required).toEqual(
+        filtersSchema?.required
+      );
       expect(body.systemPrompt).toContain(
         "every filterable constraint in TARGET AUDIENCE"
       );
@@ -609,6 +628,10 @@ describe("POST /orgs/audiences/suggest", () => {
       expect(body.systemPrompt).toContain(
         "never drop a stated constraint just because it is not perfect"
       );
+      // Apollo-native clarity: bucket-combine + revenue min,max construction.
+      expect(body.systemPrompt).toContain("expert Apollo people-search audience builder");
+      expect(body.systemPrompt).toContain('You CANNOT write an arbitrary range');
+      expect(body.systemPrompt).toContain('"min,max" DOLLAR strings');
     }
   });
 
@@ -632,7 +655,7 @@ describe("POST /orgs/audiences/suggest", () => {
         }
         const cleanTests = (body.message.match(/-> count=/g) ?? []).length;
         return ok({
-          json: cleanTests === 0 ? { action: "test", filters: { titles: ["CMO"] } } : { action: "confirm" },
+          json: cleanTests === 0 ? { action: "test", filters: { personTitles: ["CMO"] } } : { action: "confirm" },
         });
       }
       if (u.endsWith("/search/dry-run")) return ok({ totalEntries: 100 });
@@ -689,7 +712,7 @@ describe("POST /orgs/audiences/suggest", () => {
         if (body.message.includes("bad seg")) return err(503, "model overloaded");
         const cleanTests = (body.message.match(/-> count=/g) ?? []).length;
         return ok({
-          json: cleanTests === 0 ? { action: "test", filters: { titles: ["X"] } } : { action: "confirm" },
+          json: cleanTests === 0 ? { action: "test", filters: { personTitles: ["X"] } } : { action: "confirm" },
         });
       }
       if (u.endsWith("/search/dry-run")) return ok({ totalEntries: 300 });
@@ -726,7 +749,7 @@ describe("POST /orgs/audiences/suggest", () => {
         const cleanTests = (body.message.match(/-> count=/g) ?? []).length;
         return ok({
           json: cleanTests === 0
-            ? { action: "test", filters: { titles: ["CTO"] } }
+            ? { action: "test", filters: { personTitles: ["CTO"] } }
             : { action: "confirm" },
         });
       }
