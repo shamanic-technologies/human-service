@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import request from "supertest";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
+import { db } from "../../src/db/index.js";
+import { audiences } from "../../src/db/schema.js";
 
 const app = createTestApp();
 const BRAND = "00000000-0000-4000-8000-0000000000a1";
@@ -178,15 +180,18 @@ describe("POST /orgs/audiences/suggest", () => {
     });
   });
 
-  it("surfaces count:0 honestly when apollo-service returns an empty audience", async () => {
+  it("rejects a zero-count apollo build instead of persisting an unusable suggested audience", async () => {
     wire({
       segments: [{ name: "Impossible", description: "nobody" }],
       // apollo-service returns a valid (non-empty) filter object with count 0.
       apollo: () => ({ apolloAudienceId: "a0", filters: { personTitles: ["Nobody"] }, count: 0 }),
     });
     const res = await suggest("impossible audience");
-    expect(res.status).toBe(200);
-    expect(res.body.candidates[0].count).toBe(0);
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain("unusable audience build");
+
+    const rows = await db.select().from(audiences);
+    expect(rows).toHaveLength(0);
   });
 
   it("keeps every layer-1 audience and prompts for persona x company-type combinations", async () => {
