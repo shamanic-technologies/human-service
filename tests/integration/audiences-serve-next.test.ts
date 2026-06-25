@@ -133,6 +133,32 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     expect(res.body.person.provider).toBe("apollo");
   });
 
+  it("apollo LEGACY (no apollo_audience_id): remaps the stored NEUTRAL filters to apollo params (not forwarded verbatim)", async () => {
+    // A pre-Wave-2 apollo audience holds the old NEUTRAL blob ({titles:[...]}) and
+    // has no pointer. serve-next MUST remap it via toApolloSearchParams (so apollo
+    // gets personTitles), NOT forward the neutral keys verbatim — else apollo sees
+    // an unknown `titles` field and the audience serves unfiltered/empty. Guards
+    // the migration window before the backfill assigns pointers.
+    let searchBody: Record<string, unknown> | null = null;
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/search/next")) {
+        searchBody = JSON.parse(init.body ?? "{}") as Record<string, unknown>;
+        return ok({ people: [{ id: "p1", firstName: "C", lastName: null, name: null, email: null, emailStatus: null, title: "CEO", headline: null, seniority: "c_suite", linkedinUrl: "linkedin.com/in/p1", photoUrl: null, city: null, state: null, country: null, organizationName: "Acme", organizationDomain: "acme.com", organizationWebsiteUrl: null, organizationIndustry: null, organizationSize: null, organizationLinkedinUrl: null, organizationLogoUrl: null, organizationCity: null, organizationState: null, organizationCountry: null }], done: true, totalEntries: 1 });
+      }
+      if (u.endsWith("/enrich"))
+        return ok({ person: { id: "p1", firstName: "C", lastName: "D", name: "C D", email: "c@acme.com", emailStatus: "verified", title: "CEO", headline: null, seniority: "c_suite", linkedinUrl: "linkedin.com/in/p1", photoUrl: null, city: null, state: null, country: null, organizationName: "Acme", organizationDomain: "acme.com", organizationWebsiteUrl: null, organizationIndustry: null, organizationSize: null, organizationLinkedinUrl: null, organizationLogoUrl: null, organizationCity: null, organizationState: null, organizationCountry: null } });
+      throw new Error("unexpected url " + u);
+    });
+    const id = await createAudience("apollo", "Legacy Apollo");
+    const res = await serveNext(id);
+    expect(res.body.status).toBe("served");
+    // Remapped: neutral `titles` → apollo `personTitles`; no raw `titles` key leaks.
+    const sp = (searchBody as unknown as { searchParams?: Record<string, unknown> })?.searchParams ?? {};
+    expect(sp.personTitles).toEqual(["CEO"]);
+    expect(sp.titles).toBeUndefined();
+  });
+
   it("apollo: second call drops the already-served teaser pre-pay and returns exhausted (no enrich)", async () => {
     let enrichCalls = 0;
     fetchSpy.mockImplementation(async (url: string) => {
