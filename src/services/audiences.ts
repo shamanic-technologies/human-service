@@ -17,6 +17,7 @@
 // No silent fallbacks: a provider error during refreshCounts propagates (502).
 
 import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { db } from "../db/index.js";
 import { audienceMembers, audiences, people } from "../db/schema.js";
 import {
@@ -251,18 +252,31 @@ export async function computeStats(
   const peopleById = new Map(matchedPeople.map((p) => [p.id, p]));
   const matchedIds = matchedPeople.map((p) => p.id);
 
-  // Membership rows for the matched people, joined to their audiences.
+  // Membership rows for the matched people, joined to their audiences. A LEFT
+  // JOIN onto the canonical audience resolves a DEPRECATED provider-variant
+  // (e.g. "<base> [Apify]") to its live replacement, so a lead sourced via the
+  // retired apify audience reports the clean active audience the dashboard
+  // already loads (with name + avatar) instead of the deprecated "[Apify]" row.
+  const canonical = alias(audiences, "canonical_audience");
   const memberships =
     matchedIds.length > 0
       ? await db
           .select({
             personId: audienceMembers.personId,
-            audienceId: audiences.id,
-            name: audiences.name,
-            brandId: audiences.brandId,
+            matchedAudienceId: audiences.id,
+            matchedName: audiences.name,
+            matchedBrandId: audiences.brandId,
+            matchedStatus: audiences.status,
+            canonicalAudienceId: canonical.id,
+            canonicalName: canonical.name,
+            canonicalBrandId: canonical.brandId,
           })
           .from(audienceMembers)
           .innerJoin(audiences, eq(audienceMembers.audienceId, audiences.id))
+          .leftJoin(
+            canonical,
+            eq(audiences.canonicalAudienceId, canonical.id)
+          )
           .where(
             and(
               eq(audienceMembers.orgId, orgId),
@@ -271,34 +285,47 @@ export async function computeStats(
           )
       : [];
 
-  const perPerson = new Map<
-    string,
-    Array<{ audienceId: string; name: string }>
-  >();
+  // De-dupe per person AND per audience on the RESOLVED audience id: a person on
+  // both the deprecated variant and its canonical twin must surface the canonical
+  // audience exactly once (and count once in the per-audience rollup).
+  const perPerson = new Map<string, Map<string, string>>(); // personId -> (audienceId -> name)
   const perAudience = new Map<
     string,
-    { audienceId: string; name: string; brandId: string; matchedCount: number }
+    { audienceId: string; name: string; brandId: string; members: Set<string> }
   >();
   for (const m of memberships) {
-    const list = perPerson.get(m.personId) ?? [];
-    list.push({ audienceId: m.audienceId, name: m.name });
-    perPerson.set(m.personId, list);
+    // Resolve deprecated -> canonical when a link exists; otherwise keep the row.
+    const useCanonical =
+      m.matchedStatus === "deprecated" && m.canonicalAudienceId !== null;
+    const audienceId = useCanonical
+      ? (m.canonicalAudienceId as string)
+      : m.matchedAudienceId;
+    const name = useCanonical ? (m.canonicalName as string) : m.matchedName;
+    const brandId = useCanonical
+      ? (m.canonicalBrandId as string)
+      : m.matchedBrandId;
 
-    const agg = perAudience.get(m.audienceId) ?? {
-      audienceId: m.audienceId,
-      name: m.name,
-      brandId: m.brandId,
-      matchedCount: 0,
+    const personMap = perPerson.get(m.personId) ?? new Map<string, string>();
+    personMap.set(audienceId, name);
+    perPerson.set(m.personId, personMap);
+
+    const agg = perAudience.get(audienceId) ?? {
+      audienceId,
+      name,
+      brandId,
+      members: new Set<string>(),
     };
-    agg.matchedCount += 1;
-    perAudience.set(m.audienceId, agg);
+    agg.members.add(m.personId);
+    perAudience.set(audienceId, agg);
   }
 
   const matched = matchedPeople.map((p) => ({
     personId: p.id,
     emailNorm: p.emailNorm,
     fullName: p.fullName,
-    audiences: perPerson.get(p.id) ?? [],
+    audiences: [...(perPerson.get(p.id)?.entries() ?? [])].map(
+      ([audienceId, name]) => ({ audienceId, name })
+    ),
   }));
 
   const matchedEmailSet = new Set(
@@ -312,7 +339,12 @@ export async function computeStats(
       emails: emailNorms.filter((e) => !matchedEmailSet.has(e)),
       personIds: personIds.filter((id) => !matchedIdSet.has(id)),
     },
-    byAudience: [...perAudience.values()],
+    byAudience: [...perAudience.values()].map((a) => ({
+      audienceId: a.audienceId,
+      name: a.name,
+      brandId: a.brandId,
+      matchedCount: a.members.size,
+    })),
   };
 }
 
@@ -1417,6 +1449,13 @@ export async function migrateApifyAudienceToApollo(
       })
       .returning({ id: audiences.id });
 
+    // Durable canonical link: the deprecated apify row points at its live apollo
+    // replacement so membership / stats reads resolve to the clean active twin.
+    await tx
+      .update(audiences)
+      .set({ canonicalAudienceId: apollo.id })
+      .where(eq(audiences.id, row.id));
+
     return {
       apifyAudienceId: row.id,
       apolloAudienceId: apollo.id,
@@ -1425,6 +1464,89 @@ export async function migrateApifyAudienceToApollo(
       apolloCount: refined.count,
     };
   });
+}
+
+// --- Canonical-link backfill (deprecated provider-variant -> active replacement) ---
+//
+// The apify->apollo migration deprecated + renamed each apify audience
+// "<base> [Apify]" and created an active apollo twin named "<base>", but stored
+// NO link between them. This backfill sets `canonical_audience_id` on each
+// deprecated provider-variant row, pointing at its live same-(org,brand)-base-name
+// sibling, so membership / stats reads resolve to the clean active audience.
+
+// Strip a trailing " [Provider]" variant suffix from a deprecated audience name.
+// Returns the base name, or null if the name has no variant suffix (so it is not
+// a migration-retired provider-variant and must be skipped — never guessed).
+export function parseVariantBaseName(name: string): string | null {
+  const m = /^(.*\S) \[[^\]]+\]$/.exec(name);
+  return m ? m[1] : null;
+}
+
+export type CanonicalLinkOutcome =
+  | { id: string; name: string; status: "linked"; canonicalAudienceId: string }
+  | { id: string; name: string; status: "skipped"; reason: string };
+
+// Resolve + (optionally) set the canonical link for ONE deprecated row. Matching
+// is scoped to (org_id, brand_id, lower(base_name)) and EXCLUDES deprecated rows;
+// the unique index idx_audiences_org_brand_lower_name guarantees at most one such
+// sibling per (org, brand). 0 siblings OR a name with no variant suffix -> skip +
+// log (never guess). When dryRun, computes the outcome WITHOUT writing.
+export async function linkCanonicalForDeprecated(
+  row: Pick<
+    typeof audiences.$inferSelect,
+    "id" | "orgId" | "brandId" | "name"
+  >,
+  opts: { dryRun: boolean }
+): Promise<CanonicalLinkOutcome> {
+  const base = parseVariantBaseName(row.name);
+  if (base === null) {
+    return {
+      id: row.id,
+      name: row.name,
+      status: "skipped",
+      reason: "no provider-variant suffix",
+    };
+  }
+
+  const siblings = await db
+    .select({ id: audiences.id })
+    .from(audiences)
+    .where(
+      and(
+        eq(audiences.orgId, row.orgId),
+        eq(audiences.brandId, row.brandId),
+        sql`lower(${audiences.name}) = ${base.toLowerCase()}`,
+        sql`${audiences.status} <> 'deprecated'`
+      )
+    );
+
+  if (siblings.length === 0) {
+    return {
+      id: row.id,
+      name: row.name,
+      status: "skipped",
+      reason: "no active sibling",
+    };
+  }
+  if (siblings.length > 1) {
+    // Structurally prevented by the unique index, but fail loud (skip) defensively
+    // rather than picking an arbitrary canonical.
+    return {
+      id: row.id,
+      name: row.name,
+      status: "skipped",
+      reason: `ambiguous: ${siblings.length} active siblings`,
+    };
+  }
+
+  const canonicalAudienceId = siblings[0].id;
+  if (!opts.dryRun) {
+    await db
+      .update(audiences)
+      .set({ canonicalAudienceId })
+      .where(eq(audiences.id, row.id));
+  }
+  return { id: row.id, name: row.name, status: "linked", canonicalAudienceId };
 }
 
 // Verify an audience exists and belongs to the org. Returns the row or null.

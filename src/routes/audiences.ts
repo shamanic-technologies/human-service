@@ -572,6 +572,7 @@ function serializeAudience(row: typeof audiences.$inferSelect) {
     provider: row.provider,
     status: row.status,
     source: row.source,
+    canonicalAudienceId: row.canonicalAudienceId,
     filters: row.filters,
     avatarUrl: row.avatarUrl,
     apolloCount: row.apolloCount,

@@ -7,6 +7,7 @@ import {
   jsonb,
   index,
   uniqueIndex,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -356,6 +357,15 @@ export const audiences = pgTable(
     // Provenance tag for reversibility. Set to "brand_persona_backfill" for rows
     // created by the one-time persona->audience backfill; null for native rows.
     source: text("source"),
+    // Canonical link: when THIS audience is a deprecated provider-variant (e.g.
+    // "<base> [Apify]" retired by the apify->apollo migration), this points at its
+    // active replacement audience. Membership / stats reads resolve a deprecated
+    // match to this canonical id so leads render the clean live name + avatar.
+    // NULL for every non-deprecated / unlinked row. Self-FK, ON DELETE SET NULL.
+    canonicalAudienceId: uuid("canonical_audience_id").references(
+      (): AnyPgColumn => audiences.id,
+      { onDelete: "set null" }
+    ),
     // Neutral PeopleSearchFilters shape (maps to both providers).
     filters: jsonb("filters").$type<Record<string, unknown>>(),
     // Avatar image as a self-contained data: URI (populated by the avatar route,
@@ -374,6 +384,7 @@ export const audiences = pgTable(
   },
   (table) => [
     index("idx_audiences_org_brand").on(table.orgId, table.brandId),
+    index("idx_audiences_canonical").on(table.canonicalAudienceId),
     // Name-unique per (org, brand) (case-insensitive). Widened from brand-only
     // so the same audience name can exist for the same brand across different
     // orgs (org isolation) — the suggest flow keys proposals on org+brand+name.

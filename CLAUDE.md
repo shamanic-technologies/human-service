@@ -40,6 +40,7 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Internal | `POST /internal/remap-audience-filters` | apiKey | One-time data fix: translate already-backfilled audiences' filters from legacy persona vocab → canonical `PeopleSearchFilters` vocab, in place (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/backfill-audience-descriptions` | apiKey | One-time data fix: generate a per-audience one-sentence `description` (from name + filters via chat-service platform LLM) for every audience whose `description IS NULL` — pre-#82 rows (idempotent, `?dryRun=true`) |
 | Internal | `POST /internal/migrate-apify-audiences-to-apollo` | apiKey | One-time data fix (APOLLO-ONLY cutover): for every non-deprecated `provider='apify'` audience, re-derive equivalent apollo filters (agentic refine, platform LLM), create a new apollo audience mirroring the source status, and mark the apify one `deprecated` (idempotent, `?dryRun=true`, reversible) |
+| Internal | `POST /internal/backfill-canonical-audience-links` | apiKey | One-time data fix: link each EXISTING deprecated provider-variant audience (`<base> [Apify]`) to its active same-`(org,brand)`-base-name canonical sibling (`audiences.canonical_audience_id`), so membership/stats reads resolve a deprecated match to the clean active audience. Pre-link rows from the apify→apollo migration (which now sets the link going forward). Skips 0/ambiguous-sibling rows (fail loud, never guess). Idempotent, `?dryRun=true`, reversible |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
 | Org-scoped (CRM v1) | `GET /orgs/lists/{id}` | apiKey + `x-org-id` | Get a CRM list |
@@ -231,6 +232,31 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
   `source` text (provider).
 - **No cost declaration here** either — counting rides the providers' free
   dry-run; the billed reveal still belongs to apollo/apify.
+- **Canonical resolution (deprecated provider-variant → live replacement).** The
+  apify→apollo migration deprecates `<base> [Apify]` and creates an active apollo
+  twin `<base>`, but leaves the apify row's `audience_members` attached to the
+  DEPRECATED row. Without a link, any consumer that resolves a lead's audience
+  from membership lands on the deprecated variant — retired `[Apify]` name + no
+  avatar (the dashboard only loads avatars for non-deprecated audiences). So
+  `audiences.canonical_audience_id` (migration `0015`, self-FK `ON DELETE SET
+  NULL`, nullable) points a deprecated variant at its active replacement.
+  `computeStats` (`POST /orgs/audiences/stats`) LEFT-JOINs the canonical row and,
+  when a matched audience is `deprecated` AND has a canonical link, returns the
+  **canonical** id + clean name — **de-duped per person AND per audience on the
+  RESOLVED id** (a person on both the deprecated and active variant surfaces the
+  canonical audience once; `matchedCount` is a distinct-person count, not a
+  membership-row count). Provenance is preserved: `audience_members` are NOT
+  re-pointed, the deprecated row + its members stay intact — only the READ
+  resolves. The link is set TWO ways: (1) going forward, `migrateApifyAudience
+  ToApollo` sets it in the same txn as the deprecate+insert; (2) for pre-existing
+  deprecated rows, the `POST /internal/backfill-canonical-audience-links` sweep.
+  The join key is `(org_id, brand_id, lower(base_name))` where `base_name` is the
+  deprecated name minus its trailing ` [Provider]` suffix; the unique index
+  `idx_audiences_org_brand_lower_name` guarantees ≤1 non-deprecated sibling per
+  `(org, brand)`, so the match is unambiguous (e.g. two same-base "Solo Founders
+  >$100k Revenue" rows in DIFFERENT orgs do not collide — org-scoping separates
+  them). FAIL LOUD on ambiguity: a deprecated row with no variant suffix, 0
+  siblings, or (defensively) >1 sibling is SKIPPED + logged, never guessed.
 
 ### Serve-next (lead primitive) — `POST /orgs/audiences/{id}/serve-next`
 
@@ -424,6 +450,10 @@ in `src/services/audiences.ts` owns the per-row work.
   mirrored** (an `active` apify audience → `active` apollo; a `suggested` one stays
   `suggested` — never auto-activate what the user never chose), `apolloCount` from
   the refine, and `source='migrated_from_apify'` (provenance for reversibility).
+  The deprecated apify row's `canonical_audience_id` is set to the new apollo id
+  in the SAME txn, so membership/stats reads resolve it to the live twin (see
+  "Canonical resolution" above). Pre-existing deprecated rows (migrated before
+  this link existed) are linked by `POST /internal/backfill-canonical-audience-links`.
 - **Identity.** apollo dry-runs need org+user for key resolution; the sweep uses
   each row's own `org_id` + `created_by_user_id` (all prod apify rows have it). The
   **LLM** runs via the ORG-LESS platform path (`platformCompleteJson`) so a
