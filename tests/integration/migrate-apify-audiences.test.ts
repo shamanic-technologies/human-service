@@ -241,6 +241,37 @@ describe("POST /internal/migrate-apify-audiences-to-apollo", () => {
     expect(a.name).toBe("Active Apify");
   });
 
+  it("a row whose apollo re-derivation yields non-empty filters but zero count is failed + left untouched", async () => {
+    await seed();
+    wire({
+      byName: (name) =>
+        name === "Active Apify"
+          ? { apolloAudienceId: "zero-count", filters: { personTitles: ["Founder"] }, count: 0 }
+          : { apolloAudienceId: "ok", filters: { personTitles: ["CTO"] }, count: 500 },
+    });
+
+    const res = await request(app)
+      .post("/internal/migrate-apify-audiences-to-apollo?dryRun=false")
+      .set(apiKeyHeader);
+
+    expect(res.status).toBe(200);
+    expect(res.body.migrated).toHaveLength(1);
+    expect(res.body.failed).toHaveLength(1);
+    expect(res.body.failed[0]).toMatchObject({
+      id: APIFY_ACTIVE,
+      error: expect.stringContaining("unusable audience build"),
+    });
+
+    const [a] = await db
+      .select()
+      .from(audiences)
+      .where(eq(audiences.id, APIFY_ACTIVE));
+    expect(a.provider).toBe("apify");
+    expect(a.status).toBe("active");
+    expect(a.name).toBe("Active Apify");
+    expect(a.apifyCount).toBe(40000);
+  });
+
   it("async=true responds 202 immediately + runs the sweep in the background", async () => {
     await seed();
     wire({ count: 123 });

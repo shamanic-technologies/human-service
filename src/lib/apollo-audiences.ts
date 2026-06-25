@@ -28,6 +28,7 @@ export interface ApolloAudience {
   apolloAudienceId: string;
   filters: ApolloFilters;
   count: number;
+  status: string | null;
 }
 
 function asApolloAudience(data: unknown, op: string): ApolloAudience {
@@ -35,23 +36,26 @@ function asApolloAudience(data: unknown, op: string): ApolloAudience {
   const apolloAudienceId = o.apolloAudienceId;
   const filters = o.filters;
   const count = o.count;
+  const status = typeof o.status === "string" ? o.status : null;
   if (
     typeof apolloAudienceId !== "string" ||
     apolloAudienceId.length === 0 ||
     !filters ||
     typeof filters !== "object" ||
     Array.isArray(filters) ||
-    typeof count !== "number"
+    typeof count !== "number" ||
+    count <= 0 ||
+    status === "exhausted"
   ) {
     // A 2xx body that doesn't carry the contract is an apollo-service defect —
     // fail loud rather than persist a half-formed pointer.
     throw new ProviderError(
       "apollo",
       502,
-      `apollo-service ${op} returned an unexpected body: ${JSON.stringify(o).slice(0, 200)}`
+      `apollo-service ${op} returned an unusable audience build: ${JSON.stringify(o).slice(0, 200)}`
     );
   }
-  return { apolloAudienceId, filters: filters as ApolloFilters, count };
+  return { apolloAudienceId, filters: filters as ApolloFilters, count, status };
 }
 
 // POST /audiences/suggest-from-segment — run apollo-service's agentic
