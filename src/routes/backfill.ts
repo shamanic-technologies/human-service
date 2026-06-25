@@ -9,6 +9,7 @@ import {
   MigrateApifyAudiencesQuerySchema,
   BackfillAudienceAvatarsQuerySchema,
   BackfillCanonicalLinksQuerySchema,
+  BackfillApolloPointersQuerySchema,
 } from "../schemas.js";
 import {
   mapPersonaFiltersToCanonical,
@@ -21,7 +22,9 @@ import {
   linkCanonicalForDeprecated,
   buildAvatarPrompt,
   generateAudienceAvatarViaPlatform,
+  backfillApolloAudiencePointer,
   type ApifyToApolloMigrationResult,
+  type ApolloPointerBackfillResult,
 } from "../services/audiences.js";
 import { ChatConfigError, ChatServiceError } from "../lib/chat-client.js";
 import { ProviderConfigError } from "../services/people-providers.js";
@@ -684,6 +687,175 @@ router.post(
       skipped,
       sample: linkedSamples.slice(0, CANONICAL_SAMPLE_LIMIT),
     });
+  }
+);
+
+// How many {id,name} previews the apollo-pointer backfill returns.
+const APOLLO_POINTER_SAMPLE_LIMIT = 25;
+
+// Build a faithful apollo audience (via apollo-service) + store its pointer for a
+// batch of apollo audiences lacking one, one row at a time. A row whose
+// apollo-service build yields no usable filter set OR fails transiently is per-row
+// `failed` (left untouched, retried on re-run). A SYSTEMIC error (apollo env
+// missing) throws `MigrationAborted` carrying the partial progress — every row
+// already pointed persists, a re-run resumes.
+async function runApolloPointerBackfill(
+  rows: Array<typeof audiences.$inferSelect>
+): Promise<{
+  backfilled: ApolloPointerBackfillResult[];
+  failed: Array<{ id: string; name: string; error: string }>;
+}> {
+  const backfilled: ApolloPointerBackfillResult[] = [];
+  const failed: Array<{ id: string; name: string; error: string }> = [];
+  for (const row of rows) {
+    let result: ApolloPointerBackfillResult | null;
+    try {
+      result = await backfillApolloAudiencePointer(row);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Only a missing-config error is truly systemic (every row fails the same
+      // way) -> abort. A per-row apollo hiccup (5xx, transient) is logged, counted
+      // failed, and the sweep continues; the row stays pointer-less, retried later.
+      if (err instanceof ProviderConfigError) {
+        console.error(`[human-service] backfill_apollo_ptr.abort id=${row.id} ${msg}`);
+        throw new MigrationAborted(msg, [], failed);
+      }
+      console.warn(
+        `[human-service] backfill_apollo_ptr.row_failed id=${row.id} ${msg}`
+      );
+      failed.push({ id: row.id, name: row.name, error: msg });
+      continue;
+    }
+    if (!result) {
+      console.warn(
+        `[human-service] backfill_apollo_ptr.row_failed id=${row.id} no usable apollo filters`
+      );
+      failed.push({
+        id: row.id,
+        name: row.name,
+        error: "apollo-service build yielded no usable filter set",
+      });
+      continue;
+    }
+    backfilled.push(result);
+  }
+  return { backfilled, failed };
+}
+
+// POST /internal/backfill-apollo-audience-pointers?dryRun=true|false&async=true|false
+//
+// One-time DATA fix ("one filter vocabulary" Wave 2): human-service stops holding
+// Apollo's filter vocabulary. Pre-Wave-2 apollo audiences hold a human-built /
+// lossy neutral filter blob and NO apollo_audience_id. This sweep asks apollo-
+// service to BUILD a faithful Apollo audience from each row's own name +
+// description, then stores the POINTER + the faithful filters (cached, replacing
+// the old neutral blob) + the count.
+//
+// - Scoped to provider='apollo' AND apollo_audience_id IS NULL AND status<>'deprecated'
+//   -> idempotent: a re-run only sees still-pointer-less rows (a clean re-run
+//   backfills 0). apify (legacy) rows are NOT touched (they keep their own filters).
+// - Dry-runnable: ?dryRun=true counts the rows + returns an {id,name} sample
+//   WITHOUT calling apollo-service or writing (free preview).
+// - Async: ?async=true responds 202 then runs in the background (each row triggers
+//   apollo-service's agentic refine loop; a whole-table run exceeds an HTTP
+//   timeout). Each row is its own write, so progress is durable + observable via
+//   dry-run.
+// - Reversible: undo by UPDATE audiences SET apollo_audience_id=NULL WHERE ... (the
+//   cached faithful filters are the intended improvement — the old neutral apollo
+//   blob was exactly the lossy vocabulary this wave removes).
+// - Per-row resilience: a row whose build yields no usable filter set / fails
+//   transiently is counted in `failed` + left untouched (retried on re-run); a
+//   missing apollo config aborts the sweep loudly (502).
+//
+// Service-auth only (x-api-key); sweeps all orgs. Trigger MANUALLY after deploy —
+// never on boot (O(N) over the table x an apollo agentic refine each would block
+// port-bind).
+router.post(
+  "/internal/backfill-apollo-audience-pointers",
+  requireApiKey,
+  async (req, res) => {
+    const parsedQuery = BackfillApolloPointersQuerySchema.safeParse(req.query);
+    if (!parsedQuery.success) {
+      res.status(400).json({ error: parsedQuery.error.message });
+      return;
+    }
+    const dryRun = parsedQuery.data.dryRun === "true";
+    const asyncMode = parsedQuery.data.async === "true";
+
+    const rows = await db
+      .select()
+      .from(audiences)
+      .where(
+        and(
+          eq(audiences.provider, "apollo"),
+          isNull(audiences.apolloAudienceId),
+          ne(audiences.status, "deprecated")
+        )
+      );
+
+    const scanned = rows.length;
+
+    if (dryRun) {
+      const sample = rows
+        .slice(0, APOLLO_POINTER_SAMPLE_LIMIT)
+        .map((r) => ({ id: r.id, name: r.name }));
+      console.log(`[human-service] backfill_apollo_ptr.dry_run scanned=${scanned}`);
+      res.json({
+        dryRun: true,
+        scanned,
+        wouldBackfill: scanned,
+        backfilled: [],
+        failed: [],
+        sample,
+      });
+      return;
+    }
+
+    if (asyncMode) {
+      res.status(202).json({
+        dryRun: false,
+        started: true,
+        scanned,
+        wouldBackfill: scanned,
+        backfilled: [],
+        failed: [],
+        sample: [],
+      });
+      void runApolloPointerBackfill(rows)
+        .then(({ backfilled, failed }) =>
+          console.log(
+            `[human-service] backfill_apollo_ptr.run_async scanned=${scanned} backfilled=${backfilled.length} failed=${failed.length}`
+          )
+        )
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`[human-service] backfill_apollo_ptr.run_async_aborted ${msg}`);
+        });
+      return;
+    }
+
+    try {
+      const { backfilled, failed } = await runApolloPointerBackfill(rows);
+      console.log(
+        `[human-service] backfill_apollo_ptr.run scanned=${scanned} backfilled=${backfilled.length} failed=${failed.length}`
+      );
+      res.json({
+        dryRun: false,
+        scanned,
+        wouldBackfill: scanned,
+        backfilled,
+        failed,
+        sample: [],
+      });
+    } catch (err) {
+      // Systemic apollo outage / missing config -> fail loud (502). Already-pointed
+      // rows persist; a re-run resumes (only pointer-less rows remain).
+      if (err instanceof MigrationAborted) {
+        res.status(502).json({ error: err.message, failed: err.failed });
+        return;
+      }
+      throw err;
+    }
   }
 );
 

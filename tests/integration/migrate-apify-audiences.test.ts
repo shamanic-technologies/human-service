@@ -27,38 +27,33 @@ function ok(json: unknown) {
   return { ok: true, status: 200, json: async () => json, text: async () => "" };
 }
 
-type Action = Record<string, unknown>;
+interface ApolloResp {
+  apolloAudienceId: string;
+  filters: Record<string, unknown>;
+  count: number;
+}
 
-// Mock the apollo provider + chat-service platform LLM by URL. The migration's
-// refineFilters("apollo", …, { usePlatformLLM: true }) hits:
-//   /search/filters-prompt + /reference/industries (apollo rulebook),
-//   /internal/platform-complete (ORG-LESS layer-2 LLM — no /complete),
-//   /search/dry-run (apollo free count).
+// "One filter vocabulary" Wave 2: the migration asks apollo-service to BUILD a
+// faithful Apollo audience from the apify row's name + description
+// (POST /audiences/suggest-from-segment → {apolloAudienceId, filters, count}).
+// No in-human-service layer-2 loop / filters-prompt / industries / dry-run anymore.
 function wire(opts?: {
-  dryRunCount?: number;
-  actByName?: (name: string, cleanTests: number) => Action;
+  count?: number;
+  byName?: (name: string) => ApolloResp;
 }) {
-  const dryRunCount = opts?.dryRunCount ?? 500;
+  const count = opts?.count ?? 500;
+  let seq = 0;
   fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
     const u = String(url);
-    if (u.endsWith("/search/filters-prompt"))
-      return ok({ prompt: "RULES", schemaVersion: "1" });
-    if (u.endsWith("/reference/industries"))
-      return ok({ industries: [{ name: "Computer Software" }] });
-    if (u.endsWith("/internal/platform-complete")) {
-      const body = JSON.parse(init.body ?? "{}") as { message?: string };
-      const msg = body.message ?? "";
-      const name = (/name: (.+)/.exec(msg)?.[1] ?? "").trim();
-      const cleanTests = (msg.match(/-> count=/g) ?? []).length;
-      if (opts?.actByName) return ok({ json: opts.actByName(name, cleanTests) });
+    if (u.endsWith("/audiences/suggest-from-segment")) {
+      const body = JSON.parse(init.body ?? "{}") as { name: string };
+      if (opts?.byName) return ok(opts.byName(body.name));
       return ok({
-        json:
-          cleanTests === 0
-            ? { action: "test", filters: { personTitles: ["CTO"] } }
-            : { action: "confirm" },
+        apolloAudienceId: `apollo-${++seq}`,
+        filters: { personTitles: ["CTO"] },
+        count,
       });
     }
-    if (u.endsWith("/search/dry-run")) return ok({ totalEntries: dryRunCount });
     throw new Error(`unexpected fetch ${u}`);
   });
 }
@@ -154,7 +149,7 @@ describe("POST /internal/migrate-apify-audiences-to-apollo", () => {
 
   it("real run creates an apollo twin (mirrored status) + deprecates the apify row; re-run is idempotent", async () => {
     await seed();
-    wire({ dryRunCount: 777 });
+    wire({ count: 777 });
 
     const res = await request(app)
       .post("/internal/migrate-apify-audiences-to-apollo?dryRun=false")
@@ -173,8 +168,9 @@ describe("POST /internal/migrate-apify-audiences-to-apollo", () => {
     expect(oldActive.name).toBe("Active Apify [Apify]");
     expect(oldActive.provider).toBe("apify");
 
-    // apollo twin: original name, provider apollo, mirrored status, re-derived
-    // filters, apollo count snapshot, provenance tag.
+    // apollo twin: original name, provider apollo, mirrored status, the faithful
+    // apollo filters + pointer from apollo-service, apollo count snapshot,
+    // provenance tag.
     const [twin] = await db
       .select()
       .from(audiences)
@@ -186,7 +182,8 @@ describe("POST /internal/migrate-apify-audiences-to-apollo", () => {
       );
     expect(twin.status).toBe("active");
     expect(twin.source).toBe("migrated_from_apify");
-    expect(twin.filters).toEqual({ titles: ["CTO"] });
+    expect(twin.filters).toEqual({ personTitles: ["CTO"] });
+    expect(twin.apolloAudienceId).toMatch(/^apollo-/);
     expect(twin.apolloCount).toBe(777);
     expect(twin.apifyCount).toBeNull();
     expect(twin.createdByUserId).toBe(USER);
@@ -216,15 +213,13 @@ describe("POST /internal/migrate-apify-audiences-to-apollo", () => {
 
   it("a row whose apollo re-derivation yields no usable filters is counted failed + left untouched", async () => {
     await seed();
-    // "Active Apify" exhausts immediately (no clean test → empty filters);
-    // "Suggested Apify" confirms normally.
+    // apollo-service yields an EMPTY filter set for "Active Apify" (no usable
+    // audience → migration returns null → counted failed); "Suggested Apify" is fine.
     wire({
-      actByName: (name, cleanTests) => {
-        if (name === "Active Apify") return { action: "exhausted", reason: "nope" };
-        return cleanTests === 0
-          ? { action: "test", filters: { personTitles: ["CTO"] } }
-          : { action: "confirm" };
-      },
+      byName: (name) =>
+        name === "Active Apify"
+          ? { apolloAudienceId: "empty", filters: {}, count: 0 }
+          : { apolloAudienceId: "ok", filters: { personTitles: ["CTO"] }, count: 500 },
     });
 
     const res = await request(app)
@@ -248,7 +243,7 @@ describe("POST /internal/migrate-apify-audiences-to-apollo", () => {
 
   it("async=true responds 202 immediately + runs the sweep in the background", async () => {
     await seed();
-    wire({ dryRunCount: 123 });
+    wire({ count: 123 });
 
     const res = await request(app)
       .post("/internal/migrate-apify-audiences-to-apollo?dryRun=false&async=true")

@@ -1229,17 +1229,24 @@
           "provider": {
             "type": "string",
             "enum": [
-              "apollo",
-              "apify"
+              "apollo"
             ],
-            "description": "The winning provider for this audience — the one with the larger free dry-run count (tie -> apollo). Only this provider's filters/count are returned."
+            "description": "Always 'apollo' — apollo-service owns the faithful filters; the candidate commits to apollo."
+          },
+          "apolloAudienceId": {
+            "type": "string",
+            "description": "Pointer to the faithful Apollo audience apollo-service built + persisted for this segment."
           },
           "filters": {
-            "$ref": "#/components/schemas/PeopleSearchFilters"
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            },
+            "description": "The faithful Apollo filter object (opaque — apollo-service owns its shape), cached on the persisted audience row."
           },
           "count": {
             "type": "integer",
-            "description": "The winning provider's live match count (free dry-run). 0 means the LLM could not find a non-empty, valid filter set within the iteration budget on either provider."
+            "description": "The audience's live match count (free apollo dry-run snapshot from apollo-service)."
           },
           "status": {
             "$ref": "#/components/schemas/AudienceStatus"
@@ -1247,7 +1254,7 @@
           "validationError": {
             "type": "string",
             "nullable": true,
-            "description": "Set when the winning provider rejected the filters as invalid after the iteration budget was exhausted."
+            "description": "Retained for response-shape stability. apollo-service confirms a real audience (or fails loud), so always null."
           },
           "truncated": {
             "type": "boolean",
@@ -1259,6 +1266,7 @@
           "name",
           "rationale",
           "provider",
+          "apolloAudienceId",
           "filters",
           "count",
           "status",
@@ -1342,6 +1350,11 @@
               null
             ]
           },
+          "apolloAudienceId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Pointer to the faithful Apollo audience owned by apollo-service ('one filter vocabulary' Wave 2). Set for apollo audiences; null for apify (legacy) rows and pre-Wave-2 rows not yet backfilled. The faithful filters live in apollo-service; the `filters` field below is human-service's opaque cache of them."
+          },
           "status": {
             "$ref": "#/components/schemas/AudienceStatus"
           },
@@ -1356,14 +1369,11 @@
             "description": "When this audience is a deprecated provider-variant (e.g. retired '<base> [Apify]' from the apify->apollo migration), the id of its active canonical replacement. Membership/stats reads resolve a deprecated match to this audience. null for non-deprecated / unlinked rows."
           },
           "filters": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/PeopleSearchFilters"
-              },
-              {
-                "nullable": true
-              }
-            ]
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": {
+              "nullable": true
+            }
           },
           "avatarUrl": {
             "type": "string",
@@ -1402,6 +1412,7 @@
           "nlPrompt",
           "description",
           "provider",
+          "apolloAudienceId",
           "status",
           "source",
           "canonicalAudienceId",
@@ -1439,7 +1450,15 @@
             "minLength": 1
           },
           "filters": {
-            "$ref": "#/components/schemas/PeopleSearchFilters"
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            }
+          },
+          "apolloAudienceId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Pointer to the faithful Apollo audience owned by apollo-service, when persisting an apollo candidate. Omit for a neutral / apify audience."
           },
           "apolloCount": {
             "type": "integer",
@@ -2149,6 +2168,103 @@
           "scanned",
           "wouldFill",
           "filled",
+          "failed",
+          "sample"
+        ]
+      },
+      "BackfillApolloPointersResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "started": {
+            "type": "boolean",
+            "description": "Present (true) only on an async run — the sweep runs in the background."
+          },
+          "scanned": {
+            "type": "integer",
+            "description": "Apollo audiences (provider='apollo', status<>'deprecated') with apollo_audience_id IS NULL."
+          },
+          "wouldBackfill": {
+            "type": "integer",
+            "description": "Audiences that would get a pointer (= scanned on a dry-run)."
+          },
+          "backfilled": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "apolloAudienceId": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "apolloAudienceId",
+                "count"
+              ]
+            },
+            "description": "Per-audience result: the human-service row id, the new apollo-service pointer, and the apollo count. Empty on a dry-run / async."
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "error"
+              ]
+            },
+            "description": "Audiences whose apollo-service build yielded no usable filter set or failed transiently; left untouched, retried on re-run."
+          },
+          "sample": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name"
+              ]
+            },
+            "description": "Per-audience preview (capped) of rows that would be backfilled."
+          }
+        },
+        "required": [
+          "dryRun",
+          "scanned",
+          "wouldBackfill",
+          "backfilled",
           "failed",
           "sample"
         ]
@@ -5204,6 +5320,81 @@
           },
           "502": {
             "description": "chat-service missing config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/backfill-apollo-audience-pointers": {
+      "post": {
+        "summary": "One-time data fix ('one filter vocabulary' Wave 2): for every apollo audience lacking apollo_audience_id, build a faithful Apollo audience via apollo-service from the row's name+description and store the pointer + cached filters + count (idempotent, dry-runnable, async)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', count the apollo audiences missing a pointer + return a sample WITHOUT calling apollo-service or writing. Defaults to false (real run)."
+            },
+            "required": false,
+            "description": "When 'true', count the apollo audiences missing a pointer + return a sample WITHOUT calling apollo-service or writing. Defaults to false (real run).",
+            "name": "dryRun",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', respond 202 immediately and run the sweep in the background (each row triggers apollo-service's agentic refine loop; a whole-table run exceeds an HTTP timeout). Progress is durable per-row + observable via ?dryRun=true. Ignored when dryRun=true."
+            },
+            "required": false,
+            "description": "When 'true', respond 202 immediately and run the sweep in the background (each row triggers apollo-service's agentic refine loop; a whole-table run exceeds an HTTP timeout). Progress is durable per-row + observable via ?dryRun=true. Ignored when dryRun=true.",
+            "name": "async",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Backfill result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillApolloPointersResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Async sweep started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillApolloPointersResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "apollo-service outage / missing config",
             "content": {
               "application/json": {
                 "schema": {
