@@ -410,7 +410,7 @@ const SUGGEST_STATUS = "suggested"; // inactive default for suggest-created rows
 // agentic refine loop; human-service only calls POST /audiences/suggest-from-
 // segment and caches the opaque result.
 const SUGGEST_LLM_PROVIDER = "google" as const;
-const SUGGEST_LLM_MODEL = "flash-pro";
+const SUGGEST_LLM_MODEL = "flash";
 // Layer 1 + description generation are narrow structured JSON tasks → thinking off.
 const SUGGEST_DISABLE_THINKING = true;
 
