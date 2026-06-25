@@ -392,7 +392,7 @@ describe("downstream service headers", () => {
 
       fetchSpy.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ imageBase64: "aGk=", mimeType: "image/png" }),
+        json: async () => ({ url: "https://cdn.test/a.png", mimeType: "image/png" }),
       });
 
       const { generateImage } = await import("../../src/lib/chat-client.js");

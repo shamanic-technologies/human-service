@@ -1378,7 +1378,7 @@
           "avatarUrl": {
             "type": "string",
             "nullable": true,
-            "description": "Audience avatar as a hosted HTTP(S) URL. Legacy data URI rows may exist until the internal avatar backfill converts them. null until generated."
+            "description": "Audience avatar as a hosted HTTP(S) URL. null until generated."
           },
           "apolloCount": {
             "type": "integer",
@@ -2110,7 +2110,7 @@
           },
           "scanned": {
             "type": "integer",
-            "description": "Live audiences (status<>'deprecated') with avatar_url IS NULL or avatar_url starting with data:."
+            "description": "Live audiences (status<>'deprecated') with avatar_url IS NULL."
           },
           "wouldFill": {
             "type": "integer",
@@ -2118,7 +2118,7 @@
           },
           "filled": {
             "type": "integer",
-            "description": "Audiences whose avatar was generated/converted + stored as a hosted URL (0 on a dry-run / async)."
+            "description": "Audiences whose avatar was generated + stored as a hosted URL (0 on a dry-run / async)."
           },
           "failed": {
             "type": "array",
@@ -2141,7 +2141,7 @@
                 "error"
               ]
             },
-            "description": "Audiences whose image generation/upload failed; left null or data:, retried on re-run."
+            "description": "Audiences whose image generation failed; left null and retried on re-run."
           },
           "sample": {
             "type": "array",
@@ -5258,7 +5258,7 @@
     },
     "/internal/backfill-audience-avatars": {
       "post": {
-        "summary": "One-time data fix: store hosted avatar URLs for every live audience whose avatar_url is null or still a data URI — idempotent, dry-runnable, async",
+        "summary": "One-time data fix: store hosted avatar URLs for every live audience whose avatar_url is null — idempotent, dry-runnable, async",
         "security": [
           {
             "apiKey": []
@@ -5272,10 +5272,10 @@
                 "true",
                 "false"
               ],
-              "description": "When 'true', count live audiences missing an avatar or still storing a data URI + return a sample WITHOUT calling chat-service/cloudflare-service or writing. Defaults to false (real run)."
+              "description": "When 'true', count live audiences missing an avatar + return a sample WITHOUT calling chat-service or writing. Defaults to false (real run)."
             },
             "required": false,
-            "description": "When 'true', count live audiences missing an avatar or still storing a data URI + return a sample WITHOUT calling chat-service/cloudflare-service or writing. Defaults to false (real run).",
+            "description": "When 'true', count live audiences missing an avatar + return a sample WITHOUT calling chat-service or writing. Defaults to false (real run).",
             "name": "dryRun",
             "in": "query"
           },
@@ -5319,7 +5319,7 @@
             "description": "Unauthorized"
           },
           "502": {
-            "description": "chat-service/cloudflare-service missing config",
+            "description": "chat-service missing config",
             "content": {
               "application/json": {
                 "schema": {

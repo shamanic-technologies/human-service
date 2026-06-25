@@ -377,7 +377,7 @@ export const audiences = pgTable(
     ),
     // Neutral PeopleSearchFilters shape (maps to both providers).
     filters: jsonb("filters").$type<Record<string, unknown>>(),
-    // Hosted avatar URL. Legacy data URI rows may exist until backfilled.
+    // Hosted avatar URL.
     // Nullable — no avatar yet.
     avatarUrl: text("avatar_url"),
     apolloCount: integer("apollo_count"),
