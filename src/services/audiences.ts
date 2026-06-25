@@ -26,17 +26,13 @@ import {
   type ServedContact,
 } from "./suppression.js";
 import {
-  apolloIndustriesReference,
   dryRun,
-  filtersPrompt,
   peopleSearch,
   resolveEmail,
   toServedContact,
-  ProviderError,
   type Identity,
   type Person,
   type PeopleSearchFilters,
-  type Provider,
 } from "./people-providers.js";
 import {
   completeJson,
@@ -45,7 +41,11 @@ import {
   platformGenerateImage,
   ChatServiceError,
 } from "../lib/chat-client.js";
-import { PeopleSearchFiltersSchema } from "../schemas.js";
+import {
+  suggestApolloAudience,
+  apolloAudienceDryRun,
+  type ApolloFilters,
+} from "../lib/apollo-audiences.js";
 
 // The transaction handle drizzle passes to the `db.transaction` callback.
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -181,13 +181,35 @@ export async function tagAudienceServe(
   }
 }
 
-// Re-snapshot per-provider counts for an audience via the free dry-run (apollo
-// /search/dry-run + apify /search/count, zero credits). Fail loud on provider
+// Re-snapshot an audience's count via the free dry-run. Fail loud on provider
 // error. Returns the updated counts; persistence is the caller's job.
-export async function refreshCounts(
-  filters: PeopleSearchFilters,
+//
+// Pointer model ("one filter vocabulary" Wave 2): an apollo audience counts by
+// POINTER — apollo-service owns the faithful filters, so we ask it to re-count
+// via POST /audiences/{id}/dry-run. Its apifyCount is not meaningful (the audience
+// committed to apollo), so it is left as stored. A legacy/neutral audience (apify,
+// or a pre-pointer apollo row) keeps the dual free dry-run on its stored NEUTRAL
+// filters (apollo /search/dry-run + apify /search/count).
+export async function refreshAudienceCounts(
+  audience: typeof audiences.$inferSelect,
   identity: Identity
-): Promise<{ apolloCount: number; apifyCount: number; countedAt: Date }> {
+): Promise<{
+  apolloCount: number | null;
+  apifyCount: number | null;
+  countedAt: Date;
+}> {
+  if (audience.apolloAudienceId) {
+    const { count } = await apolloAudienceDryRun(
+      audience.apolloAudienceId,
+      identity
+    );
+    return {
+      apolloCount: count,
+      apifyCount: audience.apifyCount,
+      countedAt: new Date(),
+    };
+  }
+  const filters = (audience.filters ?? {}) as PeopleSearchFilters;
   const [apollo, apify] = await Promise.all([
     dryRun({ provider: "apollo", filters, identity }),
     dryRun({ provider: "apify", filters, identity }),
@@ -378,43 +400,18 @@ export async function computeStats(
 // No cost declared here -- chat-service meters the LLM spend; dry-run is free;
 // the DB write is free. The cost invariant holds.
 
-// APOLLO-ONLY (2026-06): apify removed from the suggest fan-out so /suggest no
-// longer creates apify audiences. The collapse + best-provider logic below is
-// unchanged (it just degenerates to a single provider). Restore by re-adding
-// "apify" here. Existing apify audiences are migrated separately via
-// POST /internal/migrate-apify-audiences-to-apollo.
-const SUGGEST_PROVIDERS: Provider[] = ["apollo"];
-const SUGGEST_MAX_ITERATION_ROUNDS = 8; // layer-2 agentic loop bound per (audience, provider)
 const SUGGEST_STATUS = "suggested"; // inactive default for suggest-created rows
 
-// LLM provider/model for the suggest flow. We use Gemini in SCHEMALESS JSON mode
-// (responseMimeType: application/json, no responseSchema) rather than Anthropic:
-// chat-service rejects anthropic JSON mode without a responseSchema, and
-// Anthropic's strict schema requires `additionalProperties:false` + an explicit
-// `properties` map on EVERY object -- which cannot express our open `filters`
-// blob (~16 optional neutral fields) without enumerating + over-constraining it.
-// Gemini's native JSON mode needs no schema, so the shape stays prompt-described
-// + caller-validated.
-//
-// Layer 1 and Layer 2 use `flash-pro`; Layer 2 still leaves thinking enabled
-// because NL->provider-filters is the quality-critical reasoning step.
+// LLM provider/model for LAYER 1 (segment decompose) + the description backfill —
+// the ONLY LLM work human-service still does for audiences. Gemini in JSON mode
+// with a responseSchema (the provider ENFORCES the shape server-side, so the
+// response always parses — no schemaless "non-parsable → 502" flake). Layer 2
+// (NL → faithful-Apollo-filters) NO LONGER runs here: apollo-service owns that
+// agentic refine loop; human-service only calls POST /audiences/suggest-from-
+// segment and caches the opaque result.
 const SUGGEST_LLM_PROVIDER = "google" as const;
 const SUGGEST_LLM_MODEL = "flash-pro";
-const SUGGEST_LAYER2_LLM_MODEL = "flash-pro";
-
-// Gemini structured-output schemas (passed as `responseSchema` so the provider
-// ENFORCES the shape server-side → the response always parses, eliminating the
-// schemaless-JSON "non-parsable → 502" failure that made /suggest flake ~50% of
-// the time). These are GEMINI responseSchemas (a permissive OpenAPI subset) —
-// NOT Anthropic strict schemas, so we don't enumerate `additionalProperties`.
-// The open `filters` blob (#54's reason for going schemaless) IS expressible
-// here: it's a fixed 16-field set. Values are still validated caller-side
-// (PeopleSearchFiltersSchema in dryRunSafe / parseCandidates) — the schema
-// guarantees valid JSON + the action enum, not semantic correctness.
-//
-// Layer 1 and description generation keep `disableThinking`: they are narrow
-// structured JSON tasks. Layer 2 does NOT set it because NL -> provider filters
-// is the quality-critical reasoning step.
+// Layer 1 + description generation are narrow structured JSON tasks → thinking off.
 const SUGGEST_DISABLE_THINKING = true;
 
 const LAYER1_RESPONSE_SCHEMA: Record<string, unknown> = {
@@ -435,240 +432,6 @@ const LAYER1_RESPONSE_SCHEMA: Record<string, unknown> = {
   required: ["audiences"],
 };
 
-const nullable = (schema: Record<string, unknown>): Record<string, unknown> => ({
-  anyOf: [schema, { type: "null" }],
-});
-
-// The 16 neutral PeopleSearchFilters fields (mirrors src/schemas.ts) as a Gemini
-// schema. Every key is required and nullable so the model must explicitly decide
-// value vs null for each available filter surface.
-const FILTERS_RESPONSE_SCHEMA: Record<string, unknown> = {
-  type: "object",
-  properties: {
-    titles: nullable({ type: "array", items: { type: "string" } }),
-    seniorities: nullable({ type: "array", items: { type: "string" } }),
-    functions: nullable({ type: "array", items: { type: "string" } }),
-    locationCountries: nullable({ type: "array", items: { type: "string" } }),
-    locationStates: nullable({ type: "array", items: { type: "string" } }),
-    locationCities: nullable({ type: "array", items: { type: "string" } }),
-    companyNames: nullable({ type: "array", items: { type: "string" } }),
-    companyDomains: nullable({ type: "array", items: { type: "string" } }),
-    industries: nullable({ type: "array", items: { type: "string" } }),
-    keywords: nullable({ type: "array", items: { type: "string" } }),
-    employeeMin: nullable({ type: "integer" }),
-    employeeMax: nullable({ type: "integer" }),
-    companySizes: nullable({ type: "array", items: { type: "string" } }),
-    revenueRanges: nullable({ type: "array", items: { type: "string" } }),
-    fundingStages: nullable({ type: "array", items: { type: "string" } }),
-    technologies: nullable({ type: "array", items: { type: "string" } }),
-  },
-  required: [
-    "titles",
-    "seniorities",
-    "functions",
-    "locationCountries",
-    "locationStates",
-    "locationCities",
-    "companyNames",
-    "companyDomains",
-    "industries",
-    "keywords",
-    "employeeMin",
-    "employeeMax",
-    "companySizes",
-    "revenueRanges",
-    "fundingStages",
-    "technologies",
-  ],
-};
-
-// Layer-2 agentic action. `filters` only meaningful for action:"test", `reason`
-// only for "exhausted" — both kept optional (Gemini has no clean discriminated
-// union); parseLayer2Action handles the conditional caller-side. Used by the
-// APIFY branch (its filters-prompt already embeds apify's native vocab in the
-// neutral field names). Apollo uses APOLLO_LAYER2_RESPONSE_SCHEMA below.
-const LAYER2_RESPONSE_SCHEMA: Record<string, unknown> = {
-  type: "object",
-  properties: {
-    action: { type: "string", enum: ["test", "confirm", "exhausted"] },
-    filters: FILTERS_RESPONSE_SCHEMA,
-    reasoning: { type: "string" },
-    reason: { type: "string" },
-  },
-  required: ["action"],
-};
-
-// --- Apollo-native Layer-2 vocabulary ---
-//
-// The apollo Layer-2 LLM speaks Apollo's OWN people-search filter field names
-// directly, NOT the neutral PeopleSearchFilters. Reason: the previous design told
-// the LLM to emit neutral fields (`revenueRanges`, `employeeMin/Max`) while
-// injecting Apollo's authoritative rulebook (which documents `revenueRange`,
-// `organizationNumEmployeesRanges` enum) + a "use only values verbatim from the
-// rules" rule — two conflicting vocabularies. flash-pro obeyed the authoritative
-// rulebook, couldn't find `revenueRanges` there → dropped revenue; and Apollo's
-// employee-bucket enums look like the neutral `companySizes` array → double-
-// encoded size. Speaking ONE vocabulary (Apollo's) removes the conflict.
-//
-// apolloDslToNeutral() maps the LLM output back to the neutral blob the rest of
-// the pipeline (dry-run, storage, serve-next, stats) already uses — so this is a
-// surface-only change; nothing downstream of refineFilters moves.
-//
-// qKeywords is a single free-text string (Apollo's OR/AND syntax); every other
-// field is a string[]. Each is nullable+required so the model must explicitly
-// decide value-vs-null per field (no silent omission).
-const APOLLO_LAYER2_ARRAY_FIELDS = [
-  "personTitles",
-  "personSeniorities",
-  "qOrganizationIndustryTagIds",
-  "organizationNumEmployeesRanges",
-  "revenueRange",
-  "personLocations",
-  "organizationLocations",
-  "qOrganizationDomains",
-  "currentlyUsingAnyOfTechnologyUids",
-] as const;
-// Full field list (array fields + the single string field qKeywords), in prompt /
-// schema / rationale order.
-const APOLLO_LAYER2_FIELDS = [
-  ...APOLLO_LAYER2_ARRAY_FIELDS,
-  "qKeywords",
-] as const;
-
-const apolloFieldSchema = (field: string): Record<string, unknown> =>
-  field === "qKeywords"
-    ? nullable({ type: "string" })
-    : nullable({ type: "array", items: { type: "string" } });
-
-const APOLLO_FILTERS_RESPONSE_SCHEMA: Record<string, unknown> = {
-  type: "object",
-  properties: Object.fromEntries(
-    APOLLO_LAYER2_FIELDS.map((f) => [f, apolloFieldSchema(f)])
-  ),
-  required: [...APOLLO_LAYER2_FIELDS],
-};
-
-// One short (5-10 word) justification per filter field — value OR null — so the
-// LLM must consciously decide every field and we can SEE why a field was left
-// null (logged each round). Debug aid; safe to remove once filter quality holds.
-const APOLLO_RATIONALE_RESPONSE_SCHEMA: Record<string, unknown> = {
-  type: "object",
-  properties: Object.fromEntries(
-    APOLLO_LAYER2_FIELDS.map((f) => [f, { type: "string" }])
-  ),
-  required: [...APOLLO_LAYER2_FIELDS],
-};
-
-const APOLLO_LAYER2_RESPONSE_SCHEMA: Record<string, unknown> = {
-  type: "object",
-  properties: {
-    action: { type: "string", enum: ["test", "confirm", "exhausted"] },
-    filters: APOLLO_FILTERS_RESPONSE_SCHEMA,
-    filterRationale: APOLLO_RATIONALE_RESPONSE_SCHEMA,
-    reasoning: { type: "string" },
-    reason: { type: "string" },
-  },
-  required: ["action"],
-};
-
-function layer2ResponseSchema(provider: Provider): Record<string, unknown> {
-  return provider === "apollo"
-    ? APOLLO_LAYER2_RESPONSE_SCHEMA
-    : LAYER2_RESPONSE_SCHEMA;
-}
-
-// Coerce an LLM array field to a clean string[] (drop non-strings / blanks).
-function asStringArray(v: unknown): string[] | undefined {
-  if (!Array.isArray(v)) return undefined;
-  const out = v
-    .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
-    .map((s) => s.trim());
-  return out.length ? out : undefined;
-}
-
-// Parse Apollo employee-range bucket strings ("1,10", "51,100", open-ended
-// "10001,") into a neutral [min,max] window. The neutral->apollo mapper
-// (apolloEmployeeRanges) expands the window back to the covering buckets at
-// dry-run time, so the round-trip is faithful for contiguous bucket selections.
-// An open-ended bucket ("N,") leaves employeeMax unset (no upper bound).
-function apolloEmployeeBucketsToMinMax(buckets: string[]): {
-  employeeMin?: number;
-  employeeMax?: number;
-} {
-  let min: number | undefined;
-  let max: number | undefined;
-  let openMax = false;
-  for (const b of buckets) {
-    const [loStr, hiStr] = b.split(",");
-    const lo = Number.parseInt(loStr ?? "", 10);
-    if (Number.isFinite(lo)) min = min === undefined ? lo : Math.min(min, lo);
-    if (hiStr === undefined || hiStr.trim() === "") {
-      openMax = true;
-      continue;
-    }
-    const hi = Number.parseInt(hiStr, 10);
-    if (Number.isFinite(hi)) max = max === undefined ? hi : Math.max(max, hi);
-  }
-  return { employeeMin: min, employeeMax: openMax ? undefined : max };
-}
-
-// Map the Apollo-native Layer-2 LLM output to the neutral PeopleSearchFilters the
-// rest of the pipeline stores + serves on. The dry-run / serve-next paths convert
-// neutral->apollo again via the existing toApolloSearchParams, so this is the
-// inverse of that single mapper. Defensive (won't throw on a malformed field —
-// it just drops it; the neutral schema validation in dryRunSafe is the gate).
-function apolloDslToNeutral(raw: Record<string, unknown>): PeopleSearchFilters {
-  const f: PeopleSearchFilters = {};
-  const titles = asStringArray(raw.personTitles);
-  if (titles) f.titles = titles;
-  const seniorities = asStringArray(raw.personSeniorities);
-  if (seniorities) f.seniorities = seniorities;
-  const industries = asStringArray(raw.qOrganizationIndustryTagIds);
-  if (industries) f.industries = industries;
-  const revenue = asStringArray(raw.revenueRange);
-  if (revenue) f.revenueRanges = revenue;
-  const domains = asStringArray(raw.qOrganizationDomains);
-  if (domains) f.companyDomains = domains;
-  const technologies = asStringArray(raw.currentlyUsingAnyOfTechnologyUids);
-  if (technologies) f.technologies = technologies;
-  // Apollo flattens person + org HQ location into one `personLocations`; the
-  // neutral mapper concatenates locationCountries back into personLocations, so
-  // collapse both apollo location fields into locationCountries here.
-  const locations = [
-    ...(asStringArray(raw.personLocations) ?? []),
-    ...(asStringArray(raw.organizationLocations) ?? []),
-  ];
-  if (locations.length) f.locationCountries = locations;
-  const buckets = asStringArray(raw.organizationNumEmployeesRanges);
-  if (buckets) {
-    const { employeeMin, employeeMax } = apolloEmployeeBucketsToMinMax(buckets);
-    if (employeeMin !== undefined) f.employeeMin = employeeMin;
-    if (employeeMax !== undefined) f.employeeMax = employeeMax;
-  }
-  // qKeywords is Apollo's single free-text field with OR/AND syntax; neutral
-  // `keywords[]` is joined back with " OR " by the neutral->apollo mapper.
-  if (typeof raw.qKeywords === "string" && raw.qKeywords.trim()) {
-    const kws = raw.qKeywords
-      .split(/\s+OR\s+/i)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (kws.length) f.keywords = kws;
-  }
-  return f;
-}
-
-// Convert a Layer-2 LLM filter object to the neutral shape. Apollo speaks its own
-// DSL (mapped here); apify already emits neutral fields (its filters-prompt embeds
-// apify's accepted values under the neutral names).
-function toNeutralFilters(
-  provider: Provider,
-  raw: Record<string, unknown>
-): PeopleSearchFilters {
-  return provider === "apollo"
-    ? apolloDslToNeutral(raw)
-    : (raw as PeopleSearchFilters);
-}
-
 const DESCRIPTION_RESPONSE_SCHEMA: Record<string, unknown> = {
   type: "object",
   properties: { description: { type: "string" } },
@@ -679,10 +442,18 @@ export interface AudienceCandidate {
   audienceId: string;
   name: string;
   rationale: string;
-  provider: Provider;
-  filters: PeopleSearchFilters;
+  // Pointer model: a suggested candidate always commits to apollo (apollo-service
+  // owns the faithful filters). `apolloAudienceId` is the apollo-service pointer.
+  provider: "apollo";
+  apolloAudienceId: string;
+  // The faithful Apollo filter object (opaque — apollo-service owns its shape),
+  // cached on the persisted row + echoed back here.
+  filters: ApolloFilters;
   count: number;
   status: string;
+  // Retained for response-shape stability. apollo-service confirms a real audience
+  // (or fails loud), so a returned candidate never carries a validation error and
+  // is never truncated — always null / false.
   validationError: string | null;
   truncated: boolean;
 }
@@ -840,367 +611,6 @@ export async function generateAudienceDescription(args: {
   return description.trim();
 }
 
-// --- Layer 2: per (audience, provider) agentic filter-refinement loop ---
-
-// Count a filter set via the FREE dry-run. A provider 4xx means the filters are
-// invalid (LLM's fault -> feed back to revise); a 5xx / network / config error is
-// a real outage -> rethrow (fail loud). NOT a swallow: the 4xx IS the validation
-// signal the loop consumes.
-async function dryRunSafe(
-  provider: Provider,
-  filters: PeopleSearchFilters,
-  identity: Identity
-): Promise<{ count: number; validationError: string | null }> {
-  // The LLM proposes the filter shape blind; validate it against the neutral
-  // filters schema BEFORE the provider call. A bad shape (e.g. `keywords` as a
-  // string instead of string[], or a non-enum seniority) is the LLM's fault and
-  // is fed back into the loop via the SAME validationError channel as a provider
-  // 4xx -- never a crash, never a silent coercion.
-  const parsed = PeopleSearchFiltersSchema.safeParse(stripNullFilters(filters));
-  if (!parsed.success) {
-    const issues = parsed.error.issues
-      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
-      .join("; ");
-    return { count: 0, validationError: `Invalid filter shape: ${issues}` };
-  }
-  try {
-    const { totalEntries } = await dryRun({
-      provider,
-      filters: parsed.data,
-      identity,
-    });
-    return { count: totalEntries, validationError: null };
-  } catch (err) {
-    if (err instanceof ProviderError && err.status >= 400 && err.status < 500) {
-      return { count: 0, validationError: err.message };
-    }
-    throw err;
-  }
-}
-
-// Shared multi-turn loop + count-judgment instructions (identical for both
-// providers). `withRationale` adds the filterRationale key to the TEST example.
-function layer2LoopAndCountInstructions(withRationale: boolean): string[] {
-  return [
-    "You operate in a MULTI-TURN loop. Each turn respond with EXACTLY ONE JSON",
-    "object (no prose, no markdown):",
-    "- TEST a filter set (server replies with its live match count):",
-    withRationale
-      ? '  {"action":"test","filters":{ ... },"filterRationale":{ ... },"reasoning":"<one sentence>"}'
-      : '  {"action":"test","filters":{ ... },"reasoning":"mapped constraints: ...; unfilterable: ..."}',
-    "- CONFIRM the last tested set when you are SATISFIED its count is a healthy,",
-    '  well-targeted audience for this segment: {"action":"confirm","reasoning":"why the last tested filters cover the target audience"}',
-    "- EXHAUSTED if no valid in-scope filter set yields a usable audience:",
-    '  {"action":"exhausted","reason":"<why>"}',
-    "",
-    "JUDGE THE COUNT YOURSELF: aim for a focused, addressable audience -- roughly",
-    "500 to 50,000 people is a healthy band for a B2B segment. Far below ~200 is",
-    "too narrow (a typo'd title, an over-constrained set, or a dropped enum value)",
-    "-> broaden or fix the vocabulary and test again. In the hundreds-of-thousands",
-    "or millions is too loose (under-targeted) -> add a discriminating constraint",
-    "and test again. A count inside the band that faithfully matches the segment",
-    "-> confirm. These are guides, not hard limits: a genuinely niche segment may",
-    "legitimately sit under 200 -- confirm it rather than widening beyond scope.",
-    "Iterate as many test rounds as you need before confirming. Stay STRICTLY",
-    "within the segment description -- never widen beyond its titles/geography/",
-    "company traits. If a test returns a validation error, propose corrected",
-    "filters; NEVER confirm a set with unresolved validation errors.",
-  ];
-}
-
-// Apollo-native Layer-2 prompt. The model reasons in Apollo's OWN filter
-// vocabulary (one vocabulary, no neutral/apify noise) with maximum clarity on
-// each field's type, enum values, and range/format. apolloDslToNeutral maps the
-// output back to the neutral blob the pipeline stores.
-function buildApolloLayer2SystemPrompt(
-  rules: string,
-  industriesVocab?: string[]
-): string {
-  return [
-    "You are an expert Apollo people-search audience builder. Translate ONE",
-    "self-contained target audience into the strongest valid Apollo people-search",
-    "filters.",
-    "",
-    "The TARGET AUDIENCE description is the full source of truth. Do not use the",
-    "original user prompt. Do not expect any caller-side patching after your",
-    "answer.",
-    "",
-    "CRITICAL RULE: every filterable constraint in TARGET AUDIENCE must be either:",
-    "1. represented in filters, or",
-    "2. explicitly justified as unfilterable in its filterRationale.",
-    "",
-    "Do not produce title-only filters when TARGET AUDIENCE contains company,",
-    "industry, employee count, revenue, geography, technology, or intent",
-    "constraints. Title-only is valid only when the segment itself contains no",
-    "filterable company or market constraints.",
-    "",
-    "APOLLO FILTER RULES (authoritative -- field names, types, accepted values):",
-    rules,
-    ...(industriesVocab && industriesVocab.length > 0
-      ? [
-          "",
-          "CANONICAL INDUSTRIES (the ONLY accepted values for",
-          "qOrganizationIndustryTagIds -- pick the closest one or more; never use",
-          "an industry name not in this list):",
-          industriesVocab.join(", ") + ".",
-        ]
-      : []),
-    "",
-    'Your "filters" object MUST use ONLY these exact Apollo field names, and MUST',
-    "include EVERY one of them (use null for any you do not use):",
-    "- personTitles: string[] -- job titles, free text (e.g. [\"Founder\",\"Head of Growth\"]).",
-    "- personSeniorities: string[] -- ENUM, copy verbatim from the rules (entry,",
-    "  senior, manager, director, vp, c_suite, owner, founder, partner).",
-    "- qOrganizationIndustryTagIds: string[] -- ENUM, copy verbatim from the",
-    "  CANONICAL INDUSTRIES list ONLY.",
-    "- organizationNumEmployeesRanges: string[] -- ENUM buckets, copy verbatim",
-    "  from the rules (e.g. \"1,10\",\"11,20\"). You CANNOT write an arbitrary range",
-    "  like \"1,50\"; instead select EVERY bucket that overlaps the target span",
-    "  (e.g. 1-50 employees -> [\"1,10\",\"11,20\",\"21,50\"]; 10-100 ->",
-    "  [\"1,10\",\"11,20\",\"21,50\",\"51,100\"]).",
-    "- revenueRange: string[] -- annual revenue as \"min,max\" DOLLAR strings you",
-    "  CONSTRUCT (not looked up in the rules): e.g. under $2M -> [\"0,2000000\"];",
-    "  $1M-$10M -> [\"1000000,10000000\"]. Open-ended max: \"2000000,\" means $2M+.",
-    "- qKeywords: string -- a SINGLE free-text query across person + org fields,",
-    "  Apollo OR/AND syntax (e.g. \"SaaS OR digital product\"). Use for market /",
-    "  intent terms (B2B, SaaS, Reddit marketing, social listening, organic",
-    "  acquisition, bootstrapped, seed-stage, digital product) when stated.",
-    "- personLocations: string[] -- person location (e.g. [\"United States\"]).",
-    "- organizationLocations: string[] -- company HQ location.",
-    "- qOrganizationDomains: string[] -- specific company domains.",
-    "- currentlyUsingAnyOfTechnologyUids: string[] -- technology stack.",
-    "",
-    "VOCABULARY IS EXACT for the ENUM fields ONLY (personSeniorities,",
-    "qOrganizationIndustryTagIds, organizationNumEmployeesRanges): copy values",
-    "character-for-character from the rules / industries list -- an unrecognized",
-    "enum value is silently dropped by Apollo and under-matches. The other fields",
-    "are values you CONSTRUCT (personTitles, qKeywords, revenueRange dollar",
-    "strings, locations, domains, technologies) -- never drop a stated constraint just because it is not perfect.",
-    "",
-    "filterRationale: for EVERY field above give ONE short (5-10 word) reason for",
-    "your choice -- the value you put OR why you left it null. Mandatory: a field",
-    "with no rationale is an error.",
-    "",
-    ...layer2LoopAndCountInstructions(true),
-  ].join("\n");
-}
-
-// apify Layer-2 prompt (neutral PeopleSearchFilters vocabulary). apify's own
-// filters-prompt already embeds its accepted values under the neutral field
-// names, so apify keeps the neutral contract. Inert under APOLLO-ONLY /suggest;
-// reached only if apify is restored to SUGGEST_PROVIDERS.
-function buildApifyLayer2SystemPrompt(rules: string): string {
-  return [
-    "You build a apify people-search audience for ONE target segment. Translate",
-    "the self-contained TARGET AUDIENCE into the strongest valid apify filters.",
-    "",
-    "The TARGET AUDIENCE description is the full source of truth. Do not use the",
-    "original user prompt. Do not expect any caller-side patching after your",
-    "answer.",
-    "",
-    "CRITICAL RULE: every filterable constraint in TARGET AUDIENCE must be either",
-    "represented in filters or explicitly marked unfilterable in reasoning.",
-    "",
-    "PROVIDER FILTER RULES (authoritative -- only these values are valid):",
-    rules,
-    "",
-    'Your "filters" MUST include EVERY neutral field below. Use null for fields',
-    "you do not use:",
-    "titles[], seniorities[] (one of: entry, senior, manager, director, vp,",
-    "c_suite, owner, founder, partner), functions[], locationCountries[],",
-    "locationStates[], locationCities[], companyNames[], companyDomains[],",
-    "industries[], keywords[], employeeMin (int), employeeMax (int),",
-    "companySizes[], revenueRanges[], fundingStages[], technologies[].",
-    "",
-    "VOCABULARY IS EXACT for enum-constrained fields (seniorities, functions,",
-    "industries, companySizes, revenueRanges, fundingStages): use ONLY values that",
-    "appear verbatim in the rules above. Free-text fields accept any string.",
-    "",
-    ...layer2LoopAndCountInstructions(false),
-  ].join("\n");
-}
-
-function buildLayer2SystemPrompt(
-  provider: Provider,
-  rules: string,
-  industriesVocab?: string[]
-): string {
-  return provider === "apollo"
-    ? buildApolloLayer2SystemPrompt(rules, industriesVocab)
-    : buildApifyLayer2SystemPrompt(rules);
-}
-
-interface RefineResult {
-  filters: PeopleSearchFilters;
-  count: number;
-  validationError: string | null;
-}
-
-type Layer2Action =
-  | { type: "test"; filters: Record<string, unknown> }
-  | { type: "confirm" }
-  | { type: "exhausted"; reason: string }
-  | { type: "unknown" };
-
-function stripNullFilters(filters: unknown): Record<string, unknown> {
-  if (!filters || typeof filters !== "object" || Array.isArray(filters)) return {};
-  return Object.fromEntries(
-    Object.entries(filters).filter(([, value]) => value !== null)
-  );
-}
-
-function parseLayer2Action(obj: Record<string, unknown>): Layer2Action {
-  const action = typeof obj.action === "string" ? obj.action : "";
-  if (action === "exhausted") {
-    return {
-      type: "exhausted",
-      reason:
-        typeof obj.reason === "string"
-          ? obj.reason
-          : "LLM declared exhausted with no reason",
-    };
-  }
-  if (action === "confirm") return { type: "confirm" };
-  if (action === "test") {
-    if (
-      obj.filters &&
-      typeof obj.filters === "object" &&
-      !Array.isArray(obj.filters)
-    ) {
-      return { type: "test", filters: obj.filters as Record<string, unknown> };
-    }
-  }
-  return { type: "unknown" };
-}
-
-async function refineFilters(
-  provider: Provider,
-  segment: Segment,
-  identity: Identity,
-  // When true, route the layer-2 LLM calls through chat-service's ORG-LESS
-  // platform path (platformCompleteJson) instead of the org-billed /complete.
-  // Used by the apify→apollo migration: re-deriving filters for a migration we
-  // owe users must NOT bill their orgs (same rationale as the description
-  // backfill). The apollo dry-run / filters-prompt / industries calls STILL use
-  // `identity` (apollo needs org+user for key resolution) — only the LLM is
-  // platform-routed. Default false (the /suggest flow bills the org as before).
-  opts: { usePlatformLLM?: boolean } = {}
-): Promise<RefineResult> {
-  const rules = (await filtersPrompt({ provider, identity })).prompt;
-  // apollo's industries filter is free-text against a hidden canonical taxonomy;
-  // inject the authoritative list so the LLM can only pick matchable values.
-  // apify already embeds its accepted values in its own filters-prompt.
-  const industriesVocab =
-    provider === "apollo"
-      ? await apolloIndustriesReference({ identity })
-      : undefined;
-  const systemPrompt = buildLayer2SystemPrompt(provider, rules, industriesVocab);
-  const transcript: string[] = [
-    [
-      "TARGET AUDIENCE:",
-      `name: ${segment.name}`,
-      `description: ${segment.description}`,
-      "",
-      `Propose your first "test" filter set for ${provider}.`,
-    ].join("\n"),
-  ];
-
-  let lastFilters: PeopleSearchFilters | null = null;
-  let lastCleanCount = 0; // count of the last test that had NO validation error
-  let lastValidationError: string | null = null;
-  let lastHadError = false;
-
-  for (let round = 0; round < SUGGEST_MAX_ITERATION_ROUNDS; round++) {
-    const llmArgs = {
-      message: transcript.join("\n\n---\n\n"),
-      systemPrompt,
-      provider: SUGGEST_LLM_PROVIDER,
-      model: SUGGEST_LAYER2_LLM_MODEL,
-      responseSchema: layer2ResponseSchema(provider),
-    };
-    const raw = opts.usePlatformLLM
-      ? await platformCompleteJson(llmArgs)
-      : await completeJson({ ...llmArgs, identity });
-    // Debug visibility: log the model's per-field justification so we can SEE why
-    // a filter was set or left null (the previous single `reasoning` blob was
-    // never surfaced). Removable once filter quality is confirmed.
-    if (raw.filterRationale && typeof raw.filterRationale === "object") {
-      console.log(
-        `[human-service] audience.suggest layer2 ${provider} round ${round + 1} rationale:`,
-        JSON.stringify(raw.filterRationale)
-      );
-    }
-    const action = parseLayer2Action(raw);
-
-    if (action.type === "exhausted") {
-      // Best-effort: if a clean filter set was tested before giving up, return it
-      // (honest count); otherwise surface count 0 + the reason.
-      if (lastFilters && !lastHadError) {
-        return {
-          filters: lastFilters,
-          count: lastCleanCount,
-          validationError: null,
-        };
-      }
-      return {
-        filters: lastFilters ?? {},
-        count: 0,
-        validationError: lastValidationError ?? action.reason,
-      };
-    }
-
-    if (action.type === "confirm") {
-      if (!lastFilters || lastHadError) {
-        transcript.push(
-          `Round ${round + 1}: confirm rejected -- you must TEST a valid filter set (no validation errors) before confirming.`
-        );
-        continue;
-      }
-      return {
-        filters: lastFilters,
-        count: lastCleanCount,
-        validationError: null,
-      };
-    }
-
-    if (action.type === "test") {
-      // The LLM speaks Apollo's native vocabulary (apify: the neutral one); map
-      // to the neutral PeopleSearchFilters the pipeline stores + dry-runs on. The
-      // transcript echoes the RAW (provider-native) filters back so the model
-      // sees its own vocabulary, while `lastFilters` keeps the neutral shape.
-      const rawFilters = stripNullFilters(action.filters);
-      const filters = toNeutralFilters(provider, rawFilters);
-      const r = await dryRunSafe(provider, filters, identity);
-      lastFilters = filters;
-      if (r.validationError) {
-        lastHadError = true;
-        lastValidationError = r.validationError;
-        transcript.push(
-          `Round ${round + 1}: filters=${JSON.stringify(rawFilters)} -> REJECTED as invalid: ${r.validationError}. Propose corrected filters, or declare exhausted.`
-        );
-      } else {
-        lastHadError = false;
-        lastValidationError = null;
-        lastCleanCount = r.count;
-        transcript.push(
-          `Round ${round + 1}: filters=${JSON.stringify(rawFilters)} -> count=${r.count}. Confirm this set, test another, or declare exhausted.`
-        );
-      }
-      continue;
-    }
-
-    transcript.push(
-      `Round ${round + 1}: unrecognized response. Reply with exactly one JSON action: test, confirm, or exhausted.`
-    );
-  }
-
-  // Iteration budget exhausted -- return the best clean effort, else honest 0.
-  if (lastFilters && !lastHadError) {
-    return { filters: lastFilters, count: lastCleanCount, validationError: null };
-  }
-  return { filters: lastFilters ?? {}, count: 0, validationError: lastValidationError };
-}
-
 // --- Persist a collapsed audience at status "suggested" (inactive) ---
 //
 // Unique per (org_id, brand_id, lower(name)). On a name collision: refresh the
@@ -1212,15 +622,11 @@ async function persistSuggestedAudience(args: {
   brandId: string;
   nlPrompt: string;
   segment: Segment;
-  provider: Provider;
-  filters: PeopleSearchFilters;
+  apolloAudienceId: string;
+  filters: ApolloFilters;
   count: number;
 }): Promise<string> {
   const orgId = args.identity.orgId;
-  const countCols =
-    args.provider === "apollo"
-      ? { apolloCount: args.count }
-      : { apifyCount: args.count };
   return db.transaction(async (tx) => {
     const [existing] = await tx
       .select()
@@ -1239,9 +645,10 @@ async function persistSuggestedAudience(args: {
         await tx
           .update(audiences)
           .set({
-            provider: args.provider,
+            provider: "apollo",
+            apolloAudienceId: args.apolloAudienceId,
             filters: args.filters as Record<string, unknown>,
-            ...countCols,
+            apolloCount: args.count,
             countedAt: new Date(),
             nlPrompt: args.nlPrompt,
             description: args.segment.description,
@@ -1260,10 +667,11 @@ async function persistSuggestedAudience(args: {
         name: args.segment.name,
         nlPrompt: args.nlPrompt,
         description: args.segment.description,
-        provider: args.provider,
+        provider: "apollo",
+        apolloAudienceId: args.apolloAudienceId,
         status: SUGGEST_STATUS,
         filters: args.filters as Record<string, unknown>,
-        ...countCols,
+        apolloCount: args.count,
         countedAt: new Date(),
         createdByUserId: args.identity.userId ?? null,
       })
@@ -1273,11 +681,14 @@ async function persistSuggestedAudience(args: {
 }
 
 // Turn a natural-language prompt into a set of PERSISTED candidate audiences.
-// Layer 1 decomposes the NL into named segments; layer 2 builds + refines each
-// segment's filters per provider (agentic loop); we collapse to the higher-count
-// provider per segment and persist each at status "suggested" (inactive). Fail
-// loud: a provider/chat outage propagates (502). The caller activates chosen ids
-// via PATCH /orgs/audiences/{id}/status.
+// Layer 1 (human-service) decomposes the NL into named segments; per segment we
+// ask apollo-service to BUILD + COUNT a faithful Apollo audience (it owns the
+// NL→faithful-Apollo-filters agentic refine loop now). human-service stores only
+// the POINTER (apollo_audience_id) + a cache of the opaque filters + the count,
+// at status "suggested" (inactive). Best-provider collapse degenerates to apollo
+// (apify is inert). Fault-tolerant: one segment's apollo-service failure doesn't
+// nuke the batch (allSettled); FAIL LOUD only when EVERY segment failed (502).
+// The caller activates chosen ids via PATCH /orgs/audiences/{id}/status.
 export async function suggestAudiences(
   nlPrompt: string,
   brandId: string,
@@ -1285,48 +696,26 @@ export async function suggestAudiences(
 ): Promise<AudienceCandidate[]> {
   const segments = await decomposeSegments(nlPrompt, identity);
 
-  // Layer 2 + collapse, per segment. Segments run concurrently; the two providers
-  // within a segment run concurrently too. Both fan-outs are FAULT-TOLERANT
-  // (allSettled): one provider's outage doesn't drop the other's good result for
-  // that segment, and one segment's total failure doesn't nuke the whole batch.
-  // We still FAIL LOUD when there's nothing to return — if every segment failed,
-  // the first error propagates (502) rather than a misleading empty success.
+  // One apollo-service call per segment, concurrent + fault-tolerant.
   const settled = await Promise.allSettled(
     segments.map(async (segment) => {
-      const perProviderSettled = await Promise.allSettled(
-        SUGGEST_PROVIDERS.map(async (provider) => ({
-          provider,
-          ...(await refineFilters(provider, segment, identity)),
-        }))
-      );
-      const perProvider = perProviderSettled
-        .filter((r): r is PromiseFulfilledResult<{ provider: Provider } & RefineResult> =>
-          r.status === "fulfilled"
-        )
-        .map((r) => r.value);
-      // Both providers errored for this segment — surface it (the segment fails;
-      // the outer allSettled keeps the other segments).
-      if (perProvider.length === 0) {
-        throw (perProviderSettled.find((r) => r.status === "rejected") as
-          | PromiseRejectedResult
-          | undefined)?.reason ?? new Error("both providers failed");
-      }
-      // Pick the larger count; reduce keeps the incumbent on a tie, and apollo is
-      // first in SUGGEST_PROVIDERS, so (when both succeeded) ties resolve to apollo.
-      const winner = perProvider.reduce((best, cur) =>
-        cur.count > best.count ? cur : best
-      );
-      return { segment, winner };
+      const apollo = await suggestApolloAudience({
+        name: segment.name,
+        description: segment.description,
+        brandId,
+        identity,
+      });
+      return { segment, apollo };
     })
   );
 
-  const collapsed = settled
+  const ok = settled
     .filter(
       (
         r
       ): r is PromiseFulfilledResult<{
         segment: Segment;
-        winner: { provider: Provider } & RefineResult;
+        apollo: Awaited<ReturnType<typeof suggestApolloAudience>>;
       }> => r.status === "fulfilled"
     )
     .map((r) => r.value);
@@ -1341,32 +730,33 @@ export async function suggestAudiences(
     );
   }
   // Nothing survived — fail loud with the first underlying error.
-  if (collapsed.length === 0 && segments.length > 0) {
+  if (ok.length === 0 && segments.length > 0) {
     throw failures[0]?.reason ?? new ChatServiceError(502, "all segments failed");
   }
 
   // Persist sequentially (one row per segment; names are distinct, so no
   // intra-request collision; the unique index guards cross-request races).
   const out: AudienceCandidate[] = [];
-  for (const { segment, winner } of collapsed) {
+  for (const { segment, apollo } of ok) {
     const audienceId = await persistSuggestedAudience({
       identity,
       brandId,
       nlPrompt,
       segment,
-      provider: winner.provider,
-      filters: winner.filters,
-      count: winner.count,
+      apolloAudienceId: apollo.apolloAudienceId,
+      filters: apollo.filters,
+      count: apollo.count,
     });
     out.push({
       audienceId,
       name: segment.name,
       rationale: segment.description,
-      provider: winner.provider,
-      filters: winner.filters,
-      count: winner.count,
+      provider: "apollo",
+      apolloAudienceId: apollo.apolloAudienceId,
+      filters: apollo.filters,
+      count: apollo.count,
       status: SUGGEST_STATUS,
-      validationError: winner.validationError,
+      validationError: null,
       truncated: false,
     });
   }
@@ -1387,17 +777,21 @@ export interface ApifyToApolloMigrationResult {
   apolloCount: number;
 }
 
-// Re-derive an equivalent APOLLO audience for one apify audience and retire the
-// apify one. The apify filters are NOT copied — each provider's layer-2 loop
-// tunes the neutral filter set differently (esp. apollo `industries`, a hidden
-// LinkedIn taxonomy vs apify free-text), so we re-run the agentic refine FOR
-// apollo (LLM via the platform path — no org bill; apollo dry-runs via the
-// audience's own creator identity). Then, atomically: deprecate + rename the
-// apify row (freeing the unique name) and insert a new apollo audience that
-// MIRRORS the source status (an active apify audience becomes an active apollo
-// one; a suggested one stays suggested). Returns null when apollo refinement
-// yields no usable filter set — the caller logs + skips, leaving the apify row
-// untouched (retried on re-run).
+// Build an equivalent APOLLO audience for one apify audience and retire the apify
+// one. The apify filters are NOT copied — apollo-service builds the faithful
+// Apollo audience from the row's name + description via its own NL→faithful-
+// filters refine loop (POST /audiences/suggest-from-segment) and returns the
+// pointer + opaque filters + count. Then, atomically: deprecate + rename the apify
+// row (freeing the unique name) and insert a new apollo audience storing that
+// POINTER + cached filters + count, MIRRORING the source status (an active apify
+// audience becomes an active apollo one; a suggested one stays suggested). Returns
+// null when apollo-service yields no usable filter set — the caller logs + skips,
+// leaving the apify row untouched (retried on re-run).
+//
+// NOTE: apollo-service's suggest endpoint is org-scoped (the LLM cost it incurs
+// is owned + metered by apollo-service/chat-service against this row's org). The
+// prior platform-LLM path is gone with the in-human-service Layer-2 loop; this
+// is a one-time admin sweep over a small set of rows.
 export async function migrateApifyAudienceToApollo(
   row: typeof audiences.$inferSelect
 ): Promise<ApifyToApolloMigrationResult | null> {
@@ -1405,17 +799,13 @@ export async function migrateApifyAudienceToApollo(
     orgId: row.orgId,
     userId: row.createdByUserId ?? undefined,
   };
-  const segment: Segment = {
+  const built = await suggestApolloAudience({
     name: row.name,
     description: row.description ?? row.name,
-  };
-  const refined = await refineFilters(
-    "apollo",
-    segment,
+    brandId: row.brandId,
     identity,
-    { usePlatformLLM: true }
-  );
-  if (!refined.filters || Object.keys(refined.filters).length === 0) {
+  });
+  if (!built.filters || Object.keys(built.filters).length === 0) {
     return null;
   }
 
@@ -1440,10 +830,11 @@ export async function migrateApifyAudienceToApollo(
         nlPrompt: row.nlPrompt,
         description: row.description,
         provider: "apollo",
+        apolloAudienceId: built.apolloAudienceId,
         status: row.status,
         source: MIGRATED_FROM_APIFY_SOURCE,
-        filters: refined.filters as Record<string, unknown>,
-        apolloCount: refined.count,
+        filters: built.filters as Record<string, unknown>,
+        apolloCount: built.count,
         countedAt: new Date(),
         createdByUserId: row.createdByUserId,
       })
@@ -1461,9 +852,61 @@ export async function migrateApifyAudienceToApollo(
       apolloAudienceId: apollo.id,
       name: row.name,
       status: row.status,
-      apolloCount: refined.count,
+      apolloCount: built.count,
     };
   });
+}
+
+// --- Apollo-audience-pointer backfill (one-time) ---
+//
+// Pre-Wave-2 apollo audiences (native apollo rows + the apify->apollo migrated
+// ones) hold a human-built / lossy neutral filter blob and NO apollo_audience_id.
+// This backfill gives each such row a faithful Apollo audience: it asks apollo-
+// service to BUILD one from the row's own name + description (apollo-service owns
+// the NL->faithful-filters loop), then stores the POINTER + the faithful filters
+// (cached, replacing the old neutral blob — that blob was exactly the lossy
+// vocabulary this wave removes) + the count snapshot. Returns null when apollo-
+// service yields no usable filter set (caller logs + skips, retried on re-run).
+
+export interface ApolloPointerBackfillResult {
+  id: string;
+  name: string;
+  apolloAudienceId: string;
+  count: number;
+}
+
+export async function backfillApolloAudiencePointer(
+  row: typeof audiences.$inferSelect
+): Promise<ApolloPointerBackfillResult | null> {
+  const identity: Identity = {
+    orgId: row.orgId,
+    userId: row.createdByUserId ?? undefined,
+  };
+  const built = await suggestApolloAudience({
+    name: row.name,
+    description: row.description ?? row.name,
+    brandId: row.brandId,
+    identity,
+  });
+  if (!built.filters || Object.keys(built.filters).length === 0) {
+    return null;
+  }
+  await db
+    .update(audiences)
+    .set({
+      apolloAudienceId: built.apolloAudienceId,
+      filters: built.filters as Record<string, unknown>,
+      apolloCount: built.count,
+      countedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(audiences.id, row.id));
+  return {
+    id: row.id,
+    name: row.name,
+    apolloAudienceId: built.apolloAudienceId,
+    count: built.count,
+  };
 }
 
 // --- Canonical-link backfill (deprecated provider-variant -> active replacement) ---
@@ -1596,8 +1039,10 @@ export async function serveNextPerson(
       "Audience has no committed provider — cannot serve people."
     );
   }
-  const filters = (audience.filters ?? null) as PeopleSearchFilters | null;
-  if (!filters || Object.keys(filters).length === 0) {
+  // Stored filters are OPAQUE here: apollo rows hold the faithful Apollo filter
+  // object (apollo-service's shape); apify rows hold the neutral PeopleSearchFilters.
+  const storedFilters = (audience.filters ?? null) as Record<string, unknown> | null;
+  if (!storedFilters || Object.keys(storedFilters).length === 0) {
     throw new AudienceNotServableError(
       "Audience has no stored filters — cannot serve people."
     );
@@ -1605,10 +1050,11 @@ export async function serveNextPerson(
 
   if (provider === "apify") {
     // apify BILLS per returned lead and pushes the brand exclude-set down, so a
-    // single hit is already an unserved, suppression-recorded serve. limit 1.
+    // single hit is already an unserved, suppression-recorded serve. limit 1. apify
+    // audiences keep the NEUTRAL filter shape (mapped to apify in the gateway).
     const result = await peopleSearch({
       provider: "apify",
-      filters,
+      filters: storedFilters as PeopleSearchFilters,
       limit: 1,
       audienceId: audience.id,
       identity,
@@ -1622,12 +1068,15 @@ export async function serveNextPerson(
   }
 
   // apollo: search is a FREE teaser list (already suppression-filtered + bounded
-  // by the saturation stop). Enrich teasers one at a time until one reveals a
-  // non-suppressed person (the billed reveal records the serve in finalizeResolved),
-  // then stop. All teasers exhausted / saturated ⟹ no fresh person.
+  // by the saturation stop). The stored filters are ALREADY Apollo's faithful
+  // shape, so forward them VERBATIM as the apollo search params (no neutral→apollo
+  // remap). Enrich teasers one at a time until one reveals a non-suppressed person
+  // (the billed reveal records the serve in finalizeResolved), then stop. All
+  // teasers exhausted / saturated ⟹ no fresh person.
   const search = await peopleSearch({
     provider: "apollo",
-    filters,
+    filters: {},
+    apolloSearchParams: storedFilters,
     audienceId: audience.id,
     identity,
   });

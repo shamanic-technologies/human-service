@@ -21,7 +21,7 @@ import {
 import {
   computeStats,
   getAudienceInOrg,
-  refreshCounts,
+  refreshAudienceCounts,
   suggestAudiences,
   serveNextPerson,
   generateAvatar,
@@ -33,7 +33,6 @@ import {
   ProviderConfigError,
   ProviderUnsupportedError,
   type Identity,
-  type PeopleSearchFilters,
 } from "../services/people-providers.js";
 import { ChatServiceError, ChatConfigError } from "../lib/chat-client.js";
 
@@ -116,6 +115,7 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
         brandId: parsed.data.brandId,
         name: parsed.data.name,
         provider: parsed.data.provider ?? null,
+        apolloAudienceId: parsed.data.apolloAudienceId ?? null,
         nlPrompt: parsed.data.nlPrompt ?? null,
         filters: parsed.data.filters ?? null,
         apolloCount: parsed.data.apolloCount ?? null,
@@ -374,10 +374,9 @@ router.post(
     }
 
     try {
-      const counts = await refreshCounts(
-        (audience.filters ?? {}) as PeopleSearchFilters,
-        buildIdentity(res)
-      );
+      // Pointer model: an apollo audience re-counts via apollo-service by its
+      // stored pointer; a legacy/neutral audience keeps the dual free dry-run.
+      const counts = await refreshAudienceCounts(audience, buildIdentity(res));
       const [updated] = await db
         .update(audiences)
         .set({
@@ -570,6 +569,7 @@ function serializeAudience(row: typeof audiences.$inferSelect) {
     nlPrompt: row.nlPrompt,
     description: row.description,
     provider: row.provider,
+    apolloAudienceId: row.apolloAudienceId,
     status: row.status,
     source: row.source,
     canonicalAudienceId: row.canonicalAudienceId,

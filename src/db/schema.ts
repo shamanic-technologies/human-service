@@ -350,6 +350,15 @@ export const audiences = pgTable(
     // The provider this audience commits to ("apollo" | "apify"); null = neutral.
     // Set when a provider-specific candidate from /suggest is selected.
     provider: text("provider"),
+    // Pointer to the faithful Apollo audience owned by apollo-service ("one
+    // filter vocabulary" Wave 2). human-service stores ONLY this id for apollo
+    // audiences; apollo-service owns the faithful filter object + count. Nullable
+    // — native apify (legacy) rows and pre-Wave-2 rows have none until the
+    // POST /internal/backfill-apollo-audience-pointers sweep fills them. For
+    // apollo rows the `filters` column below caches the OPAQUE faithful Apollo
+    // filters (verbatim from apollo-service), so serve-next forwards them to
+    // apollo /search without any neutral->apollo remap.
+    apolloAudienceId: text("apollo_audience_id"),
     // Status lifecycle, mirroring brand-service persona semantics:
     // "active" | "paused" | "archived". Default active. The ONLY mutable field
     // (editing filters = a new audience). Archived is a soft state, NOT a delete.
@@ -385,6 +394,7 @@ export const audiences = pgTable(
   (table) => [
     index("idx_audiences_org_brand").on(table.orgId, table.brandId),
     index("idx_audiences_canonical").on(table.canonicalAudienceId),
+    index("idx_audiences_apollo_audience_id").on(table.apolloAudienceId),
     // Name-unique per (org, brand) (case-insensitive). Widened from brand-only
     // so the same audience name can exist for the same brand across different
     // orgs (org isolation) — the suggest flow keys proposals on org+brand+name.
