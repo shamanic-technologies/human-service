@@ -337,7 +337,30 @@ router.patch(
     console.log(
       `[human-service] audience.status org=${orgId} audience=${updated.id} status=${updated.status}`
     );
+    // Respond FIRST — the avatar must never block or fail the status flip.
     res.json({ audience: serializeAudience(updated) });
+
+    // On any transition to `active`, auto-generate the avatar IF the audience
+    // has none yet — this route is the single chokepoint every activation
+    // surface (chat set_audience_status, onboarding, manual UI) passes through.
+    // Reuse the SAME org-billed path the manual avatar route uses
+    // (generateAvatar + buildIdentity), so the avatar is billed to the org from
+    // the inbound status request's identity headers. Idempotent: only fires when
+    // there's no avatarUrl, so re-activating never double-bills. Fire-and-forget
+    // (best-effort) — a generation failure is logged loud, never surfaced.
+    if (updated.status === "active" && !updated.avatarUrl) {
+      generateAvatar(
+        orgId,
+        updated.id,
+        buildAvatarPrompt(updated),
+        buildIdentity(res)
+      ).catch((err) =>
+        console.error(
+          `[human-service] audience.status.avatar_failed org=${orgId} audience=${updated.id}`,
+          err
+        )
+      );
+    }
   }
 );
 
