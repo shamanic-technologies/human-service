@@ -396,6 +396,96 @@ describe("Audience membership engine (dedup + provenance)", () => {
   });
 });
 
+describe("stats: deprecated -> canonical resolution", () => {
+  const CANON = "00000000-0000-4000-8000-0000000000c1";
+  const DEPR = "00000000-0000-4000-8000-0000000000d1";
+
+  async function seedPair() {
+    await db.insert(audiences).values([
+      {
+        id: CANON,
+        orgId: ORG_A,
+        brandId: BRAND_1,
+        name: "Agency Owners and MDs",
+        provider: "apollo",
+        status: "active",
+        source: "migrated_from_apify",
+      },
+      {
+        id: DEPR,
+        orgId: ORG_A,
+        brandId: BRAND_1,
+        name: "Agency Owners and MDs [Apify]",
+        provider: "apify",
+        status: "deprecated",
+        canonicalAudienceId: CANON,
+      },
+    ]);
+  }
+
+  it("a lead served only via the deprecated variant resolves to the canonical audience", async () => {
+    await seedPair();
+    await tagAudienceServe(ORG_A, DEPR, [
+      contact({ email: "mike@pmdevelopment.co.uk", firstName: "Mike", provider: "apify" }),
+    ]);
+
+    const stats = await computeStats(ORG_A, {
+      emails: ["mike@pmdevelopment.co.uk"],
+    });
+    expect(stats.matched).toHaveLength(1);
+    // Resolves to the canonical active audience, NOT the deprecated "[Apify]" row.
+    expect(stats.matched[0].audiences).toEqual([
+      { audienceId: CANON, name: "Agency Owners and MDs" },
+    ]);
+    expect(stats.byAudience).toEqual([
+      {
+        audienceId: CANON,
+        name: "Agency Owners and MDs",
+        brandId: BRAND_1,
+        matchedCount: 1,
+      },
+    ]);
+  });
+
+  it("a person on BOTH the deprecated and canonical variant de-dupes to canonical once", async () => {
+    await seedPair();
+    const c = contact({ email: "dual@x.com", firstName: "Dual", provider: "apollo" });
+    await tagAudienceServe(ORG_A, DEPR, [c]);
+    await tagAudienceServe(ORG_A, CANON, [c]);
+
+    const stats = await computeStats(ORG_A, { emails: ["dual@x.com"] });
+    expect(stats.matched).toHaveLength(1);
+    // ONE canonical audience entry, not two (deprecated + canonical collapsed).
+    expect(stats.matched[0].audiences).toEqual([
+      { audienceId: CANON, name: "Agency Owners and MDs" },
+    ]);
+    expect(stats.byAudience).toHaveLength(1);
+    expect(stats.byAudience[0]).toMatchObject({
+      audienceId: CANON,
+      matchedCount: 1,
+    });
+  });
+
+  it("a deprecated audience with NO canonical link is reported as-is (no crash)", async () => {
+    await db.insert(audiences).values({
+      id: DEPR,
+      orgId: ORG_A,
+      brandId: BRAND_1,
+      name: "Orphan [Apify]",
+      provider: "apify",
+      status: "deprecated",
+      canonicalAudienceId: null,
+    });
+    await tagAudienceServe(ORG_A, DEPR, [
+      contact({ email: "orphan@x.com", provider: "apify" }),
+    ]);
+    const stats = await computeStats(ORG_A, { emails: ["orphan@x.com"] });
+    expect(stats.matched[0].audiences).toEqual([
+      { audienceId: DEPR, name: "Orphan [Apify]" },
+    ]);
+  });
+});
+
 describe("People route audience tagging", () => {
   const fetchSpy = vi.fn();
   vi.stubGlobal("fetch", fetchSpy);

@@ -191,6 +191,9 @@ describe("POST /internal/migrate-apify-audiences-to-apollo", () => {
     expect(twin.apifyCount).toBeNull();
     expect(twin.createdByUserId).toBe(USER);
 
+    // The deprecated apify row carries a durable canonical link to its twin.
+    expect(oldActive.canonicalAudienceId).toBe(twin.id);
+
     // suggested apify → apollo twin keeps suggested status (NOT auto-activated).
     const [suggestedTwin] = await db
       .select({ status: audiences.status })

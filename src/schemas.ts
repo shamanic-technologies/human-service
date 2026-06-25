@@ -919,6 +919,10 @@ export const AudienceSchema = z
     status: AudienceStatusSchema,
     // Provenance: "brand_persona_backfill" for backfilled rows, else null.
     source: z.string().nullable(),
+    canonicalAudienceId: z.string().uuid().nullable().openapi({
+      description:
+        "When this audience is a deprecated provider-variant (e.g. retired '<base> [Apify]' from the apify->apollo migration), the id of its active canonical replacement. Membership/stats reads resolve a deprecated match to this audience. null for non-deprecated / unlinked rows.",
+    }),
     filters: PeopleSearchFiltersSchema.nullable(),
     avatarUrl: z.string().nullable().openapi({
       description:
@@ -1529,6 +1533,72 @@ registry.registerPath({
     200: { description: "Migration result", content: { "application/json": { schema: MigrateApifyAudiencesResponseSchema } } },
     401: { description: "Unauthorized" },
     502: { description: "apollo / chat-service outage / missing config", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+// --- Internal: one-time backfill of canonical links on deprecated variants ---
+export const BackfillCanonicalLinksQuerySchema = z.object({
+  dryRun: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({
+      description:
+        "When 'true', resolve which deprecated provider-variant audiences would link to an active sibling + return counts WITHOUT writing. Defaults to false (real run).",
+    }),
+});
+
+export const BackfillCanonicalLinksResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    scanned: z.number().int().openapi({
+      description:
+        "Deprecated audiences with canonical_audience_id IS NULL inspected by this sweep.",
+    }),
+    linked: z.number().int().openapi({
+      description:
+        "Deprecated audiences resolved to exactly one active sibling + linked (0 on a dry-run; the would-link count is `wouldLink`).",
+    }),
+    wouldLink: z.number().int().openapi({
+      description:
+        "Deprecated audiences that resolve to exactly one active sibling (the count that would be / was linked).",
+    }),
+    skipped: z
+      .array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          reason: z.string(),
+        })
+      )
+      .openapi({
+        description:
+          "Deprecated rows left unlinked: no provider-variant suffix, no active sibling, or (defensively) >1 sibling — never guessed.",
+      }),
+    sample: z
+      .array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          canonicalAudienceId: z.string(),
+        })
+      )
+      .openapi({
+        description:
+          "Per-audience preview (capped): {id,name,canonicalAudienceId} of the deprecated rows that would link.",
+      }),
+  })
+  .openapi("BackfillCanonicalLinksResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/backfill-canonical-audience-links",
+  summary:
+    "One-time data fix: link each deprecated provider-variant audience ('<base> [Apify]') to its active same-(org,brand)-base-name canonical sibling, so membership/stats reads resolve to the clean active audience (idempotent, dry-runnable, reversible; skips 0/ambiguous siblings)",
+  security: [{ apiKey: [] }],
+  request: { query: BackfillCanonicalLinksQuerySchema },
+  responses: {
+    200: { description: "Backfill result", content: { "application/json": { schema: BackfillCanonicalLinksResponseSchema } } },
+    401: { description: "Unauthorized" },
   },
 });
 

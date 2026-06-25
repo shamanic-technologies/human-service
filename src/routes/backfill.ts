@@ -8,6 +8,7 @@ import {
   BackfillAudienceDescriptionsQuerySchema,
   MigrateApifyAudiencesQuerySchema,
   BackfillAudienceAvatarsQuerySchema,
+  BackfillCanonicalLinksQuerySchema,
 } from "../schemas.js";
 import {
   mapPersonaFiltersToCanonical,
@@ -17,6 +18,7 @@ import {
 import {
   generateAudienceDescription,
   migrateApifyAudienceToApollo,
+  linkCanonicalForDeprecated,
   buildAvatarPrompt,
   generateAudienceAvatarViaPlatform,
   type ApifyToApolloMigrationResult,
@@ -588,6 +590,100 @@ router.post(
       }
       throw err;
     }
+  }
+);
+
+// How many {id,name,canonicalAudienceId} previews the canonical-link backfill returns.
+const CANONICAL_SAMPLE_LIMIT = 25;
+
+// POST /internal/backfill-canonical-audience-links?dryRun=true|false
+//
+// One-time DATA fix: the apify->apollo migration deprecated + renamed each apify
+// audience "<base> [Apify]" and created an active apollo twin "<base>" but stored
+// NO link between them, so consumers that resolve a lead's audience from
+// membership land on the deprecated provider-variant (retired name, no avatar).
+// This sweep sets `canonical_audience_id` on each deprecated provider-variant row,
+// pointing at its active same-(org,brand)-base-name sibling, so membership/stats
+// reads resolve to the clean active audience.
+//
+// - Scoped to status='deprecated' AND canonical_audience_id IS NULL -> idempotent:
+//   a re-run only sees still-unlinked rows (a clean re-run links 0).
+// - Dry-runnable: ?dryRun=true resolves the would-be links + returns counts +
+//   a sample WITHOUT writing.
+// - Reversible: undo by UPDATE audiences SET canonical_audience_id=NULL WHERE
+//   status='deprecated'.
+// - FAIL LOUD on ambiguity: a deprecated row with no provider-variant suffix, no
+//   active sibling, or (defensively) >1 sibling is SKIPPED + logged, never guessed.
+//
+// Service-auth only (x-api-key); sweeps all orgs. Cheap (pure SQL, no LLM), but
+// still trigger MANUALLY after deploy — never on boot (O(N) over the table).
+router.post(
+  "/internal/backfill-canonical-audience-links",
+  requireApiKey,
+  async (req, res) => {
+    const parsedQuery = BackfillCanonicalLinksQuerySchema.safeParse(req.query);
+    if (!parsedQuery.success) {
+      res.status(400).json({ error: parsedQuery.error.message });
+      return;
+    }
+    const dryRun = parsedQuery.data.dryRun === "true";
+
+    const rows = await db
+      .select({
+        id: audiences.id,
+        orgId: audiences.orgId,
+        brandId: audiences.brandId,
+        name: audiences.name,
+      })
+      .from(audiences)
+      .where(
+        and(
+          eq(audiences.status, "deprecated"),
+          isNull(audiences.canonicalAudienceId)
+        )
+      );
+
+    const scanned = rows.length;
+    const linkedSamples: Array<{
+      id: string;
+      name: string;
+      canonicalAudienceId: string;
+    }> = [];
+    const skipped: Array<{ id: string; name: string; reason: string }> = [];
+
+    for (const row of rows) {
+      const outcome = await linkCanonicalForDeprecated(row, { dryRun });
+      if (outcome.status === "linked") {
+        linkedSamples.push({
+          id: outcome.id,
+          name: outcome.name,
+          canonicalAudienceId: outcome.canonicalAudienceId,
+        });
+      } else {
+        console.warn(
+          `[human-service] backfill_canonical.skip id=${outcome.id} ${outcome.reason}`
+        );
+        skipped.push({
+          id: outcome.id,
+          name: outcome.name,
+          reason: outcome.reason,
+        });
+      }
+    }
+
+    const wouldLink = linkedSamples.length;
+    console.log(
+      `[human-service] backfill_canonical.${dryRun ? "dry_run" : "run"} scanned=${scanned} ${dryRun ? "wouldLink" : "linked"}=${wouldLink} skipped=${skipped.length}`
+    );
+
+    res.json({
+      dryRun,
+      scanned,
+      linked: dryRun ? 0 : wouldLink,
+      wouldLink,
+      skipped,
+      sample: linkedSamples.slice(0, CANONICAL_SAMPLE_LIMIT),
+    });
   }
 );
 
