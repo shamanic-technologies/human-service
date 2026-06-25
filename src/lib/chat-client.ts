@@ -264,8 +264,7 @@ export async function platformCompleteJson(args: {
 }
 
 export interface GeneratedImage {
-  url?: string;
-  imageBase64?: string;
+  url: string;
   mimeType: string;
   model: string;
   tokensInput: number;
@@ -276,7 +275,7 @@ export interface GeneratedImage {
 // One-shot image generation via chat-service POST /orgs/images/generate. As with
 // /complete, chat-service OWNS the cost (provision→authorize→execute→actualize
 // against the org balance) — human-service declares none, it only forwards the
-// prompt + identity headers and stores the returned bytes. Fail loud: a non-2xx
+// prompt + identity headers and stores the returned hosted URL. Fail loud: a non-2xx
 // (incl. a 402 when the org can't afford the call) throws ChatServiceError → 502.
 export async function generateImage(args: {
   prompt: string;
@@ -307,10 +306,10 @@ export async function generateImage(args: {
     throw new ChatServiceError(res.status, text);
   }
   const data = (await res.json()) as Partial<GeneratedImage>;
-  if ((!data.url && !data.imageBase64) || !data.mimeType) {
+  if (!data.url || !data.mimeType) {
     throw new ChatServiceError(
       502,
-      "chat-service returned no image URL or bytes / mime type"
+      "chat-service returned no hosted image URL or mime type"
     );
   }
   return data as GeneratedImage;
@@ -347,10 +346,10 @@ export async function platformGenerateImage(args: {
     throw new ChatServiceError(res.status, text);
   }
   const data = (await res.json()) as Partial<GeneratedImage>;
-  if ((!data.url && !data.imageBase64) || !data.mimeType) {
+  if (!data.url || !data.mimeType) {
     throw new ChatServiceError(
       502,
-      "chat-service returned no image URL or bytes / mime type"
+      "chat-service returned no hosted image URL or mime type"
     );
   }
   return data as GeneratedImage;

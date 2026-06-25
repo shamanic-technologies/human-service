@@ -934,7 +934,7 @@ export const AudienceSchema = z
     filters: z.record(z.string(), z.unknown()).nullable(),
     avatarUrl: z.string().nullable().openapi({
       description:
-        "Audience avatar as a hosted HTTP(S) URL. Legacy data URI rows may exist until the internal avatar backfill converts them. null until generated.",
+        "Audience avatar as a hosted HTTP(S) URL. null until generated.",
     }),
     apolloCount: z.number().int().nullable(),
     apifyCount: z.number().int().nullable(),
@@ -1625,14 +1625,14 @@ registry.registerPath({
   },
 });
 
-// --- Internal: one-time backfill of audience avatars (avatar_url IS NULL or data:) ---
+// --- Internal: one-time backfill of audience avatars (avatar_url IS NULL) ---
 export const BackfillAudienceAvatarsQuerySchema = z.object({
   dryRun: z
     .enum(["true", "false"])
     .optional()
     .openapi({
       description:
-        "When 'true', count live audiences missing an avatar or still storing a data URI + return a sample WITHOUT calling chat-service/cloudflare-service or writing. Defaults to false (real run).",
+        "When 'true', count live audiences missing an avatar + return a sample WITHOUT calling chat-service or writing. Defaults to false (real run).",
     }),
   async: z
     .enum(["true", "false"])
@@ -1650,13 +1650,13 @@ export const BackfillAudienceAvatarsResponseSchema = z
       description: "Present (true) only on an async run — the sweep runs in the background.",
     }),
     scanned: z.number().int().openapi({
-      description: "Live audiences (status<>'deprecated') with avatar_url IS NULL or avatar_url starting with data:.",
+      description: "Live audiences (status<>'deprecated') with avatar_url IS NULL.",
     }),
     wouldFill: z.number().int().openapi({
       description: "Audiences that would get an avatar (= scanned on a dry-run).",
     }),
     filled: z.number().int().openapi({
-      description: "Audiences whose avatar was generated/converted + stored as a hosted URL (0 on a dry-run / async).",
+      description: "Audiences whose avatar was generated + stored as a hosted URL (0 on a dry-run / async).",
     }),
     failed: z
       .array(
@@ -1664,7 +1664,7 @@ export const BackfillAudienceAvatarsResponseSchema = z
       )
       .openapi({
         description:
-          "Audiences whose image generation/upload failed; left null or data:, retried on re-run.",
+          "Audiences whose image generation failed; left null and retried on re-run.",
       }),
     sample: z
       .array(z.object({ id: z.string(), name: z.string() }))
@@ -1676,14 +1676,14 @@ registry.registerPath({
   method: "post",
   path: "/internal/backfill-audience-avatars",
   summary:
-    "One-time data fix: store hosted avatar URLs for every live audience whose avatar_url is null or still a data URI — idempotent, dry-runnable, async",
+    "One-time data fix: store hosted avatar URLs for every live audience whose avatar_url is null — idempotent, dry-runnable, async",
   security: [{ apiKey: [] }],
   request: { query: BackfillAudienceAvatarsQuerySchema },
   responses: {
     200: { description: "Backfill result", content: { "application/json": { schema: BackfillAudienceAvatarsResponseSchema } } },
     202: { description: "Async sweep started", content: { "application/json": { schema: BackfillAudienceAvatarsResponseSchema } } },
     401: { description: "Unauthorized" },
-    502: { description: "chat-service/cloudflare-service missing config", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "chat-service missing config", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
