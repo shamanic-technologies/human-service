@@ -54,7 +54,7 @@ function wire(opts?: {
       return ok({
         json:
           cleanTests === 0
-            ? { action: "test", filters: { titles: ["CTO"] } }
+            ? { action: "test", filters: { personTitles: ["CTO"] } }
             : { action: "confirm" },
       });
     }
@@ -219,7 +219,7 @@ describe("POST /internal/migrate-apify-audiences-to-apollo", () => {
       actByName: (name, cleanTests) => {
         if (name === "Active Apify") return { action: "exhausted", reason: "nope" };
         return cleanTests === 0
-          ? { action: "test", filters: { titles: ["CTO"] } }
+          ? { action: "test", filters: { personTitles: ["CTO"] } }
           : { action: "confirm" };
       },
     });
