@@ -193,6 +193,34 @@ describe("POST /internal/backfill-apollo-audience-pointers", () => {
     expect(row.filters).toEqual({ titles: ["CEO"] });
   });
 
+  it("a row whose apollo build yields non-empty filters but zero count is failed + left untouched", async () => {
+    await seed();
+    wire({
+      byName: () => ({
+        apolloAudienceId: "zero-count",
+        filters: { personTitles: ["Founder"] },
+        count: 0,
+      }),
+    });
+
+    const res = await request(app)
+      .post("/internal/backfill-apollo-audience-pointers?dryRun=false")
+      .set(apiKeyHeader);
+
+    expect(res.status).toBe(200);
+    expect(res.body.backfilled).toEqual([]);
+    expect(res.body.failed).toHaveLength(1);
+    expect(res.body.failed[0]).toMatchObject({
+      id: APOLLO_NOPTR,
+      error: expect.stringContaining("unusable audience build"),
+    });
+
+    const [row] = await db.select().from(audiences).where(eq(audiences.id, APOLLO_NOPTR));
+    expect(row.apolloAudienceId).toBeNull();
+    expect(row.filters).toEqual({ titles: ["CEO"] });
+    expect(row.apolloCount).toBeNull();
+  });
+
   it("fails loud (502) on missing apollo config (truly systemic)", async () => {
     await seed();
     wire();
