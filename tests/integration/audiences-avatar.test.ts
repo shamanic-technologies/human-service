@@ -17,16 +17,12 @@ beforeEach(async () => {
   fetchSpy.mockReset();
   process.env.CHAT_SERVICE_URL = "http://chat:8080";
   process.env.CHAT_SERVICE_API_KEY = "chat-key";
-  process.env.CLOUDFLARE_SERVICE_URL = "http://cloudflare:8080";
-  process.env.CLOUDFLARE_SERVICE_API_KEY = "cloudflare-key";
   await cleanTestData();
 });
 
 afterAll(async () => {
   await closeDb();
 });
-
-const IMG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQB/zb2hAAAAAElFTkSuQmCC";
 
 async function createAudience(name: string) {
   const res = await request(app)
@@ -82,18 +78,10 @@ describe("POST /orgs/audiences/:id/avatar", () => {
     expect(second.body.audience.avatarUrl).toBe("https://cdn.test/audiences/2.png");
   });
 
-  it("legacy chat-service imageBase64 response is uploaded to Cloudflare and stored as a URL", async () => {
-    const uploadBodies: Array<Record<string, unknown>> = [];
-    fetchSpy.mockImplementation(async (url: string, init: { body?: string; headers?: Record<string, string> }) => {
+  it("502 when chat-service returns imageBase64 without a hosted URL", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
       if (String(url).endsWith("/orgs/images/generate")) {
-        return ok({ imageBase64: IMG, mimeType: "image/png", model: "m", tokensInput: 1, tokensOutput: 1 });
-      }
-      if (String(url).endsWith("/upload/base64")) {
-        uploadBodies.push(JSON.parse(init.body ?? "{}") as Record<string, unknown>);
-        expect(init.headers?.["x-org-id"]).toBe(getAuthHeaders()["x-org-id"]);
-        expect(init.headers?.["x-user-id"]).toBe(getAuthHeaders()["x-user-id"]);
-        expect(init.headers?.["x-run-id"]).toBe(getAuthHeaders()["x-run-id"]);
-        return ok({ id: "file-1", url: "https://cdn.test/audiences/legacy.png", size: 68, contentType: "image/png" });
+        return ok({ imageBase64: "AAAA", mimeType: "image/png", model: "m", tokensInput: 1, tokensOutput: 1 });
       }
       throw new Error("unexpected url " + url);
     });
@@ -101,13 +89,9 @@ describe("POST /orgs/audiences/:id/avatar", () => {
     const id = await createAudience("CMOs Legacy");
     const res = await avatar(id);
 
-    expect(res.status).toBe(200);
-    expect(res.body.audience.avatarUrl).toBe("https://cdn.test/audiences/legacy.png");
-    expect(uploadBodies).toHaveLength(1);
-    expect(uploadBodies[0]).toMatchObject({
-      contentBase64: IMG,
-      contentType: "image/png",
-    });
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain("no hosted image URL");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it("forwards an optional prompt override to chat-service", async () => {

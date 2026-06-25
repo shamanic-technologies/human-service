@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
+import { and, eq, isNull, ne } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audiences } from "../db/schema.js";
 import { requireApiKey } from "../middleware/auth.js";
@@ -22,15 +22,11 @@ import {
   linkCanonicalForDeprecated,
   buildAvatarPrompt,
   generateAudienceAvatarViaPlatform,
-  convertAudienceDataUriAvatarViaPlatform,
   backfillApolloAudiencePointer,
   type ApifyToApolloMigrationResult,
   type ApolloPointerBackfillResult,
 } from "../services/audiences.js";
 import { ChatConfigError, ChatServiceError } from "../lib/chat-client.js";
-import {
-  CloudflareConfigError,
-} from "../lib/cloudflare-client.js";
 import { ProviderConfigError } from "../services/people-providers.js";
 
 const router = Router();
@@ -463,9 +459,8 @@ router.post(
 // How many {id,name} previews the avatar backfill returns.
 const AVATAR_SAMPLE_LIMIT = 25;
 
-// Generate + store a flat-vector avatar for avatar-less audiences, and convert
-// legacy data URI avatars to Cloudflare URLs. A per-row image/upload failure is
-// logged + counted in `failed`; missing service config aborts the sweep loud
+// Generate + store a flat-vector avatar URL for avatar-less audiences. A per-row
+// image failure is logged + counted in `failed`; missing service config aborts the sweep loud
 // (502) because every row would fail identically.
 async function runAvatarBackfill(
   rows: Array<typeof audiences.$inferSelect>
@@ -477,16 +472,12 @@ async function runAvatarBackfill(
   const failed: Array<{ id: string; name: string; error: string }> = [];
   for (const row of rows) {
     try {
-      if (row.avatarUrl?.startsWith("data:")) {
-        await convertAudienceDataUriAvatarViaPlatform(row);
-      } else {
-        const prompt = buildAvatarPrompt(row);
-        await generateAudienceAvatarViaPlatform(row.orgId, row.id, prompt);
-      }
+      const prompt = buildAvatarPrompt(row);
+      await generateAudienceAvatarViaPlatform(row.orgId, row.id, prompt);
       filled++;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (err instanceof ChatConfigError || err instanceof CloudflareConfigError) {
+      if (err instanceof ChatConfigError) {
         console.error(`[human-service] backfill_avatars.abort id=${row.id} ${msg}`);
         throw new MigrationAborted(msg, [], failed);
       }
@@ -502,11 +493,10 @@ async function runAvatarBackfill(
 // POST /internal/backfill-audience-avatars?dryRun=true|false&async=true|false
 //
 // One-time DATA fix: generate + store a flat-vector avatar URL for every LIVE
-// audience whose avatar_url is null, and convert existing data URI avatar rows
-// to Cloudflare URLs. Swept server-side over all orgs.
+// audience whose avatar_url is null. Swept server-side over all orgs.
 //
-// - Scoped to status<>'deprecated' AND (avatar_url IS NULL OR avatar_url LIKE
-//   'data:%') -> idempotent (a re-run only sees rows still null / still inline).
+// - Scoped to status<>'deprecated' AND avatar_url IS NULL -> idempotent
+//   (a re-run only sees rows still null).
 //   NO created_by_user_id requirement: platform paths need no org/user.
 // - Dry-runnable: ?dryRun=true counts + samples WITHOUT calling chat-service.
 // - Async: ?async=true responds 202 then runs in the background (image gen is
@@ -535,10 +525,7 @@ router.post(
       .where(
         and(
           ne(audiences.status, "deprecated"),
-          or(
-            isNull(audiences.avatarUrl),
-            sql`${audiences.avatarUrl} LIKE 'data:%'`
-          )
+          isNull(audiences.avatarUrl)
         )
       );
 
