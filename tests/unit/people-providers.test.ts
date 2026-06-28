@@ -83,6 +83,7 @@ describe("peopleSearch — apollo", () => {
             organizationWebsiteUrl: "https://cascobay.com",
             organizationIndustry: "marketing",
             organizationSize: "12",
+            organizationAnnualRevenue: 5000000,
             organizationLinkedinUrl: null,
             organizationLogoUrl: null,
             organizationCity: "Portland",
@@ -140,6 +141,47 @@ describe("peopleSearch — apollo", () => {
     expect(p.providerPersonId).toBe("apollo-1");
     expect(p.organization?.domain).toBe("cascobay.com");
     expect(p.organization?.estimatedNumEmployees).toBe(12);
+    expect(p.organization?.annualRevenue).toBe(5000000);
+  });
+
+  it("organization.annualRevenue is null when apollo omits organizationAnnualRevenue", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      ok({
+        people: [
+          {
+            id: "apollo-2",
+            firstName: "Ada",
+            lastName: "Byte",
+            name: "Ada Byte",
+            email: "ada@nrco.com",
+            emailStatus: "verified",
+            title: "CEO",
+            headline: null,
+            seniority: "founder",
+            linkedinUrl: null,
+            photoUrl: null,
+            city: null,
+            state: null,
+            country: null,
+            organizationName: "No Rev Co",
+            organizationDomain: "nrco.com",
+            organizationWebsiteUrl: null,
+            organizationIndustry: "software",
+            organizationSize: "30",
+            organizationAnnualRevenue: null,
+            organizationLinkedinUrl: null,
+            organizationLogoUrl: null,
+            organizationCity: null,
+            organizationState: null,
+            organizationCountry: null,
+          },
+        ],
+        done: true,
+        totalEntries: 1,
+      })
+    );
+    const result = await peopleSearch({ provider: "apollo", filters: {}, identity });
+    expect(result.people[0].organization?.annualRevenue).toBeNull();
   });
 
   it("nextPage sends an empty body so apollo advances its cursor", async () => {
@@ -235,6 +277,8 @@ describe("peopleSearch — apify", () => {
     expect(p.provider).toBe("apify");
     expect(p.providerPersonId).toBeNull();
     expect(p.organization?.estimatedNumEmployees).toBe(50);
+    // apify returns no revenue field → always null
+    expect(p.organization?.annualRevenue).toBeNull();
   });
 
   it("defaults limit to 1 (strict minimum — apify bills per returned lead) when omitted", async () => {
