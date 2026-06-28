@@ -864,6 +864,10 @@
             "type": "number",
             "nullable": true
           },
+          "annualRevenue": {
+            "type": "number",
+            "nullable": true
+          },
           "linkedinUrl": {
             "type": "string",
             "nullable": true
@@ -891,6 +895,7 @@
           "websiteUrl",
           "industry",
           "estimatedNumEmployees",
+          "annualRevenue",
           "linkedinUrl",
           "logoUrl",
           "city",

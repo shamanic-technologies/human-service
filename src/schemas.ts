@@ -676,6 +676,7 @@ export const NeutralOrganizationSchema = z
     websiteUrl: z.string().nullable(),
     industry: z.string().nullable(),
     estimatedNumEmployees: z.number().nullable(),
+    annualRevenue: z.number().nullable(),
     linkedinUrl: z.string().nullable(),
     logoUrl: z.string().nullable(),
     city: z.string().nullable(),
