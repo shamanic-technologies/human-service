@@ -106,6 +106,7 @@ export interface NeutralOrganization {
   websiteUrl: string | null;
   industry: string | null;
   estimatedNumEmployees: number | null;
+  annualRevenue: number | null;
   linkedinUrl: string | null;
   logoUrl: string | null;
   city: string | null;
@@ -456,6 +457,7 @@ interface ApolloPerson {
   organizationWebsiteUrl: string | null;
   organizationIndustry: string | null;
   organizationSize: string | null;
+  organizationAnnualRevenue: number | null;
   organizationLinkedinUrl: string | null;
   organizationLogoUrl: string | null;
   organizationCity: string | null;
@@ -500,6 +502,7 @@ function normalizeApolloPerson(p: ApolloPerson): Person {
           websiteUrl: p.organizationWebsiteUrl,
           industry: p.organizationIndustry,
           estimatedNumEmployees: parseEmployees(p.organizationSize),
+          annualRevenue: p.organizationAnnualRevenue,
           linkedinUrl: p.organizationLinkedinUrl,
           logoUrl: p.organizationLogoUrl,
           city: p.organizationCity,
@@ -560,6 +563,7 @@ function normalizeApifyLead(l: ApifyLead): Person {
           websiteUrl: null,
           industry: l.companyIndustry,
           estimatedNumEmployees: l.companySize,
+          annualRevenue: null,
           linkedinUrl: l.companyLinkedinUrl,
           logoUrl: null,
           city: l.city,
