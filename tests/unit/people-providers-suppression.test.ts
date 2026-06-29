@@ -109,18 +109,42 @@ describe("apollo search — suppression filter", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1); // got a fresh lead → no extra paging
   });
 
-  it("saturated brand (every page all-suppressed) → bounded re-page → done:true, no leads", async () => {
-    fetchSpy.mockResolvedValue(
-      ok({ people: [apolloPerson("a1", "https://linkedin.com/in/sara")], done: false, totalEntries: 9999 })
-    );
-    supp.filterSuppressed.mockResolvedValue([]); // everything already served
+  it("saturated brand: walks the FREE teaser cursor with NO page cap until Apollo's real done → done:true, no leads", async () => {
+    // 6 fully-suppressed pages (more than the old 5-page cap), then Apollo signals
+    // true pool exhaustion. The old code fabricated `done` after 5 pages; now we
+    // honor Apollo's own `done` and walk every free page to get there.
+    for (let i = 0; i < 6; i++) {
+      fetchSpy.mockResolvedValueOnce(
+        ok({ people: [apolloPerson(`a${i}`, `https://linkedin.com/in/s${i}`)], done: false, totalEntries: 9999 })
+      );
+    }
+    fetchSpy.mockResolvedValueOnce(ok({ people: [], done: true, totalEntries: 9999 }));
+    supp.filterSuppressed.mockResolvedValue([]); // every page already served
     const r = await peopleSearch({ provider: "apollo", filters: {}, identity: brandIdentity });
     expect(r.people).toHaveLength(0);
-    expect(r.done).toBe(true); // terminal on saturation
-    expect(fetchSpy).toHaveBeenCalledTimes(5); // APOLLO_MAX_SATURATION_PAGES
+    expect(r.done).toBe(true); // terminal ONLY on Apollo's real exhaustion
+    expect(fetchSpy).toHaveBeenCalledTimes(7); // 6 suppressed + 1 apollo-done; OLD code capped at 5
   });
 
-  it("respects apollo's own done before exhausting the page budget", async () => {
+  it("brand-saturated early pages then a fresh page → returns the fresh lead, done:false (never false-exhaust)", async () => {
+    // The reported bug: pages the brand has already contacted must NOT collapse to
+    // exhaustion. Walk past the suppressed pages and serve the fresh lead.
+    fetchSpy
+      .mockResolvedValueOnce(ok({ people: [apolloPerson("old1", "https://linkedin.com/in/old1")], done: false, totalEntries: 9999 }))
+      .mockResolvedValueOnce(ok({ people: [apolloPerson("old2", "https://linkedin.com/in/old2")], done: false, totalEntries: 9999 }))
+      .mockResolvedValueOnce(ok({ people: [apolloPerson("fresh", "https://linkedin.com/in/fresh")], done: false, totalEntries: 9999 }));
+    // Suppress anyone whose linkedin marks them "old"; let "fresh" through.
+    supp.filterSuppressed.mockImplementation(async (_o, _b, items) =>
+      items.filter((p: { linkedinUrl: string | null }) => !p.linkedinUrl?.includes("/in/old"))
+    );
+    const r = await peopleSearch({ provider: "apollo", filters: {}, identity: brandIdentity });
+    expect(r.people).toHaveLength(1);
+    expect(r.people[0].linkedinUrl).toBe("https://linkedin.com/in/fresh");
+    expect(r.done).toBe(false); // pool has more — NOT exhausted
+    expect(fetchSpy).toHaveBeenCalledTimes(3); // walked past 2 suppressed, stopped at the fresh page
+  });
+
+  it("respects apollo's own done immediately (empty + done:true → terminal, one call)", async () => {
     fetchSpy.mockResolvedValueOnce(ok({ people: [], done: true, totalEntries: 9 }));
     supp.filterSuppressed.mockResolvedValue([]);
     const r = await peopleSearch({ provider: "apollo", filters: {}, identity: brandIdentity });

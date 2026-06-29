@@ -20,13 +20,6 @@ import {
   type ServedContact,
 } from "./suppression.js";
 
-// apollo search is FREE (only enrich is billed), so on a brand-saturated
-// audience we can page the free cursor and drop already-served teasers without
-// spending. Cap how many consecutive all-served pages we scan before returning
-// a truthful per-brand `done` — producer-side saturation stop (the gateway IS
-// lead-service's producer), bounded so we never deep-page forever.
-const APOLLO_MAX_SATURATION_PAGES = 5;
-
 // apify bills per RETURNED lead (each search hit carries a verified email — there
 // is no free teaser list like apollo's). So the gateway takes the strict minimum
 // by default: one lead per call. A caller that consciously wants a batch passes
@@ -628,11 +621,19 @@ export async function peopleSearch(args: {
     const collected: Person[] = [];
     let total = 0;
     let done = false;
-    // Without brandIds there is nothing to suppress against — single page, the
-    // caller drives pagination exactly as before.
-    const maxPages = brandIds.length > 0 ? APOLLO_MAX_SATURATION_PAGES : 1;
 
-    for (let page = 0; page < maxPages; page++) {
+    // No brandIds → nothing to suppress against → single page, the caller drives
+    // pagination exactly as before. With brandIds → keep paging the FREE teaser
+    // cursor until a page yields a fresh (non-suppressed) lead OR Apollo reports
+    // true pool exhaustion (`data.done`). There is NO artificial page cap: a
+    // brand-saturated stretch is walked through (free teaser pages cost nothing)
+    // rather than mis-reported as exhausted. Apollo guarantees termination — its
+    // cursor sets `done` only once the next page is past `totalPages`. This keeps
+    // the upward `done` signal HONEST (real pool depletion only), so serve-next
+    // never false-exhausts on a region the brand has already contacted (the old
+    // 5-page saturation cap fabricated `done` here and stopped live campaigns
+    // early with leads still left in the pool).
+    for (let page = 0; ; page++) {
       const data = (await postProvider(
         "apollo",
         url,
@@ -649,6 +650,7 @@ export async function peopleSearch(args: {
       }
       collected.push(...people);
 
+      // True pool exhaustion (Apollo) → terminal.
       if (data.done) {
         done = true;
         break;
@@ -656,12 +658,8 @@ export async function peopleSearch(args: {
       // Got fresh (non-suppressed) leads, or suppression is off → return them
       // and let the caller request the next page.
       if (brandIds.length === 0 || people.length > 0) break;
-      // Whole page already served for the brand — try the next free page.
+      // Whole page already served for the brand → walk to the next free page.
     }
-
-    // Brand-scoped search that scanned the bounded page budget and found zero
-    // fresh leads ⟹ audience saturated for this brand → terminal.
-    if (brandIds.length > 0 && collected.length === 0 && !done) done = true;
 
     return { provider, people: collected, done, total, nextOffset: null };
   }
