@@ -702,6 +702,10 @@ export const PersonSchema = z
     city: z.string().nullable(),
     state: z.string().nullable(),
     country: z.string().nullable(),
+    timezone: z.string().nullable().openapi({
+      description:
+        "Recipient's IANA timezone (e.g. 'America/New_York'), threaded from the provider so downstream send-scheduling lands in the prospect's local business hours. null when the provider omits it.",
+    }),
     provider: providerEnum,
     providerPersonId: z.string().nullable().openapi({
       description: "apollo person id (usable for a later enrich). null for apify.",

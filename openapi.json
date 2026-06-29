@@ -802,6 +802,11 @@
             "type": "string",
             "nullable": true
           },
+          "timezone": {
+            "type": "string",
+            "nullable": true,
+            "description": "Recipient's IANA timezone (e.g. 'America/New_York'), threaded from the provider so downstream send-scheduling lands in the prospect's local business hours. null when the provider omits it."
+          },
           "provider": {
             "type": "string",
             "enum": [
@@ -835,6 +840,7 @@
           "city",
           "state",
           "country",
+          "timezone",
           "provider",
           "providerPersonId",
           "organization"

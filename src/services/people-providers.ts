@@ -132,6 +132,10 @@ export interface Person {
   city: string | null;
   state: string | null;
   country: string | null;
+  // Recipient's IANA timezone (e.g. "America/New_York"), threaded from upstream
+  // (apollo) so downstream (lead-service → email-gateway → instantly) can schedule
+  // sends in the prospect's local business hours. null when the provider omits it.
+  timezone: string | null;
   provider: Provider;
   // apollo person id — usable for a later enrich/resolve. null for apify.
   providerPersonId: string | null;
@@ -452,6 +456,8 @@ interface ApolloPerson {
   city: string | null;
   state: string | null;
   country: string | null;
+  // Recipient's IANA timezone read off the apollo wire (null when apollo omits it).
+  timezone: string | null;
   organizationName: string | null;
   organizationDomain: string | null;
   organizationWebsiteUrl: string | null;
@@ -493,6 +499,7 @@ function normalizeApolloPerson(p: ApolloPerson): Person {
     city: p.city,
     state: p.state,
     country: p.country,
+    timezone: p.timezone,
     provider: "apollo",
     providerPersonId: p.id,
     organization: hasOrg
@@ -554,6 +561,8 @@ function normalizeApifyLead(l: ApifyLead): Person {
     city: l.city,
     state: l.state,
     country: l.country,
+    // apify has no recipient-timezone field; instantly defaults a safe tz when null.
+    timezone: null,
     provider: "apify",
     providerPersonId: null,
     organization: hasOrg
