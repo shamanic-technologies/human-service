@@ -154,9 +154,15 @@ confusing downstream 502.
   asymmetry:
   - **apollo** search is FREE (only enrich bills) → drop already-served teasers
     in-gateway (match on `linkedin_url_norm` OR `provider_person_id`) BEFORE
-    revealing the email. A brand-saturated audience pages the free cursor a
-    bounded number of times (`APOLLO_MAX_SATURATION_PAGES`) then returns a
-    truthful `done` — producer-side saturation stop, no consumer heuristic.
+    revealing the email. A brand-saturated stretch is **walked through** — the
+    gateway keeps paging the free teaser cursor until a page yields a fresh lead
+    OR Apollo reports true pool exhaustion (`data.done`). There is **NO
+    artificial page cap**: the upward `done` is HONEST (real depletion only), so
+    serve-next never false-exhausts on a region the brand already contacted. (A
+    fixed 5-page `APOLLO_MAX_SATURATION_PAGES` budget previously fabricated `done`
+    here and auto-stopped live campaigns with leads still left in the pool —
+    removed. Apollo's cursor guarantees termination at `totalPages`; the walk is
+    bounded by the free pool, costs $0, and the cursor advances across calls.)
   - **apify** BILLS per returned lead → can't post-filter (pay-then-drop). The
     brand's exclude-set (`excludeEmails` + `excludeLinkedinUrls`) is **pushed
     down** to apify `/search` so the actor never returns/bills a served lead and
@@ -308,7 +314,8 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
   forever-exclusion.)
 - **Per provider**: apify → `peopleSearch(limit 1)` (exclude-set pushed down, hit
   is billed + recorded by the gateway) → that hit, or exhausted. apollo → free
-  teaser list (suppression-filtered + saturation-bounded) → enrich teasers one at
+  teaser list (suppression-filtered, walked to a fresh page or Apollo's true
+  `done` — no page cap) → enrich teasers one at
   a time (`resolveEmail` by `providerPersonId`, billed, recorded in
   `finalizeResolved`) until one reveals a non-suppressed person, then stop; all
   teasers dry ⟹ exhausted.
