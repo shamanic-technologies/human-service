@@ -78,6 +78,7 @@ describe("peopleSearch — apollo", () => {
             city: "Portland",
             state: "ME",
             country: "USA",
+            timezone: "America/New_York",
             organizationName: "Casco Bay",
             organizationDomain: "cascobay.com",
             organizationWebsiteUrl: "https://cascobay.com",
@@ -142,6 +143,48 @@ describe("peopleSearch — apollo", () => {
     expect(p.organization?.domain).toBe("cascobay.com");
     expect(p.organization?.estimatedNumEmployees).toBe(12);
     expect(p.organization?.annualRevenue).toBe(5000000);
+    expect(p.timezone).toBe("America/New_York");
+  });
+
+  it("timezone is null when apollo omits it", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      ok({
+        people: [
+          {
+            id: "apollo-tz",
+            firstName: "Tim",
+            lastName: "Zone",
+            name: "Tim Zone",
+            email: "tim@notz.com",
+            emailStatus: "verified",
+            title: "CEO",
+            headline: null,
+            seniority: "founder",
+            linkedinUrl: null,
+            photoUrl: null,
+            city: null,
+            state: null,
+            country: null,
+            timezone: null,
+            organizationName: "No TZ Co",
+            organizationDomain: "notz.com",
+            organizationWebsiteUrl: null,
+            organizationIndustry: "software",
+            organizationSize: "30",
+            organizationAnnualRevenue: null,
+            organizationLinkedinUrl: null,
+            organizationLogoUrl: null,
+            organizationCity: null,
+            organizationState: null,
+            organizationCountry: null,
+          },
+        ],
+        done: true,
+        totalEntries: 1,
+      })
+    );
+    const result = await peopleSearch({ provider: "apollo", filters: {}, identity });
+    expect(result.people[0].timezone).toBeNull();
   });
 
   it("organization.annualRevenue is null when apollo omits organizationAnnualRevenue", async () => {
@@ -279,6 +322,8 @@ describe("peopleSearch — apify", () => {
     expect(p.organization?.estimatedNumEmployees).toBe(50);
     // apify returns no revenue field → always null
     expect(p.organization?.annualRevenue).toBeNull();
+    // apify has no recipient-timezone field → always null
+    expect(p.timezone).toBeNull();
   });
 
   it("defaults limit to 1 (strict minimum — apify bills per returned lead) when omitted", async () => {
