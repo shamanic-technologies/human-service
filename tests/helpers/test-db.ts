@@ -8,6 +8,7 @@ import {
   brandSuppressions,
   audienceMembers,
   audiences,
+  audienceTeaserBuffer,
   people,
 } from "../../src/db/schema.js";
 import { sql } from "../../src/db/index.js";
@@ -19,6 +20,7 @@ export async function cleanTestData() {
   await db.delete(lists);
   await db.delete(leadServes);
   await db.delete(brandSuppressions);
+  await db.delete(audienceTeaserBuffer);
   await db.delete(audienceMembers);
   await db.delete(audiences);
   await db.delete(people);

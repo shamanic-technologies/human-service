@@ -21,10 +21,12 @@ import { alias } from "drizzle-orm/pg-core";
 import { db } from "../db/index.js";
 import { audienceMembers, audiences, people } from "../db/schema.js";
 import {
+  filterSuppressed,
   normalizeEmail,
   normalizeLinkedinUrl,
   type ServedContact,
 } from "./suppression.js";
+import { bufferTeasers, popTeaser } from "./teaser-buffer.js";
 import {
   dryRun,
   peopleSearch,
@@ -1067,26 +1069,59 @@ export async function serveNextPerson(
     return { status: "served", person };
   }
 
-  // apollo: search is a FREE teaser list (already suppression-filtered + bounded
-  // by the saturation stop). Pointer rows (apollo_audience_id set) store Apollo's
-  // FAITHFUL filter shape → forward it VERBATIM as the apollo search params (no
-  // neutral→apollo remap). A LEGACY pre-Wave-2 apollo row (no pointer) still holds
-  // the old NEUTRAL blob → let toApolloSearchParams remap it (the pre-Wave-2
-  // behavior), so it keeps serving correctly until the backfill gives it a pointer.
-  // Mirrors the same guard in refreshAudienceCounts. Enrich teasers one at a time
-  // until one reveals a non-suppressed person (the billed reveal records the serve
-  // in finalizeResolved), then stop. All teasers exhausted / saturated ⟹ none.
-  const search = await peopleSearch({
-    provider: "apollo",
-    filters: audience.apolloAudienceId
-      ? {}
-      : (storedFilters as PeopleSearchFilters),
-    apolloSearchParams: audience.apolloAudienceId ? storedFilters : undefined,
-    audienceId: audience.id,
-    identity,
-  });
-  for (const teaser of search.people) {
-    if (!teaser.providerPersonId) continue;
+  // apollo: search is a FREE teaser list. Apollo's /search/next hands back up to
+  // 100 teasers per page AND advances its forward-only cursor a whole page, while
+  // serve-next reveals ONE lead per call — so we BUFFER each fetched page and
+  // DRAIN it one teaser per call, only re-advancing apollo's cursor when the
+  // buffer is empty. Without this the other ~99 teasers per page were discarded
+  // and the cursor moved on for good, capping the audience at ~1% of its pool.
+  //
+  // Pointer rows (apollo_audience_id set) store Apollo's FAITHFUL filter shape →
+  // forward it VERBATIM as the apollo search params (no neutral→apollo remap). A
+  // LEGACY pre-Wave-2 apollo row (no pointer) still holds the old NEUTRAL blob →
+  // let toApolloSearchParams remap it, so it keeps serving until the backfill
+  // gives it a pointer. Mirrors the same guard in refreshAudienceCounts.
+  const apolloSearchParams = audience.apolloAudienceId ? storedFilters : undefined;
+  const apolloFilters = audience.apolloAudienceId
+    ? {}
+    : (storedFilters as PeopleSearchFilters);
+
+  // Drain loop: pop one buffered teaser per iteration; refill (advancing apollo's
+  // cursor) only when the buffer is dry. Enrich ONE non-suppressed teaser at a
+  // time (the billed reveal records the serve in finalizeResolved) and return on
+  // the first reveal. Exhausted ONLY when the buffer is empty AND apollo returns
+  // no more fresh teasers — never a fabricated cap (apollo's `done` at totalPages
+  // guarantees termination, so the walk is bounded by the real pool).
+  for (;;) {
+    const teaser = await popTeaser(identity.orgId, audience.id);
+    if (!teaser) {
+      // Buffer dry → advance apollo's free cursor one fruitful chunk. peopleSearch
+      // already drops brand-suppressed teasers before returning, and returns the
+      // page's fresh teasers (or [] at true apollo pool exhaustion).
+      const search = await peopleSearch({
+        provider: "apollo",
+        filters: apolloFilters,
+        apolloSearchParams,
+        audienceId: audience.id,
+        identity,
+      });
+      if (search.people.length === 0) {
+        return { status: "exhausted", person: null };
+      }
+      await bufferTeasers(identity.orgId, audience.id, search.people);
+      continue;
+    }
+
+    // Re-check suppression pre-pay: a teaser fresh at buffer time may have been
+    // served under ANOTHER audience for this brand since (cross-audience, within
+    // the window) — drop it before paying to enrich.
+    const [fresh] = await filterSuppressed(
+      identity.orgId,
+      [audience.brandId],
+      [{ linkedinUrl: teaser.linkedinUrl, providerPersonId: teaser.providerPersonId }]
+    );
+    if (!fresh) continue;
+
     const revealed = await resolveEmail({
       provider: "apollo",
       providerPersonId: teaser.providerPersonId,
@@ -1099,8 +1134,9 @@ export async function serveNextPerson(
       ]);
       return { status: "served", person: revealed.person };
     }
+    // Reveal yielded nothing (no email) or was post-pay suppressed → drop, pop
+    // the next buffered teaser.
   }
-  return { status: "exhausted", person: null };
 }
 
 // --- Avatar style: flat-vector character on a distinctive colour ------------
