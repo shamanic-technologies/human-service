@@ -40,6 +40,48 @@ function serveNext(id: string) {
   return request(app).post(`/orgs/audiences/${id}/serve-next`).set(getAuthHeaders());
 }
 
+// A masked apollo free teaser (search/next page item): person id + first name +
+// linkedin, NO email/last-name/domain (apollo masks those until enrich).
+function apolloTeaser(id: string, linkedin: string) {
+  return {
+    id,
+    firstName: "C",
+    lastName: null,
+    name: null,
+    email: null,
+    emailStatus: null,
+    title: "CEO",
+    headline: null,
+    seniority: "c_suite",
+    linkedinUrl: linkedin,
+    photoUrl: null,
+    city: null,
+    state: null,
+    country: null,
+    organizationName: "Acme",
+    organizationDomain: "acme.com",
+    organizationWebsiteUrl: null,
+    organizationIndustry: null,
+    organizationSize: null,
+    organizationLinkedinUrl: null,
+    organizationLogoUrl: null,
+    organizationCity: null,
+    organizationState: null,
+    organizationCountry: null,
+  };
+}
+
+// The enriched (revealed) apollo person returned by /enrich for a given id.
+function apolloRevealed(id: string, email: string, linkedin: string) {
+  return {
+    ...apolloTeaser(id, linkedin),
+    lastName: "D",
+    name: "C D",
+    email,
+    emailStatus: "verified",
+  };
+}
+
 function apifyLead(email: string, linkedin: string) {
   return {
     firstName: "A",
@@ -178,6 +220,110 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     expect(second.body.status).toBe("exhausted");
     expect(second.body.person).toBeNull();
     expect(enrichCalls).toBe(1); // never paid to re-enrich the suppressed teaser
+  });
+
+  it("apollo: drains a full teaser page across calls — serves every teaser, advancing apollo's cursor only ONCE per page", async () => {
+    // THE FIX. One /search/next page of 3 teasers must serve 3 people over 3
+    // calls, hitting /search/next exactly twice (once to fill the buffer, once to
+    // confirm exhaustion) — NOT 3 times (which discarded ~99/page and capped the
+    // audience at ~1% of its pool). enrich is one-at-a-time, once per teaser.
+    let searchNextCalls = 0;
+    let enrichCalls = 0;
+    const emailById: Record<string, string> = {
+      p1: "p1@acme.com",
+      p2: "p2@acme.com",
+      p3: "p3@acme.com",
+    };
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/search/next")) {
+        searchNextCalls++;
+        // First page: the 3 teasers. Every later page: empty + done (the cursor
+        // is past totalPages — true pool exhaustion).
+        return searchNextCalls === 1
+          ? ok({
+              people: [
+                apolloTeaser("p1", "linkedin.com/in/p1"),
+                apolloTeaser("p2", "linkedin.com/in/p2"),
+                apolloTeaser("p3", "linkedin.com/in/p3"),
+              ],
+              done: false,
+              totalEntries: 3,
+            })
+          : ok({ people: [], done: true, totalEntries: 3 });
+      }
+      if (u.endsWith("/enrich")) {
+        enrichCalls++;
+        const id = (JSON.parse(init.body ?? "{}") as { apolloPersonId: string })
+          .apolloPersonId;
+        return ok({ person: apolloRevealed(id, emailById[id], `linkedin.com/in/${id}`) });
+      }
+      throw new Error("unexpected url " + u);
+    });
+
+    const id = await createAudience("apollo", "Apollo Drain");
+    const served: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const res = await serveNext(id);
+      expect(res.body.status).toBe("served");
+      served.push(res.body.person.email);
+    }
+    // 4th call: buffer empty → one more /search/next → empty+done → exhausted.
+    const last = await serveNext(id);
+    expect(last.body.status).toBe("exhausted");
+    expect(last.body.person).toBeNull();
+
+    // All 3 distinct teasers served from a SINGLE fetched page.
+    expect(new Set(served)).toEqual(
+      new Set(["p1@acme.com", "p2@acme.com", "p3@acme.com"])
+    );
+    expect(enrichCalls).toBe(3); // one billed reveal per served teaser
+    expect(searchNextCalls).toBe(2); // page-fill + exhaustion-confirm — NOT 3+
+
+    const members = await request(app)
+      .get(`/orgs/audiences/${id}/members`)
+      .set(getAuthHeaders());
+    expect(members.body.members).toHaveLength(3);
+  });
+
+  it("apollo: a buffered teaser suppressed after buffering is dropped AT POP (pre-pay), not re-enriched", async () => {
+    // Two teasers buffered together share a linkedin url (same person, two apollo
+    // ids — a real dedup case). Serving the first suppresses that linkedin; the
+    // second is caught by the pop-time suppression re-check (it was fresh when
+    // buffered, suppressed by the time it is popped) and dropped WITHOUT a paid
+    // enrich. Proves no re-serve / no over-spend across the buffer boundary.
+    let searchNextCalls = 0;
+    let enrichCalls = 0;
+    const SHARED = "linkedin.com/in/shared";
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/search/next")) {
+        searchNextCalls++;
+        return searchNextCalls === 1
+          ? ok({
+              people: [apolloTeaser("p1", SHARED), apolloTeaser("p2", SHARED)],
+              done: false,
+              totalEntries: 2,
+            })
+          : ok({ people: [], done: true, totalEntries: 2 });
+      }
+      if (u.endsWith("/enrich")) {
+        enrichCalls++;
+        const id = (JSON.parse(init.body ?? "{}") as { apolloPersonId: string })
+          .apolloPersonId;
+        return ok({ person: apolloRevealed(id, `${id}@acme.com`, SHARED) });
+      }
+      throw new Error("unexpected url " + u);
+    });
+
+    const id = await createAudience("apollo", "Apollo Pop Suppress");
+    const first = await serveNext(id);
+    expect(first.body.status).toBe("served");
+    const second = await serveNext(id);
+    expect(second.body.status).toBe("exhausted");
+    expect(second.body.person).toBeNull();
+    // Only ONE teaser was ever enriched; the linkedin-twin was dropped at pop.
+    expect(enrichCalls).toBe(1);
   });
 
   it("422 when the audience has no committed provider", async () => {
