@@ -442,3 +442,52 @@ export const audienceMembers = pgTable(
 
 export type AudienceMember = typeof audienceMembers.$inferSelect;
 export type NewAudienceMember = typeof audienceMembers.$inferInsert;
+
+// --- serve-next: apollo free-teaser drain buffer ---
+//
+// Apollo's POST /search/next returns up to 100 FREE teasers per page AND advances
+// its server-side cursor a whole page. serve-next reveals ONE lead per call, so
+// the other ~99 teasers per page were discarded while the forward-only cursor
+// moved on for good — capping an apollo audience at ~1 served lead per page
+// (~1% of its verified-email pool). This buffer holds a fetched page's teasers so
+// serve-next drains them ONE per call and only RE-advances apollo's cursor once
+// the buffer is empty — raising the servable cap to ~100% of the pool.
+//
+// Bounded (≤ one apollo page per audience in flight), self-draining (popped on
+// read, no cron — DELETE ... RETURNING with FOR UPDATE SKIP LOCKED), and
+// cascade-deleted with its audience. apify needs no equivalent (it bills per
+// returned lead, so it serves one-at-a-time with no free teaser list).
+export const audienceTeaserBuffer = pgTable(
+  "audience_teaser_buffer",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    // Apollo person id — the enrich handle popped teasers are revealed by.
+    providerPersonId: text("provider_person_id").notNull(),
+    // Raw linkedin url for the pre-pay suppression re-check at pop time (a teaser
+    // may have been served under another audience for the brand since buffering).
+    linkedinUrl: text("linkedin_url"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // One row per (audience, apollo person) — a re-surfaced teaser is ignored.
+    uniqueIndex("idx_audience_teaser_buffer_unique").on(
+      table.audienceId,
+      table.providerPersonId
+    ),
+    // Drain order: oldest-first per audience.
+    index("idx_audience_teaser_buffer_drain").on(
+      table.orgId,
+      table.audienceId,
+      table.createdAt
+    ),
+  ]
+);
+
+export type AudienceTeaserBuffer = typeof audienceTeaserBuffer.$inferSelect;
+export type NewAudienceTeaserBuffer = typeof audienceTeaserBuffer.$inferInsert;
