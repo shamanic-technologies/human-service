@@ -313,12 +313,23 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
   only. (The 3-mo window lapsing is the existing designed semantic; not a new
   forever-exclusion.)
 - **Per provider**: apify → `peopleSearch(limit 1)` (exclude-set pushed down, hit
-  is billed + recorded by the gateway) → that hit, or exhausted. apollo → free
-  teaser list (suppression-filtered, walked to a fresh page or Apollo's true
-  `done` — no page cap) → enrich teasers one at
-  a time (`resolveEmail` by `providerPersonId`, billed, recorded in
-  `finalizeResolved`) until one reveals a non-suppressed person, then stop; all
-  teasers dry ⟹ exhausted.
+  is billed + recorded by the gateway) → that hit, or exhausted. apollo → drain a
+  **buffered teaser page** ONE per call (migration `0017` `audience_teaser_buffer`,
+  `src/services/teaser-buffer.ts`): each apollo `/search/next` returns up to 100
+  free teasers AND advances apollo's forward-only cursor a whole page, but
+  serve-next reveals only ONE lead per call — so a fetched page is BUFFERED and
+  popped one teaser per call (`popTeaser`, atomic `DELETE … RETURNING` +
+  `FOR UPDATE SKIP LOCKED`), and apollo's cursor only RE-advances when the buffer
+  is empty (`peopleSearch` refill). Without this the other ~99 teasers/page were
+  discarded and the cursor moved on for good, capping an apollo audience at
+  **~1 served lead per page (~1% of its verified pool)** — fixed v0.25.0. Each
+  popped teaser is re-checked against suppression PRE-PAY (it may have been served
+  under another audience for the brand since buffering), then enriched one at a
+  time (`resolveEmail` by `providerPersonId`, billed, recorded in
+  `finalizeResolved`) until one reveals a non-suppressed person, then stop.
+  Exhausted ONLY when the buffer is empty AND apollo returns no fresh teasers —
+  no fabricated cap (apollo's honest `done` at totalPages bounds the walk; the
+  2026-06-29 no-saturation-cap fix is preserved).
 - **Exhaustion is explicit**: `{ status: "exhausted", person: null }` — never a
   silent empty. An audience with **no committed provider OR no stored filters**
   fails loud: `AudienceNotServableError` → **422** (can't serve without them).
@@ -601,6 +612,9 @@ returns 404, never 403, to avoid leaking existence.
   (audit-only forwarded headers, not guaranteed uuid).
 - **`people`, `audiences`, `audience_members`** (audiences v1): `org_id` +
   `brand_id` uuid (new-table convention); `source` / `confidence` text.
+- **`audience_teaser_buffer`** (serve-next apollo drain buffer): `org_id` uuid
+  (new-table convention); `audience_id` uuid FK → `audiences` (ON DELETE CASCADE);
+  `provider_person_id` / `linkedin_url` text.
 
 The same request can hit both column families because the value passed in
 `x-org-id` is text-coercible-to-uuid in practice. New tables use `uuid`.
