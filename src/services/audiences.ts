@@ -372,6 +372,220 @@ export async function computeStats(
   };
 }
 
+// --- Internal bulk resolver: lead -> ACTIVE audience {id,name,avatarUrl} ---
+//
+// Server-to-server (service-auth, no browser body cap) resolution of a large
+// batch of leads to their brand-correct active audience, keyed by audienceId
+// AND/OR by email. Powers lead-service#346 (dashboard Leads "Audience" column),
+// which fans out the whole brand's leads (thousands of emails) in ONE call —
+// impossible against org+email `/orgs/audiences/stats` (100 KB gateway cap →
+// 413). This resolver differs from computeStats on every axis the consumer needs:
+//   - brand-scoped (AC2): only audiences of `brandId` are ever returned, so a
+//     lead is NEVER attributed a foreign-brand audience (an org spans brands).
+//   - active-preferred (AC1): each membership's audience is resolved through the
+//     deprecated->canonical link (reusing computeStats' resolution), then the
+//     best-status membership per person wins (active > paused > archived);
+//     `suggested` (never-chosen) and unlinked-`deprecated` ([Provider] variants
+//     with no active twin) are excluded — we surface a live card, never a retired
+//     name. Tiebreak: most-recent `last_served_at`.
+//   - historical (AC3): the by-email path keys on `people.email_norm`, so a lead
+//     that predates audience_id tagging (lead-service never tagged it) still
+//     resolves via its serve-time membership. NO backfill needed —
+//     `audience_members` is already promoted from `lead_serves` at serve time
+//     (prod gap = ~16/5668 rows, dedup noise); EMAIL is the historical key, not
+//     new state. Leads human-service never served resolve to null (honest — we
+//     cannot invent an audience we never assigned).
+//   - avatar-bearing: returns `avatarUrl` so the dashboard renders the card.
+//
+// No cost declared here (a pure DB read). Fail loud: a DB error propagates.
+
+export interface ResolvedAudience {
+  id: string;
+  name: string;
+  avatarUrl: string | null;
+}
+
+// Status precedence for the by-email pick (lower = preferred). Effective statuses
+// outside this map (only unlinked `deprecated` survives post-canonical) are
+// excluded before ranking, so no default rank is needed.
+const AUDIENCE_STATUS_RANK: Record<string, number> = {
+  active: 0,
+  paused: 1,
+  archived: 2,
+};
+
+// One audience row joined to its optional canonical twin. Field names mirror the
+// `baseAudienceCols` select below.
+interface AudienceWithCanonical {
+  id: string;
+  name: string;
+  brandId: string;
+  status: string;
+  avatarUrl: string | null;
+  canonicalAudienceId: string | null;
+  canonId: string | null;
+  canonName: string | null;
+  canonBrandId: string | null;
+  canonStatus: string | null;
+  canonAvatarUrl: string | null;
+}
+
+// Resolve a row to its EFFECTIVE audience: a deprecated provider-variant with a
+// canonical link resolves to that canonical twin (the live replacement the
+// dashboard loads with a clean name + avatar); otherwise the row itself. Same
+// rule computeStats applies — kept identical so /stats and the resolver agree.
+function effectiveAudience(m: AudienceWithCanonical): {
+  id: string;
+  name: string;
+  brandId: string;
+  status: string;
+  avatarUrl: string | null;
+} {
+  if (m.status === "deprecated" && m.canonId !== null) {
+    return {
+      id: m.canonId,
+      name: m.canonName as string,
+      brandId: m.canonBrandId as string,
+      status: m.canonStatus as string,
+      avatarUrl: m.canonAvatarUrl,
+    };
+  }
+  return {
+    id: m.id,
+    name: m.name,
+    brandId: m.brandId,
+    status: m.status,
+    avatarUrl: m.avatarUrl,
+  };
+}
+
+export async function resolveAudiencesForBrand(
+  orgId: string,
+  brandId: string,
+  input: { audienceIds?: string[]; emails?: string[] }
+): Promise<{
+  byAudienceId: Record<string, ResolvedAudience | null>;
+  byEmail: Record<string, ResolvedAudience | null>;
+}> {
+  const canonical = alias(audiences, "canonical_audience");
+  const baseAudienceCols = {
+    id: audiences.id,
+    name: audiences.name,
+    brandId: audiences.brandId,
+    status: audiences.status,
+    avatarUrl: audiences.avatarUrl,
+    canonicalAudienceId: audiences.canonicalAudienceId,
+    canonId: canonical.id,
+    canonName: canonical.name,
+    canonBrandId: canonical.brandId,
+    canonStatus: canonical.status,
+    canonAvatarUrl: canonical.avatarUrl,
+  };
+
+  // --- by audienceId: direct tag -> effective (canonical-resolved) audience ---
+  const audienceIds = [...new Set(input.audienceIds ?? [])];
+  const byAudienceId: Record<string, ResolvedAudience | null> = {};
+  if (audienceIds.length > 0) {
+    const rows = await db
+      .select(baseAudienceCols)
+      .from(audiences)
+      .leftJoin(canonical, eq(audiences.canonicalAudienceId, canonical.id))
+      .where(
+        and(eq(audiences.orgId, orgId), inArray(audiences.id, audienceIds))
+      );
+    const rowById = new Map(rows.map((r) => [r.id, r]));
+    for (const aid of audienceIds) {
+      const row = rowById.get(aid);
+      // Not found or foreign brand -> null (brand-correct, AC2).
+      if (!row || row.brandId !== brandId) {
+        byAudienceId[aid] = null;
+        continue;
+      }
+      const eff = effectiveAudience(row);
+      // A retired provider-variant with no live twin (unlinked deprecated) is not
+      // a card we want to surface; brand mismatch on the canonical is defensive.
+      byAudienceId[aid] =
+        eff.status !== "deprecated" && eff.brandId === brandId
+          ? { id: eff.id, name: eff.name, avatarUrl: eff.avatarUrl }
+          : null;
+    }
+  }
+
+  // --- by email: person(email_norm) -> membership(brand) -> best audience ---
+  const rawEmails = input.emails ?? [];
+  const byEmail: Record<string, ResolvedAudience | null> = {};
+  const emailToNorm = new Map<string, string | null>();
+  for (const e of rawEmails) {
+    emailToNorm.set(e, normalizeEmail(e));
+    byEmail[e] = null; // default: unmatched
+  }
+  const emailNorms = [
+    ...new Set(
+      [...emailToNorm.values()].filter((x): x is string => x !== null)
+    ),
+  ];
+  if (emailNorms.length > 0) {
+    const rows = await db
+      .select({
+        emailNorm: people.emailNorm,
+        lastServedAt: audienceMembers.lastServedAt,
+        ...baseAudienceCols,
+      })
+      .from(people)
+      .innerJoin(audienceMembers, eq(audienceMembers.personId, people.id))
+      .innerJoin(audiences, eq(audiences.id, audienceMembers.audienceId))
+      .leftJoin(canonical, eq(audiences.canonicalAudienceId, canonical.id))
+      .where(
+        and(
+          eq(people.orgId, orgId),
+          inArray(people.emailNorm, emailNorms),
+          eq(audiences.brandId, brandId)
+        )
+      );
+
+    // Pick the best membership per email_norm (rank, then recency).
+    const best = new Map<
+      string,
+      { audience: ResolvedAudience; rank: number; lastServedAt: Date }
+    >();
+    for (const r of rows) {
+      const norm = r.emailNorm as string;
+      const eff = effectiveAudience(r);
+      // Exclude never-chosen candidates and retired unlinked variants; a
+      // canonical whose brand drifted is a defensive guard.
+      if (
+        eff.status === "suggested" ||
+        eff.status === "deprecated" ||
+        eff.brandId !== brandId
+      ) {
+        continue;
+      }
+      const rank = AUDIENCE_STATUS_RANK[eff.status] ?? 3;
+      const cur = best.get(norm);
+      if (
+        !cur ||
+        rank < cur.rank ||
+        (rank === cur.rank && r.lastServedAt > cur.lastServedAt)
+      ) {
+        best.set(norm, {
+          audience: { id: eff.id, name: eff.name, avatarUrl: eff.avatarUrl },
+          rank,
+          lastServedAt: r.lastServedAt,
+        });
+      }
+    }
+
+    for (const [raw, norm] of emailToNorm) {
+      if (norm !== null) {
+        const hit = best.get(norm);
+        if (hit) byEmail[raw] = hit.audience;
+      }
+    }
+  }
+
+  return { byAudienceId, byEmail };
+}
+
 // --- Audience suggestion (onboarding NL -> persisted candidate audiences) ---
 //
 // Two layers, then collapse + persist:
