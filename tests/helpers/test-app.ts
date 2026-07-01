@@ -9,10 +9,14 @@ import backfillRoutes from "../../src/routes/backfill.js";
 import listsRoutes from "../../src/routes/lists.js";
 import peopleRoutes from "../../src/routes/people.js";
 import audiencesRoutes from "../../src/routes/audiences.js";
+import internalAudiencesRoutes from "../../src/routes/internal-audiences.js";
 
 export function createTestApp() {
   const app = express();
   app.use(cors());
+  // Mirror index.ts: internal resolver (25 MB parser) mounts before the global
+  // 100 KB json parser.
+  app.use(internalAudiencesRoutes);
   app.use(express.json());
 
   app.use(healthRoutes);

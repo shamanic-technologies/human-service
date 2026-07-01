@@ -42,6 +42,7 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Internal | `POST /internal/migrate-apify-audiences-to-apollo` | apiKey | One-time data fix (APOLLO-ONLY cutover): for every non-deprecated `provider='apify'` audience, build an equivalent apollo audience via apollo-service (`POST /audiences/suggest-from-segment`), store the pointer + faithful filters, create a new apollo audience mirroring the source status, and mark the apify one `deprecated` (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/backfill-canonical-audience-links` | apiKey | One-time data fix: link each EXISTING deprecated provider-variant audience (`<base> [Apify]`) to its active same-`(org,brand)`-base-name canonical sibling (`audiences.canonical_audience_id`), so membership/stats reads resolve a deprecated match to the clean active audience. Pre-link rows from the apify→apollo migration (which now sets the link going forward). Skips 0/ambiguous-sibling rows (fail loud, never guess). Idempotent, `?dryRun=true`, reversible |
 | Internal | `POST /internal/backfill-apollo-audience-pointers` | apiKey | One-time data fix ("one filter vocabulary" Wave 2): for every `provider='apollo'` audience lacking `apollo_audience_id`, build a faithful Apollo audience via apollo-service `POST /audiences/suggest-from-segment` (from the row's name + description), then store the **pointer** + cached faithful filters (replacing the old lossy neutral blob) + count. Idempotent (scoped to `apollo_audience_id IS NULL`), `?dryRun=true`, `?async=true`, reversible |
+| Internal | `POST /internal/audiences/resolve` | apiKey | **Bulk server-to-server audience resolver** for lead-service (#166): body `{orgId, brandId, audienceIds?, emails?}` → `{byAudienceId, byEmail}` maps of `{id,name,avatarUrl}` \| null. Brand-correct + active-preferred (deprecated→canonical), keyed by audienceId AND/OR email (historical coverage). Dedicated **25 MB** body parser (mounts before the global 100 KB json) — NO browser 413 cap. See below. |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
 | Org-scoped (CRM v1) | `GET /orgs/lists/{id}` | apiKey + `x-org-id` | Get a CRM list |
@@ -286,6 +287,49 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
   >$100k Revenue" rows in DIFFERENT orgs do not collide — org-scoping separates
   them). FAIL LOUD on ambiguity: a deprecated row with no variant suffix, 0
   siblings, or (defensively) >1 sibling is SKIPPED + logged, never guessed.
+
+### Internal bulk audience resolver — `POST /internal/audiences/resolve`
+
+Server-to-server (service-auth `x-api-key`, no browser body cap) resolution of a
+large batch of leads to their brand-correct **active audience card**
+`{id, name, avatarUrl}`, keyed by `audienceId` AND/OR `email`. Powers
+lead-service#346 (dashboard Leads "Audience" column): lead-service fans out a
+whole brand's leads (thousands of emails) in ONE call to attach the audience onto
+each lead server-side. `src/routes/internal-audiences.ts` is the thin layer;
+`resolveAudiencesForBrand` in `src/services/audiences.ts` owns the engine.
+
+- **Why not `/orgs/audiences/stats`?** That route is org+email scoped
+  (cross-brand, no status/avatar) and rides the global **100 KB** `express.json`
+  cap — the dashboard's ~7.7k-email fan-out 413s there. This resolver mounts
+  **before** the global parser with its OWN **25 MB** `express.json` (body-parser
+  sets `req._body`, so the global parser no-ops on it); org-scoped routes keep the
+  100 KB browser guard. `computeStats` is left untouched (the browser `/stats`
+  path still serves the small membership-inspector use case).
+- **Brand-correct (AC2)** — only audiences of the body's `brandId` are ever
+  returned; a foreign-brand `audienceId` or a foreign-brand membership resolves to
+  `null`. An org spans brands, so this prevents attributing a foreign-brand
+  audience.
+- **Active-preferred (AC1)** — each membership's audience is resolved through the
+  same deprecated→canonical link `computeStats` uses (so `/stats` and the resolver
+  agree). The **by-email** path then picks the best-status membership per person:
+  `active` > `paused` > `archived`; `suggested` (never-chosen) and unlinked
+  `deprecated` (`[Provider]` variant with no live twin) are **excluded** — we
+  surface a live card, never a retired name. Tiebreak: most-recent
+  `last_served_at`. The **by-audienceId** path resolves a directly-tagged id to
+  its effective (canonical) card, `null` only if foreign-brand / unknown / retired.
+- **Historical coverage (AC3)** — the by-email key on `people.email_norm` covers
+  leads that predate `audience_id` tagging (lead-service never tagged them). **No
+  backfill / new state** — `audience_members` is already promoted from
+  `lead_serves` at serve time (prod gap ≈ 16/5668 rows = dedup noise), so EMAIL is
+  the historical key, not a sweep. A lead human-service **never served** (served
+  pre-gateway via the old direct lead-service path) resolves to `null` — honest, we
+  cannot invent an audience we never assigned (never mock absent data).
+- **Contract**: body `{ orgId (lax uuid — org ids predate v4), brandId (strict),
+  audienceIds?: uuid[], emails?: string[] }`, at least one of the two lists (400
+  otherwise). Response `{ byAudienceId: Record<id, card|null>, byEmail:
+  Record<rawEmail, card|null> }` — `byEmail` is keyed by the **raw** email as sent
+  (normalization is internal). **No cost** (pure DB read); no downstream calls.
+  Fail loud on a DB error (propagates).
 
 ### Serve-next (lead primitive) — `POST /orgs/audiences/{id}/serve-next`
 
