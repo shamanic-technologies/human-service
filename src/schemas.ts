@@ -1765,6 +1765,96 @@ registry.registerPath({
   },
 });
 
+// --- Internal: bulk audience resolver for lead-service (by id and/or email) ---
+//
+// Server-to-server, service-auth, NO browser body cap (dedicated 25 MB parser).
+// Resolves a batch of leads to their brand-correct active audience card, keyed by
+// audienceId AND/OR email. See the "Internal bulk resolver" note in
+// src/services/audiences.ts.
+export const ResolveAudiencesRequestSchema = z
+  .object({
+    // Lax (not strict-v4): org ids can predate the v4 convention — matches the
+    // header org-id parsing. Brand/audience ids stay strict below.
+    orgId: z.string().min(1).openapi({
+      description: "Org the leads belong to (internal UUID).",
+    }),
+    brandId: z.string().uuid().openapi({
+      description:
+        "Brand to resolve FOR. Only audiences of this brand are ever returned (brand-correct) — a lead is never attributed a foreign-brand audience.",
+    }),
+    audienceIds: z
+      .array(z.string().uuid())
+      .optional()
+      .openapi({
+        description:
+          "Audience ids carried on already-tagged leads. Each resolves to its effective (deprecated->canonical) active card, or null if not this brand / retired / unknown.",
+      }),
+    emails: z
+      .array(z.string())
+      .optional()
+      .openapi({
+        description:
+          "Lead emails (raw; normalized server-side). Each resolves to the best-status membership audience for this brand (active > paused > archived), or null. This is the HISTORICAL key — covers leads that predate audience_id tagging.",
+      }),
+  })
+  .refine((d) => (d.audienceIds?.length ?? 0) + (d.emails?.length ?? 0) > 0, {
+    message: "Provide at least one of audienceIds or emails",
+  })
+  .openapi("ResolveAudiencesRequest");
+
+export const ResolvedAudienceSchema = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    avatarUrl: z.string().nullable(),
+  })
+  .openapi("ResolvedAudience");
+
+export const ResolveAudiencesResponseSchema = z
+  .object({
+    byAudienceId: z
+      .record(z.string(), ResolvedAudienceSchema.nullable())
+      .openapi({
+        description:
+          "Map of each requested audienceId -> resolved card, or null.",
+      }),
+    byEmail: z
+      .record(z.string(), ResolvedAudienceSchema.nullable())
+      .openapi({
+        description:
+          "Map of each requested (raw) email -> resolved card, or null.",
+      }),
+  })
+  .openapi("ResolveAudiencesResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/audiences/resolve",
+  summary:
+    "Server-to-server bulk resolution of leads -> brand-correct active audience {id,name,avatarUrl}, keyed by audienceId and/or email (historical coverage). No browser body cap.",
+  security: [{ apiKey: [] }],
+  request: {
+    body: {
+      content: {
+        "application/json": { schema: ResolveAudiencesRequestSchema },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Resolution maps",
+      content: {
+        "application/json": { schema: ResolveAudiencesResponseSchema },
+      },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
 // --- GET /health ---
 
 export const HealthResponseSchema = z

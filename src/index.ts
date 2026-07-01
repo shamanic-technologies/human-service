@@ -11,12 +11,18 @@ import backfillRoutes from "./routes/backfill.js";
 import listsRoutes from "./routes/lists.js";
 import peopleRoutes from "./routes/people.js";
 import audiencesRoutes from "./routes/audiences.js";
+import internalAudiencesRoutes from "./routes/internal-audiences.js";
 import { register as runInstrumentation } from "./instrumentation.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
+// Internal bulk audience resolver mounts BEFORE the global 100 KB json parser so
+// its own 25 MB parser handles lead-service's large payloads; the global parser
+// then no-ops on those (body already parsed). Org-scoped routes keep the 100 KB
+// browser guard.
+app.use(internalAudiencesRoutes);
 app.use(express.json());
 
 app.use(healthRoutes);

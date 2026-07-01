@@ -2280,6 +2280,84 @@
           "sample"
         ]
       },
+      "ResolveAudiencesResponse": {
+        "type": "object",
+        "properties": {
+          "byAudienceId": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ResolvedAudience"
+            },
+            "description": "Map of each requested audienceId -> resolved card, or null."
+          },
+          "byEmail": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ResolvedAudience"
+            },
+            "description": "Map of each requested (raw) email -> resolved card, or null."
+          }
+        },
+        "required": [
+          "byAudienceId",
+          "byEmail"
+        ]
+      },
+      "ResolvedAudience": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "avatarUrl": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "avatarUrl"
+        ]
+      },
+      "ResolveAudiencesRequest": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Org the leads belong to (internal UUID)."
+          },
+          "brandId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Brand to resolve FOR. Only audiences of this brand are ever returned (brand-correct) — a lead is never attributed a foreign-brand audience."
+          },
+          "audienceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Audience ids carried on already-tagged leads. Each resolves to its effective (deprecated->canonical) active card, or null if not this brand / retired / unknown."
+          },
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Lead emails (raw; normalized server-side). Each resolves to the best-status membership audience for this brand (active > paused > archived), or null. This is the HISTORICAL key — covers leads that predate audience_id tagging."
+          }
+        },
+        "required": [
+          "orgId",
+          "brandId"
+        ]
+      },
       "HealthResponse": {
         "type": "object",
         "properties": {
@@ -5413,6 +5491,50 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/internal/audiences/resolve": {
+      "post": {
+        "summary": "Server-to-server bulk resolution of leads -> brand-correct active audience {id,name,avatarUrl}, keyed by audienceId and/or email (historical coverage). No browser body cap.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveAudiencesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Resolution maps",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolveAudiencesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
           }
         }
       }
