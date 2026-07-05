@@ -1236,6 +1236,18 @@ export interface ServeNextResult {
   person: Person | null;
 }
 
+// serve-next's LOCKED consumer contract (lead-service): status="served" MUST mean
+// a contactable person WITH a usable email. A provider can hand back a person
+// record that has NO email — apollo /enrich returns a person whose `email` is null
+// when the email is locked / not-found / unverifiable, and (defensively) an apify
+// hit could carry an empty string. Such a person is NOT servable: committing it as
+// "served" pushes an uncontactable lead into the cold-email funnel, which the
+// consumer correctly rejects (fail-loud) and crash-loops the campaign. This guard
+// is the single truth for "does this person satisfy the served contract".
+function hasUsableEmail(p: Person): boolean {
+  return typeof p.email === "string" && p.email.trim().length > 0;
+}
+
 // Serve the NEXT unserved person of an audience — the per-iteration lead
 // primitive lead-service calls. A thin wrapper over the existing people-gateway
 // machinery: it searches with the audience's STORED canonical filters via its
@@ -1276,7 +1288,13 @@ export async function serveNextPerson(
       identity,
     });
     const person = result.people[0] ?? null;
-    if (!person) return { status: "exhausted", person: null };
+    // A no-email hit violates the served contract (apify is supposed to return a
+    // verified email per hit; a blank one is junk). It was already billed +
+    // suppression-recorded by the gateway, so surface exhausted rather than
+    // committing an uncontactable person as served.
+    if (!person || !hasUsableEmail(person)) {
+      return { status: "exhausted", person: null };
+    }
     await tagAudienceServe(identity.orgId, audience.id, [
       toServedContact(person),
     ]);
@@ -1342,14 +1360,20 @@ export async function serveNextPerson(
       audienceId: audience.id,
       identity,
     });
-    if (revealed.person) {
+    // Only commit as served when the reveal produced a person WITH a usable email
+    // — apollo /enrich can return a person record whose `email` is null (locked /
+    // not-found), and serving that violates the consumer contract. The credit is
+    // already spent + the serve suppression-recorded in finalizeResolved, so a
+    // no-email reveal is simply dropped and we pop the next teaser (never wasting
+    // it on a re-enrich).
+    if (revealed.person && hasUsableEmail(revealed.person)) {
       await tagAudienceServe(identity.orgId, audience.id, [
         toServedContact(revealed.person),
       ]);
       return { status: "served", person: revealed.person };
     }
-    // Reveal yielded nothing (no email) or was post-pay suppressed → drop, pop
-    // the next buffered teaser.
+    // Reveal yielded no usable email, or was post-pay suppressed → drop, pop the
+    // next buffered teaser.
   }
 }
 
