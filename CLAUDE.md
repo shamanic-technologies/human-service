@@ -374,6 +374,18 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
   Exhausted ONLY when the buffer is empty AND apollo returns no fresh teasers —
   no fabricated cap (apollo's honest `done` at totalPages bounds the walk; the
   2026-06-29 no-saturation-cap fix is preserved).
+- **`served` ⇒ a USABLE email (LOCKED consumer contract)**: `status:"served"` MUST
+  carry a person with a non-empty `email` — lead-service fails loud on an emailless
+  lead (won't push an uncontactable person into the cold-email funnel) and a bad
+  serve crash-loops the campaign. A reveal can produce a person record with NO email
+  (apollo `/enrich` returns `email:null` when it's locked / not-found / unverifiable;
+  an apify hit could carry a blank string), so BOTH provider paths gate on
+  `hasUsableEmail(person)` (non-empty trimmed string) before returning `served`. A
+  no-email reveal is DROPPED (credit already spent + serve suppression-recorded in
+  `finalizeResolved`, so never re-enriched) and the apollo drain loop pops the next
+  teaser; apify surfaces `exhausted`. Fixed v0.26.2 (the drain loop's `if
+  (revealed.person)` check was truthy for a null-email person — the "no email → drop"
+  the comment claimed was never actually enforced).
 - **Exhaustion is explicit**: `{ status: "exhausted", person: null }` — never a
   silent empty. An audience with **no committed provider OR no stored filters**
   fails loud: `AudienceNotServableError` → **422** (can't serve without them).
