@@ -326,6 +326,86 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     expect(enrichCalls).toBe(1);
   });
 
+  it("apollo: a reveal with NO email is skipped (never served) — advances to the next contactable teaser", async () => {
+    // THE BUG: apollo /enrich can return a person record whose `email` is null
+    // (locked / not-found). serve-next must NOT commit that as served (the
+    // consumer rejects a no-email lead and crash-loops). p1 reveals with a null
+    // email → dropped; p2 reveals with a real email → served. Both enriched once.
+    let enrichCalls = 0;
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/search/next"))
+        return ok({
+          people: [
+            apolloTeaser("p1", "linkedin.com/in/p1"),
+            apolloTeaser("p2", "linkedin.com/in/p2"),
+          ],
+          done: false,
+          totalEntries: 2,
+        });
+      if (u.endsWith("/enrich")) {
+        enrichCalls++;
+        const id = (JSON.parse(init.body ?? "{}") as { apolloPersonId: string })
+          .apolloPersonId;
+        // p1 reveals with NO email (the null-email hazard); p2 with a real one.
+        const person =
+          id === "p1"
+            ? { ...apolloRevealed("p1", "", "linkedin.com/in/p1"), email: null }
+            : apolloRevealed("p2", "p2@acme.com", "linkedin.com/in/p2");
+        return ok({ person });
+      }
+      throw new Error("unexpected url " + u);
+    });
+
+    const id = await createAudience("apollo", "Apollo NoEmail Skip");
+    const res = await serveNext(id);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.email).toBe("p2@acme.com");
+    expect(enrichCalls).toBe(2); // p1 (no email, dropped) then p2 (served)
+
+    // Only the contactable person is a member — the no-email p1 is never tagged.
+    const members = await request(app)
+      .get(`/orgs/audiences/${id}/members`)
+      .set(getAuthHeaders());
+    expect(members.body.members).toHaveLength(1);
+    expect(members.body.members[0].emailNorm).toBe("p2@acme.com");
+  });
+
+  it("apollo: when every remaining reveal has NO email, returns exhausted (never served)", async () => {
+    let searchNextCalls = 0;
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/search/next")) {
+        searchNextCalls++;
+        return searchNextCalls === 1
+          ? ok({ people: [apolloTeaser("p1", "linkedin.com/in/p1")], done: false, totalEntries: 1 })
+          : ok({ people: [], done: true, totalEntries: 1 });
+      }
+      if (u.endsWith("/enrich"))
+        return ok({ person: { ...apolloRevealed("p1", "", "linkedin.com/in/p1"), email: null } });
+      throw new Error("unexpected url " + u);
+    });
+    const id = await createAudience("apollo", "Apollo All NoEmail");
+    const res = await serveNext(id);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("exhausted");
+    expect(res.body.person).toBeNull();
+  });
+
+  it("apify: a hit with a blank email is NOT served — returns exhausted", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).endsWith("/search"))
+        return ok({ leads: [apifyLead("", "linkedin.com/in/x")], leadCount: 1, verifiedCount: 0, hasMore: false });
+      throw new Error("unexpected url " + url);
+    });
+    const id = await createAudience("apify", "Apify Blank Email");
+    const res = await serveNext(id);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("exhausted");
+    expect(res.body.person).toBeNull();
+  });
+
   it("422 when the audience has no committed provider", async () => {
     const create = await request(app)
       .post("/orgs/audiences")
