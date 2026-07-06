@@ -3,10 +3,11 @@ import request from "supertest";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { tagAudienceServe, computeStats } from "../../src/services/audiences.js";
+import { recordServe } from "../../src/services/suppression.js";
 import type { ServedContact } from "../../src/services/suppression.js";
 import { db } from "../../src/db/index.js";
-import { audiences } from "../../src/db/schema.js";
-import { eq } from "drizzle-orm";
+import { audiences, brandSuppressions } from "../../src/db/schema.js";
+import { eq, sql } from "drizzle-orm";
 
 const app = createTestApp();
 
@@ -574,5 +575,118 @@ describe("People route audience tagging", () => {
       });
     expect(res.status).toBe(404);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("Audiences list contactability (Size / Remaining)", () => {
+  // Mark `contact` as served for a brand within the window: tags it a member of
+  // the audience AND records the per-brand suppression (both, exactly like the
+  // real serve path), so it counts against availability.
+  async function serve(
+    orgId: string,
+    brandId: string,
+    audienceId: string,
+    c: ServedContact
+  ) {
+    await tagAudienceServe(orgId, audienceId, [c]);
+    await recordServe(orgId, [brandId], [c], { audienceId });
+  }
+
+  async function listItem(orgId: string, audienceId: string) {
+    const res = await request(app)
+      .get("/orgs/audiences")
+      .set(headersForOrg(orgId));
+    expect(res.status).toBe(200);
+    const item = res.body.audiences.find(
+      (a: { id: string }) => a.id === audienceId
+    );
+    expect(item).toBeDefined();
+    return item as {
+      sizeCount: number;
+      availableToContactCount: number;
+      availableToContactPct: number;
+    };
+  }
+
+  it("never-served audience: availableToContactCount == sizeCount, pct == 100", async () => {
+    const id = await createAudience(ORG_A, {
+      name: "Fresh",
+      brandId: BRAND_1,
+      provider: "apollo",
+      apolloCount: 40,
+    });
+    const item = await listItem(ORG_A, id);
+    expect(item.sizeCount).toBe(40);
+    expect(item.availableToContactCount).toBe(40);
+    expect(item.availableToContactPct).toBe(100);
+  });
+
+  it("a serve within the window subtracts from availability", async () => {
+    const id = await createAudience(ORG_A, {
+      name: "Served",
+      brandId: BRAND_1,
+      provider: "apollo",
+      apolloCount: 10,
+    });
+    await serve(
+      ORG_A,
+      BRAND_1,
+      id,
+      contact({ email: "s1@x.com", provider: "apollo" })
+    );
+    const item = await listItem(ORG_A, id);
+    expect(item.sizeCount).toBe(10);
+    expect(item.availableToContactCount).toBe(9);
+    expect(item.availableToContactPct).toBe(90);
+  });
+
+  it("a serve older than the 3-month window is contactable again", async () => {
+    const id = await createAudience(ORG_A, {
+      name: "Lapsed",
+      brandId: BRAND_1,
+      provider: "apollo",
+      apolloCount: 10,
+    });
+    await serve(
+      ORG_A,
+      BRAND_1,
+      id,
+      contact({ email: "lapsed@x.com", provider: "apollo" })
+    );
+    // Backdate the suppression past the window — the member becomes available.
+    await db
+      .update(brandSuppressions)
+      .set({ lastServedAt: sql`now() - interval '4 months'` })
+      .where(eq(brandSuppressions.orgId, ORG_A));
+
+    const item = await listItem(ORG_A, id);
+    expect(item.availableToContactCount).toBe(10);
+    expect(item.availableToContactPct).toBe(100);
+  });
+
+  it("sizeCount 0 (never counted) -> availableToContactPct 0, no error", async () => {
+    const id = await createAudience(ORG_A, {
+      name: "Uncounted",
+      brandId: BRAND_1,
+      provider: "apollo",
+    });
+    const item = await listItem(ORG_A, id);
+    expect(item.sizeCount).toBe(0);
+    expect(item.availableToContactCount).toBe(0);
+    expect(item.availableToContactPct).toBe(0);
+  });
+
+  it("size reads the committed provider's count (apify audience -> apifyCount)", async () => {
+    const id = await createAudience(ORG_A, {
+      name: "ApifyPool",
+      brandId: BRAND_1,
+      provider: "apify",
+      apifyCount: 25,
+      apolloCount: null,
+    });
+    const item = await listItem(ORG_A, id);
+    expect(item.sizeCount).toBe(25);
+    expect(item.availableToContactCount).toBe(25);
+    expect(item.availableToContactPct).toBe(100);
   });
 });
