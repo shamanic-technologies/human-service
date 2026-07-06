@@ -1027,9 +1027,28 @@ export const GetAudienceResponseSchema = z
   .object({ audience: AudienceSchema })
   .openapi("GetAudienceResponse");
 
+// A list item is a full Audience plus the server-computed contactability numbers
+// the dashboard "Size" / "Remaining" columns render. Only the LIST endpoint
+// carries these (it's the one the audiences table consumes); the single-audience
+// GET / CRUD responses stay the plain AudienceSchema.
+export const AudienceListItemSchema = AudienceSchema.extend({
+  sizeCount: z.number().int().openapi({
+    description:
+      "Total contactable audience pool = the committed provider's count snapshot (apollo -> apolloCount, apify -> apifyCount). 0 for a never-counted audience.",
+  }),
+  availableToContactCount: z.number().int().openapi({
+    description:
+      "Pool members NOT suppressed within the 3-month re-contact window (never-served, or last served >3 months ago). Computed server-side from the same per-brand cross-provider suppression the serve path enforces.",
+  }),
+  availableToContactPct: z.number().int().openapi({
+    description:
+      "round(availableToContactCount / sizeCount * 100), integer 0..100. 0 when sizeCount is 0. Denominator is exactly sizeCount so Size and Remaining stay coherent.",
+  }),
+}).openapi("AudienceListItem");
+
 export const ListAudiencesResponseSchema = z
   .object({
-    audiences: z.array(AudienceSchema),
+    audiences: z.array(AudienceListItemSchema),
     total: z.number().int(),
     limit: z.number().int(),
     offset: z.number().int(),

@@ -20,6 +20,7 @@ import {
 } from "../schemas.js";
 import {
   computeStats,
+  computeAudienceContactability,
   getAudienceInOrg,
   refreshAudienceCounts,
   suggestAudiences,
@@ -215,8 +216,24 @@ router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) 
     db.select({ value: count() }).from(audiences).where(whereClause),
   ]);
 
+  // Per-row "Size" / "Remaining" contactability, computed server-side from the
+  // SAME 3-month suppression window the serve path enforces. Every list item
+  // carries sizeCount / availableToContactCount / availableToContactPct so the
+  // dashboard renders them straight from the wire (never client-computed).
+  const contactability = await computeAudienceContactability(rows);
+
   res.json({
-    audiences: rows.map(serializeAudience),
+    audiences: rows.map((row) => {
+      const c = contactability.get(row.id);
+      if (!c) {
+        // computeAudienceContactability returns an entry for every input row;
+        // a miss is an invariant break, not a case to paper over — fail loud.
+        throw new Error(
+          `[human-service] audience.contactability missing for ${row.id}`
+        );
+      }
+      return { ...serializeAudience(row), ...c };
+    }),
     total: totalRows[0]?.value ?? 0,
     limit,
     offset,

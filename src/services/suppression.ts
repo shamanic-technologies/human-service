@@ -24,8 +24,11 @@ import { and, eq, gt, inArray, or, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { brandSuppressions, leadServes } from "../db/schema.js";
 
-// Calendar-accurate 3-month window, evaluated by Postgres at query time.
-const windowCutoff = () => sql`now() - interval '3 months'`;
+// Calendar-accurate 3-month window, evaluated by Postgres at query time. The
+// single source of the re-contact window — every read path (teaser filter,
+// exclude-set, resolve-email block, AND the audiences contactability rollup)
+// references this so "suppressed within window" never diverges.
+export const windowCutoff = () => sql`now() - interval '3 months'`;
 
 export function normalizeEmail(
   email: string | null | undefined
