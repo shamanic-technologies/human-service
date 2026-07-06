@@ -57,7 +57,7 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Org-scoped (People v1) | `GET /orgs/people/filters-prompt` | apiKey + `x-org-id` + `x-user-id` | LLM filter-shape prompt (apollo only in v1) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/suggest` | apiKey + `x-org-id` + `x-user-id` | NL → **persisted** candidate audiences (one per segment, best provider only), returns `audienceId`s at status `suggested` (inactive) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider) |
-| Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` filter) |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
 | Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}` | apiKey + `x-org-id` | Update metadata (name / nlPrompt only) — immutable otherwise |
 | Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}/status` | apiKey + `x-org-id` | Change status (active / paused / archived) — mutates only status |
@@ -287,6 +287,40 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
   >$100k Revenue" rows in DIFFERENT orgs do not collide — org-scoping separates
   them). FAIL LOUD on ambiguity: a deprecated row with no variant suffix, 0
   siblings, or (defensively) >1 sibling is SKIPPED + logged, never guessed.
+
+### List contactability (Size / Remaining) — `GET /orgs/audiences`
+
+Every item in the `GET /orgs/audiences` list carries three ready numeric fields
+so the dashboard Audiences table renders "Size" / "Remaining" straight from the
+wire (NEVER client-computed). `computeAudienceContactability` in
+`src/services/audiences.ts` owns the engine; the list route merges its result
+onto each `serializeAudience` row. **Only the LIST endpoint** carries them
+(`AudienceListItemSchema` extends `AudienceSchema`); the single-audience GET /
+CRUD responses stay the plain `AudienceSchema`.
+
+- **`sizeCount`** — total contactable pool = the committed provider's count
+  snapshot (`provider='apify'` → `apifyCount`, else `apolloCount`). A
+  never-counted row (null) is `0` (pool unknown = empty; the one explicit guard,
+  not a swallowed error). Provider pool members are NOT enumerable locally, so
+  this is the provider's own snapshot, not a local row count.
+- **`availableToContactCount`** — pool members NOT suppressed within the 3-month
+  re-contact window = `sizeCount − (members served within window)`. Uses the SAME
+  per-brand cross-provider suppression the serve path enforces
+  (`brand_suppressions` + the shared `windowCutoff` exported from
+  `suppression.ts`), intersected with the audience's provenance membership
+  (`audience_members` → `people` → `brand_suppressions`, matched on `email_norm`
+  OR `linkedin_url_norm`, `last_served_at > now() - interval '3 months'`,
+  brand-wide across providers). Never-served pool members are all available; a
+  member last served >3 months ago is contactable again; a member served within
+  the window is subtracted. Clamped `≥ 0` (a stale snapshot can report fewer in
+  the pool than served).
+- **`availableToContactPct`** — `round(availableToContactCount / sizeCount *
+  100)`, integer `0..100`; `0` when `sizeCount` is `0` (the only divide-by-zero
+  guard). Denominator is EXACTLY `sizeCount` so Size and Remaining's % never
+  disagree for the same row.
+- **No cost** — pure DB read; no downstream calls. One grouped query per list
+  page (not N+1). The window lives here by design (per-brand, cross-provider
+  suppression is human-service's job) — never moved to another service.
 
 ### Internal bulk audience resolver — `POST /internal/audiences/resolve`
 

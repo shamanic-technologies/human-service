@@ -16,14 +16,21 @@
 //
 // No silent fallbacks: a provider error during refreshCounts propagates (502).
 
-import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { db } from "../db/index.js";
-import { audienceMembers, audiences, people } from "../db/schema.js";
+import {
+  audienceMembers,
+  audiences,
+  brandSuppressions,
+  people,
+  type Audience,
+} from "../db/schema.js";
 import {
   filterSuppressed,
   normalizeEmail,
   normalizeLinkedinUrl,
+  windowCutoff,
   type ServedContact,
 } from "./suppression.js";
 import { bufferTeasers, popTeaser } from "./teaser-buffer.js";
@@ -370,6 +377,105 @@ export async function computeStats(
       matchedCount: a.members.size,
     })),
   };
+}
+
+// Contactability rollup for the audiences list (dashboard "Size" / "Remaining"
+// columns). For each audience returns three ready numbers:
+//
+//   sizeCount               — total contactable pool = the committed provider's
+//                             count snapshot (apollo -> apolloCount, apify ->
+//                             apifyCount). A never-counted row (null) is 0.
+//   availableToContactCount — pool members NOT suppressed within the 3-month
+//                             re-contact window = sizeCount minus the audience's
+//                             members currently suppressed brand-wide (across all
+//                             providers). Never-served people are all available;
+//                             a member last served >3 months ago is available
+//                             again (re-contactable); a member served within the
+//                             window is suppressed and subtracted.
+//   availableToContactPct   — round(available / size * 100), integer 0..100. 0
+//                             when sizeCount is 0 (the one divide-by-zero guard).
+//
+// Suppression truth is the SAME per-brand cross-provider silver the serve path
+// enforces (`brand_suppressions` + the shared `windowCutoff`), intersected with
+// each audience's provenance membership. We never enumerate the provider pool
+// locally — the served subset is the only pool slice whose suppression we can
+// know, and every never-served pool member is available by definition, so
+// `size - servedWithinWindow` is the exact available count.
+export interface AudienceContactability {
+  sizeCount: number;
+  availableToContactCount: number;
+  availableToContactPct: number;
+}
+
+export async function computeAudienceContactability(
+  rows: Audience[]
+): Promise<Map<string, AudienceContactability>> {
+  const result = new Map<string, AudienceContactability>();
+  if (rows.length === 0) return result;
+
+  const audienceIds = rows.map((r) => r.id);
+
+  // One grouped query: per audience, the count of DISTINCT members whose person
+  // is currently suppressed for the audience's brand within the window. Match on
+  // email_norm (canonical) OR linkedin_url_norm (cross-provider pre-pay key) —
+  // exactly the identities the serve path suppresses on.
+  const suppressedRows = await db
+    .select({
+      audienceId: audienceMembers.audienceId,
+      suppressed: sql<number>`count(distinct ${audienceMembers.personId})`,
+    })
+    .from(audienceMembers)
+    .innerJoin(audiences, eq(audienceMembers.audienceId, audiences.id))
+    .innerJoin(people, eq(audienceMembers.personId, people.id))
+    .innerJoin(
+      brandSuppressions,
+      and(
+        eq(brandSuppressions.orgId, audiences.orgId),
+        eq(brandSuppressions.brandId, audiences.brandId),
+        gt(brandSuppressions.lastServedAt, windowCutoff()),
+        or(
+          eq(brandSuppressions.emailNorm, people.emailNorm),
+          and(
+            isNotNull(people.linkedinUrlNorm),
+            eq(brandSuppressions.linkedinUrlNorm, people.linkedinUrlNorm)
+          )
+        )
+      )
+    )
+    .where(inArray(audienceMembers.audienceId, audienceIds))
+    .groupBy(audienceMembers.audienceId);
+
+  const suppressedByAudience = new Map<string, number>(
+    suppressedRows.map((r) => [r.audienceId, Number(r.suppressed)])
+  );
+
+  for (const row of rows) {
+    // Pool = the committed provider's snapshot. apollo is the default provider,
+    // so a neutral (provider null) row reads apolloCount.
+    const rawSize =
+      row.provider === "apify" ? row.apifyCount : row.apolloCount;
+    const sizeCount = rawSize ?? 0;
+
+    const suppressed = suppressedByAudience.get(row.id) ?? 0;
+    // Clamp: a stale snapshot can report fewer in the pool than we've served.
+    const availableToContactCount = Math.max(0, sizeCount - suppressed);
+
+    const availableToContactPct =
+      sizeCount === 0
+        ? 0
+        : Math.min(
+            100,
+            Math.max(0, Math.round((availableToContactCount / sizeCount) * 100))
+          );
+
+    result.set(row.id, {
+      sizeCount,
+      availableToContactCount,
+      availableToContactPct,
+    });
+  }
+
+  return result;
 }
 
 // --- Internal bulk resolver: lead -> ACTIVE audience {id,name,avatarUrl} ---
