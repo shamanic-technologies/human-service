@@ -123,4 +123,46 @@ describe("workflow tracking middleware", () => {
 
     expect(res.status).toBe(400);
   });
+
+  // ── Malformed x-org-id: must 400/normalize, NEVER crash the process ──────────
+  // Regression: a doubled x-org-id header arrives comma-joined ("<uuid>,") and used
+  // to reach a `uuid` SQL param → Postgres 22P02 → unhandled rejection → process
+  // crash-loop → human-service DOWN for every consumer.
+
+  it("tolerates a doubled x-org-id header (dedups '<uuid>,' to the single value)", async () => {
+    const res = await request(app)
+      .get("/test")
+      .set({ ...baseHeaders, "x-org-id": `${baseHeaders["x-org-id"]},` });
+
+    expect(res.status).toBe(200);
+    expect(res.body.orgId).toBe(baseHeaders["x-org-id"]);
+  });
+
+  it("tolerates a doubled x-org-id header with the same value repeated", async () => {
+    const res = await request(app)
+      .get("/test")
+      .set({ ...baseHeaders, "x-org-id": `${baseHeaders["x-org-id"]},${baseHeaders["x-org-id"]}` });
+
+    expect(res.status).toBe(200);
+    expect(res.body.orgId).toBe(baseHeaders["x-org-id"]);
+  });
+
+  it("rejects an ambiguous x-org-id with two DISTINCT values → 400 (not a crash)", async () => {
+    const res = await request(app)
+      .get("/test")
+      .set({
+        ...baseHeaders,
+        "x-org-id": "00000000-0000-0000-0000-000000000001,00000000-0000-0000-0000-0000000000ff",
+      });
+
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a non-UUID x-org-id → 400 (not a crash)", async () => {
+    const res = await request(app)
+      .get("/test")
+      .set({ ...baseHeaders, "x-org-id": "not-a-uuid" });
+
+    expect(res.status).toBe(400);
+  });
 });

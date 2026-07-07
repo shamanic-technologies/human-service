@@ -1,5 +1,34 @@
 import { Request, Response, NextFunction } from "express";
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Identity ids (org/user/run) are single values. A DOUBLED HTTP header arrives
+ * comma-joined by Node (e.g. an upstream that sets `x-org-id` twice yields
+ * "<uuid>," or "<uuid>,<uuid>"). Collapse to the distinct, non-empty set and
+ * accept ONLY when exactly one value remains — so a doubled-but-identical header
+ * is tolerated (dedup, HTTP-correct) while a genuinely ambiguous "<uuidA>,<uuidB>"
+ * is rejected. Returns null on empty / ambiguous, letting the caller 400.
+ */
+function normalizeIdHeader(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const distinct = [...new Set(raw.split(",").map((s) => s.trim()).filter(Boolean))];
+  return distinct.length === 1 ? distinct[0] : null;
+}
+
+/**
+ * As `normalizeIdHeader`, but also enforces UUID shape. `x-org-id` is a `uuid`
+ * column downstream, so a malformed value (comma-joined header, stray text) that
+ * reaches a query throws Postgres 22P02 — and an UNHANDLED rejection there crashed
+ * the whole process (crash-loop). Validate at the door → 400, never let it hit SQL.
+ * Mirrors runs-service, which already 400s a non-UUID x-org-id.
+ */
+function normalizeUuidHeader(raw: string | undefined): string | null {
+  const value = normalizeIdHeader(raw);
+  return value && UUID_RE.test(value) ? value : null;
+}
+
 export function requireApiKey(
   req: Request,
   res: Response,
@@ -18,12 +47,12 @@ export function requireIdentity(
   res: Response,
   next: NextFunction
 ): void {
-  const orgId = req.headers["x-org-id"] as string | undefined;
-  const userId = req.headers["x-user-id"] as string | undefined;
-  const runId = req.headers["x-run-id"] as string | undefined;
+  const orgId = normalizeUuidHeader(req.headers["x-org-id"] as string | undefined);
+  const userId = normalizeIdHeader(req.headers["x-user-id"] as string | undefined);
+  const runId = normalizeIdHeader(req.headers["x-run-id"] as string | undefined);
 
   if (!orgId || !userId || !runId) {
-    res.status(400).json({ error: "x-org-id, x-user-id, and x-run-id headers are required" });
+    res.status(400).json({ error: "x-org-id (valid UUID), x-user-id, and x-run-id headers are required" });
     return;
   }
 
@@ -44,16 +73,16 @@ export function requireOrgIdOnly(
   res: Response,
   next: NextFunction
 ): void {
-  const orgId = req.headers["x-org-id"] as string | undefined;
+  const orgId = normalizeUuidHeader(req.headers["x-org-id"] as string | undefined);
   if (!orgId) {
-    res.status(400).json({ error: "x-org-id header is required" });
+    res.status(400).json({ error: "x-org-id header is required and must be a valid UUID" });
     return;
   }
 
   res.locals.orgId = orgId;
 
-  const userId = req.headers["x-user-id"] as string | undefined;
-  const runId = req.headers["x-run-id"] as string | undefined;
+  const userId = normalizeIdHeader(req.headers["x-user-id"] as string | undefined);
+  const runId = normalizeIdHeader(req.headers["x-run-id"] as string | undefined);
   if (userId) res.locals.userId = userId;
   if (runId) res.locals.runId = runId;
 
@@ -72,17 +101,17 @@ export function requireOrgAndUser(
   res: Response,
   next: NextFunction
 ): void {
-  const orgId = req.headers["x-org-id"] as string | undefined;
-  const userId = req.headers["x-user-id"] as string | undefined;
+  const orgId = normalizeUuidHeader(req.headers["x-org-id"] as string | undefined);
+  const userId = normalizeIdHeader(req.headers["x-user-id"] as string | undefined);
   if (!orgId || !userId) {
-    res.status(400).json({ error: "x-org-id and x-user-id headers are required" });
+    res.status(400).json({ error: "x-org-id (valid UUID) and x-user-id headers are required" });
     return;
   }
 
   res.locals.orgId = orgId;
   res.locals.userId = userId;
 
-  const runId = req.headers["x-run-id"] as string | undefined;
+  const runId = normalizeIdHeader(req.headers["x-run-id"] as string | undefined);
   if (runId) res.locals.runId = runId;
 
   parseOptionalTrackingHeaders(req, res);
