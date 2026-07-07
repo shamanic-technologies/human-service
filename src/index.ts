@@ -14,6 +14,19 @@ import audiencesRoutes from "./routes/audiences.js";
 import internalAudiencesRoutes from "./routes/internal-audiences.js";
 import { register as runInstrumentation } from "./instrumentation.js";
 
+// Process-level safety net: a single request must NEVER crash-loop the whole
+// service. Before this, an unawaited async rejection (e.g. a bad `uuid` param →
+// Postgres 22P02) bubbled up as an unhandled rejection and Node exited → Railway
+// restart loop → human-service DOWN for every consumer. Log loudly (fail-loud on
+// the individual failure) but keep serving; per-request errors still surface as
+// 4xx/5xx via the normal handler + validation path.
+process.on("unhandledRejection", (reason) => {
+  console.error("[human-service] Unhandled promise rejection (process kept alive):", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[human-service] Uncaught exception (process kept alive):", err);
+});
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
