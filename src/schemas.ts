@@ -3,6 +3,7 @@ import {
   OpenAPIRegistry,
   extendZodWithOpenApi,
 } from "@asteasolutions/zod-to-openapi";
+import { LAX_UUID_REGEX } from "./lib/uuid.js";
 
 extendZodWithOpenApi(z);
 export const registry = new OpenAPIRegistry();
@@ -1792,9 +1793,12 @@ registry.registerPath({
 // src/services/audiences.ts.
 export const ResolveAudiencesRequestSchema = z
   .object({
-    // Lax (not strict-v4): org ids can predate the v4 convention — matches the
-    // header org-id parsing. Brand/audience ids stay strict below.
-    orgId: z.string().min(1).openapi({
+    // Lax UUID SHAPE (not strict-v4): org ids can predate the v4 convention —
+    // matches the header org-id parsing. But a comma-joined / doubled value must
+    // still be rejected here (400) rather than pass `min(1)` and flow into a
+    // uuid-typed query where Postgres crashes it with 22P02. Brand/audience ids
+    // stay strict-v4 below.
+    orgId: z.string().regex(LAX_UUID_REGEX, "orgId must be a valid UUID").openapi({
       description: "Org the leads belong to (internal UUID).",
     }),
     brandId: z.string().uuid().openapi({
