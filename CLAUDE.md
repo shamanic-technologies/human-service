@@ -634,6 +634,30 @@ apollo-service owns the NL→faithful-Apollo-filters loop now.)
    must carry every shared and segment-specific constraint. **No rule-based
    post-processing after layer 1** (no regex extraction, no forced filter merge) —
    fix the layer-1 prompt/schema if a constraint is missing.
+   - **Split-generous: explode UNSPECIFIED axes MECE, target ~6-8+ audiences**
+     (#183). Layer 1 does NOT wait for the caller to span an axis explicitly — for
+     a broad/under-specified ICP it TAKES THE INITIATIVE and partitions unspecified
+     axes MECE (mutually-exclusive, collectively-exhaustive): geography → NA /
+     Europe / Africa / Asia / S-C America (primary lever); revenue → contiguous
+     ranges; employee size → headcount bands; funding stage → Bootstrapped / Seed /
+     Series A / B / C+. Explicit multi-value axes (roles, company types, tech A/B)
+     still split as before. Guidance is "generous but sensible" — pick the axes
+     that make business sense to reach ~6-8+, NOT a blind full cartesian product
+     (avoids 100+ tiny buckets). Each `description` must state its assigned
+     partition value so the apollo build filters on it. More segments ⇒
+     proportionally more apollo/chat spend + latency per `/suggest` (owned
+     upstream; human-service still declares no cost). Want more/fewer splits → tune
+     `buildLayer1SystemPrompt`, nowhere else.
+   - **⚠️ `buildLayer1SystemPrompt` is a `[...].join("\n")` array AND the
+     `audiences-suggest.test.ts` integration test asserts exact prompt SUBSTRINGS**
+     (`toContain("When multiple independent axes are explicitly present")`,
+     `toMatch(/Example: 3 personas\s+x 2 company types = 6 audiences/)`,
+     `.includes("decompose a natural-language audience")`). A `.includes(...)`
+     assert FAILS if you split the asserted phrase across two array elements (the
+     join inserts a `\n` mid-phrase). When editing the prompt, keep each
+     `toContain`/`.includes` phrase on ONE array line (a `\s+` in a `toMatch`
+     regex tolerates the join newline, a bare `.includes` does not), or update the
+     assertions in the same commit.
 2. **APOLLO BUILD (per segment, apollo-service owns it)** — `suggestApolloAudience`
    calls apollo-service `POST /audiences/suggest-from-segment` with
    `{ name, description, brandId }`; apollo-service runs its agentic NL→faithful-
