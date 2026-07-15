@@ -209,18 +209,37 @@ function downstreamHeaders(
 const TRANSIENT_CODES = ["ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "EAI_AGAIN"];
 const RETRY_BACKOFF_MS = [250, 500, 1000];
 
+// A single provider call may not run forever. apollo-service's per-segment
+// agentic build (suggest-from-segment) can stall when ITS own chat-service call
+// drops mid-flight; without a bound our `fetch` would hang until undici's
+// implicit ~300s headers timeout, and `/suggest` waits for the SLOWEST segment
+// via allSettled -> the whole request (and the frontend loader) hangs. Bound
+// each attempt so a stalled build fails loud fast; allSettled then returns the
+// segments that did resolve.
+const PROVIDER_TIMEOUT_MS = 120_000;
+
 // Walk err.cause / AggregateError.errors for a transient connect-phase code.
 // apollo/apify are Neon-backed siblings; their first request after an idle
 // scale-to-zero lands mid-wake and rejects with `fetch failed` whose cause is
 // ECONNRESET/ETIMEDOUT/ECONNREFUSED. See CLAUDE.md "second surface".
+// A client-side timeout ABORT is NOT transient — it means the request already
+// reached the server and stalled there, so retrying would only re-stall (and,
+// for a create like suggest-from-segment, risk a duplicate). Fail it loud.
 function isTransientConnectError(err: unknown): boolean {
   const seen = new Set<unknown>();
   const visit = (e: unknown): boolean => {
     if (!e || typeof e !== "object" || seen.has(e)) return false;
     seen.add(e);
-    const anyE = e as { code?: string; cause?: unknown; errors?: unknown[]; message?: string };
+    const anyE = e as {
+      name?: string;
+      code?: string;
+      cause?: unknown;
+      errors?: unknown[];
+      message?: string;
+    };
+    if (anyE.name === "AbortError" || anyE.name === "TimeoutError") return false;
     if (anyE.code && TRANSIENT_CODES.includes(anyE.code)) return true;
-    if (typeof anyE.message === "string" && /fetch failed|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED/i.test(anyE.message))
+    if (typeof anyE.message === "string" && /fetch failed|ETIMEDOUT|ECONNRESET|ECONNREFUSED/i.test(anyE.message))
       return true;
     if (Array.isArray(anyE.errors) && anyE.errors.some(visit)) return true;
     return visit(anyE.cause);
@@ -240,7 +259,10 @@ async function fetchWithConnectRetry(
   let lastErr: unknown;
   for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt++) {
     try {
-      return await fetch(url, init);
+      // Fresh timeout per attempt (AbortSignal.timeout is one-shot). A stalled
+      // request aborts with an AbortError, which isTransientConnectError treats
+      // as non-transient -> thrown, not retried.
+      return await fetch(url, { ...init, signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS) });
     } catch (err) {
       lastErr = err;
       if (attempt < RETRY_BACKOFF_MS.length && isTransientConnectError(err)) {
