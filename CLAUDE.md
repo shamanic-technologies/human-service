@@ -20,7 +20,10 @@ Backend service that owns two distinct concerns:
    `brand_suppressions` silver — only the gateway sees both providers' emissions
    for a brand, so the "already served" truth lives here). Declares **no cost**
    (apollo/apify own the paid call); forwards `x-run-id` for downstream tracing.
-   See below.
+   A **third** lead provider, `crm-service` (a client's uploaded contact list), is
+   served — not searched — through this layer: an audience with `provider='crm'`
+   is served by `/orgs/audiences/{id}/serve-next` straight from crm-service, which
+   owns its OWN no-re-serve (human-service does no crm suppression). See below.
 
 Stack: Express + Drizzle (Postgres) + Zod + zod-to-openapi. Deployed on
 Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
@@ -407,7 +410,23 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
   `finalizeResolved`) until one reveals a non-suppressed person, then stop.
   Exhausted ONLY when the buffer is empty AND apollo returns no fresh teasers —
   no fabricated cap (apollo's honest `done` at totalPages bounds the walk; the
-  2026-06-29 no-saturation-cap fix is preserved).
+  2026-06-29 no-saturation-cap fix is preserved). **crm** (a client's uploaded
+  contact list — `provider='crm'`, sibling of apollo/apify) → an **ask-and-trust**
+  wrapper over crm-service `POST /orgs/contacts/serve-next` (`src/lib/crm-contacts.ts`
+  `crmServeNext`): `serveNextCrmContact` asks for the NEXT contact **by brand**
+  (`{brandId, limit:1}`) and returns it as a neutral `Person`
+  (`normalizeCrmContact`). A crm audience serves by BRAND and has **NO stored
+  filters** — the crm branch runs BEFORE the filters guard, so a filterless crm
+  audience is servable (apollo/apify still 422 on no-filters). **crm-service OWNS
+  the no-re-serve**: it atomically marks each returned contact served, permanently,
+  per-`(brand, contact)` — so human-service records NO suppression for crm (no
+  `recordServe` / no `brand_suppressions` write / no exclude-set push) and just
+  trusts crm-service's `exhausted` flag / empty batch. Membership IS tagged
+  (`tagAudienceServe`, `source='crm'`) for provenance parity — that is membership,
+  not suppression. `limit:1` (like apify's strict minimum) so crm never burns a
+  contact we can't hand back this call. A crm contact with no usable email is
+  skipped (crm already suppressed it) and the next asked for; empty batch ⟹
+  `exhausted`.
 - **`served` ⇒ a USABLE email (LOCKED consumer contract)**: `status:"served"` MUST
   carry a person with a non-empty `email` — lead-service fails loud on an emailless
   lead (won't push an uncontactable person into the cold-email funnel) and a bad
@@ -421,10 +440,13 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
   (revealed.person)` check was truthy for a null-email person — the "no email → drop"
   the comment claimed was never actually enforced).
 - **Exhaustion is explicit**: `{ status: "exhausted", person: null }` — never a
-  silent empty. An audience with **no committed provider OR no stored filters**
-  fails loud: `AudienceNotServableError` → **422** (can't serve without them).
-- **No cost declared here** — apollo/apify own the billed reveal; the gateway only
-  forwards `x-run-id` for downstream tracing.
+  silent empty. An audience with **no committed provider** fails loud:
+  `AudienceNotServableError` → **422**. apollo/apify additionally fail loud on **no
+  stored filters** (422); crm has no filters by design and is exempt (served by
+  brand). Env vars for crm: `CRM_SERVICE_URL`, `CRM_SERVICE_API_KEY` (read at call
+  time; missing ⟹ `ProviderConfigError` → 502).
+- **No cost declared here** — apollo/apify own the billed reveal; crm-service owns
+  its serve; the gateway only forwards `x-run-id` for downstream tracing.
 
 ### Avatar — `POST /orgs/audiences/{id}/avatar`
 
