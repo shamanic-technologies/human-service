@@ -1026,6 +1026,36 @@ async function persistSuggestedAudience(args: {
   });
 }
 
+// Max apollo audience builds in flight at once for a single /suggest. Each build
+// is a chat-heavy agentic loop upstream; an unbounded fan-out over a
+// split-generous segment set saturates chat-service and times every build out.
+const SEGMENT_BUILD_CONCURRENCY = 4;
+
+// Run `fn` over `items` with at most `limit` concurrent, returning results in
+// input order with Promise.allSettled semantics (a thrown item -> `rejected`,
+// never rejects the whole batch). A tiny worker-pool — no dependency.
+async function settleWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (let i = next++; i < items.length; i = next++) {
+      try {
+        results[i] = { status: "fulfilled", value: await fn(items[i]) };
+      } catch (reason) {
+        results[i] = { status: "rejected", reason };
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, worker)
+  );
+  return results;
+}
+
 // Turn a natural-language prompt into a set of PERSISTED candidate audiences.
 // Layer 1 (human-service) decomposes the NL into named segments; per segment we
 // ask apollo-service to BUILD + COUNT a faithful Apollo audience (it owns the
@@ -1042,9 +1072,17 @@ export async function suggestAudiences(
 ): Promise<AudienceCandidate[]> {
   const segments = await decomposeSegments(nlPrompt, identity);
 
-  // One apollo-service call per segment, concurrent + fault-tolerant.
-  const settled = await Promise.allSettled(
-    segments.map(async (segment) => {
+  // One apollo-service call per segment — concurrent but BOUNDED + fault-tolerant.
+  // Each apollo build is an agentic refine loop (up to ~6 sequential chat-service
+  // LLM calls). Firing every segment at once (a split-generous prompt can emit
+  // 10+) floods chat-service, so every build queues and blows past our 120s
+  // provider timeout -> N/N segments fail. A small pool lets apollo/chat finish
+  // each build inside the timeout; the rest wait their turn (a suggest is an
+  // onboarding batch, not real-time). allSettled semantics preserved.
+  const settled = await settleWithConcurrency(
+    segments,
+    SEGMENT_BUILD_CONCURRENCY,
+    async (segment) => {
       const apollo = await suggestApolloAudience({
         name: segment.name,
         description: segment.description,
@@ -1052,7 +1090,7 @@ export async function suggestAudiences(
         identity,
       });
       return { segment, apollo };
-    })
+    }
   );
 
   const ok = settled
