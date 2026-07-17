@@ -56,7 +56,10 @@ export interface ServedContact {
   firstName: string | null;
   lastName: string | null;
   companyDomain: string | null;
-  provider: "apollo" | "apify";
+  // "crm" is a valid source for MEMBERSHIP tagging (tagAudienceServe). It never
+  // reaches recordServe below — crm-service owns per-brand suppression, so the
+  // gateway never writes crm serves into brand_suppressions.
+  provider: "apollo" | "apify" | "crm";
   providerPersonId: string | null;
 }
 

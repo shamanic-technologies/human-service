@@ -55,6 +55,7 @@ import {
   apolloAudienceDryRun,
   type ApolloFilters,
 } from "../lib/apollo-audiences.js";
+import { crmServeNext, normalizeCrmContact } from "../lib/crm-contacts.js";
 
 // The transaction handle drizzle passes to the `db.transaction` callback.
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -1416,6 +1417,44 @@ function hasUsableEmail(p: Person): boolean {
   return typeof p.email === "string" && p.email.trim().length > 0;
 }
 
+// Serve the next contact of a CRM audience from crm-service. crm-service serves
+// by brand, atomically marks each returned contact served, and owns the permanent
+// no-re-serve + exhausted signal — so this is a thin ask-and-trust wrapper: no
+// stored filters, no local suppression, no teaser buffer (crm serves exactly what
+// we ask for and burns exactly those, unlike apollo's discard-99-per-page cursor).
+// We take limit 1 (mirrors apify's strict minimum) so crm never burns a contact we
+// can't hand back this call. Membership is tagged for provenance parity with the
+// other providers (that's NOT suppression — crm still owns re-serve).
+async function serveNextCrmContact(
+  audience: typeof audiences.$inferSelect,
+  identity: Identity
+): Promise<ServeNextResult> {
+  for (;;) {
+    const { contacts, exhausted } = await crmServeNext(
+      audience.brandId,
+      1,
+      identity
+    );
+    const contact = contacts[0] ?? null;
+    if (!contact) {
+      // Empty batch ⟹ the brand is drained.
+      return { status: "exhausted", person: null };
+    }
+    const person = normalizeCrmContact(contact);
+    // served ⇒ usable email (LOCKED consumer contract). A crm contact without a
+    // sendable email is not servable via the cold-email funnel; crm-service has
+    // already permanently suppressed it, so drop it and ask for the next one.
+    if (!hasUsableEmail(person)) {
+      if (exhausted) return { status: "exhausted", person: null };
+      continue;
+    }
+    await tagAudienceServe(identity.orgId, audience.id, [
+      toServedContact(person),
+    ]);
+    return { status: "served", person };
+  }
+}
+
 // Serve the NEXT unserved person of an audience — the per-iteration lead
 // primitive lead-service calls. A thin wrapper over the existing people-gateway
 // machinery: it searches with the audience's STORED canonical filters via its
@@ -1430,6 +1469,16 @@ export async function serveNextPerson(
   identity: Identity
 ): Promise<ServeNextResult> {
   const provider = audience.provider;
+
+  // CRM audience: the brand's audience IS its uploaded contact list. crm-service
+  // serves the next not-yet-served contact BY BRAND and owns permanent per-(brand,
+  // contact) no-re-serve + the exhausted signal — so we don't need stored filters
+  // and we do NO local suppression here (it's crm-service's job). Handled before
+  // the filters guard because a crm audience legitimately has no filters.
+  if (provider === "crm") {
+    return serveNextCrmContact(audience, identity);
+  }
+
   if (provider !== "apollo" && provider !== "apify") {
     throw new AudienceNotServableError(
       "Audience has no committed provider — cannot serve people."

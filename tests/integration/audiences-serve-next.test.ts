@@ -19,6 +19,8 @@ beforeEach(async () => {
   process.env.APOLLO_SERVICE_API_KEY = "apollo-key";
   process.env.APIFY_SERVICE_URL = "http://apify:8080";
   process.env.APIFY_SERVICE_API_KEY = "apify-key";
+  process.env.CRM_SERVICE_URL = "http://crm:8080";
+  process.env.CRM_SERVICE_API_KEY = "crm-key";
   await cleanTestData();
 });
 
@@ -103,6 +105,36 @@ function apifyLead(email: string, linkedin: string) {
     companyIndustry: null,
     companySize: null,
     companyLinkedinUrl: null,
+  };
+}
+
+// A crm audience commits to provider "crm" and has NO filters (crm-service
+// serves by brand). It is created with just name + brandId + provider.
+async function createCrmAudience(name: string) {
+  const res = await request(app)
+    .post("/orgs/audiences")
+    .set(getAuthHeaders())
+    .send({ name, brandId: BRAND, provider: "crm" });
+  expect(res.status).toBe(201);
+  return res.body.audience.id as string;
+}
+
+function crmContact(id: string, email: string | null, name = "CRM Person") {
+  return {
+    id,
+    orgId: "00000000-0000-4000-8000-0000000000a1",
+    brandId: BRAND,
+    primaryEmail: email,
+    phoneE164: null,
+    fullName: name,
+    firstName: "CRM",
+    lastName: "Person",
+    rawAttributes: {},
+    consentStatus: "granted",
+    unsubscribed: false,
+    sourceUploadId: "00000000-0000-4000-8000-0000000000c1",
+    sourceRowId: "00000000-0000-4000-8000-0000000000c2",
+    lastRebuiltAt: "2026-07-17T00:00:00.000Z",
   };
 }
 
@@ -422,6 +454,105 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
       .send({ name: "No Filters", brandId: BRAND, provider: "apify" });
     const res = await serveNext(create.body.audience.id);
     expect(res.status).toBe(422);
+  });
+
+  it("crm: serves a crm-service contact and records it as an audience member (no filters needed)", async () => {
+    let serveCalls = 0;
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        const body = JSON.parse(init.body ?? "{}") as { brandId?: string; limit?: number };
+        expect(body.brandId).toBe(BRAND);
+        expect(body.limit).toBe(1);
+        serveCalls++;
+        return ok({ contacts: [crmContact("crm1", "one@crm.com")], served: 1, exhausted: false });
+      }
+      throw new Error("unexpected url " + u);
+    });
+    const id = await createCrmAudience("CRM A");
+    const res = await serveNext(id);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.email).toBe("one@crm.com");
+    expect(res.body.person.provider).toBe("crm");
+    expect(serveCalls).toBe(1);
+
+    const members = await request(app).get(`/orgs/audiences/${id}/members`).set(getAuthHeaders());
+    expect(members.body.members).toHaveLength(1);
+    expect(members.body.members[0].emailNorm).toBe("one@crm.com");
+  });
+
+  it("crm: drains across calls without repeats, then returns exhausted when crm-service signals drained", async () => {
+    // crm-service owns no-re-serve: each call returns the NEXT contact (it marks
+    // served atomically). human-service just relays. Final call → empty + exhausted.
+    const pool = [
+      crmContact("crm1", "a@crm.com"),
+      crmContact("crm2", "b@crm.com"),
+    ];
+    let idx = 0;
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).endsWith("/orgs/contacts/serve-next")) {
+        const contact = pool[idx];
+        idx++;
+        return contact
+          ? ok({ contacts: [contact], served: 1, exhausted: idx >= pool.length })
+          : ok({ contacts: [], served: 0, exhausted: true });
+      }
+      throw new Error("unexpected url " + url);
+    });
+    const id = await createCrmAudience("CRM Drain");
+    const first = await serveNext(id);
+    expect(first.body.person.email).toBe("a@crm.com");
+    const second = await serveNext(id);
+    expect(second.body.person.email).toBe("b@crm.com");
+    expect(second.body.person.email).not.toBe(first.body.person.email);
+    const third = await serveNext(id);
+    expect(third.body.status).toBe("exhausted");
+    expect(third.body.person).toBeNull();
+  });
+
+  it("crm: a contact with no email is skipped, advances to the next contactable one", async () => {
+    const pool = [crmContact("crm1", null), crmContact("crm2", "real@crm.com")];
+    let idx = 0;
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).endsWith("/orgs/contacts/serve-next")) {
+        const contact = pool[idx];
+        idx++;
+        return contact
+          ? ok({ contacts: [contact], served: 1, exhausted: idx >= pool.length })
+          : ok({ contacts: [], served: 0, exhausted: true });
+      }
+      throw new Error("unexpected url " + url);
+    });
+    const id = await createCrmAudience("CRM NoEmail Skip");
+    const res = await serveNext(id);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.email).toBe("real@crm.com");
+  });
+
+  it("crm: exhausted straight away when crm-service reports the brand is drained", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).endsWith("/orgs/contacts/serve-next"))
+        return ok({ contacts: [], served: 0, exhausted: true });
+      throw new Error("unexpected url " + url);
+    });
+    const id = await createCrmAudience("CRM Empty");
+    const res = await serveNext(id);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("exhausted");
+    expect(res.body.person).toBeNull();
+  });
+
+  it("crm: a crm-service non-2xx fails loud (502), never a silent fallback", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).endsWith("/orgs/contacts/serve-next"))
+        return { ok: false, status: 500, json: async () => ({}), text: async () => "boom" };
+      throw new Error("unexpected url " + url);
+    });
+    const id = await createCrmAudience("CRM Down");
+    const res = await serveNext(id);
+    expect(res.status).toBe(502);
   });
 
   it("404 for an unknown audience id", async () => {
