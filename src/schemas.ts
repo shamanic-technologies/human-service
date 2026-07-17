@@ -609,8 +609,11 @@ registry.registerPath({
 // paid call), forwards x-run-id for downstream tracing.
 
 const providerEnum = z
-  .enum(["apollo", "apify"])
-  .openapi({ description: "Lead provider to route to. Explicit choice wins over `need`." });
+  .enum(["apollo", "apify", "crm"])
+  .openapi({
+    description:
+      "Lead provider. apollo/apify are the searchable people-gateway providers; crm is a client's uploaded contact list (served via an audience's serve-next, not searchable here).",
+  });
 
 // People gateway requires x-org-id AND x-user-id (apollo/apify need x-user-id
 // for key resolution / attribution). x-run-id optional (used downstream for
@@ -921,7 +924,7 @@ export const AudienceSchema = z
       description:
         "One-sentence summary of who THIS audience targets, distinct from the shared batch nlPrompt. LLM-generated at /suggest time. null for rows predating this field.",
     }),
-    provider: z.enum(["apollo", "apify"]).nullable(),
+    provider: z.enum(["apollo", "apify", "crm"]).nullable(),
     apolloAudienceId: z.string().nullable().openapi({
       description:
         "Pointer to the faithful Apollo audience owned by apollo-service ('one filter vocabulary' Wave 2). Set for apollo audiences; null for apify (legacy) rows and pre-Wave-2 rows not yet backfilled. The faithful filters live in apollo-service; the `filters` field below is human-service's opaque cache of them.",
@@ -955,9 +958,9 @@ export const CreateAudienceRequestSchema = z
   .object({
     name: z.string().min(1),
     brandId: z.string().uuid(),
-    provider: z.enum(["apollo", "apify"]).optional().openapi({
+    provider: z.enum(["apollo", "apify", "crm"]).optional().openapi({
       description:
-        "The provider this audience commits to, when persisting a candidate from /suggest. Omit for a neutral audience.",
+        "The provider this audience commits to. apollo/apify when persisting a candidate from /suggest; crm for a brand whose audience is its uploaded contact list (served by crm-service — no filters/apolloAudienceId, brand-scoped). Omit for a neutral audience.",
     }),
     nlPrompt: z.string().min(1).optional(),
     // Opaque, provider-native filter object stored as-is. For apollo audiences

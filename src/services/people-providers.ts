@@ -26,7 +26,13 @@ import {
 // an explicit `limit`. apollo is unaffected (cursor-based, ignores `limit`).
 const APIFY_DEFAULT_LIMIT = 1;
 
-export type Provider = "apollo" | "apify";
+// "crm" is a third lead provider (crm-service — a client's own uploaded B2C
+// contact list). Unlike apollo/apify it has NO teaser search / email-reveal
+// waterfall in THIS gateway: a crm audience is served via serveNextPerson's
+// dedicated crm branch (src/lib/crm-contacts.ts → crm-service serve-next), which
+// owns its own no-re-serve. The people-search gateway functions below reject
+// "crm" fail-loud (ProviderUnsupportedError) — crm is not searchable here.
+export type Provider = "apollo" | "apify" | "crm";
 
 // --- Errors (fail-loud) ---
 
@@ -191,7 +197,10 @@ export function resolveProvider(opts: {
 
 // --- Header builder ---
 
-function downstreamHeaders(
+// Exported so the crm-contacts client (src/lib/crm-contacts.ts) reuses the SAME
+// identity/tracking-header serialization + the connect-phase retry below — one
+// place that shapes an outbound sibling call.
+export function downstreamHeaders(
   apiKey: string,
   identity: Identity
 ): Record<string, string> {
@@ -252,7 +261,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // Connect-phase retry on a THROWN rejection only — never on a completed HTTP
 // response (an HTTP 5xx is a real answer that may have side-effected). Safe for
 // POSTs because the request never reached the server when fetch itself rejects.
-async function fetchWithConnectRetry(
+export async function fetchWithConnectRetry(
   url: string,
   init: RequestInit
 ): Promise<Response> {
@@ -620,6 +629,9 @@ export async function peopleSearch(args: {
   identity: Identity;
 }): Promise<PeopleSearchResult> {
   const provider = resolveProvider(args);
+  // crm is not searchable through the people gateway (no teaser search / cursor).
+  // A crm audience is served via serveNextPerson's crm branch, never here.
+  if (provider === "crm") throw new ProviderUnsupportedError("crm", "people-search");
   const brandIds = args.identity.brandIds ?? [];
 
   if (provider === "apollo") {
@@ -791,6 +803,7 @@ export async function resolveEmail(args: {
   // nothing to apify), so we never cross providers — the caller picks the
   // provider at search time and the reveal inherits it.
   const provider = args.provider ?? "apollo";
+  if (provider === "crm") throw new ProviderUnsupportedError("crm", "email-reveal");
   const hasIdentity = !!(args.firstName && args.lastName && args.domain);
 
   if (provider === "apollo") {
@@ -895,6 +908,7 @@ export async function dryRun(args: {
   identity: Identity;
 }): Promise<{ provider: Provider; totalEntries: number }> {
   const provider = resolveProvider(args);
+  if (provider === "crm") throw new ProviderUnsupportedError("crm", "dry-run");
   if (provider === "apify") {
     // apify-service#6: free count, zero credit, zero persistence.
     const { url, key } = requireApify();
@@ -925,6 +939,7 @@ export async function filtersPrompt(args: {
   identity: Identity;
 }): Promise<{ provider: Provider; prompt: string; schemaVersion: string }> {
   const provider = args.provider ?? "apollo";
+  if (provider === "crm") throw new ProviderUnsupportedError("crm", "filters-prompt");
   const { url, key } = provider === "apify" ? requireApify() : requireApollo();
   const data = (await getProvider(
     provider,

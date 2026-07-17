@@ -708,9 +708,10 @@
             "type": "string",
             "enum": [
               "apollo",
-              "apify"
+              "apify",
+              "crm"
             ],
-            "description": "Lead provider to route to. Explicit choice wins over `need`."
+            "description": "Lead provider. apollo/apify are the searchable people-gateway providers; crm is a client's uploaded contact list (served via an audience's serve-next, not searchable here)."
           },
           "people": {
             "type": "array",
@@ -811,9 +812,10 @@
             "type": "string",
             "enum": [
               "apollo",
-              "apify"
+              "apify",
+              "crm"
             ],
-            "description": "Lead provider to route to. Explicit choice wins over `need`."
+            "description": "Lead provider. apollo/apify are the searchable people-gateway providers; crm is a client's uploaded contact list (served via an audience's serve-next, not searchable here)."
           },
           "providerPersonId": {
             "type": "string",
@@ -916,9 +918,10 @@
             "type": "string",
             "enum": [
               "apollo",
-              "apify"
+              "apify",
+              "crm"
             ],
-            "description": "Lead provider to route to. Explicit choice wins over `need`."
+            "description": "Lead provider. apollo/apify are the searchable people-gateway providers; crm is a client's uploaded contact list (served via an audience's serve-next, not searchable here)."
           },
           "need": {
             "type": "string",
@@ -1088,9 +1091,10 @@
             "type": "string",
             "enum": [
               "apollo",
-              "apify"
+              "apify",
+              "crm"
             ],
-            "description": "Lead provider to route to. Explicit choice wins over `need`."
+            "description": "Lead provider. apollo/apify are the searchable people-gateway providers; crm is a client's uploaded contact list (served via an audience's serve-next, not searchable here)."
           },
           "person": {
             "allOf": [
@@ -1115,7 +1119,8 @@
             "type": "string",
             "enum": [
               "apollo",
-              "apify"
+              "apify",
+              "crm"
             ],
             "description": "Defaults to apollo (same as search). Set 'apify' for the verified-email waterfall. The reveal follows the provider that searched — a provider person id only means something to its own provider."
           },
@@ -1154,9 +1159,10 @@
             "type": "string",
             "enum": [
               "apollo",
-              "apify"
+              "apify",
+              "crm"
             ],
-            "description": "Lead provider to route to. Explicit choice wins over `need`."
+            "description": "Lead provider. apollo/apify are the searchable people-gateway providers; crm is a client's uploaded contact list (served via an audience's serve-next, not searchable here)."
           },
           "totalEntries": {
             "type": "integer"
@@ -1174,9 +1180,10 @@
             "type": "string",
             "enum": [
               "apollo",
-              "apify"
+              "apify",
+              "crm"
             ],
-            "description": "Lead provider to route to. Explicit choice wins over `need`."
+            "description": "Lead provider. apollo/apify are the searchable people-gateway providers; crm is a client's uploaded contact list (served via an audience's serve-next, not searchable here)."
           },
           "filters": {
             "$ref": "#/components/schemas/PeopleSearchFilters"
@@ -1190,9 +1197,10 @@
             "type": "string",
             "enum": [
               "apollo",
-              "apify"
+              "apify",
+              "crm"
             ],
-            "description": "Lead provider to route to. Explicit choice wins over `need`."
+            "description": "Lead provider. apollo/apify are the searchable people-gateway providers; crm is a client's uploaded contact list (served via an audience's serve-next, not searchable here)."
           },
           "prompt": {
             "type": "string"
@@ -1358,6 +1366,7 @@
             "enum": [
               "apollo",
               "apify",
+              "crm",
               null
             ]
           },
@@ -1452,9 +1461,10 @@
             "type": "string",
             "enum": [
               "apollo",
-              "apify"
+              "apify",
+              "crm"
             ],
-            "description": "The provider this audience commits to, when persisting a candidate from /suggest. Omit for a neutral audience."
+            "description": "The provider this audience commits to. apollo/apify when persisting a candidate from /suggest; crm for a brand whose audience is its uploaded contact list (served by crm-service — no filters/apolloAudienceId, brand-scoped). Omit for a neutral audience."
           },
           "nlPrompt": {
             "type": "string",
@@ -3986,12 +3996,13 @@
               "type": "string",
               "enum": [
                 "apollo",
-                "apify"
+                "apify",
+                "crm"
               ],
-              "description": "Lead provider to route to. Explicit choice wins over `need`."
+              "description": "Lead provider. apollo/apify are the searchable people-gateway providers; crm is a client's uploaded contact list (served via an audience's serve-next, not searchable here)."
             },
             "required": false,
-            "description": "Lead provider to route to. Explicit choice wins over `need`.",
+            "description": "Lead provider. apollo/apify are the searchable people-gateway providers; crm is a client's uploaded contact list (served via an audience's serve-next, not searchable here).",
             "name": "provider",
             "in": "query"
           },
