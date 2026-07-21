@@ -231,6 +231,74 @@ export async function refreshAudienceCounts(
   };
 }
 
+// The provider count snapshot (Size) is refreshed opportunistically when an
+// audience is EXERCISED (a serve happens) and its stored count is older than this
+// TTL — so Size tracks the provider adding/removing matching people over time
+// WITHOUT hammering the count on every serve. The re-count rides the provider's
+// FREE dry-run (no credits), same path as the manual /refresh-count endpoint.
+const COUNT_REFRESH_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+// TTL-gated, best-effort Size refresh. Called on serve (fire-and-forget by the
+// route): the serve itself does NOT read the count (only the list's Size /
+// Remaining does), so a refresh here just keeps the stored snapshot honest for
+// the next list read. Skips when the count is fresher than the TTL (no per-run
+// hammering) and for crm audiences (served by brand, no provider count snapshot).
+export async function refreshAudienceCountIfStale(
+  audience: Audience,
+  identity: Identity
+): Promise<void> {
+  if (audience.provider !== "apollo" && audience.provider !== "apify") return;
+  if (
+    audience.countedAt &&
+    Date.now() - audience.countedAt.getTime() < COUNT_REFRESH_TTL_MS
+  ) {
+    return; // counted within the last hour — skip the re-fetch.
+  }
+  const counts = await refreshAudienceCounts(audience, identity);
+  await db
+    .update(audiences)
+    .set({
+      apolloCount: counts.apolloCount,
+      apifyCount: counts.apifyCount,
+      countedAt: counts.countedAt,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(eq(audiences.id, audience.id), eq(audiences.orgId, identity.orgId))
+    );
+}
+
+// When serve-next EXHAUSTS an apollo/apify audience we have just walked the ENTIRE
+// reachable pool, so the count of distinct members we materialized IS the true
+// reachable-pool ceiling (every member carries a usable email — tagAudienceServe
+// only tags reveals that passed hasUsableEmail). Persist it so the list's
+// Remaining clamps to reachable-minus-suppressed instead of the provider's
+// inflated demographic Size. The writer holds this value at exhaustion; the read
+// side cannot re-derive it (it can't distinguish "exhausted" from "still
+// serving"), so we persist at write. Self-correcting: if the provider pool later
+// grows, the next serve-next serves the new people and re-exhausts, bumping this.
+async function persistReachableCountOnExhaustion(
+  orgId: string,
+  audienceId: string
+): Promise<void> {
+  const [row] = await db
+    .select({
+      reachable: sql<number>`count(distinct ${audienceMembers.personId})`,
+    })
+    .from(audienceMembers)
+    .where(
+      and(
+        eq(audienceMembers.orgId, orgId),
+        eq(audienceMembers.audienceId, audienceId)
+      )
+    );
+  const reachable = Number(row?.reachable ?? 0);
+  await db
+    .update(audiences)
+    .set({ reachableCount: reachable, updatedAt: new Date() })
+    .where(and(eq(audiences.id, audienceId), eq(audiences.orgId, orgId)));
+}
+
 export interface AudienceStats {
   matched: Array<{
     personId: string;
@@ -459,7 +527,23 @@ export async function computeAudienceContactability(
 
     const suppressed = suppressedByAudience.get(row.id) ?? 0;
     // Clamp: a stale snapshot can report fewer in the pool than we've served.
-    const availableToContactCount = Math.max(0, sizeCount - suppressed);
+    let availableToContactCount = Math.max(0, sizeCount - suppressed);
+
+    // Safety net — never let a stale / inflated Size manufacture phantom
+    // "remaining" contacts. The provider Size counts ALL demographic matches, not
+    // just people with a verified email, so it over-states the reachable pool
+    // (e.g. an exhausted audience: Size 1349, only 503 reachable, all 503 served
+    // → sizeCount - suppressed = 846 phantom). Once serve-next has EXHAUSTED the
+    // audience we know the true reachable ceiling (reachableCount, persisted at
+    // exhaustion); clamp Remaining to reachable-minus-suppressed so a truly-
+    // exhausted audience reads ~0, and re-contactable as its members lapse the
+    // window. NULL (never exhausted) ⟹ ceiling unknown, no clamp.
+    if (row.reachableCount !== null && row.reachableCount !== undefined) {
+      availableToContactCount = Math.min(
+        availableToContactCount,
+        Math.max(0, row.reachableCount - suppressed)
+      );
+    }
 
     const availableToContactPct =
       sizeCount === 0
@@ -1510,6 +1594,7 @@ export async function serveNextPerson(
     // suppression-recorded by the gateway, so surface exhausted rather than
     // committing an uncontactable person as served.
     if (!person || !hasUsableEmail(person)) {
+      await persistReachableCountOnExhaustion(identity.orgId, audience.id);
       return { status: "exhausted", person: null };
     }
     await tagAudienceServe(identity.orgId, audience.id, [
@@ -1555,6 +1640,7 @@ export async function serveNextPerson(
         identity,
       });
       if (search.people.length === 0) {
+        await persistReachableCountOnExhaustion(identity.orgId, audience.id);
         return { status: "exhausted", person: null };
       }
       await bufferTeasers(identity.orgId, audience.id, search.people);

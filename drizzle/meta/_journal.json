@@ -127,6 +127,13 @@
       "when": 1771587966888,
       "tag": "0017_add_audience_teaser_buffer",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1771587966889,
+      "tag": "0018_add_audience_reachable_count",
+      "breakpoints": true
     }
   ]
 }

@@ -23,6 +23,7 @@ import {
   computeAudienceContactability,
   getAudienceInOrg,
   refreshAudienceCounts,
+  refreshAudienceCountIfStale,
   suggestAudiences,
   serveNextPerson,
   generateAvatar,
@@ -459,6 +460,18 @@ router.post(
       ...buildIdentity(res),
       brandIds: [audience.brandId],
     };
+
+    // Opportunistically refresh the Size snapshot on serve, TTL-gated to 1h. The
+    // serve does NOT read the count (only the list's Size / Remaining does), so
+    // this is fire-and-forget + best-effort: a refresh failure must never fail the
+    // serve (lead-service crash-loops on a bad serve). The re-count is free (dry-
+    // run, no credits).
+    void refreshAudienceCountIfStale(audience, identity).catch((err) =>
+      console.error(
+        `[human-service] audience.count_refresh_failed org=${orgId} audience=${audience.id}`,
+        err
+      )
+    );
 
     try {
       const result = await serveNextPerson(audience, identity);
