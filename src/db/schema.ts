@@ -383,6 +383,17 @@ export const audiences = pgTable(
     apolloCount: integer("apollo_count"),
     apifyCount: integer("apify_count"),
     countedAt: timestamp("counted_at", { withTimezone: true }),
+    // True reachable-pool ceiling, learned when serve-next fully EXHAUSTS the
+    // provider pool: at that point the count of distinct members we materialized
+    // IS the reachable pool (everyone with a usable email we could serve). The
+    // provider's own count (apollo_count) counts ALL demographic matches, not
+    // just people with a verified email, so it over-states the reachable pool.
+    // The list's "Remaining" clamps to reachable_count - suppressed so a stale /
+    // inflated Size can never manufacture phantom contacts. Nullable — NULL until
+    // serve-next has exhausted the audience at least once (ceiling unknown ⟹ no
+    // clamp). The writer holds this value; the read side cannot re-derive it
+    // (it can't tell "exhausted" from "still serving"), so we persist at write.
+    reachableCount: integer("reachable_count"),
     createdByUserId: uuid("created_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
