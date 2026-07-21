@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import request from "supertest";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
-import { tagAudienceServe, computeStats } from "../../src/services/audiences.js";
+import {
+  tagAudienceServe,
+  computeStats,
+  refreshAudienceCountIfStale,
+} from "../../src/services/audiences.js";
 import { recordServe } from "../../src/services/suppression.js";
 import type { ServedContact } from "../../src/services/suppression.js";
 import { db } from "../../src/db/index.js";
@@ -688,5 +692,171 @@ describe("Audiences list contactability (Size / Remaining)", () => {
     expect(item.sizeCount).toBe(25);
     expect(item.availableToContactCount).toBe(25);
     expect(item.availableToContactPct).toBe(100);
+  });
+
+  // --- Safety-net clamp: Remaining never exceeds reachable-minus-suppressed ---
+
+  it("exhausted audience (reachableCount set) clamps Remaining to ~0 despite an inflated Size", async () => {
+    // Mirrors the prod chiropractor case: Size (demographic) 100, only 3 reachable
+    // (verified-email), all 3 served → without the clamp Remaining would phantom
+    // to 97; with reachableCount persisted at exhaustion it reads 0.
+    const id = await createAudience(ORG_A, {
+      name: "Exhausted",
+      brandId: BRAND_1,
+      provider: "apollo",
+      apolloCount: 100,
+    });
+    await db
+      .update(audiences)
+      .set({ reachableCount: 3 })
+      .where(eq(audiences.id, id));
+    for (const e of ["a@x.com", "b@x.com", "c@x.com"]) {
+      await serve(ORG_A, BRAND_1, id, contact({ email: e, provider: "apollo" }));
+    }
+    const item = await listItem(ORG_A, id);
+    expect(item.sizeCount).toBe(100); // Size still the provider snapshot
+    expect(item.availableToContactCount).toBe(0); // clamped, no phantom 97
+    expect(item.availableToContactPct).toBe(0);
+  });
+
+  it("never-exhausted audience (reachableCount null) is NOT clamped", async () => {
+    const id = await createAudience(ORG_A, {
+      name: "InProgress",
+      brandId: BRAND_1,
+      provider: "apollo",
+      apolloCount: 100,
+    });
+    // reachableCount stays null (never exhausted) → ceiling unknown → no clamp.
+    for (const e of ["d@x.com", "e@x.com", "f@x.com"]) {
+      await serve(ORG_A, BRAND_1, id, contact({ email: e, provider: "apollo" }));
+    }
+    const item = await listItem(ORG_A, id);
+    expect(item.availableToContactCount).toBe(97);
+    expect(item.availableToContactPct).toBe(97);
+  });
+
+  it("exhausted members lapsing the window become re-contactable up to the reachable ceiling, not the inflated Size", async () => {
+    const id = await createAudience(ORG_A, {
+      name: "LapsedExhausted",
+      brandId: BRAND_1,
+      provider: "apollo",
+      apolloCount: 100,
+    });
+    await db
+      .update(audiences)
+      .set({ reachableCount: 3 })
+      .where(eq(audiences.id, id));
+    for (const e of ["g@x.com", "h@x.com", "i@x.com"]) {
+      await serve(ORG_A, BRAND_1, id, contact({ email: e, provider: "apollo" }));
+    }
+    // Backdate every suppression past the window — all 3 become contactable again.
+    await db
+      .update(brandSuppressions)
+      .set({ lastServedAt: sql`now() - interval '4 months'` })
+      .where(eq(brandSuppressions.orgId, ORG_A));
+    const item = await listItem(ORG_A, id);
+    // Clamped to the reachable ceiling (3), NOT the demographic Size (100).
+    expect(item.availableToContactCount).toBe(3);
+    expect(item.availableToContactPct).toBe(3);
+  });
+});
+
+// Size auto-refresh on serve, TTL-gated to 1 hour. refreshAudienceCountIfStale is
+// what the serve-next route fires (best-effort) each serve.
+describe("Audience Size auto-refresh (1h TTL)", () => {
+  const fetchSpy = vi.fn();
+  const identity = { orgId: ORG_A, userId: "u1", brandIds: [BRAND_1] };
+
+  beforeEach(() => {
+    // Re-stub in beforeEach (not at collection) so this does not clobber the
+    // People describe's own fetch spy — collection-time stubs from a later
+    // describe would otherwise win globally for the whole file.
+    vi.stubGlobal("fetch", fetchSpy);
+    fetchSpy.mockReset();
+    process.env.APOLLO_SERVICE_URL = "http://apollo:8080";
+    process.env.APOLLO_SERVICE_API_KEY = "apollo-key";
+    process.env.APIFY_SERVICE_URL = "http://apify:8080";
+    process.env.APIFY_SERVICE_API_KEY = "apify-key";
+  });
+
+  async function apolloPointerAudience(
+    apolloCount: number,
+    countedAgoMs: number | null
+  ): Promise<string> {
+    const id = await createAudience(ORG_A, {
+      name: `Ptr-${apolloCount}-${countedAgoMs}`,
+      brandId: BRAND_1,
+      provider: "apollo",
+      apolloCount,
+    });
+    await db
+      .update(audiences)
+      .set({
+        apolloAudienceId: "apollo-aud-1",
+        countedAt:
+          countedAgoMs === null
+            ? null
+            : new Date(Date.now() - countedAgoMs),
+      })
+      .where(eq(audiences.id, id));
+    return id;
+  }
+
+  async function readCount(id: string) {
+    const [row] = await db
+      .select()
+      .from(audiences)
+      .where(eq(audiences.id, id));
+    return row;
+  }
+
+  it("count older than 1h → re-fetches Apollo count and updates Size", async () => {
+    const id = await apolloPointerAudience(100, 2 * 60 * 60 * 1000); // 2h stale
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ count: 250 }),
+      text: async () => "",
+    });
+    await refreshAudienceCountIfStale(await readCount(id), identity);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const row = await readCount(id);
+    expect(row.apolloCount).toBe(250); // drifted up with the Apollo pool
+    expect(row.countedAt).not.toBeNull();
+  });
+
+  it("count fresher than 1h → skips the re-fetch (no per-run hammering)", async () => {
+    const id = await apolloPointerAudience(100, 10 * 60 * 1000); // 10min fresh
+    await refreshAudienceCountIfStale(await readCount(id), identity);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const row = await readCount(id);
+    expect(row.apolloCount).toBe(100); // unchanged
+  });
+
+  it("never-counted (countedAt null) → refreshes", async () => {
+    const id = await apolloPointerAudience(0, null);
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ count: 42 }),
+      text: async () => "",
+    });
+    await refreshAudienceCountIfStale(await readCount(id), identity);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect((await readCount(id)).apolloCount).toBe(42);
+  });
+
+  it("crm audience → never refreshes (served by brand, no provider count)", async () => {
+    const id = await createAudience(ORG_A, {
+      name: "CrmAud",
+      brandId: BRAND_1,
+      provider: "crm",
+    });
+    await db
+      .update(audiences)
+      .set({ countedAt: new Date(Date.now() - 5 * 60 * 60 * 1000) }) // 5h stale
+      .where(eq(audiences.id, id));
+    await refreshAudienceCountIfStale(await readCount(id), identity);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

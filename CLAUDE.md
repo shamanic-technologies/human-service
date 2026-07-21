@@ -239,6 +239,20 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
   `refreshAudienceCounts(audience, identity)` owns the branch. **No cost** —
   dry-run is the free count path; refresh-count needs `x-user-id` (apollo/apify
   key resolution), the CRUD routes use `requireOrgIdOnly`.
+- **Auto-refresh Size on serve (1h TTL).** The `apollo_count` snapshot is refreshed
+  OPPORTUNISTICALLY when an audience is exercised (a serve happens) and its
+  `counted_at` is older than **1 hour** — so Size tracks the provider adding /
+  removing matching people over time WITHOUT hammering the count every serve. The
+  serve-next route fires `refreshAudienceCountIfStale(audience, identity)`
+  **fire-and-forget + best-effort** (`.catch(console.error)`): the serve does NOT
+  read the count (only the list's Size / Remaining does), so a refresh failure must
+  never fail the serve (lead-service crash-loops on a bad serve). Gated by the same
+  free dry-run path as `/refresh-count` (no credits); skipped for crm audiences
+  (served by brand, no provider count) and when `counted_at` is fresher than the
+  TTL (`COUNT_REFRESH_TTL_MS`). This is the human-service half of "truthful Size";
+  the parallel apollo-service change makes its dry-run count VERIFIED-EMAIL-ONLY, so
+  after both ship Size converges on the true reachable pool. Independently correct
+  regardless of ordering (the clamp below covers a still-inflated snapshot).
 - **Membership = PROVENANCE, not local matching.** A person joins an audience
   iff a serve made under that audience returned them. The caller passes
   `audienceId` on `/orgs/people/search` or `/resolve-email`; the route validates
@@ -316,7 +330,24 @@ CRUD responses stay the plain `AudienceSchema`.
   brand-wide across providers). Never-served pool members are all available; a
   member last served >3 months ago is contactable again; a member served within
   the window is subtracted. Clamped `≥ 0` (a stale snapshot can report fewer in
-  the pool than served).
+  the pool than served). **Safety-net clamp to the reachable ceiling** — the
+  provider Size counts ALL demographic matches, not only people with a verified
+  email, so it can over-state the reachable pool (prod chiropractor case: Size
+  1349, only ~503 reachable, all 503 served → without the clamp Remaining phantoms
+  to 846). Once serve-next has EXHAUSTED the audience we know the TRUE reachable
+  ceiling — `audiences.reachable_count` (migration `0018`), persisted at exhaustion
+  = the count of DISTINCT materialized members (every member carries a usable email,
+  since `tagAudienceServe` only tags reveals that passed `hasUsableEmail`). So
+  `availableToContactCount = min(sizeCount − suppressed, max(0, reachable_count −
+  suppressed))`. A truly-exhausted audience reads ~0; as its members lapse the
+  3-month window they become re-contactable up to `reachable_count` (NOT the
+  inflated Size). `reachable_count IS NULL` (never exhausted) ⟹ ceiling unknown ⟹
+  no clamp. This is the "persist-at-write the value the writer already held" rule:
+  serve-next holds the reachable truth at exhaustion, the read side cannot re-derive
+  it (can't tell "exhausted" from "still serving"). Self-correcting — if the provider
+  pool later grows, the next serve-next serves the new people and re-exhausts,
+  bumping `reachable_count` up. This clamp makes Remaining truthful even before the
+  parallel apollo-service verified-email-only count lands (independently correct).
 - **`availableToContactPct`** — `round(availableToContactCount / sizeCount *
   100)`, integer `0..100`; `0` when `sizeCount` is `0` (the only divide-by-zero
   guard). Denominator is EXACTLY `sizeCount` so Size and Remaining's % never
@@ -445,6 +476,12 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
   stored filters** (422); crm has no filters by design and is exempt (served by
   brand). Env vars for crm: `CRM_SERVICE_URL`, `CRM_SERVICE_API_KEY` (read at call
   time; missing ⟹ `ProviderConfigError` → 502).
+- **Exhaustion persists the reachable ceiling**: at every apollo/apify `exhausted`
+  return, `persistReachableCountOnExhaustion` writes `audiences.reachable_count` =
+  the count of DISTINCT materialized members — the TRUE reachable pool, since we
+  just walked the whole thing. That is what the list's "Remaining" clamps to (see
+  the contactability section). crm is exempt (no provider count concept). Cheap
+  (one COUNT + one UPDATE, only on the infrequent exhaustion path).
 - **No cost declared here** — apollo/apify own the billed reveal; crm-service owns
   its serve; the gateway only forwards `x-run-id` for downstream tracing.
 
