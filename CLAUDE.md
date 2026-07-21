@@ -867,6 +867,16 @@ To re-generate the OpenAPI spec after editing `src/schemas.ts`:
 npm run generate:openapi
 ```
 
+**Test gotcha — `vi.stubGlobal("fetch", spy)` at describe-body eval clobbers other
+describes.** `fileParallelism:false` + `maxWorkers:1` means ONE shared global. Two
+`describe` blocks that each `const spy = vi.fn(); vi.stubGlobal("fetch", spy)` at
+body-eval time BOTH run at collection, so the LAST one wins globally for the whole
+file — the earlier describe's provider-mock stops intercepting and its tests hit a
+real `fetch` (502 / hang). When adding a NEW provider-mocking describe, stub inside
+`beforeEach` (`vi.stubGlobal("fetch", spy)`), NOT at body eval, so the active
+describe re-owns `fetch` at run time. (audiences.test.ts "Audience Size auto-refresh"
+vs "People route audience tagging".)
+
 **Migrations are hand-authored, not `drizzle-kit generate`d.** `drizzle/meta/`
 keeps only `0000_snapshot.json` (intermediate snapshots were never committed),
 so `drizzle-kit generate` mis-diffs — it prompts to "rename" EXISTING tables
