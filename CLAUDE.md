@@ -407,6 +407,26 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
 (`x-user-id` needed for apollo/apify key resolution). `serveNextPerson` in
 `src/services/audiences.ts` owns it; `src/routes/audiences.ts` is the thin layer.
 
+- **Provider selection: FEATURE IDENTITY first, then the audience's committed
+  provider.** lead-service forwards `x-feature-slug` and does NOT know/care which
+  provider serves the request — the routing decision is human-service's. When the
+  feature is the **CRM-outreach feature** (`x-feature-slug ===
+  "sales-crm-email-outreach"`, the `CRM_OUTREACH_FEATURE_SLUG` constant, byte-equal
+  to features-service `src/seed/features.ts`), the serve MUST come from the org's
+  own CRM connection (crm-service) **regardless of the picked audience's stored
+  `provider`** — feature identity wins over `audience.provider`, so even an audience
+  built on a search provider is served from CRM for that feature. Any other feature
+  (cold outreach, PR, etc.) falls through to the audience's committed provider
+  (apollo/apify/crm) exactly as before. Parsed into the tracking block
+  (`x-feature-slug` → `WorkflowTrackingHeaders.featureSlug`, so it also auto-forwards
+  downstream); `serveNextPerson` reads `identity.workflowTracking?.featureSlug`. The
+  CRM branch runs BEFORE the filters guard (a crm serve has no stored filters), and
+  is **fail-soft by construction**: crm-service returns an empty batch + `exhausted`
+  for a brand with no uploaded contacts (= no CRM connection) or a drained list, so
+  a CRM-feature serve for a connection-less org returns `{status:"exhausted"}` (200),
+  never a 500 (a 500 crashes lead-service's buffer instead of ending it cleanly as
+  `found:false`). Only a genuine crm-service non-2xx / network error / missing env
+  stays fail-loud (502), same as apollo/apify.
 - **It's a thin WRAPPER over the existing people-gateway, not new matching.** It
   loads the audience (404 if missing/foreign), searches with the audience's
   **STORED `filters` via its committed `provider`**, brand-scoped to
@@ -894,7 +914,7 @@ Run tracking is wired through `src/services/runs.ts` for the legacy
 the caller's `x-run-id` for downstream tracing only — they don't create
 their own runs because list CRUD is short, idempotent, and free.
 
-## Workflow tracking headers (`x-campaign-id` / `x-brand-id` / `x-workflow-slug` / `x-audience-id`)
+## Workflow tracking headers (`x-campaign-id` / `x-brand-id` / `x-workflow-slug` / `x-audience-id` / `x-feature-slug`)
 
 workflow-service stamps these optional tracking headers on every campaign-DAG
 call. `parseOptionalTrackingHeaders` (`src/middleware/auth.ts`) reads them into
@@ -914,6 +934,13 @@ key-service, `scraping.ts` → scraping-service, `chat-client.ts` → chat-servi
   owns the LLM/image), so its only job is **propagation**: read the header inbound,
   forward it to those internal siblings so THEY tag their own runs-service cost
   rows. Absent outside the campaign flow ⟹ omitted, never thrown.
+- **`x-feature-slug`** = the features-service catalogue slug of the campaign's
+  feature (e.g. `sales-cold-email-outreach` / `sales-crm-email-outreach`), forwarded
+  by lead-service on every serve-next call. Carried in the block so it auto-forwards
+  downstream for tracing/attribution AND drives serve-next's **feature-identity
+  provider routing**: the CRM-outreach feature sources from crm-service regardless of
+  the audience's stored provider (see the serve-next section). Absent outside the
+  campaign flow ⟹ omitted, never thrown.
 - **Egress guardrail**: every downstream URL human-service calls
   (apollo/apify/chat/runs/key/scraping) is an INTERNAL sibling — the actual
   vendor (anthropic/gemini/apollo.io/apify actor) is reached INSIDE those
