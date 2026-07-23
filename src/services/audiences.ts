@@ -1477,6 +1477,12 @@ export async function getAudienceInOrg(
 // Thrown when an audience cannot serve people because it lacks the stored state
 // serve-next needs (a committed provider, or a non-empty filter set). Fail loud
 // (route → 422) rather than silently returning an empty / wrong result.
+// The features-service catalogue slug for the "Sales CRM Email Outreach" feature.
+// A serve-next request carrying this feature identity (x-feature-slug, forwarded by
+// lead-service) sources from crm-service instead of a search provider — see
+// serveNextPerson. Byte-equal to features-service `src/seed/features.ts`.
+const CRM_OUTREACH_FEATURE_SLUG = "sales-crm-email-outreach";
+
 export class AudienceNotServableError extends Error {
   constructor(message: string) {
     super(message);
@@ -1553,13 +1559,27 @@ export async function serveNextPerson(
   identity: Identity
 ): Promise<ServeNextResult> {
   const provider = audience.provider;
+  const featureSlug = identity.workflowTracking?.featureSlug;
 
-  // CRM audience: the brand's audience IS its uploaded contact list. crm-service
-  // serves the next not-yet-served contact BY BRAND and owns permanent per-(brand,
-  // contact) no-re-serve + the exhausted signal — so we don't need stored filters
-  // and we do NO local suppression here (it's crm-service's job). Handled before
-  // the filters guard because a crm audience legitimately has no filters.
-  if (provider === "crm") {
+  // CRM sourcing — two ways in, handled before the filters guard because a crm
+  // serve legitimately has no stored filters:
+  //
+  //   (1) FEATURE-IDENTITY routing (the reason this feature exists): a serve-next
+  //       for the CRM-outreach feature (`sales-crm-email-outreach`) MUST source
+  //       from the org's own CRM connection regardless of the picked audience's
+  //       stored provider. lead-service passes only identity (x-feature-slug) and
+  //       does not know/care which provider serves it — the routing decision is
+  //       ours. Feature identity WINS over `audience.provider`: even an audience
+  //       built on a search provider is served from crm-service for this feature.
+  //   (2) An explicitly crm-provider audience (the audience IS the brand's uploaded
+  //       list) — the existing behavior, unchanged.
+  //
+  // crm-service serves the next not-yet-served contact BY BRAND and owns permanent
+  // per-(brand, contact) no-re-serve + the exhausted signal — so we do NO local
+  // suppression here. It returns an empty batch + exhausted for a brand with no
+  // uploaded contacts (i.e. no CRM connection), so this path is FAIL-SOFT by
+  // construction: no connection / drained list → {status:"exhausted"}, never a 500.
+  if (featureSlug === CRM_OUTREACH_FEATURE_SLUG || provider === "crm") {
     return serveNextCrmContact(audience, identity);
   }
 

@@ -19,6 +19,7 @@ function createApp() {
         brandIds: wt.brandIds ?? null,
         workflowSlug: wt.workflowSlug ?? null,
         audienceId: wt.audienceId ?? null,
+        featureSlug: wt.featureSlug ?? null,
       });
     }
   );
@@ -87,6 +88,18 @@ describe("workflow tracking middleware", () => {
     expect(res.body.audienceId).toBe("aud-123");
   });
 
+  it("extracts x-feature-slug into the tracking block when present", async () => {
+    const res = await request(app)
+      .get("/test")
+      .set({
+        ...baseHeaders,
+        "x-feature-slug": "sales-crm-email-outreach",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.featureSlug).toBe("sales-crm-email-outreach");
+  });
+
   it("returns null for workflow tracking headers when absent", async () => {
     const res = await request(app)
       .get("/test")
@@ -97,6 +110,7 @@ describe("workflow tracking middleware", () => {
     expect(res.body.brandIds).toBeNull();
     expect(res.body.workflowSlug).toBeNull();
     expect(res.body.audienceId).toBeNull();
+    expect(res.body.featureSlug).toBeNull();
   });
 
   it("handles partial workflow tracking headers", async () => {

@@ -42,6 +42,15 @@ function serveNext(id: string) {
   return request(app).post(`/orgs/audiences/${id}/serve-next`).set(getAuthHeaders());
 }
 
+// serve-next carrying a feature identity (x-feature-slug) — lead-service forwards
+// this on every serve-next call. Drives the feature-identity routing (the
+// CRM-outreach feature sources from crm-service regardless of the audience provider).
+function serveNextForFeature(id: string, featureSlug: string) {
+  return request(app)
+    .post(`/orgs/audiences/${id}/serve-next`)
+    .set({ ...getAuthHeaders(), "x-feature-slug": featureSlug });
+}
+
 // A masked apollo free teaser (search/next page item): person id + first name +
 // linkedin, NO email/last-name/domain (apollo masks those until enrich).
 function apolloTeaser(id: string, linkedin: string) {
@@ -553,6 +562,99 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     const id = await createCrmAudience("CRM Down");
     const res = await serveNext(id);
     expect(res.status).toBe(502);
+  });
+
+  // ── Feature-identity routing (Sales CRM Email Outreach) ──────────────────────
+  // lead-service forwards x-feature-slug and does NOT know/care which provider
+  // serves the request — human-service owns the routing decision. When the feature
+  // is the CRM-outreach feature, the next person MUST come from the org's CRM
+  // connection (crm-service) instead of a search provider, EVEN when the picked
+  // audience was built on apollo/apify.
+
+  it("crm feature: sources from crm-service even for an APOLLO audience (feature identity wins over provider)", async () => {
+    // The serve MUST come from crm-service, never the search provider. (The route
+    // also fires a best-effort, fire-and-forget Size count-refresh on serve, which
+    // for an apollo audience hits apollo's FREE dry-run — that is unrelated to
+    // sourcing, so the mock answers it but we assert no apollo SEARCH/serve endpoint
+    // was hit.)
+    let searchServeCalls = 0;
+    let crmCalls = 0;
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        const body = JSON.parse(init.body ?? "{}") as { brandId?: string; limit?: number };
+        expect(body.brandId).toBe(BRAND);
+        expect(body.limit).toBe(1);
+        crmCalls++;
+        return ok({ contacts: [crmContact("crm1", "from-crm@crm.com")], served: 1, exhausted: false });
+      }
+      // The fire-and-forget Size refresh's free dry-run / count probes — answered so
+      // the best-effort refresh doesn't reject, but they are NOT serve sourcing.
+      if (u.endsWith("/search/dry-run")) return ok({ total: 0 });
+      if (u.endsWith("/search/count")) return ok({ total: 0 });
+      // Any actual apollo/apify SEARCH or reveal endpoint = wrong provider for a CRM
+      // feature serve.
+      if (u.endsWith("/search/next") || u.endsWith("/enrich") || u.endsWith("/search")) {
+        searchServeCalls++;
+        return ok({});
+      }
+      throw new Error("unexpected url " + u);
+    });
+    // An apollo audience (has a search provider + filters) — but the CRM feature
+    // must ignore that and pull from crm-service.
+    const id = await createAudience("apollo", "Apollo but CRM feature");
+    const res = await serveNextForFeature(id, "sales-crm-email-outreach");
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.email).toBe("from-crm@crm.com");
+    expect(res.body.person.provider).toBe("crm");
+    expect(crmCalls).toBe(1);
+    expect(searchServeCalls).toBe(0); // never sourced from the search provider
+
+    // Provenance still tagged onto the audience.
+    const members = await request(app).get(`/orgs/audiences/${id}/members`).set(getAuthHeaders());
+    expect(members.body.members).toHaveLength(1);
+    expect(members.body.members[0].emailNorm).toBe("from-crm@crm.com");
+  });
+
+  it("cold feature: keeps using the search provider (apollo) — unchanged", async () => {
+    let crmCalls = 0;
+    fetchSpy.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        crmCalls++;
+        return ok({ contacts: [], served: 0, exhausted: true });
+      }
+      if (u.endsWith("/search/next"))
+        return ok({ people: [apolloTeaser("p1", "linkedin.com/in/p1")], done: true, totalEntries: 1 });
+      if (u.endsWith("/enrich"))
+        return ok({ person: apolloRevealed("p1", "cold@acme.com", "linkedin.com/in/p1") });
+      throw new Error("unexpected url " + u);
+    });
+    const id = await createAudience("apollo", "Apollo cold feature");
+    const res = await serveNextForFeature(id, "sales-cold-email-outreach");
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.email).toBe("cold@acme.com");
+    expect(res.body.person.provider).toBe("apollo");
+    expect(crmCalls).toBe(0); // never routed to crm
+  });
+
+  it("crm feature, no CRM connection: fail-soft exhausted (200), never a 500", async () => {
+    // An org with no CRM connection / no uploaded contacts for the brand: crm-service
+    // returns an empty batch + exhausted:true (the brand is trivially drained). The
+    // serve must surface the clean not-serveable/exhausted outcome, NOT a 500 — a 500
+    // crashes lead-service's buffer instead of ending it as found:false.
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).endsWith("/orgs/contacts/serve-next"))
+        return ok({ contacts: [], served: 0, exhausted: true });
+      throw new Error("unexpected url " + url);
+    });
+    const id = await createAudience("apollo", "Apollo, CRM feature, no CRM");
+    const res = await serveNextForFeature(id, "sales-crm-email-outreach");
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("exhausted");
+    expect(res.body.person).toBeNull();
   });
 
   it("404 for an unknown audience id", async () => {
