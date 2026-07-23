@@ -132,11 +132,20 @@ function parseOptionalTrackingHeaders(req: Request, res: Response): void {
   // for per-audience cost attribution. Absent outside the campaign flow → omitted,
   // never thrown (same optional treatment as x-run-id / x-workflow-slug).
   const audienceId = req.headers["x-audience-id"] as string | undefined;
+  // x-feature-slug — the feature catalogue slug the campaign belongs to
+  // (features-service, e.g. "sales-cold-email-outreach" / "sales-crm-email-outreach").
+  // lead-service forwards it on every serve-next call. Carried through the tracking
+  // block so it (a) auto-forwards to internal siblings for tracing/attribution and
+  // (b) lets serve-next route by FEATURE IDENTITY (the CRM-outreach feature sources
+  // from crm-service regardless of the audience's stored provider). Absent outside
+  // the campaign flow → omitted, never thrown (same optional treatment as x-run-id).
+  const featureSlug = req.headers["x-feature-slug"] as string | undefined;
 
   if (campaignId) res.locals.campaignId = campaignId;
   if (brandIds.length > 0) res.locals.brandIds = brandIds;
   if (workflowSlug) res.locals.workflowSlug = workflowSlug;
   if (audienceId) res.locals.audienceId = audienceId;
+  if (featureSlug) res.locals.featureSlug = featureSlug;
 }
 
 export interface WorkflowTrackingHeaders {
@@ -144,6 +153,7 @@ export interface WorkflowTrackingHeaders {
   brandIds?: string[];
   workflowSlug?: string;
   audienceId?: string;
+  featureSlug?: string;
 }
 
 export function getWorkflowTracking(locals: Record<string, unknown>): WorkflowTrackingHeaders {
@@ -152,6 +162,7 @@ export function getWorkflowTracking(locals: Record<string, unknown>): WorkflowTr
     ...(locals.brandIds ? { brandIds: locals.brandIds as string[] } : {}),
     ...(locals.workflowSlug ? { workflowSlug: locals.workflowSlug as string } : {}),
     ...(locals.audienceId ? { audienceId: locals.audienceId as string } : {}),
+    ...(locals.featureSlug ? { featureSlug: locals.featureSlug as string } : {}),
   };
 }
 
@@ -161,5 +172,6 @@ export function workflowTrackingToHeaders(tracking: WorkflowTrackingHeaders): Re
     ...(tracking.brandIds?.length ? { "x-brand-id": tracking.brandIds.join(",") } : {}),
     ...(tracking.workflowSlug ? { "x-workflow-slug": tracking.workflowSlug } : {}),
     ...(tracking.audienceId ? { "x-audience-id": tracking.audienceId } : {}),
+    ...(tracking.featureSlug ? { "x-feature-slug": tracking.featureSlug } : {}),
   };
 }
