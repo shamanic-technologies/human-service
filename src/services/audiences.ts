@@ -1515,15 +1515,36 @@ function hasUsableEmail(p: Person): boolean {
 // We take limit 1 (mirrors apify's strict minimum) so crm never burns a contact we
 // can't hand back this call. Membership is tagged for provenance parity with the
 // other providers (that's NOT suppression — crm still owns re-serve).
+//
+// SOURCE BINDING: when the audience carries `crmUploadId` it represents ONE
+// imported CRM file, so the serve is restricted to that file's people. Restricting
+// happens at crm-service (pushed down), never by filtering the returned batch here
+// — crm-service burns every contact it hands back, so a local filter would drain
+// the brand's pool and corrupt its served bookkeeping. An UNBOUND audience sends
+// no restriction, so its serve stays byte-identical to the pre-binding behaviour.
+//
+// AUDIENCE IDENTITY: the serve is attributed to the audience it is made under, so
+// downstream run / outcome tracking in crm-service is per-audience. We stamp
+// `x-audience-id` from the AUDIENCE ROW rather than trusting the inbound header —
+// same reasoning as brandIds at the route: the caller serves "the next person of
+// THIS audience", so the audience identity is the row's, not a header's.
 async function serveNextCrmContact(
   audience: typeof audiences.$inferSelect,
   identity: Identity
 ): Promise<ServeNextResult> {
+  const crmIdentity: Identity = {
+    ...identity,
+    workflowTracking: {
+      ...(identity.workflowTracking ?? {}),
+      audienceId: audience.id,
+    },
+  };
   for (;;) {
     const { contacts, exhausted } = await crmServeNext(
       audience.brandId,
       1,
-      identity
+      crmIdentity,
+      audience.crmUploadId
     );
     const contact = contacts[0] ?? null;
     if (!contact) {
