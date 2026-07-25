@@ -929,6 +929,10 @@ export const AudienceSchema = z
       description:
         "Pointer to the faithful Apollo audience owned by apollo-service ('one filter vocabulary' Wave 2). Set for apollo audiences; null for apify (legacy) rows and pre-Wave-2 rows not yet backfilled. The faithful filters live in apollo-service; the `filters` field below is human-service's opaque cache of them.",
     }),
+    crmUploadId: z.string().nullable().openapi({
+      description:
+        "The ONE imported CRM source (crm-service upload id) this audience is bound to. When set, every CRM serve made under this audience is restricted to the people that came from that file, so several CRM audiences can coexist for one brand and each behaves as its own audience. null = unbound ⟹ the serve covers the brand's whole imported list (the pre-existing behaviour).",
+    }),
     status: AudienceStatusSchema,
     // Provenance: "brand_persona_backfill" for backfilled rows, else null.
     source: z.string().nullable(),
@@ -970,6 +974,10 @@ export const CreateAudienceRequestSchema = z
     apolloAudienceId: z.string().min(1).optional().openapi({
       description:
         "Pointer to the faithful Apollo audience owned by apollo-service, when persisting an apollo candidate. Omit for a neutral / apify audience.",
+    }),
+    crmUploadId: z.string().uuid().optional().openapi({
+      description:
+        "Bind this audience to ONE imported CRM source (a crm-service upload id of the same brand). Every CRM serve made under this audience is then restricted to the people of that file, so several bound audiences can coexist for one brand and each is independently pausable + independently costed. Validated against the brand's uploads at creation (400 if it is not one of them). Omit to keep the whole-brand behaviour. Immutable afterwards.",
     }),
     apolloCount: z.number().int().min(0).nullish().openapi({
       description:
