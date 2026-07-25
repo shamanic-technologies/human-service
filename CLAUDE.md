@@ -970,6 +970,25 @@ matching entry to `drizzle/meta/_journal.json` with a `when` greater than every
 existing entry (the runtime migrator only checks `when`, ignores the SQL hash).
 `drizzle-kit migrate` applies them on boot + in CI.
 
+**`npm run db:push` is BROKEN locally** — `drizzle-kit push` throws a zod
+`invalid_type ... Expected string, received null` before it reaches the DB (a
+drizzle-kit/zod version mismatch, not a config bug; note that `drizzle.config.ts`
+reads `HUMAN_SERVICE_DATABASE_URL`, NOT `DATABASE_URL`). To bring a local test DB
+up to date, apply the migration SQL directly instead — it is idempotent by
+convention:
+
+```bash
+psql "postgresql://test:test@localhost:5432/human_test" -f drizzle/00NN_your_migration.sql
+npx vitest run
+```
+
+**This repo has GitHub auto-merge DISABLED** (`enablePullRequestAutoMerge`), so
+`gh pr merge <N> --auto --squash` fails with `GraphQL: Auto merge is not allowed
+for this repository`. The `test` check is required by branch protection, so the
+flow is: open the PR → poll `gh pr view <N> --json statusCheckRollup` until the
+`test` check is `COMPLETED:SUCCESS` → then `gh pr merge <N> --squash
+--delete-branch`. Don't arm auto-merge and walk away; nothing will merge.
+
 ## Run tracking
 
 Run tracking is wired through `src/services/runs.ts` for the legacy
