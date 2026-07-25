@@ -359,6 +359,17 @@ export const audiences = pgTable(
     // filters (verbatim from apollo-service), so serve-next forwards them to
     // apollo /search without any neutral->apollo remap.
     apolloAudienceId: text("apollo_audience_id"),
+    // Pointer to ONE imported CRM source (a crm-service upload) this audience is
+    // bound to. When set, every CRM serve made under this audience is restricted
+    // to the people that came from that file — so several CRM audiences can
+    // coexist for one brand, each behaving as its own audience (pause one and
+    // sending to its people stops; outreach economics are attributed per file).
+    // NULL = unbound ⟹ today's whole-brand behaviour, byte-identical. Set at
+    // creation and immutable afterwards (same rule as filters: rebinding = a new
+    // audience, since evidence attribution keys on the audience id). A first-class
+    // pointer, not a filter — an imported-source id is a provider resource handle
+    // (mirrors apollo_audience_id), not a search predicate.
+    crmUploadId: text("crm_upload_id"),
     // Status lifecycle, mirroring brand-service persona semantics:
     // "active" | "paused" | "archived". Default active. The ONLY mutable field
     // (editing filters = a new audience). Archived is a soft state, NOT a delete.
@@ -406,6 +417,7 @@ export const audiences = pgTable(
     index("idx_audiences_org_brand").on(table.orgId, table.brandId),
     index("idx_audiences_canonical").on(table.canonicalAudienceId),
     index("idx_audiences_apollo_audience_id").on(table.apolloAudienceId),
+    index("idx_audiences_crm_upload_id").on(table.crmUploadId),
     // Name-unique per (org, brand) (case-insensitive). Widened from brand-only
     // so the same audience name can exist for the same brand across different
     // orgs (org isolation) — the suggest flow keys proposals on org+brand+name.

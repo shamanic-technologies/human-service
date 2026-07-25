@@ -662,3 +662,249 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     expect(res.status).toBe(404);
   });
 });
+
+// ── CRM source binding ────────────────────────────────────────────────────────
+// A CRM audience can be bound to ONE of the brand's imported CRM files, so several
+// such audiences coexist for a brand and each behaves as its own audience: pausing
+// one stops sending to the people of that file, and per-audience cost attribution
+// gives per-file outreach economics. An UNBOUND audience keeps the whole-brand
+// behaviour byte-identical.
+
+const UPLOAD_A = "00000000-0000-4000-8000-0000000000d1";
+const UPLOAD_B = "00000000-0000-4000-8000-0000000000d2";
+const OTHER_BRAND_UPLOAD = "00000000-0000-4000-8000-0000000000d9";
+
+function crmUpload(id: string, filename: string) {
+  return {
+    id,
+    brandId: BRAND,
+    filename,
+    rowCount: 10,
+    status: "promoted",
+    mappingProvenance: null,
+    columnMapping: null,
+    uploadedAt: "2026-07-17T00:00:00.000Z",
+  };
+}
+
+// The uploads listing crm-service answers when human-service validates a binding.
+function mockUploadsList() {
+  return ok({ uploads: [crmUpload(UPLOAD_A, "a.csv"), crmUpload(UPLOAD_B, "b.csv")] });
+}
+
+async function createBoundCrmAudience(name: string, crmUploadId: string) {
+  const res = await request(app)
+    .post("/orgs/audiences")
+    .set(getAuthHeaders())
+    .send({ name, brandId: BRAND, provider: "crm", crmUploadId });
+  expect(res.status).toBe(201);
+  return res.body.audience as { id: string; crmUploadId: string | null };
+}
+
+describe("CRM audience source binding", () => {
+  it("binds an audience to one imported CRM source and returns it on reads", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).includes("/orgs/contacts/uploads")) return mockUploadsList();
+      throw new Error("unexpected url " + url);
+    });
+
+    const created = await createBoundCrmAudience("CRM File A", UPLOAD_A);
+    expect(created.crmUploadId).toBe(UPLOAD_A);
+
+    // Readable back on the single-audience GET...
+    const get = await request(app)
+      .get(`/orgs/audiences/${created.id}`)
+      .set(getAuthHeaders());
+    expect(get.status).toBe(200);
+    expect(get.body.audience.crmUploadId).toBe(UPLOAD_A);
+
+    // ...and on the list.
+    const list = await request(app)
+      .get(`/orgs/audiences?brandId=${BRAND}`)
+      .set(getAuthHeaders());
+    expect(list.status).toBe(200);
+    const row = list.body.audiences.find(
+      (a: { id: string }) => a.id === created.id
+    );
+    expect(row.crmUploadId).toBe(UPLOAD_A);
+  });
+
+  it("rejects (400) a binding to an upload that is not one of the brand's imported sources", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).includes("/orgs/contacts/uploads")) return mockUploadsList();
+      throw new Error("unexpected url " + url);
+    });
+    const res = await request(app)
+      .post("/orgs/audiences")
+      .set(getAuthHeaders())
+      .send({
+        name: "Foreign File",
+        brandId: BRAND,
+        provider: "crm",
+        crmUploadId: OTHER_BRAND_UPLOAD,
+      });
+    expect(res.status).toBe(400);
+  });
+
+  it("serving a BOUND audience restricts the serve to its source (pushed down to crm-service)", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.includes("/orgs/contacts/uploads")) return mockUploadsList();
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({
+          contacts: [crmContact("crm1", "bound@crm.com")],
+          served: 1,
+          exhausted: false,
+        });
+      }
+      throw new Error("unexpected url " + u);
+    });
+
+    const created = await createBoundCrmAudience("CRM Bound Serve", UPLOAD_A);
+    const res = await serveNext(created.id);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.email).toBe("bound@crm.com");
+
+    // The restriction is pushed DOWN — never a local filter of the returned batch
+    // (crm-service burns every contact it hands back).
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toEqual({ brandId: BRAND, limit: 1, uploadIds: [UPLOAD_A] });
+  });
+
+  it("serving an UNBOUND audience is byte-identical to today (no restriction on the wire)", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      if (String(url).endsWith("/orgs/contacts/serve-next")) {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({
+          contacts: [crmContact("crm1", "unbound@crm.com")],
+          served: 1,
+          exhausted: false,
+        });
+      }
+      throw new Error("unexpected url " + url);
+    });
+
+    const id = await createCrmAudience("CRM Unbound Serve");
+    const res = await serveNext(id);
+    expect(res.status).toBe(200);
+    expect(res.body.person.email).toBe("unbound@crm.com");
+    expect(bodies).toHaveLength(1);
+    // No `uploadIds` key at all — the exact body sent before this feature existed.
+    expect(bodies[0]).toEqual({ brandId: BRAND, limit: 1 });
+  });
+
+  it("the CRM-outreach feature-identity serve honours the picked audience's binding", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.includes("/orgs/contacts/uploads")) return mockUploadsList();
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({
+          contacts: [crmContact("crm1", "feature-bound@crm.com")],
+          served: 1,
+          exhausted: false,
+        });
+      }
+      // Fire-and-forget Size refresh probes (best-effort, unrelated to sourcing).
+      if (u.endsWith("/search/dry-run")) return ok({ total: 0 });
+      if (u.endsWith("/search/count")) return ok({ total: 0 });
+      throw new Error("unexpected url " + u);
+    });
+
+    // A bound audience whose committed provider is a SEARCH provider: the feature
+    // identity routes it to crm-service, and the binding still applies.
+    const create = await request(app)
+      .post("/orgs/audiences")
+      .set(getAuthHeaders())
+      .send({
+        name: "Apollo audience bound to a CRM file",
+        brandId: BRAND,
+        provider: "apollo",
+        filters: { titles: ["CEO"] },
+        crmUploadId: UPLOAD_B,
+      });
+    expect(create.status).toBe(201);
+    expect(create.body.audience.crmUploadId).toBe(UPLOAD_B);
+
+    const res = await serveNextForFeature(
+      create.body.audience.id,
+      "sales-crm-email-outreach"
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.email).toBe("feature-bound@crm.com");
+    expect(res.body.person.provider).toBe("crm");
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toEqual({ brandId: BRAND, limit: 1, uploadIds: [UPLOAD_B] });
+  });
+
+  it("several bound audiences coexist on one brand, each serving only its own source", async () => {
+    const calls: Array<{ uploadIds?: string[] }> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.includes("/orgs/contacts/uploads")) return mockUploadsList();
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        const body = JSON.parse(init.body ?? "{}") as { uploadIds?: string[] };
+        calls.push(body);
+        // crm-service answers from the restricted pool.
+        const from = body.uploadIds?.[0] === UPLOAD_A ? "a" : "b";
+        return ok({
+          contacts: [crmContact(`crm-${from}`, `${from}@crm.com`)],
+          served: 1,
+          exhausted: false,
+        });
+      }
+      throw new Error("unexpected url " + u);
+    });
+
+    const a = await createBoundCrmAudience("CRM File One", UPLOAD_A);
+    const b = await createBoundCrmAudience("CRM File Two", UPLOAD_B);
+    expect(a.id).not.toBe(b.id);
+
+    const servedA = await serveNext(a.id);
+    const servedB = await serveNext(b.id);
+    expect(servedA.body.person.email).toBe("a@crm.com");
+    expect(servedB.body.person.email).toBe("b@crm.com");
+    expect(calls.map((c) => c.uploadIds)).toEqual([[UPLOAD_A], [UPLOAD_B]]);
+  });
+
+  it("forwards the audience identity to crm-service on the serve call", async () => {
+    // Per-audience run / outcome attribution downstream. The identity comes from
+    // the AUDIENCE ROW, so it is correct even when the caller sent no (or a
+    // different) x-audience-id header.
+    const headers: Array<Record<string, string>> = [];
+    fetchSpy.mockImplementation(
+      async (url: string, init: { headers?: Record<string, string> }) => {
+        const u = String(url);
+        if (u.includes("/orgs/contacts/uploads")) return mockUploadsList();
+        if (u.endsWith("/orgs/contacts/serve-next")) {
+          headers.push(init.headers ?? {});
+          return ok({
+            contacts: [crmContact("crm1", "attributed@crm.com")],
+            served: 1,
+            exhausted: false,
+          });
+        }
+        throw new Error("unexpected url " + u);
+      }
+    );
+
+    const created = await createBoundCrmAudience("CRM Attribution", UPLOAD_A);
+    const res = await request(app)
+      .post(`/orgs/audiences/${created.id}/serve-next`)
+      .set({
+        ...getAuthHeaders(),
+        "x-feature-slug": "sales-crm-email-outreach",
+        // A stale / wrong header must not win over the served audience.
+        "x-audience-id": "00000000-0000-4000-8000-0000000000ee",
+      });
+    expect(res.status).toBe(200);
+    expect(headers).toHaveLength(1);
+    expect(headers[0]["x-audience-id"]).toBe(created.id);
+  });
+});

@@ -37,6 +37,7 @@ import {
   type Identity,
 } from "../services/people-providers.js";
 import { ChatServiceError, ChatConfigError } from "../lib/chat-client.js";
+import { crmListUploads } from "../lib/crm-contacts.js";
 
 const router = Router();
 
@@ -108,6 +109,28 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
   const orgId = res.locals.orgId as string;
   const userId = (res.locals.userId as string | undefined) ?? null;
 
+  // Source binding — the audience represents ONE of the brand's imported CRM
+  // files. Validate the pointer against crm-service BEFORE persisting: a binding
+  // to an upload that is not this brand's would silently serve nobody forever
+  // (and must never be able to reach another brand's people). Fail loud — a
+  // crm-service outage surfaces as 502, never a dead pointer written anyway.
+  if (parsed.data.crmUploadId) {
+    let uploads;
+    try {
+      uploads = await crmListUploads(parsed.data.brandId, buildIdentity(res));
+    } catch (err) {
+      sendProviderError(res, err);
+      return;
+    }
+    if (!uploads.some((u) => u.id === parsed.data.crmUploadId)) {
+      res.status(400).json({
+        error:
+          "crmUploadId is not an imported CRM source of this brand.",
+      });
+      return;
+    }
+  }
+
   let audience;
   try {
     [audience] = await db
@@ -118,6 +141,7 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
         name: parsed.data.name,
         provider: parsed.data.provider ?? null,
         apolloAudienceId: parsed.data.apolloAudienceId ?? null,
+        crmUploadId: parsed.data.crmUploadId ?? null,
         nlPrompt: parsed.data.nlPrompt ?? null,
         filters: parsed.data.filters ?? null,
         apolloCount: parsed.data.apolloCount ?? null,
@@ -623,6 +647,7 @@ function serializeAudience(row: typeof audiences.$inferSelect) {
     description: row.description,
     provider: row.provider,
     apolloAudienceId: row.apolloAudienceId,
+    crmUploadId: row.crmUploadId,
     status: row.status,
     source: row.source,
     canonicalAudienceId: row.canonicalAudienceId,

@@ -23,7 +23,10 @@ Backend service that owns two distinct concerns:
    A **third** lead provider, `crm-service` (a client's uploaded contact list), is
    served — not searched — through this layer: an audience with `provider='crm'`
    is served by `/orgs/audiences/{id}/serve-next` straight from crm-service, which
-   owns its OWN no-re-serve (human-service does no crm suppression). See below.
+   owns its OWN no-re-serve (human-service does no crm suppression). Such an
+   audience may be **bound to ONE imported CRM source** (`crm_upload_id`) so each
+   uploaded file is its own audience — independently pausable, independently
+   costed. See below.
 
 Stack: Express + Drizzle (Postgres) + Zod + zod-to-openapi. Deployed on
 Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
@@ -59,7 +62,7 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Org-scoped (People v1) | `POST /orgs/people/search/dry-run` | apiKey + `x-org-id` + `x-user-id` | Count matches, free (apollo only in v1) |
 | Org-scoped (People v1) | `GET /orgs/people/filters-prompt` | apiKey + `x-org-id` + `x-user-id` | LLM filter-shape prompt (apollo only in v1) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/suggest` | apiKey + `x-org-id` + `x-user-id` | NL → **persisted** candidate audiences (one per segment, best provider only), returns `audienceId`s at status `suggested` (inactive) |
-| Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider + optional `crmUploadId` source binding) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
 | Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}` | apiKey + `x-org-id` | Update metadata (name / nlPrompt only) — immutable otherwise |
@@ -477,7 +480,8 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
   not suppression. `limit:1` (like apify's strict minimum) so crm never burns a
   contact we can't hand back this call. A crm contact with no usable email is
   skipped (crm already suppressed it) and the next asked for; empty batch ⟹
-  `exhausted`.
+  `exhausted`. A **bound** crm audience additionally restricts the serve to its
+  source (see "CRM source binding" below).
 - **`served` ⇒ a USABLE email (LOCKED consumer contract)**: `status:"served"` MUST
   carry a person with a non-empty `email` — lead-service fails loud on an emailless
   lead (won't push an uncontactable person into the cold-email funnel) and a bad
@@ -504,6 +508,62 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
   (one COUNT + one UPDATE, only on the infrequent exhaustion path).
 - **No cost declared here** — apollo/apify own the billed reveal; crm-service owns
   its serve; the gateway only forwards `x-run-id` for downstream tracing.
+
+### CRM source binding — one imported file = one audience
+
+An audience committed to CRM used to implicitly mean "this brand's ENTIRE imported
+contact list", so creating several CRM audiences for a brand was possible but
+meaningless and pausing one changed nothing. **`audiences.crm_upload_id`**
+(migration `0019`, nullable `text`) binds an audience to exactly ONE of the brand's
+imported CRM sources (a crm-service upload id), so each uploaded file behaves as
+its own audience: pausing one actually stops sending to the people it contains,
+and outreach economics (cost per outcome) are attributed per file. Several bound
+audiences may coexist for one brand.
+
+- **A typed first-class POINTER, not a filter.** An imported-source id is a
+  provider resource handle (same shape as `apollo_audience_id`), not a search
+  predicate — so it does NOT live in the `filters` bag. Set at creation
+  (`POST /orgs/audiences {crmUploadId}`), returned on **every** audience read
+  (`serializeAudience` → single GET, list, create, status/avatar responses), and
+  immutable afterwards (same rule as `filters`: rebinding = a new audience, since
+  evidence attribution keys on the audience id). `PATCH` still only accepts
+  `name`/`nlPrompt`.
+- **Validated at creation against the brand's own uploads** — the create route
+  calls crm-service `GET /orgs/contacts/uploads?brandId=` (`crmListUploads` in
+  `src/lib/crm-contacts.ts`) and **400s** when the id is not one of that brand's
+  imported sources. A dead / cross-brand pointer would otherwise silently serve
+  nobody forever (or reach another brand's people). Fail loud: a crm-service
+  outage surfaces as 502, never a dead pointer persisted anyway. Only runs when
+  `crmUploadId` is present ⟹ zero change to every other create.
+- **Restriction is PUSHED DOWN to crm-service, never filtered locally.**
+  `crmServeNext` sends `uploadIds: [crmUploadId]` on `POST /orgs/contacts/serve-next`
+  (crm-service takes a LIST because it supports a subset of files; a human-service
+  audience is bound to exactly one, so we send a single-element list — byte-equal
+  to the deployed crm-service contract). Filtering the returned batch here would be
+  wrong AND destructive: crm-service atomically BURNS every contact it hands back,
+  so a local filter would drain the brand's pool and corrupt its served bookkeeping.
+- **UNBOUND (`crm_upload_id IS NULL`) is byte-identical to before** — the request
+  body carries no `uploadIds` key at all, so every pre-existing CRM audience keeps
+  the whole-brand behaviour. There is deliberately **no "one CRM audience per
+  brand"** restriction.
+- **The CRM-outreach feature-identity path honours the binding.** Feature routing
+  (`x-feature-slug === "sales-crm-email-outreach"`) picks crm-service as the
+  SOURCE; the picked audience still decides WHICH people — so an audience whose
+  committed `provider` is apollo/apify but which carries a `crm_upload_id` serves
+  only that file's people under the CRM feature. Both entry points go through the
+  same `serveNextCrmContact`, so there is one binding rule, not two.
+- **The audience identity is forwarded to crm-service** on the serve call:
+  `serveNextCrmContact` stamps `x-audience-id` from the **audience row**
+  (via `workflowTracking.audienceId` → the single `workflowTrackingToHeaders`
+  builder), not from the inbound header — same reasoning as `brandIds` at the
+  route: the caller serves "the next person of THIS audience", so the identity is
+  the row's. That is what makes crm-service's run/outcome tracking per-audience,
+  i.e. per file. Only the crm path is stamped — apollo/apify downstream headers are
+  untouched.
+- **crm-service still owns no-re-serve, brand-wide.** Restricting a serve to a file
+  does not let an already-served person come back through another file: a person in
+  two files is sendable once for the brand. human-service records no crm
+  suppression, unchanged. **No cost** declared here either.
 
 ### Avatar — `POST /orgs/audiences/{id}/avatar`
 
@@ -805,6 +865,9 @@ returns 404, never 403, to avoid leaking existence.
   (audit-only forwarded headers, not guaranteed uuid).
 - **`people`, `audiences`, `audience_members`** (audiences v1): `org_id` +
   `brand_id` uuid (new-table convention); `source` / `confidence` text.
+  `audiences.crm_upload_id` is **text** (a pointer into crm-service, same typing
+  choice as `apollo_audience_id` — no cross-service FK), validated as a uuid at
+  the API edge.
 - **`audience_teaser_buffer`** (serve-next apollo drain buffer): `org_id` uuid
   (new-table convention); `audience_id` uuid FK → `audiences` (ON DELETE CASCADE);
   `provider_person_id` / `linkedin_url` text.
