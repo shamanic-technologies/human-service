@@ -787,6 +787,56 @@ apollo-service owns the NL→faithful-Apollo-filters loop now.)
      proportionally more apollo/chat spend + latency per `/suggest` (owned
      upstream; human-service still declares no cost). Want more/fewer splits → tune
      `buildLayer1SystemPrompt`, nowhere else.
+   - **The split is a PARTITION of the request, and MECE is measured against the
+     REQUESTED AUDIENCE — never merely against the axis.** Every emitted audience
+     is a SUBSET of what the caller asked for and together they COVER it (no
+     person added who shouldn't be there, none left out). So the **persona travels
+     into every segment UNCHANGED**; it is a partition lever ONLY when the caller
+     themselves named several roles. A partition band the requested people barely
+     occupy is a **SMALL audience — and small is a correct answer**, never a licence
+     to put different people in it. The ~6-8 target is reached by **subdividing an
+     axis further** (geography always drops one notch: country → regions → states),
+     NEVER by widening WHO. Guarded by `tests/unit/layer1-split-prompt.test.ts`.
+     (Cost 2026-07-28: `nl_prompt = "Chiropractors in the United States"` produced
+     12 audiences whose persona drifted monotonically with the employee band —
+     1-10 "chiropractors, solo practitioners" ✅ → 51-200 "Chiropractors, Clinic
+     Directors, and **Healthcare Executives**" → 201+ "**Chief Medical Officers**,
+     Directors of Chiropractic, and **Senior Physicians**", i.e. zero
+     chiropractors. Chiropractic practices are 1-10 people, so the upper headcount
+     bands are sparse; instead of accepting small audiences the model rewrote WHO
+     until each band was populated. The old prompt only required MECE to *"cover
+     the whole space"* = the AXIS, which a 201+ band satisfies while holding none
+     of the requested people. The count target was NOT the cause and is kept —
+     the 4 clean "Solo Chiropractors Northeast/Midwest/South/West US" rows prove
+     6-8 is reachable by geography alone without leaving the ICP.)
+   - **A `description` must describe ONE population, not a union of several — and
+     every generic role word must be BOUND to the caller's occupation/sector.**
+     The apollo build receives ONLY `name` + `description` (no original prompt, no
+     sight of the sibling segments), so the sentence IS the whole specification and
+     must read exactly one way. A role list reads as a UNION: `"Chiropractors and
+     Practice Owners …"` is understood as chiropractors PLUS practice owners of
+     any kind (dentists, vets, accountants). Write the single population instead —
+     `"chiropractors who own their practice"`. `owner` / `founder` / `director` /
+     `manager` / `partner` / `administrator` mean nothing alone; bind them
+     (`"owner of a chiropractic practice"`). (Cost 2026-07-28, same run: the
+     `"Chiropractors and Practice Owners"` description survived apollo-service's
+     new MECE gate **untouched** — apollo was FAITHFUL to it and graded it
+     `reachesOffTarget: false` four times, correctly, because "Practice Owners" IS
+     in the described target. The drift was already in the description, so the
+     apollo-side fix could not catch it. This layer is the only place it can be.)
+   - **Two things are explicitly NOT Layer 1's business, and the prompt says so.**
+     (a) **Audience SIZE** — it never estimates, compares or worries about how many
+     people a segment holds; the apollo build measures that. (b) **The provider's
+     filter vocabulary** — Layer 1 writes plain English, apollo-service translates.
+     The unit test asserts no Apollo field name (`person_titles`,
+     `organization_industries`, `q_organization_keyword_tags`, …) leaks into this
+     prompt. Corollary, deliberately rejected: **do NOT forward the original
+     `nlPrompt` to apollo-service alongside the per-segment description.** The
+     original request is the SUPERSET of each segment, so handing it down invites
+     the builder to re-widen toward it and blur the segment boundary — the exact
+     Mutually-Exclusive violation this layer exists to prevent — and it creates two
+     conflicting sources of truth for one build. The defence is a self-sufficient,
+     unambiguous description, which is already the contract.
    - **⚠️ `buildLayer1SystemPrompt` is a `[...].join("\n")` array AND the
      `audiences-suggest.test.ts` integration test asserts exact prompt SUBSTRINGS**
      (`toContain("When multiple independent axes are explicitly present")`,
@@ -796,7 +846,11 @@ apollo-service owns the NL→faithful-Apollo-filters loop now.)
      join inserts a `\n` mid-phrase). When editing the prompt, keep each
      `toContain`/`.includes` phrase on ONE array line (a `\s+` in a `toMatch`
      regex tolerates the join newline, a bare `.includes` does not), or update the
-     assertions in the same commit.
+     assertions in the same commit. **`tests/unit/layer1-split-prompt.test.ts`
+     asserts many more substrings** (the invariants above) — it is the cheap,
+     DB-free guard, so run `npm run test:unit` after any prompt edit. It pins the
+     INVARIANTS, not the prose: when rewording, keep each invariant expressed
+     somewhere in the prompt and move the assertion with it.
 2. **APOLLO BUILD (per segment, apollo-service owns it)** — `suggestApolloAudience`
    calls apollo-service `POST /audiences/suggest-from-segment` with
    `{ name, description, brandId }`; apollo-service runs its agentic NL→faithful-
