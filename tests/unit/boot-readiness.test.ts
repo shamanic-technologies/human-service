@@ -1,7 +1,8 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import express from "express";
 import request from "supertest";
 import { isTransientConnectError } from "../../src/db/boot-migrate.js";
+import { register } from "../../src/instrumentation.js";
 import { requireMigratedSchema } from "../../src/middleware/readiness.js";
 import healthRoutes from "../../src/routes/health.js";
 import {
@@ -128,5 +129,50 @@ describe("readiness gate — trailing slash", () => {
     const res = await request(makeApp()).get("/health/");
     expect(res.status).toBe(200);
     expect(res.body.migrations).toBe("pending");
+  });
+});
+
+describe("platform-key registration — cold sibling", () => {
+  const prevUrl = process.env.KEY_SERVICE_URL;
+  const prevKey = process.env.KEY_SERVICE_API_KEY;
+
+  beforeEach(() => {
+    process.env.KEY_SERVICE_URL = "http://key-service.railway.internal:8080";
+    process.env.KEY_SERVICE_API_KEY = "key-service-test-key";
+  });
+
+  afterEach(() => {
+    process.env.KEY_SERVICE_URL = prevUrl ?? "";
+    process.env.KEY_SERVICE_API_KEY = prevKey ?? "";
+    vi.unstubAllGlobals();
+  });
+
+  it("retries a sleeping key-service and succeeds once it wakes", async () => {
+    // Exactly what staging produced on 2026-07-31: key-service asleep, so the
+    // first connect throws `fetch failed` wrapping an ECONNREFUSED AggregateError.
+    const cold = Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new AggregateError([], "") as Error & { errors: unknown[] }, {
+        code: "ECONNREFUSED",
+        errors: [Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" })],
+      }),
+    });
+    const fetchSpy = vi
+      .fn()
+      .mockRejectedValueOnce(cold)
+      .mockResolvedValueOnce({ ok: true, status: 200, text: async () => "" });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(register()).resolves.toBeUndefined();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT retry a real key-service rejection — a non-2xx is a real answer", async () => {
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 401, text: async () => "unauthorized" });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(register()).rejects.toThrow(/401/);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });

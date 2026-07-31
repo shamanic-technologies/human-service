@@ -1125,6 +1125,15 @@ The pieces (`src/index.ts`, `src/db/boot-migrate.ts`, `src/lib/migration-state.t
   SQL/schema error is **never retried**: logged loudly, state `failed`, `/health`
   503 forever, every route 503. The process **never exits** — exiting is the
   crash loop this removes.
+- **The key-service registration retries the connect phase too.** key-service is
+  a Railway sibling that sleeps when idle, so on a cold deploy the first `fetch`
+  rejects with `fetch failed` → `AggregateError [ECONNREFUSED]` (observed on the
+  staging deploy of 2026-07-31, where the OLD code would have `process.exit(1)`'d
+  on it). `instrumentation.ts` retries 250ms→4s on a *thrown* rejection only —
+  never on a completed HTTP response, since a non-2xx is a real answer from
+  key-service. Write-safe: the request never reached the server and
+  `/platform-keys` is an upsert. `isTransientConnectError` is shared with the
+  migration retry via `src/lib/transient-connect.ts`.
 - **`net.setDefaultAutoSelectFamilyAttemptTimeout(5000)`** in `src/db/index.ts`.
   Node 20's happy-eyeballs gives each candidate address 250ms, which expires
   before a resume completes → `AggregateError [ETIMEDOUT]`.
