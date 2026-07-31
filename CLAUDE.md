@@ -1086,9 +1086,71 @@ key-service, `scraping.ts` → scraping-service, `chat-client.ts` → chat-servi
   was recorded UNDER (membership tagging) — distinct from the `x-audience-id`
   cost-attribution header, though in the serve-next campaign flow they coincide.
 
+## Boot sequence — the port binds BEFORE migrations (Neon cold-start)
+
+`app.listen()` runs FIRST. Nothing that touches the network is awaited before
+it. This is load-bearing: Railway's healthcheck window is **30s**, the staging
+Neon compute (`ep-bold-river-aztn1cbz`, branch `staging`) suspends after **300s**
+of inactivity, and a resume takes seconds — so awaiting `migrate()` before
+`listen()` meant a deploy landing on a cold compute spent its entire startup
+budget on the first DB connection, never opened the port, and was marked FAILED
+(`1/1 replicas never became healthy!`, no application output at all — it stalled
+before the first `console.log`). If the connection rejected instead, the old
+`.catch` called `process.exit(1)` and Railway restarted into a crash loop. Either
+way the failure has nothing to do with the code being deployed, which is what
+made it expensive: it reads as a flaky deploy, you retry onto a now-warm compute,
+it passes, and the real cause is never found. Reproduced on staging 2026-07-30.
+
+The pieces (`src/index.ts`, `src/db/boot-migrate.ts`, `src/lib/migration-state.ts`,
+`src/middleware/readiness.ts`):
+
+- **`app.listen()` first**, then `runMigrationsOnBoot()` and `runInstrumentation()`
+  both fire-and-forget. Instrumentation is no longer fatal on failure (a cold
+  key-service must not fail a deploy) — it logs loudly instead.
+- **LIVE ≠ READY.** `migration-state.ts` holds `ready | pending | failed`.
+  `requireMigratedSchema` (mounted first, right after `cors()`) answers **503 +
+  `Retry-After: 5`** on every route except `/health` and `/openapi.json` until
+  migrations land. So the port being open never means traffic is served against
+  an un-migrated schema.
+- **`/health` answers 200 while `pending`** (with `migrations: "pending"` in the
+  body) — that is what makes the deploy pass on a cold compute — and **503 when
+  `failed`**. It is not a lie about readiness: the gate above holds everything
+  else.
+- **Migration failures stay loud and terminal.** `runMigrationsOnBoot` retries
+  ONLY connect-phase errors (`isTransientConnectError`: Node socket/DNS codes,
+  postgres.js `CONNECT_TIMEOUT`/`CONNECTION_CLOSED`, SQLSTATE class `08`, `57P03`,
+  `53300`, plus the code-less pool message `timeout exceeded when trying to
+  connect`, walking `cause` chains and `AggregateError.errors`), backing off
+  250ms→15s over 11 attempts (~76s) — long enough for any Neon resume. A real
+  SQL/schema error is **never retried**: logged loudly, state `failed`, `/health`
+  503 forever, every route 503. The process **never exits** — exiting is the
+  crash loop this removes.
+- **The key-service registration retries the connect phase too.** key-service is
+  a Railway sibling that sleeps when idle, so on a cold deploy the first `fetch`
+  rejects with `fetch failed` → `AggregateError [ECONNREFUSED]` (observed on the
+  staging deploy of 2026-07-31, where the OLD code would have `process.exit(1)`'d
+  on it). `instrumentation.ts` retries 250ms→4s on a *thrown* rejection only —
+  never on a completed HTTP response, since a non-2xx is a real answer from
+  key-service. Write-safe: the request never reached the server and
+  `/platform-keys` is an upsert. `isTransientConnectError` is shared with the
+  migration retry via `src/lib/transient-connect.ts`.
+- **`net.setDefaultAutoSelectFamilyAttemptTimeout(5000)`** in `src/db/index.ts`.
+  Node 20's happy-eyeballs gives each candidate address 250ms, which expires
+  before a resume completes → `AggregateError [ETIMEDOUT]`.
+- **Do NOT add `connect_timeout` or `idle_timeout` to the `postgres()` options.**
+  Both were tried and reverted (brand-service#389, by reading postgres.js source):
+  `connect_timeout: 30` is already the postgres.js default (no-op), and
+  `idle_timeout` points the WRONG way here — postgres.js never closes idle
+  connections by default, so setting it makes the next request pay a fresh
+  TCP+TLS handshake for nothing. That advice is node-postgres's, mis-transplanted.
+- The gate defaults to `ready` and is armed only by `runMigrationsOnBoot()`, so
+  tests (which bring up their own schema) are never gated. `tests/helpers/test-app.ts`
+  mounts it anyway for parity; `tests/unit/boot-readiness.test.ts` is the guard.
+
 ## Cold-start instrumentation
 
 `src/instrumentation.ts` registers `HUMAN_SERVICE_API_KEY` as a platform key
 in key-service so other services can resolve it without configuring local
 env vars. Idempotent and safe to call on every boot. Skipped silently in
-local dev / tests when `KEY_SERVICE_URL` is not set.
+local dev / tests when `KEY_SERVICE_URL` is not set. Called **after**
+`app.listen()`, fire-and-forget — see the boot-sequence section above.
