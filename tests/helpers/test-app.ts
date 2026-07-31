@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import { requireMigratedSchema } from "../../src/middleware/readiness.js";
 import healthRoutes from "../../src/routes/health.js";
 import openapiRoutes from "../../src/routes/openapi.js";
 import humanRoutes from "../../src/routes/humans.js";
@@ -14,8 +15,10 @@ import internalAudiencesRoutes from "../../src/routes/internal-audiences.js";
 export function createTestApp() {
   const app = express();
   app.use(cors());
-  // Mirror index.ts: internal resolver (25 MB parser) mounts before the global
-  // 100 KB json parser.
+  // Mirror index.ts: readiness gate first (a no-op here — tests never arm it,
+  // they bring up their own schema), then the internal resolver (25 MB parser)
+  // before the global 100 KB json parser.
+  app.use(requireMigratedSchema);
   app.use(internalAudiencesRoutes);
   app.use(express.json());
 

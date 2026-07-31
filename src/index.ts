@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
-import { migrate } from "drizzle-orm/postgres-js/migrator";
-import { db } from "./db/index.js";
+import { runMigrationsOnBoot } from "./db/boot-migrate.js";
+import { requireMigratedSchema } from "./middleware/readiness.js";
 import healthRoutes from "./routes/health.js";
 import openapiRoutes from "./routes/openapi.js";
 import humanRoutes from "./routes/humans.js";
@@ -31,6 +31,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
+// Migrations run AFTER the port is open (see below), so every DB-backed route is
+// held at 503 until they land. `/health` and `/openapi.json` pass through.
+app.use(requireMigratedSchema);
 // Internal bulk audience resolver mounts BEFORE the global 100 KB json parser so
 // its own 25 MB parser handles lead-service's large payloads; the global parser
 // then no-ops on those (body already parsed). Org-scoped routes keep the 100 KB
@@ -53,18 +56,25 @@ app.use((_req, res) => {
 });
 
 if (process.env.NODE_ENV !== "test") {
-  migrate(db, { migrationsFolder: "./drizzle" })
-    .then(async () => {
-      console.log("[human-service] Migrations complete");
-      await runInstrumentation();
-      app.listen(Number(PORT), "::", () => {
-        console.log(`[human-service] Running on port ${PORT}`);
-      });
-    })
-    .catch((err) => {
-      console.error("[human-service] Migration failed:", err);
-      process.exit(1);
-    });
+  // BIND THE PORT FIRST. Everything that touches the network — `migrate()` on a
+  // Neon compute that may be suspended, and the key-service registration — used
+  // to be awaited here, so a deploy landing on a cold compute spent its whole
+  // startup budget on the first DB connection, never opened the port inside
+  // Railway's 30s healthcheck window, and was marked FAILED (or rejected and
+  // `process.exit(1)`'d into a restart loop). Neither had anything to do with
+  // the code being deployed. With the port open first, a slow resume costs a few
+  // seconds of 503s on DB-backed routes instead of a failed deploy.
+  app.listen(Number(PORT), "::", () => {
+    console.log(`[human-service] Running on port ${PORT}`);
+  });
+
+  // Off the critical path, both fail-loud in their own way: migrations gate every
+  // DB-backed route (503 until ready, 503 forever + unhealthy /health if they
+  // genuinely fail), and a failed platform-key registration is logged, not fatal.
+  void runMigrationsOnBoot();
+  runInstrumentation().catch((err) => {
+    console.error("[human-service] Platform-key registration failed:", err);
+  });
 }
 
 export default app;
