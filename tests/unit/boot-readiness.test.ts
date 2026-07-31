@@ -121,3 +121,12 @@ describe("readiness gate", () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe("readiness gate — trailing slash", () => {
+  it("treats /health/ as /health so a trailing slash cannot gate the healthcheck", async () => {
+    markMigrationsPending();
+    const res = await request(makeApp()).get("/health/");
+    expect(res.status).toBe(200);
+    expect(res.body.migrations).toBe("pending");
+  });
+});

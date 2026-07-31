@@ -18,7 +18,12 @@ const ALWAYS_ALLOWED = new Set(["/health", "/openapi.json"]);
  * we never quietly serve traffic against a schema the code does not expect.
  */
 export function requireMigratedSchema(req: Request, res: Response, next: NextFunction): void {
-  if (ALWAYS_ALLOWED.has(req.path)) {
+  // Express routes `/health/` to the `/health` handler by default (non-strict
+  // routing), so the allowlist has to see them as the same path too — otherwise
+  // a caller with a trailing slash gets gated off the one route that must never
+  // be gated.
+  const path = req.path.length > 1 ? req.path.replace(/\/+$/, "") : req.path;
+  if (ALWAYS_ALLOWED.has(path)) {
     next();
     return;
   }
