@@ -78,7 +78,8 @@ describe("peopleSearch — apollo", () => {
             city: "Portland",
             state: "ME",
             country: "USA",
-            timezone: "America/New_York",
+            // apollo-service emits the recipient timezone as `timeZone` (capital Z).
+            timeZone: "America/New_York",
             organizationName: "Casco Bay",
             organizationDomain: "cascobay.com",
             organizationWebsiteUrl: "https://cascobay.com",
@@ -165,7 +166,7 @@ describe("peopleSearch — apollo", () => {
             city: null,
             state: null,
             country: null,
-            timezone: null,
+            timeZone: null,
             organizationName: "No TZ Co",
             organizationDomain: "notz.com",
             organizationWebsiteUrl: null,
@@ -436,6 +437,49 @@ describe("resolveEmail", () => {
     });
     expect(fetchSpy.mock.calls[0][0]).toBe("http://apollo:8080/enrich");
     expect(result.person?.email).toBe("jane@acme.com");
+  });
+
+  it("apollo /enrich carries the recipient timezone into the neutral Person", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      apolloPersonOk({
+        person: {
+          id: "a1",
+          firstName: "Jane",
+          lastName: "Doe",
+          name: "Jane Doe",
+          email: "jane@acme.com",
+          emailStatus: "verified",
+          title: null,
+          headline: null,
+          seniority: null,
+          linkedinUrl: null,
+          photoUrl: null,
+          city: "London",
+          state: null,
+          country: "United Kingdom",
+          // apollo-service emits the recipient timezone as `timeZone` (capital Z).
+          timeZone: "Europe/London",
+          organizationName: null,
+          organizationDomain: "acme.com",
+          organizationWebsiteUrl: null,
+          organizationIndustry: null,
+          organizationSize: null,
+          organizationLinkedinUrl: null,
+          organizationLogoUrl: null,
+          organizationCity: null,
+          organizationState: null,
+          organizationCountry: null,
+        },
+      })
+    );
+    const result = await resolveEmail({ providerPersonId: "a1", identity });
+    expect(result.person?.timezone).toBe("Europe/London");
+  });
+
+  it("apollo /enrich yields timezone null when apollo omits the field", async () => {
+    fetchSpy.mockResolvedValueOnce(apolloPersonOk());
+    const result = await resolveEmail({ providerPersonId: "a1", identity });
+    expect(result.person?.timezone).toBeNull();
   });
 
   it("apollo /enrich returns person=null when apollo reveals nothing", async () => {

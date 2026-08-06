@@ -480,8 +480,11 @@ interface ApolloPerson {
   city: string | null;
   state: string | null;
   country: string | null;
-  // Recipient's IANA timezone read off the apollo wire (null when apollo omits it).
-  timezone: string | null;
+  // Recipient's IANA timezone read off the apollo wire. apollo-service emits it as
+  // `timeZone` (camelCase, capital Z — sourced from Apollo's snake_case `time_zone`);
+  // reading any other spelling yields undefined and silently drops the value.
+  // Optional because apollo-service declares it `.nullable().optional()`.
+  timeZone?: string | null;
   organizationName: string | null;
   organizationDomain: string | null;
   organizationWebsiteUrl: string | null;
@@ -523,7 +526,7 @@ function normalizeApolloPerson(p: ApolloPerson): Person {
     city: p.city,
     state: p.state,
     country: p.country,
-    timezone: p.timezone,
+    timezone: p.timeZone ?? null,
     provider: "apollo",
     providerPersonId: p.id,
     organization: hasOrg
