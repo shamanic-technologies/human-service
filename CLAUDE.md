@@ -122,7 +122,18 @@ confusing downstream 502.
     — Zod refine, 400 otherwise.
 - **Neutral `Person` shape**: field names mirror lead-service `FullLead` so a
   future Sales Lead Service mapping is trivial — but the type is **owned here**,
-  never imported cross-repo.
+  never imported cross-repo. **Field names differ from apollo's on purpose, so the
+  wire spelling must be read from apollo's deployed contract, never guessed**: the
+  neutral field is `timezone` while apollo-service emits `timeZone` (capital Z,
+  from Apollo's snake_case `time_zone`). `ApolloPerson` declared it `timezone`
+  from PR #155 (2026-06-29) until v0.35.x, so the read was `undefined` and every
+  neutral `Person` carried `timezone: null` — apollo had the value for 96% of
+  enrichments, lead-service had 0 of 86,853 rows populated, and instantly-service
+  fell back to `America/Chicago` 08:00 (= 14:00 London) for the whole fleet. The
+  unit tests passed throughout because their apollo fixtures used the same wrong
+  spelling as the code. `timezone` stays **null when the provider has none** —
+  apify and crm emit null by design, and there is no fallback/derivation here
+  (instantly-service owns its own default).
 - **Pagination**: apollo keeps its server-managed cursor (keyed by org +
   `x-campaign-id`); human-service forwards next-page calls (empty body advances
   the cursor). apify is offset-based (`limit` + `offset`).
