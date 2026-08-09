@@ -48,6 +48,8 @@ Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
 | Internal | `POST /internal/migrate-apify-audiences-to-apollo` | apiKey | One-time data fix (APOLLO-ONLY cutover): for every non-deprecated `provider='apify'` audience, build an equivalent apollo audience via apollo-service (`POST /audiences/suggest-from-segment`), store the pointer + faithful filters, create a new apollo audience mirroring the source status, and mark the apify one `deprecated` (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/backfill-canonical-audience-links` | apiKey | One-time data fix: link each EXISTING deprecated provider-variant audience (`<base> [Apify]`) to its active same-`(org,brand)`-base-name canonical sibling (`audiences.canonical_audience_id`), so membership/stats reads resolve a deprecated match to the clean active audience. Pre-link rows from the apify→apollo migration (which now sets the link going forward). Skips 0/ambiguous-sibling rows (fail loud, never guess). Idempotent, `?dryRun=true`, reversible |
 | Internal | `POST /internal/backfill-apollo-audience-pointers` | apiKey | One-time data fix ("one filter vocabulary" Wave 2): for every `provider='apollo'` audience lacking `apollo_audience_id`, build a faithful Apollo audience via apollo-service `POST /audiences/suggest-from-segment` (from the row's name + description), then store the **pointer** + cached faithful filters (replacing the old lossy neutral blob) + count. Idempotent (scoped to `apollo_audience_id IS NULL`), `?dryRun=true`, `?async=true`, reversible |
+| Internal | `POST /internal/recover-suppressions` | apiKey | One-time data repair: for a caller-supplied set of `{orgId, brandId, email}`, archive the `brand_suppressions` row into the reversible `suppression_recoveries` ledger (tagged with a `reason`) and DELETE it, so people who were served but never actually contacted become emittable again for their brand. Idempotent (unique `(reason, org, brand, email_norm)`), `?dryRun=true`, reversible. NOT a sweep — the set is supplied, never inferred |
+| Internal | `POST /internal/recover-suppressions/revert` | apiKey | Undo a recovery: restore every archived suppression row carrying `reason` verbatim + drop the ledger rows. A person re-suppressed by a fresh serve keeps the newer row |
 | Internal | `POST /internal/audiences/resolve` | apiKey | **Bulk server-to-server audience resolver** for lead-service (#166): body `{orgId, brandId, audienceIds?, emails?}` → `{byAudienceId, byEmail}` maps of `{id,name,avatarUrl}` \| null. Brand-correct + active-preferred (deprecated→canonical), keyed by audienceId AND/OR email (historical coverage). Dedicated **25 MB** body parser (mounts before the global 100 KB json) — NO browser 413 cap. See below. |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
@@ -199,11 +201,61 @@ confusing downstream 502.
     read via `last_served_at`. No gold table (a view if a consumer needs counts).
     `src/services/suppression.ts` owns it; `org_id`/`brand_id` uuid,
     `campaign_id`/`run_id` text (audit-only).
+- **Recovery of an un-sent serve** — see "Suppression recovery" below.
 - **No cost declaration here** — apollo/apify own the paid call; human-service
   only forwards `x-run-id`.
 - **Env vars**: `APOLLO_SERVICE_URL`, `APOLLO_SERVICE_API_KEY`,
   `APIFY_SERVICE_URL`, `APIFY_SERVICE_API_KEY`. Read at call time (not boot) so
   a missing var fails the request loudly rather than crash-looping boot.
+
+### Suppression recovery — `POST /internal/recover-suppressions`
+
+A serve is recorded the moment the gateway hands a person back with a verified
+email, which is correct: the gateway did emit them. But the downstream send can
+fail AFTER that point (a vendor rejecting the payload, a campaign never
+created), and then the person is permanently un-emittable for the brand while
+nothing was ever sent to them — the brand paid for a prospect it can no longer
+reach. These two routes are the repair. `src/services/suppression-recovery.ts`
+owns the engine; `src/routes/suppression-recovery.ts` is the thin HTTP layer.
+
+- **Recovering = DELETING the silver `brand_suppressions` row**, the single
+  surface every serve path reads (teaser filter, apify exclude-set,
+  resolve-email block, and the audiences Remaining rollup). Nothing about how
+  serving or suppression works changes — this is data repair, not behaviour.
+- **Archive-then-delete in ONE transaction.** The row is copied VERBATIM (same
+  `suppression_id`, same `first_served_at` / `last_served_at`) into
+  `suppression_recoveries` (migration `0020`) tagged with the incident `reason`,
+  so a row can never be deleted without its archive existing. That tag is what
+  makes the repair **identifiable** (`WHERE reason = '<tag>'`), **reversible**
+  (`/revert` restores it verbatim, then drops the ledger row), and **idempotent**
+  (unique `(reason, org_id, brand_id, email_norm)` ⟹ a re-run counts
+  `alreadyRecovered` and acts on nothing). `?dryRun=true` reports
+  `wouldRecover` + a per-brand breakdown and writes NOTHING.
+- **Bronze `lead_serves` is deliberately untouched** — it is the append-only
+  audit of what the gateway actually emitted and it stays true. A future silver
+  rebuild from bronze MUST consult this ledger.
+- **The set is SUPPLIED, never inferred.** "Was this person actually handed to
+  the vendor?" is knowable only by the service that submitted to the vendor
+  (instantly-service), so the caller passes the exact `{orgId, brandId, email}`
+  list. There is deliberately **no detector, no sweep and no retry loop** here:
+  a standing compensator for a producer bug that is fixed would be working
+  around a problem that no longer exists.
+- **Scoped to `(org, brand, email_norm)`** — the same grain the silver table is
+  unique on. A same-email serve under another brand or org is never touched.
+  Blank email ⟹ throws (fail loud, never a silent drop). **No cost.**
+- A revert whose person has been re-suppressed by a FRESH serve keeps the newer
+  row (`onConflictDoNothing`, counted as `skippedResuppressed`) — the end state
+  is still "suppressed", which is what a revert asks for.
+
+**First use (2026-08-09, reason `instantly-timezone-enum-2026-08`)**: between
+2026-08-07 01:00 and 2026-08-08 UTC, instantly-service rejected every lead
+carrying a real IANA timezone (the vendor's enum is closed), failing campaign
+creation AFTER the gateway had served the person and after their email was
+generated and paid for. 170 recipients across 2 brands; one had a vendor record
+under another org and was excluded; **169 recovered** — 92 for brand
+`7604c385-1f02-4016-b42f-344565bcd36d`, 77 for
+`6e21bb6c-67bc-45f3-8a6d-52230338d7e4`. The producer bug is fixed
+(instantly-service#570); the affected set is CLOSED.
 
 ## Audiences (v1) — `/orgs/audiences/*`
 
@@ -933,6 +985,9 @@ returns 404, never 403, to avoid leaking existence.
   `audiences.crm_upload_id` is **text** (a pointer into crm-service, same typing
   choice as `apollo_audience_id` — no cross-service FK), validated as a uuid at
   the API edge.
+- **`suppression_recoveries`** (reversible recovery ledger): `org_id` /
+  `brand_id` / `suppression_id` uuid; `reason` / `email_norm` /
+  `linkedin_url_norm` / `provider_person_id` / `last_provider` text.
 - **`audience_teaser_buffer`** (serve-next apollo drain buffer): `org_id` uuid
   (new-table convention); `audience_id` uuid FK → `audiences` (ON DELETE CASCADE);
   `provider_person_id` / `linkedin_url` text.
