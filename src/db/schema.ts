@@ -280,6 +280,42 @@ export const brandSuppressions = pgTable(
 export type BrandSuppression = typeof brandSuppressions.$inferSelect;
 export type NewBrandSuppression = typeof brandSuppressions.$inferInsert;
 
+// Reversible ledger for one-time suppression recoveries. Recovering a person
+// means DELETING their silver `brand_suppressions` row (the only surface the
+// serve paths read), so the row is archived here verbatim first, tagged with the
+// incident `reason` — that is what makes a repair identifiable and undoable.
+// Unique on (reason, org, brand, email_norm) ⟹ a re-run is idempotent.
+export const suppressionRecoveries = pgTable(
+  "suppression_recoveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    reason: text("reason").notNull(),
+    suppressionId: uuid("suppression_id").notNull(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    emailNorm: text("email_norm").notNull(),
+    linkedinUrlNorm: text("linkedin_url_norm"),
+    providerPersonId: text("provider_person_id"),
+    lastProvider: text("last_provider"),
+    firstServedAt: timestamp("first_served_at", { withTimezone: true }).notNull(),
+    lastServedAt: timestamp("last_served_at", { withTimezone: true }).notNull(),
+    recoveredAt: timestamp("recovered_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_suppression_recoveries_unique").on(
+      table.reason,
+      table.orgId,
+      table.brandId,
+      table.emailNorm
+    ),
+    index("idx_suppression_recoveries_reason").on(table.reason),
+  ]
+);
+
+export type SuppressionRecovery = typeof suppressionRecoveries.$inferSelect;
+
 // --- People gateway v1: audiences + canonical people + membership bridge ---
 //
 // Naming follows CDP/CRM canon (Segment / Salesforce CDP / Adobe AEP / HubSpot):

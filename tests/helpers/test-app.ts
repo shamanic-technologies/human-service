@@ -11,6 +11,7 @@ import listsRoutes from "../../src/routes/lists.js";
 import peopleRoutes from "../../src/routes/people.js";
 import audiencesRoutes from "../../src/routes/audiences.js";
 import internalAudiencesRoutes from "../../src/routes/internal-audiences.js";
+import suppressionRecoveryRoutes from "../../src/routes/suppression-recovery.js";
 
 export function createTestApp() {
   const app = express();
@@ -28,6 +29,7 @@ export function createTestApp() {
   app.use(methodologyRoutes);
   app.use(transferBrandRoutes);
   app.use(backfillRoutes);
+  app.use(suppressionRecoveryRoutes);
   app.use(listsRoutes);
   app.use(peopleRoutes);
   app.use(audiencesRoutes);

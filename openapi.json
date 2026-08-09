@@ -2408,6 +2408,177 @@
           "brandId"
         ]
       },
+      "RecoverSuppressionsResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "requested": {
+            "type": "integer"
+          },
+          "distinct": {
+            "type": "integer",
+            "description": "Distinct (org, brand, normalized email) keys — the grain brand_suppressions is unique on."
+          },
+          "recovered": {
+            "type": "integer",
+            "description": "Suppression rows archived + deleted (0 on a dry-run; the would-act count is `wouldRecover`)."
+          },
+          "wouldRecover": {
+            "type": "integer"
+          },
+          "alreadyRecovered": {
+            "type": "integer",
+            "description": "Entries already archived under this reason — idempotency: a re-run acts on none of them."
+          },
+          "notSuppressed": {
+            "type": "integer",
+            "description": "Entries holding neither a live suppression row nor a prior archive: nothing to recover."
+          },
+          "byBrand": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "brandId": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "brandId",
+                "count"
+              ]
+            }
+          },
+          "sample": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "orgId": {
+                  "type": "string"
+                },
+                "brandId": {
+                  "type": "string"
+                },
+                "emailNorm": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "orgId",
+                "brandId",
+                "emailNorm"
+              ]
+            }
+          }
+        },
+        "required": [
+          "dryRun",
+          "reason",
+          "requested",
+          "distinct",
+          "recovered",
+          "wouldRecover",
+          "alreadyRecovered",
+          "notSuppressed",
+          "byBrand",
+          "sample"
+        ]
+      },
+      "RecoverSuppressionsRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Incident tag written onto every archived row — how the repair is later identified and reverted (e.g. 'instantly-timezone-enum-2026-08')."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "orgId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+                },
+                "brandId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "email": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "orgId",
+                "brandId",
+                "email"
+              ]
+            },
+            "minItems": 1,
+            "description": "The exact set to recover. The caller supplies it because 'was this person actually handed to the vendor?' is knowable only by the service that submitted to the vendor — it is never inferred here."
+          }
+        },
+        "required": [
+          "reason",
+          "entries"
+        ]
+      },
+      "RevertSuppressionRecoveryResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "archived": {
+            "type": "integer"
+          },
+          "restored": {
+            "type": "integer"
+          },
+          "wouldRestore": {
+            "type": "integer"
+          },
+          "skippedResuppressed": {
+            "type": "integer",
+            "description": "Archived entries suppressed again by a fresh serve since the recovery — the newer row wins and is never clobbered."
+          }
+        },
+        "required": [
+          "dryRun",
+          "reason",
+          "archived",
+          "restored",
+          "wouldRestore",
+          "skippedResuppressed"
+        ]
+      },
+      "RevertSuppressionRecoveryRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The incident tag whose archived rows should be restored."
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
       "HealthResponse": {
         "type": "object",
         "properties": {
@@ -5570,6 +5741,126 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ResolveAudiencesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/recover-suppressions": {
+      "post": {
+        "summary": "One-time data repair: archive + delete the brand_suppressions rows for a caller-supplied set of people who were served but never contacted, so they become emittable again for their brand (idempotent, dry-runnable, reversible via /internal/recover-suppressions/revert)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', report exactly which entries hold a live suppression row (with per-brand counts) WITHOUT writing. Defaults to false (real run)."
+            },
+            "required": false,
+            "description": "When 'true', report exactly which entries hold a live suppression row (with per-brand counts) WITHOUT writing. Defaults to false (real run).",
+            "name": "dryRun",
+            "in": "query"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoverSuppressionsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Recovery result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoverSuppressionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/recover-suppressions/revert": {
+      "post": {
+        "summary": "Undo a suppression recovery: restore every archived brand_suppressions row carrying this reason (verbatim) and drop the ledger rows",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', report exactly which entries hold a live suppression row (with per-brand counts) WITHOUT writing. Defaults to false (real run)."
+            },
+            "required": false,
+            "description": "When 'true', report exactly which entries hold a live suppression row (with per-brand counts) WITHOUT writing. Defaults to false (real run).",
+            "name": "dryRun",
+            "in": "query"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevertSuppressionRecoveryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Revert result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevertSuppressionRecoveryResponse"
                 }
               }
             }

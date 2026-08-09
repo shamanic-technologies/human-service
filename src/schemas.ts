@@ -1889,6 +1889,163 @@ registry.registerPath({
   },
 });
 
+// --- Internal: one-time suppression recovery (reversible ledger) ---
+
+export const RecoverSuppressionsQuerySchema = z.object({
+  dryRun: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({
+      description:
+        "When 'true', report exactly which entries hold a live suppression row (with per-brand counts) WITHOUT writing. Defaults to false (real run).",
+    }),
+});
+
+export const RecoverSuppressionsRequestSchema = z
+  .object({
+    reason: z.string().min(1).openapi({
+      description:
+        "Incident tag written onto every archived row — how the repair is later identified and reverted (e.g. 'instantly-timezone-enum-2026-08').",
+    }),
+    entries: z
+      .array(
+        z.object({
+          // Lax UUID SHAPE (not strict-v4): org ids can predate the v4
+          // convention, same as every other org-id read here.
+          orgId: z
+            .string()
+            .regex(LAX_UUID_REGEX, "orgId must be a valid UUID"),
+          brandId: z.string().uuid(),
+          email: z.string().min(1),
+        })
+      )
+      .min(1)
+      .openapi({
+        description:
+          "The exact set to recover. The caller supplies it because 'was this person actually handed to the vendor?' is knowable only by the service that submitted to the vendor — it is never inferred here.",
+      }),
+  })
+  .openapi("RecoverSuppressionsRequest");
+
+export const RecoverSuppressionsResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    reason: z.string(),
+    requested: z.number().int(),
+    distinct: z.number().int().openapi({
+      description:
+        "Distinct (org, brand, normalized email) keys — the grain brand_suppressions is unique on.",
+    }),
+    recovered: z.number().int().openapi({
+      description:
+        "Suppression rows archived + deleted (0 on a dry-run; the would-act count is `wouldRecover`).",
+    }),
+    wouldRecover: z.number().int(),
+    alreadyRecovered: z.number().int().openapi({
+      description:
+        "Entries already archived under this reason — idempotency: a re-run acts on none of them.",
+    }),
+    notSuppressed: z.number().int().openapi({
+      description:
+        "Entries holding neither a live suppression row nor a prior archive: nothing to recover.",
+    }),
+    byBrand: z.array(
+      z.object({ brandId: z.string(), count: z.number().int() })
+    ),
+    sample: z.array(
+      z.object({
+        orgId: z.string(),
+        brandId: z.string(),
+        emailNorm: z.string(),
+      })
+    ),
+  })
+  .openapi("RecoverSuppressionsResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/recover-suppressions",
+  summary:
+    "One-time data repair: archive + delete the brand_suppressions rows for a caller-supplied set of people who were served but never contacted, so they become emittable again for their brand (idempotent, dry-runnable, reversible via /internal/recover-suppressions/revert)",
+  security: [{ apiKey: [] }],
+  request: {
+    query: RecoverSuppressionsQuerySchema,
+    body: {
+      content: {
+        "application/json": { schema: RecoverSuppressionsRequestSchema },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Recovery result",
+      content: {
+        "application/json": { schema: RecoverSuppressionsResponseSchema },
+      },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+export const RevertSuppressionRecoveryRequestSchema = z
+  .object({
+    reason: z.string().min(1).openapi({
+      description: "The incident tag whose archived rows should be restored.",
+    }),
+  })
+  .openapi("RevertSuppressionRecoveryRequest");
+
+export const RevertSuppressionRecoveryResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    reason: z.string(),
+    archived: z.number().int(),
+    restored: z.number().int(),
+    wouldRestore: z.number().int(),
+    skippedResuppressed: z.number().int().openapi({
+      description:
+        "Archived entries suppressed again by a fresh serve since the recovery — the newer row wins and is never clobbered.",
+    }),
+  })
+  .openapi("RevertSuppressionRecoveryResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/recover-suppressions/revert",
+  summary:
+    "Undo a suppression recovery: restore every archived brand_suppressions row carrying this reason (verbatim) and drop the ledger rows",
+  security: [{ apiKey: [] }],
+  request: {
+    query: RecoverSuppressionsQuerySchema,
+    body: {
+      content: {
+        "application/json": {
+          schema: RevertSuppressionRecoveryRequestSchema,
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Revert result",
+      content: {
+        "application/json": {
+          schema: RevertSuppressionRecoveryResponseSchema,
+        },
+      },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
 // --- GET /health ---
 
 export const HealthResponseSchema = z
