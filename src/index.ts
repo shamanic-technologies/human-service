@@ -12,6 +12,7 @@ import listsRoutes from "./routes/lists.js";
 import peopleRoutes from "./routes/people.js";
 import audiencesRoutes from "./routes/audiences.js";
 import internalAudiencesRoutes from "./routes/internal-audiences.js";
+import suppressionRecoveryRoutes from "./routes/suppression-recovery.js";
 import { register as runInstrumentation } from "./instrumentation.js";
 
 // Process-level safety net: a single request must NEVER crash-loop the whole
@@ -47,6 +48,7 @@ app.use(humanRoutes);
 app.use(methodologyRoutes);
 app.use(transferBrandRoutes);
 app.use(backfillRoutes);
+app.use(suppressionRecoveryRoutes);
 app.use(listsRoutes);
 app.use(peopleRoutes);
 app.use(audiencesRoutes);
