@@ -28,8 +28,15 @@ Backend service that owns two distinct concerns:
    uploaded file is its own audience — independently pausable, independently
    costed. See below.
 
-Stack: Express + Drizzle (Postgres) + Zod + zod-to-openapi. Deployed on
-Railway via `Dockerfile`. Migrations in `drizzle/` apply on cold start.
+Stack: Express + Drizzle (Postgres) + Zod + zod-to-openapi. Deployed as a Docker
+container (`Dockerfile`) on the Hetzner box — a 5-minute cron runs
+`./deploy.sh --all`, health-checks the new container and rolls back
+automatically on failure. Env vars live in `/root/distribute/env/<svc>.env` on
+that box. The database is the shared `distribute-postgres-1` Postgres container
+on the same box (`docker exec distribute-postgres-1 psql -U postgres -d
+human_service`). Migrations in `drizzle/` apply on boot (see the boot-sequence
+section — the port binds first).
+(Previously deployed on Railway with a Neon Postgres; both platforms are gone.)
 
 ## Route map
 
@@ -152,9 +159,13 @@ confusing downstream 502.
   (cursor-based).
 - **Fail loud**: a provider non-2xx / network error → thrown `ProviderError` →
   **502** (never a silent fallback). `ProviderConfigError` (missing env) → 502.
-- **Cold-start retry**: apollo/apify are Neon-backed siblings; the first call
-  after their idle scale-to-zero rejects with `fetch failed` (cause
-  ECONNRESET/ETIMEDOUT). `fetchWithConnectRetry` retries the **connect phase
+- **Connect-phase retry**: apollo/apify are sibling containers on the same box,
+  and a container is not always accepting connections right now — the deploy cron
+  restarts it, the box reboots, its own DB is coming up. A call landing in that
+  window rejects with `fetch failed` (cause ECONNRESET/ETIMEDOUT/ECONNREFUSED)
+  before any request is sent. (This was first hit as a Neon scale-to-zero
+  cold-start; Neon is gone, the failure shape is not — anything that makes a
+  sibling briefly unreachable produces it.) `fetchWithConnectRetry` retries the **connect phase
   only** (thrown rejection, never a completed HTTP response) with 250/500/1000ms
   backoff — write-safe because the request never reached the server. See
   CLAUDE.md global "second surface" note.
@@ -1152,20 +1163,27 @@ key-service, `scraping.ts` → scraping-service, `chat-client.ts` → chat-servi
   was recorded UNDER (membership tagging) — distinct from the `x-audience-id`
   cost-attribution header, though in the serve-next campaign flow they coincide.
 
-## Boot sequence — the port binds BEFORE migrations (Neon cold-start)
+## Boot sequence — the port binds BEFORE migrations (slow first DB connect)
 
 `app.listen()` runs FIRST. Nothing that touches the network is awaited before
-it. This is load-bearing: Railway's healthcheck window is **30s**, the staging
-Neon compute (`ep-bold-river-aztn1cbz`, branch `staging`) suspends after **300s**
-of inactivity, and a resume takes seconds — so awaiting `migrate()` before
-`listen()` meant a deploy landing on a cold compute spent its entire startup
-budget on the first DB connection, never opened the port, and was marked FAILED
-(`1/1 replicas never became healthy!`, no application output at all — it stalled
-before the first `console.log`). If the connection rejected instead, the old
-`.catch` called `process.exit(1)` and Railway restarted into a crash loop. Either
-way the failure has nothing to do with the code being deployed, which is what
-made it expensive: it reads as a flaky deploy, you retry onto a now-warm compute,
-it passes, and the real cause is never found. Reproduced on staging 2026-07-30.
+it. This is load-bearing whenever the DB is not ready to accept a connection at
+the instant the process boots — the Postgres container restarting, the box
+rebooting, a deploy bringing everything up at once. Awaiting `migrate()` before
+`listen()` means a deploy that lands in that window spends its whole startup
+budget on the first DB connection, never opens the port, and fails the deploy
+health check (`deploy.sh` then rolls the release back). If the connection
+rejects instead, a `.catch` that calls `process.exit(1)` turns it into a restart
+loop. Either way the failure has nothing to do with the code being deployed,
+which is what makes it expensive: it reads as a flaky deploy, you redeploy onto
+a now-warm DB, it passes, and the real cause is never found.
+
+*History (why this section exists):* the original incident was on Railway +
+Neon, reproduced on staging 2026-07-30. The staging Neon compute
+(`ep-bold-river-aztn1cbz`) suspended after 300s of inactivity and took seconds
+to resume, which blew Railway's 30s healthcheck window — the deploy was marked
+FAILED with `1/1 replicas never became healthy!` and no application output at
+all, because it stalled before the first `console.log`. Both platforms are gone;
+the shape of the failure is not, so the ordering below stays.
 
 The pieces (`src/index.ts`, `src/db/boot-migrate.ts`, `src/lib/migration-state.ts`,
 `src/middleware/readiness.ts`):
@@ -1187,22 +1205,27 @@ The pieces (`src/index.ts`, `src/db/boot-migrate.ts`, `src/lib/migration-state.t
   postgres.js `CONNECT_TIMEOUT`/`CONNECTION_CLOSED`, SQLSTATE class `08`, `57P03`,
   `53300`, plus the code-less pool message `timeout exceeded when trying to
   connect`, walking `cause` chains and `AggregateError.errors`), backing off
-  250ms→15s over 11 attempts (~76s) — long enough for any Neon resume. A real
+  250ms→15s over 11 attempts (~76s) — long enough for a Postgres container
+  restart or a box reboot to finish (it was originally sized for a Neon resume;
+  the budget is still the right order of magnitude). A real
   SQL/schema error is **never retried**: logged loudly, state `failed`, `/health`
   503 forever, every route 503. The process **never exits** — exiting is the
   crash loop this removes.
 - **The key-service registration retries the connect phase too.** key-service is
-  a Railway sibling that sleeps when idle, so on a cold deploy the first `fetch`
-  rejects with `fetch failed` → `AggregateError [ECONNREFUSED]` (observed on the
-  staging deploy of 2026-07-31, where the OLD code would have `process.exit(1)`'d
-  on it). `instrumentation.ts` retries 250ms→4s on a *thrown* rejection only —
+  a sibling container that is not guaranteed to be up at the moment we boot (the
+  deploy cron restarts services independently, and a box reboot brings the whole
+  fleet up at once), so the first `fetch` can reject with `fetch failed` →
+  `AggregateError [ECONNREFUSED]`. Observed on the staging deploy of 2026-07-31
+  — key-service was then a Railway sibling that slept when idle — where the OLD
+  code would have `process.exit(1)`'d on it. `instrumentation.ts` retries 250ms→4s on a *thrown* rejection only —
   never on a completed HTTP response, since a non-2xx is a real answer from
   key-service. Write-safe: the request never reached the server and
   `/platform-keys` is an upsert. `isTransientConnectError` is shared with the
   migration retry via `src/lib/transient-connect.ts`.
 - **`net.setDefaultAutoSelectFamilyAttemptTimeout(5000)`** in `src/db/index.ts`.
   Node 20's happy-eyeballs gives each candidate address 250ms, which expires
-  before a resume completes → `AggregateError [ETIMEDOUT]`.
+  before a slow first connect completes → `AggregateError [ETIMEDOUT]`. This is
+  a Node-level setting, independent of who hosts the DB.
 - **Do NOT add `connect_timeout` or `idle_timeout` to the `postgres()` options.**
   Both were tried and reverted (brand-service#389, by reading postgres.js source):
   `connect_timeout: 30` is already the postgres.js default (no-op), and
