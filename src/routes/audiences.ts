@@ -142,6 +142,11 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
         provider: parsed.data.provider ?? null,
         apolloAudienceId: parsed.data.apolloAudienceId ?? null,
         crmUploadId: parsed.data.crmUploadId ?? null,
+        // The offer this audience belongs to. Stored verbatim — brand-service
+        // owns the entity, human-service defines no offer semantics and does
+        // not resolve the id (same treatment as brandId; crmUploadId is
+        // validated above only because it decides who a serve may reach).
+        offerId: parsed.data.offerId ?? null,
         nlPrompt: parsed.data.nlPrompt ?? null,
         filters: parsed.data.filters ?? null,
         apolloCount: parsed.data.apolloCount ?? null,
@@ -212,10 +217,15 @@ router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) 
   const limit = parsedQuery.data.limit ?? DEFAULT_LIMIT;
   const offset = parsedQuery.data.offset ?? 0;
   const brandFilter = parsedQuery.data.brandId;
+  const offerFilter = parsedQuery.data.offerId;
   const statusFilter = parsedQuery.data.status;
 
   const conditions = [eq(audiences.orgId, orgId)];
   if (brandFilter) conditions.push(eq(audiences.brandId, brandFilter));
+  // Narrow to ONE offer when asked. No filter = every audience the org owns,
+  // whatever offer it carries and including the offer-less ones, which is
+  // exactly what this route returned before offers existed.
+  if (offerFilter) conditions.push(eq(audiences.offerId, offerFilter));
   if (statusFilter) conditions.push(eq(audiences.status, statusFilter));
   // "deprecated" is an admin-only terminal state (retired apify audiences from
   // the apify→apollo migration). Hide it from the user dashboard by default —
@@ -648,6 +658,7 @@ function serializeAudience(row: typeof audiences.$inferSelect) {
     provider: row.provider,
     apolloAudienceId: row.apolloAudienceId,
     crmUploadId: row.crmUploadId,
+    offerId: row.offerId,
     status: row.status,
     source: row.source,
     canonicalAudienceId: row.canonicalAudienceId,
