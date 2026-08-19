@@ -10,7 +10,13 @@ import {
   BackfillAudienceAvatarsQuerySchema,
   BackfillCanonicalLinksQuerySchema,
   BackfillApolloPointersQuerySchema,
+  BackfillAudienceOffersQuerySchema,
 } from "../schemas.js";
+import {
+  loadOfferlessPairs,
+  backfillAudienceOffers,
+} from "../services/audience-offer-backfill.js";
+import { BrandConfigError } from "../lib/brand-offers.js";
 import {
   mapPersonaFiltersToCanonical,
   hasPersonaVocab,
@@ -857,5 +863,61 @@ router.post(
     }
   }
 );
+
+// POST /internal/backfill-audience-offers?dryRun=true|false
+//
+// One-time DATA fix: give every pre-existing audience the offer it belongs to.
+// #221 gave the row its offer grain and #223 let a suggestion state it, so every
+// audience born after those carries an offer; every row created before them
+// carries none, and the customer dashboard's Audiences page — now scoped to an
+// offer, and the only Audiences surface a customer has — cannot see them.
+//
+// An offer is per (org, brand), not per brand: brand identity is shared across
+// orgs by domain, so several orgs claim one brand and each holds its own offer
+// row for it. An audience already carries both ids, so brand-service resolves
+// the pair, and where exactly one offer exists there is a single correct answer
+// and no heuristic to design.
+//
+// - Scoped to offer_id IS NULL -> idempotent: a re-run only sees still-offer-less
+//   rows (a clean re-run attributes 0).
+// - Dry-runnable: ?dryRun=true resolves the same answers, returns the FULL
+//   mapping + the unattributed count, and writes NOTHING.
+// - Reversible: the response returns every {audienceId, offerId} written (and
+//   each is logged), so the undo is
+//   UPDATE audiences SET offer_id = NULL WHERE id IN (<those ids>).
+// - A pair with NO offer stays NULL — absent means brand-wide, which is what the
+//   column documents, and inventing an offer would be worse than the gap. A pair
+//   with SEVERAL offers stays NULL too: no single correct answer, never guessed.
+//   Both are counted in `unattributed` + itemised in `skipped`, never swallowed.
+//
+// Service-auth only (x-api-key); sweeps all orgs. Cheap (one brand-service read
+// per pair, one UPDATE per pair), but still trigger MANUALLY after deploy —
+// never on boot (O(pairs) network reads would block port-bind).
+router.post("/internal/backfill-audience-offers", requireApiKey, async (req, res) => {
+  const parsedQuery = BackfillAudienceOffersQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) {
+    res.status(400).json({ error: parsedQuery.error.message });
+    return;
+  }
+  const dryRun = parsedQuery.data.dryRun === "true";
+
+  const { scanned, pairs } = await loadOfferlessPairs();
+
+  try {
+    const result = await backfillAudienceOffers(pairs, scanned, { dryRun });
+    console.log(
+      `[human-service] backfill_offer.${dryRun ? "dry_run" : "run"} scanned=${result.scanned} pairs=${result.pairs} ${dryRun ? "wouldAttribute" : "attributed"}=${result.wouldAttribute} unattributed=${result.unattributed} skippedPairs=${result.skipped.length}`
+    );
+    res.json(result);
+  } catch (err) {
+    // No brand-service config ⟹ no offers readable anywhere ⟹ the sweep is
+    // meaningless. Fail loud rather than report every pair as an offer-less gap.
+    if (err instanceof BrandConfigError) {
+      res.status(502).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+});
 
 export default router;

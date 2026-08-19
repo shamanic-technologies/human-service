@@ -1814,6 +1814,89 @@ registry.registerPath({
   },
 });
 
+// --- Internal: one-time attribution of pre-existing audiences to their offer ---
+// #221 gave the row its offer grain and #223 let a suggestion state it, so every
+// audience born after those carries an offer. Rows created before them carry
+// none, and the customer Audiences page now asks for one offer's audiences — so
+// they are invisible there. An offer is per (org, brand) and an audience already
+// carries both, so brand-service resolves the pair and, where exactly one offer
+// exists, there is one correct answer. Where none exists the row stays NULL and
+// the count is reported.
+export const BackfillAudienceOffersQuerySchema = z.object({
+  dryRun: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({
+      description:
+        "When 'true', resolve which audiences would be attributed to which offer + return the full mapping and the unattributed count WITHOUT writing. Defaults to false (real run).",
+    }),
+});
+
+export const BackfillAudienceOffersResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    scanned: z.number().int().openapi({
+      description: "Audiences with offer_id IS NULL inspected by this sweep.",
+    }),
+    pairs: z.number().int().openapi({
+      description:
+        "Distinct (org, brand) pairs those audiences span — one brand-service offer read each.",
+    }),
+    attributed: z.number().int().openapi({
+      description:
+        "Audiences given their offer (0 on a dry-run; the would-be count is `wouldAttribute`).",
+    }),
+    wouldAttribute: z.number().int().openapi({
+      description: "Audiences whose (org, brand) resolves to exactly one offer.",
+    }),
+    unattributed: z.number().int().openapi({
+      description:
+        "Audiences still carrying no offer after this sweep — their (org, brand) holds none, or holds several so there is no single correct answer. Reported, never guessed: absent means brand-wide, which is what the column documents.",
+    }),
+    skipped: z
+      .array(
+        z.object({
+          orgId: z.string(),
+          brandId: z.string(),
+          audiences: z.number().int(),
+          reason: z.string(),
+        })
+      )
+      .openapi({
+        description:
+          "One entry per (org, brand) pair left alone, with how many audiences it costs: 'no offer', 'several offers (N)', or a brand-service read failure (retried on re-run).",
+      }),
+    assignments: z
+      .array(
+        z.object({
+          audienceId: z.string(),
+          name: z.string(),
+          orgId: z.string(),
+          brandId: z.string(),
+          offerId: z.string(),
+        })
+      )
+      .openapi({
+        description:
+          "The FULL mapping written (or that would be written) — not a sample, because it is the reversal set: undo with UPDATE audiences SET offer_id = NULL WHERE id IN (these ids). Also logged per row.",
+      }),
+  })
+  .openapi("BackfillAudienceOffersResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/backfill-audience-offers",
+  summary:
+    "One-time data fix: attribute every pre-existing offer-less audience to the offer its (org, brand) holds, read from brand-service. A pair with no offer — or with several — is left NULL and reported, never guessed (idempotent, dry-runnable, reversible)",
+  security: [{ apiKey: [] }],
+  request: { query: BackfillAudienceOffersQuerySchema },
+  responses: {
+    200: { description: "Attribution result", content: { "application/json": { schema: BackfillAudienceOffersResponseSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "brand-service missing config", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 // --- Internal: bulk audience resolver for lead-service (by id and/or email) ---
 //
 // Server-to-server, service-auth, NO browser body cap (dedicated 25 MB parser).
