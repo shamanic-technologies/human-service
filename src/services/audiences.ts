@@ -16,7 +16,7 @@
 //
 // No silent fallbacks: a provider error during refreshCounts propagates (502).
 
-import { and, eq, gt, inArray, isNotNull, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { db } from "../db/index.js";
 import {
@@ -1088,13 +1088,21 @@ export async function generateAudienceDescription(args: {
 
 // --- Persist a collapsed audience at status "suggested" (inactive) ---
 //
-// Unique per (org_id, brand_id, lower(name)). On a name collision: refresh the
-// filters/count ONLY when the existing row is still "suggested"; NEVER mutate an
-// active/paused/archived audience (audiences are immutable except their status).
+// Unique per (org_id, brand_id, offer_id, lower(name)) — the collision lookup
+// MUST carry the offer, matching the two partial unique indexes (offer_id IS
+// NULL keeps the pre-offer three-column shape). Suggesting the same name for a
+// SECOND offer of the same brand is a legitimately distinct audience: without
+// the offer in this WHERE we would return the first offer's row and never
+// create one for the offer the caller asked for.
+// On a name collision: refresh the filters/count ONLY when the existing row is
+// still "suggested"; NEVER mutate an active/paused/archived audience (audiences
+// are immutable except their status), and never re-scope an existing row's
+// offer (offer_id is immutable, same rule as filters).
 // Returns the audience id either way.
 async function persistSuggestedAudience(args: {
   identity: Identity;
   brandId: string;
+  offerId: string | null;
   nlPrompt: string;
   segment: Segment;
   apolloAudienceId: string;
@@ -1110,6 +1118,9 @@ async function persistSuggestedAudience(args: {
         and(
           eq(audiences.orgId, orgId),
           eq(audiences.brandId, args.brandId),
+          args.offerId === null
+            ? isNull(audiences.offerId)
+            : eq(audiences.offerId, args.offerId),
           sql`lower(${audiences.name}) = lower(${args.segment.name})`
         )
       )
@@ -1139,6 +1150,7 @@ async function persistSuggestedAudience(args: {
       .values({
         orgId,
         brandId: args.brandId,
+        offerId: args.offerId,
         name: args.segment.name,
         nlPrompt: args.nlPrompt,
         description: args.segment.description,
@@ -1194,10 +1206,16 @@ async function settleWithConcurrency<T, R>(
 // (apify is inert). Fault-tolerant: one segment's apollo-service failure doesn't
 // nuke the batch (allSettled); FAIL LOUD only when EVERY segment failed (502).
 // The caller activates chosen ids via PATCH /orgs/audiences/{id}/status.
+// `offerId` scopes the whole batch: every persisted candidate carries it, so an
+// offer-scoped surface reads them back via GET /orgs/audiences?offerId=. It is
+// stored verbatim and never resolved against brand-service (same rule as
+// brand_id, decided in #221). null (the default) means brand-wide — never
+// inferred from anything — and keeps this path byte-identical to pre-offer.
 export async function suggestAudiences(
   nlPrompt: string,
   brandId: string,
-  identity: Identity
+  identity: Identity,
+  offerId: string | null = null
 ): Promise<AudienceCandidate[]> {
   const segments = await decomposeSegments(nlPrompt, identity);
 
@@ -1254,6 +1272,7 @@ export async function suggestAudiences(
     const audienceId = await persistSuggestedAudience({
       identity,
       brandId,
+      offerId,
       nlPrompt,
       segment,
       apolloAudienceId: apollo.apolloAudienceId,

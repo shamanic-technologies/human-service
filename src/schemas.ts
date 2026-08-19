@@ -1140,6 +1140,10 @@ export const SuggestAudiencesRequestSchema = z
         "Natural-language audience description. The LLM reads the caller's own granularity intent from this text (e.g. 'split by country', 'founders in FR and DE separately') and emits one candidate per implied segment — granularity and count are NOT separate inputs.",
     }),
     brandId: z.string().uuid(),
+    offerId: z.string().uuid().optional().openapi({
+      description:
+        "Optional offer this batch of candidates is assembled for (brand-service owns the offer entity; stored opaquely, never resolved here). Every persisted candidate carries it, so GET /orgs/audiences?offerId= returns them. Omitted ⟹ brand-wide, byte-identical to the pre-offer behaviour.",
+    }),
   })
   .openapi("SuggestAudiencesRequest");
 

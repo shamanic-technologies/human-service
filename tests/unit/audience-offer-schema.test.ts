@@ -3,6 +3,7 @@ import {
   AudienceSchema,
   CreateAudienceRequestSchema,
   ListAudiencesQuerySchema,
+  SuggestAudiencesRequestSchema,
   UpdateAudienceRequestSchema,
 } from "../../src/schemas.js";
 
@@ -40,6 +41,37 @@ describe("CreateAudienceRequestSchema — offerId", () => {
       offerId: "offer-1",
     });
     expect(parsed.success).toBe(false);
+  });
+});
+
+// Suggestion is the ONLY path that creates audiences in the fleet, so this is
+// where a new audience gets its offer — the field has to exist on the request.
+describe("SuggestAudiencesRequestSchema — offerId", () => {
+  it("accepts the offer the candidates are assembled for", () => {
+    const parsed = SuggestAudiencesRequestSchema.parse({
+      nlPrompt: "founders",
+      brandId: BRAND,
+      offerId: OFFER,
+    });
+    expect(parsed.offerId).toBe(OFFER);
+  });
+
+  it("stays optional — no offer means brand-wide, as before", () => {
+    const parsed = SuggestAudiencesRequestSchema.parse({
+      nlPrompt: "founders",
+      brandId: BRAND,
+    });
+    expect(parsed.offerId).toBeUndefined();
+  });
+
+  it("rejects a non-uuid offerId", () => {
+    expect(
+      SuggestAudiencesRequestSchema.safeParse({
+        nlPrompt: "founders",
+        brandId: BRAND,
+        offerId: "offer-1",
+      }).success
+    ).toBe(false);
   });
 });
 

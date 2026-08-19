@@ -1315,6 +1315,11 @@
           "brandId": {
             "type": "string",
             "format": "uuid"
+          },
+          "offerId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional offer this batch of candidates is assembled for (brand-service owns the offer entity; stored opaquely, never resolved here). Every persisted candidate carries it, so GET /orgs/audiences?offerId= returns them. Omitted ⟹ brand-wide, byte-identical to the pre-offer behaviour."
           }
         },
         "required": [

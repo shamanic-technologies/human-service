@@ -70,7 +70,7 @@ section — the port binds first).
 | Org-scoped (People v1) | `POST /orgs/people/resolve-email` | apiKey + `x-org-id` + `x-user-id` | Reveal a verified email — apollo by `providerPersonId` (`/enrich`, billed) or name+domain (`/match`); apify by name+domain |
 | Org-scoped (People v1) | `POST /orgs/people/search/dry-run` | apiKey + `x-org-id` + `x-user-id` | Count matches, free (apollo only in v1) |
 | Org-scoped (People v1) | `GET /orgs/people/filters-prompt` | apiKey + `x-org-id` + `x-user-id` | LLM filter-shape prompt (apollo only in v1) |
-| Org-scoped (Audiences v1) | `POST /orgs/audiences/suggest` | apiKey + `x-org-id` + `x-user-id` | NL → **persisted** candidate audiences (one per segment, best provider only), returns `audienceId`s at status `suggested` (inactive) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/suggest` | apiKey + `x-org-id` + `x-user-id` | NL → **persisted** candidate audiences (one per segment, best provider only), returns `audienceId`s at status `suggested` (inactive); optional `offerId` scopes the whole batch |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider + optional `crmUploadId` source binding + optional `offerId` scope) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` / `offerId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
@@ -625,9 +625,24 @@ list you send a $200 self-serve plan to.
 - **`offer_id IS NULL` is byte-identical to before** — creation, listing,
   uniqueness, serving. Consumers migrate in a later wave; nothing about an
   offer-less audience changed the day this shipped.
-- **Not threaded through `/suggest`.** That route persists candidates for a brand
-  and does not take an offer yet; when the dashboard suggests per offer it needs
-  its own field on `SuggestAudiencesRequestSchema`, not a guess here.
+- **`/suggest` carries it too — that is where audiences are actually born.**
+  `POST /orgs/audiences/suggest {offerId?}` scopes the WHOLE batch: every
+  persisted candidate row gets it, so an offer-scoped surface reads them back via
+  `GET /orgs/audiences?offerId=`. The plain create route has no caller in the
+  fleet, so without this every new audience would keep being born offer-less
+  (807/807 prod rows were, which left the offer-scoped Audiences page empty).
+  Same rules as create: stored verbatim, never resolved against brand-service,
+  never inferred — omitted ⟹ brand-wide, byte-identical to before.
+  **`persistSuggestedAudience`'s same-name collision lookup carries the offer**,
+  matching the two partial unique indexes: suggesting "US founders" under a
+  SECOND offer of the same brand must create a second row, not return the first
+  offer's. A still-`suggested` row is refreshed in place only within its own
+  offer scope, and an existing row's `offer_id` is never re-scoped (immutable,
+  same rule as `filters`).
+- **The 807 pre-existing offer-less rows are a SEPARATE ship**, blocked on
+  brand-service merging its duplicate offer rows (21 brands hold clones of one
+  proposition) — backfilling now would attribute audiences to rows about to
+  disappear.
 
 ### CRM source binding — one imported file = one audience
 
@@ -1006,8 +1021,11 @@ apollo-service owns the NL→faithful-Apollo-filters loop now.)
   real audience or fails loud, so `validationError` is always null, `truncated`
   always false — both retained for response-shape stability only).
 - **Granularity is emergent from the NL, not an input.** Input is ONLY
-  `{nlPrompt, brandId}` — no `strategy`/count knob. Layer 1 reads the caller's own
-  segmentation intent and emits one **named** audience per implied segment.
+  `{nlPrompt, brandId, offerId?}` — no `strategy`/count knob. Layer 1 reads the
+  caller's own segmentation intent and emits one **named** audience per implied
+  segment. `offerId` is a pure SCOPE stamped on the persisted rows (see "An
+  audience belongs to ONE offer"); it never reaches Layer 1's prompt or the
+  apollo build.
 - **Stateful — persists `suggested` rows, returns `audienceId`s.** The front
   displays them, the user picks, and the front **activates** the chosen ones via
   `PATCH /orgs/audiences/{id}/status {status:"active"}` (existing endpoint, no new

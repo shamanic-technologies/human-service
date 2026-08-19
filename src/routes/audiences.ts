@@ -193,10 +193,11 @@ router.post(
       const candidates = await suggestAudiences(
         parsed.data.nlPrompt,
         parsed.data.brandId,
-        buildIdentity(res)
+        buildIdentity(res),
+        parsed.data.offerId ?? null
       );
       console.log(
-        `[human-service] audience.suggest org=${res.locals.orgId} brand=${parsed.data.brandId} candidates=${candidates.length}`
+        `[human-service] audience.suggest org=${res.locals.orgId} brand=${parsed.data.brandId} offer=${parsed.data.offerId ?? "none"} candidates=${candidates.length}`
       );
       res.json({ candidates });
     } catch (err) {
