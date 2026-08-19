@@ -406,6 +406,19 @@ export const audiences = pgTable(
     // pointer, not a filter — an imported-source id is a provider resource handle
     // (mirrors apollo_audience_id), not a search predicate.
     crmUploadId: text("crm_upload_id"),
+    // The OFFER this audience belongs to (Org > Brand > Offer > Campaign).
+    // brand-service owns the offer entity; human-service stores ONLY the id and
+    // defines no offer semantics — an audience is chosen for one distinct thing
+    // the brand sells (the list assembled to sell a $20k contract is not the one
+    // you send a $200 self-serve plan to), so it is scoped to that offer rather
+    // than to the whole brand. Same scope shape as `brand_id`, which is likewise
+    // an id owned elsewhere and stored without a cross-service lookup — unlike
+    // `crm_upload_id`, which IS validated because it restricts which people a
+    // serve may reach. NULL = no offer stated ⟹ today's brand-wide behaviour,
+    // byte-identical. Set at creation and immutable afterwards (the same rule
+    // filters and crm_upload_id follow: re-scoping = a new audience, since
+    // evidence attribution keys on the audience id).
+    offerId: uuid("offer_id"),
     // Status lifecycle, mirroring brand-service persona semantics:
     // "active" | "paused" | "archived". Default active. The ONLY mutable field
     // (editing filters = a new audience). Archived is a soft state, NOT a delete.
@@ -454,14 +467,27 @@ export const audiences = pgTable(
     index("idx_audiences_canonical").on(table.canonicalAudienceId),
     index("idx_audiences_apollo_audience_id").on(table.apolloAudienceId),
     index("idx_audiences_crm_upload_id").on(table.crmUploadId),
-    // Name-unique per (org, brand) (case-insensitive). Widened from brand-only
-    // so the same audience name can exist for the same brand across different
-    // orgs (org isolation) — the suggest flow keys proposals on org+brand+name.
-    uniqueIndex("idx_audiences_org_brand_lower_name").on(
-      table.orgId,
-      table.brandId,
-      sql`lower(${table.name})`
-    ),
+    index("idx_audiences_offer_id").on(table.offerId),
+    // Name uniqueness is per (org, brand, OFFER), case-insensitive, expressed as
+    // TWO PARTIAL indexes rather than one four-column index. A single index over
+    // a nullable offer_id would not do: Postgres treats NULLs as distinct, so
+    // every offer-less audience would stop colliding and the pre-offer behaviour
+    // would silently loosen. So:
+    //   - offer_id IS NULL     -> (org, brand, lower(name)), byte-identical to
+    //                             the pre-offer constraint (the rows that exist
+    //                             today all take this branch, unchanged).
+    //   - offer_id IS NOT NULL -> (org, brand, offer, lower(name)), so two
+    //                             offers of one brand may each own an audience
+    //                             called "US SaaS founders" — a legitimate
+    //                             collision, they are different promises.
+    // A partial index yields the same 23505 as before, so the route's 409 path
+    // is unchanged.
+    uniqueIndex("idx_audiences_org_brand_lower_name")
+      .on(table.orgId, table.brandId, sql`lower(${table.name})`)
+      .where(sql`${table.offerId} IS NULL`),
+    uniqueIndex("idx_audiences_org_brand_offer_lower_name")
+      .on(table.orgId, table.brandId, table.offerId, sql`lower(${table.name})`)
+      .where(sql`${table.offerId} IS NOT NULL`),
   ]
 );
 

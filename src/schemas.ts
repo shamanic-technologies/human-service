@@ -933,6 +933,10 @@ export const AudienceSchema = z
       description:
         "The ONE imported CRM source (crm-service upload id) this audience is bound to. When set, every CRM serve made under this audience is restricted to the people that came from that file, so several CRM audiences can coexist for one brand and each behaves as its own audience. null = unbound ⟹ the serve covers the brand's whole imported list (the pre-existing behaviour).",
     }),
+    offerId: z.string().uuid().nullable().openapi({
+      description:
+        "The offer (Org > Brand > Offer > Campaign) this audience belongs to — an id owned by brand-service. An audience is assembled for one distinct thing the brand sells, so it is scoped to that offer rather than to every offer of the brand. null = no offer stated ⟹ the audience is brand-wide, the pre-existing behaviour.",
+    }),
     status: AudienceStatusSchema,
     // Provenance: "brand_persona_backfill" for backfilled rows, else null.
     source: z.string().nullable(),
@@ -979,6 +983,10 @@ export const CreateAudienceRequestSchema = z
       description:
         "Bind this audience to ONE imported CRM source (a crm-service upload id of the same brand). Every CRM serve made under this audience is then restricted to the people of that file, so several bound audiences can coexist for one brand and each is independently pausable + independently costed. Validated against the brand's uploads at creation (400 if it is not one of them). Omit to keep the whole-brand behaviour. Immutable afterwards.",
     }),
+    offerId: z.string().uuid().optional().openapi({
+      description:
+        "The offer this audience belongs to — a brand-service offer id. Scopes the audience to one distinct thing the brand sells; name uniqueness becomes per (org, brand, offer), so two offers of the same brand may each own an audience with the same name. Stored as-is: human-service defines no offer semantics and does not resolve the id (same as brandId). Omit to keep the brand-wide behaviour. Immutable afterwards.",
+    }),
     apolloCount: z.number().int().min(0).nullish().openapi({
       description:
         "Optional count snapshot the caller already obtained from /orgs/people/search/dry-run (apollo). Stored as-is; refresh-count re-computes it server-side later. Accepts null (e.g. an apify-source candidate carries apolloCount: null).",
@@ -991,9 +999,11 @@ export const CreateAudienceRequestSchema = z
   .openapi("CreateAudienceRequest");
 
 // An audience is immutable except its status (editing filters = a new audience).
-// PATCH only accepts metadata (name / nlPrompt); brandId and filters are NOT
-// editable. `.strict()` so a request that tries to change them fails loud (400)
-// rather than being silently stripped. Status changes go through the dedicated
+// PATCH only accepts metadata (name / nlPrompt); brandId, offerId and filters
+// are NOT editable — re-scoping an audience to another offer is a new audience,
+// since evidence attribution keys on the audience id. `.strict()` so a request
+// that tries to change them fails loud (400) rather than being silently
+// stripped. Status changes go through the dedicated
 // PATCH /orgs/audiences/{id}/status route.
 export const UpdateAudienceRequestSchema = z
   .object({
@@ -1017,6 +1027,10 @@ export const ListAudiencesQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
   offset: z.coerce.number().int().min(0).optional(),
   brandId: z.string().uuid().optional(),
+  // Narrow the list to ONE offer. Omitted = every audience of the org (or of
+  // the brand when brandId is given), whatever offer they carry and including
+  // the ones that carry none — the pre-offer answer, byte-identical.
+  offerId: z.string().uuid().optional(),
   status: AudienceStatusSchema.optional(),
 });
 
@@ -1240,7 +1254,7 @@ registry.registerPath({
 registry.registerPath({
   method: "get",
   path: "/orgs/audiences",
-  summary: "List audiences for an org (optional brandId filter)",
+  summary: "List audiences for an org (optional brandId / offerId filter)",
   security: [{ apiKey: [] }],
   request: { headers: orgsListsHeaders, query: ListAudiencesQuerySchema },
   responses: {

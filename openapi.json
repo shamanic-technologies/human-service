@@ -1380,6 +1380,12 @@
             "nullable": true,
             "description": "The ONE imported CRM source (crm-service upload id) this audience is bound to. When set, every CRM serve made under this audience is restricted to the people that came from that file, so several CRM audiences can coexist for one brand and each behaves as its own audience. null = unbound ⟹ the serve covers the brand's whole imported list (the pre-existing behaviour)."
           },
+          "offerId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid",
+            "description": "The offer (Org > Brand > Offer > Campaign) this audience belongs to — an id owned by brand-service. An audience is assembled for one distinct thing the brand sells, so it is scoped to that offer rather than to every offer of the brand. null = no offer stated ⟹ the audience is brand-wide, the pre-existing behaviour."
+          },
           "status": {
             "$ref": "#/components/schemas/AudienceStatus"
           },
@@ -1439,6 +1445,7 @@
           "provider",
           "apolloAudienceId",
           "crmUploadId",
+          "offerId",
           "status",
           "source",
           "canonicalAudienceId",
@@ -1491,6 +1498,11 @@
             "type": "string",
             "format": "uuid",
             "description": "Bind this audience to ONE imported CRM source (a crm-service upload id of the same brand). Every CRM serve made under this audience is then restricted to the people of that file, so several bound audiences can coexist for one brand and each is independently pausable + independently costed. Validated against the brand's uploads at creation (400 if it is not one of them). Omit to keep the whole-brand behaviour. Immutable afterwards."
+          },
+          "offerId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The offer this audience belongs to — a brand-service offer id. Scopes the audience to one distinct thing the brand sells; name uniqueness becomes per (org, brand, offer), so two offers of the same brand may each own an audience with the same name. Stored as-is: human-service defines no offer semantics and does not resolve the id (same as brandId). Omit to keep the brand-wide behaviour. Immutable afterwards."
           },
           "apolloCount": {
             "type": "integer",
@@ -4427,7 +4439,7 @@
         }
       },
       "get": {
-        "summary": "List audiences for an org (optional brandId filter)",
+        "summary": "List audiences for an org (optional brandId / offerId filter)",
         "security": [
           {
             "apiKey": []
@@ -4461,6 +4473,15 @@
             },
             "required": false,
             "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "offerId",
             "in": "query"
           },
           {
