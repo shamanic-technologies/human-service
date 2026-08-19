@@ -71,8 +71,8 @@ section — the port binds first).
 | Org-scoped (People v1) | `POST /orgs/people/search/dry-run` | apiKey + `x-org-id` + `x-user-id` | Count matches, free (apollo only in v1) |
 | Org-scoped (People v1) | `GET /orgs/people/filters-prompt` | apiKey + `x-org-id` + `x-user-id` | LLM filter-shape prompt (apollo only in v1) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/suggest` | apiKey + `x-org-id` + `x-user-id` | NL → **persisted** candidate audiences (one per segment, best provider only), returns `audienceId`s at status `suggested` (inactive) |
-| Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider + optional `crmUploadId` source binding) |
-| Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider + optional `crmUploadId` source binding + optional `offerId` scope) |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` / `offerId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
 | Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}` | apiKey + `x-org-id` | Update metadata (name / nlPrompt only) — immutable otherwise |
 | Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}/status` | apiKey + `x-org-id` | Change status (active / paused / archived) — mutates only status |
@@ -582,6 +582,52 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
   (one COUNT + one UPDATE, only on the infrequent exhaustion path).
 - **No cost declared here** — apollo/apify own the billed reveal; crm-service owns
   its serve; the gateway only forwards `x-run-id` for downstream tracing.
+
+### An audience belongs to ONE offer, not to a whole brand
+
+The platform inserts an **OFFER** level between Brand and Campaign
+(Org > Brand > Offer > Campaign): one distinct thing a brand sells, its value
+proposition plus the funnels it sells through. **brand-service owns the offer
+entity and exposes it as a UUID.** human-service defines no offer semantics; it
+records which offer an audience belongs to and nothing more.
+
+Why it is not brand-scoped: an audience is assembled for a specific promise. A
+brand about to sell several offers would otherwise target the same list for every
+one of them, and a CFO list built to sell a $20k enterprise contract is not the
+list you send a $200 self-serve plan to.
+
+**`audiences.offer_id`** (migration `0021`, nullable `uuid`).
+
+- **Stored verbatim, NOT validated against brand-service.** It is a SCOPE, so it
+  follows `brand_id` — also an id owned by another service, also persisted with no
+  cross-service lookup. `crm_upload_id` is the deliberate exception (it is
+  validated) because it decides *which people a serve may reach*; a wrong one
+  would silently serve nobody, or another brand's people. An offer id decides
+  nothing about the serve, so a lookup would buy an outage and no correctness.
+- **Set at creation** (`POST /orgs/audiences {offerId}`), returned on **every**
+  audience read (`serializeAudience` → single GET, list, create, status/avatar
+  responses), and **immutable afterwards** — same rule as `filters` and
+  `crm_upload_id`: re-scoping = a new audience, since evidence attribution keys on
+  the audience id. `PATCH` still only accepts `name`/`nlPrompt` and its `.strict()`
+  schema 400s an `offerId`.
+- **Listing narrows to one offer** via `GET /orgs/audiences?offerId=`. Omitted
+  returns every audience of the org (or brand), whatever offer they carry and
+  including the offer-less ones — byte-identical to the pre-offer answer.
+- **Name uniqueness is now per (org, brand, OFFER)**, and is two PARTIAL unique
+  indexes rather than one four-column index. Postgres treats NULLs as distinct, so
+  a plain `(org, brand, offer_id, lower(name))` unique index would let two
+  offer-less audiences share a name — silently loosening the constraint every
+  existing row lives under. So `offer_id IS NULL` keeps the old index definition
+  verbatim (409 exactly as today) and `offer_id IS NOT NULL` gets the four-column
+  one, which is what lets two offers of one brand each own a "US SaaS founders":
+  a legitimate collision, they are different promises. Both raise the same 23505,
+  so the route's 409 path is untouched.
+- **`offer_id IS NULL` is byte-identical to before** — creation, listing,
+  uniqueness, serving. Consumers migrate in a later wave; nothing about an
+  offer-less audience changed the day this shipped.
+- **Not threaded through `/suggest`.** That route persists candidates for a brand
+  and does not take an offer yet; when the dashboard suggests per offer it needs
+  its own field on `SuggestAudiencesRequestSchema`, not a guess here.
 
 ### CRM source binding — one imported file = one audience
 
