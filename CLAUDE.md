@@ -55,6 +55,7 @@ section — the port binds first).
 | Internal | `POST /internal/migrate-apify-audiences-to-apollo` | apiKey | One-time data fix (APOLLO-ONLY cutover): for every non-deprecated `provider='apify'` audience, build an equivalent apollo audience via apollo-service (`POST /audiences/suggest-from-segment`), store the pointer + faithful filters, create a new apollo audience mirroring the source status, and mark the apify one `deprecated` (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/backfill-canonical-audience-links` | apiKey | One-time data fix: link each EXISTING deprecated provider-variant audience (`<base> [Apify]`) to its active same-`(org,brand)`-base-name canonical sibling (`audiences.canonical_audience_id`), so membership/stats reads resolve a deprecated match to the clean active audience. Pre-link rows from the apify→apollo migration (which now sets the link going forward). Skips 0/ambiguous-sibling rows (fail loud, never guess). Idempotent, `?dryRun=true`, reversible |
 | Internal | `POST /internal/backfill-apollo-audience-pointers` | apiKey | One-time data fix ("one filter vocabulary" Wave 2): for every `provider='apollo'` audience lacking `apollo_audience_id`, build a faithful Apollo audience via apollo-service `POST /audiences/suggest-from-segment` (from the row's name + description), then store the **pointer** + cached faithful filters (replacing the old lossy neutral blob) + count. Idempotent (scoped to `apollo_audience_id IS NULL`), `?dryRun=true`, `?async=true`, reversible |
+| Internal | `POST /internal/backfill-audience-offers` | apiKey | One-time data fix: attribute every pre-existing offer-less audience to the offer its `(org, brand)` holds, read from brand-service. A pair with no offer — or with several — stays NULL and is reported, never guessed (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/recover-suppressions` | apiKey | One-time data repair: for a caller-supplied set of `{orgId, brandId, email}`, archive the `brand_suppressions` row into the reversible `suppression_recoveries` ledger (tagged with a `reason`) and DELETE it, so people who were served but never actually contacted become emittable again for their brand. Idempotent (unique `(reason, org, brand, email_norm)`), `?dryRun=true`, reversible. NOT a sweep — the set is supplied, never inferred |
 | Internal | `POST /internal/recover-suppressions/revert` | apiKey | Undo a recovery: restore every archived suppression row carrying `reason` verbatim + drop the ledger rows. A person re-suppressed by a fresh serve keeps the newer row |
 | Internal | `POST /internal/audiences/resolve` | apiKey | **Bulk server-to-server audience resolver** for lead-service (#166): body `{orgId, brandId, audienceIds?, emails?}` → `{byAudienceId, byEmail}` maps of `{id,name,avatarUrl}` \| null. Brand-correct + active-preferred (deprecated→canonical), keyed by audienceId AND/OR email (historical coverage). Dedicated **25 MB** body parser (mounts before the global 100 KB json) — NO browser 413 cap. See below. |
@@ -639,10 +640,48 @@ list you send a $200 self-serve plan to.
   offer's. A still-`suggested` row is refreshed in place only within its own
   offer scope, and an existing row's `offer_id` is never re-scoped (immutable,
   same rule as `filters`).
-- **The 807 pre-existing offer-less rows are a SEPARATE ship**, blocked on
-  brand-service merging its duplicate offer rows (21 brands hold clones of one
-  proposition) — backfilling now would attribute audiences to rows about to
-  disappear.
+#### Attributing the pre-existing rows — `POST /internal/backfill-audience-offers`
+
+#221 gave the row its offer grain and #223 let a suggestion state it, so every
+audience born after those carries an offer. Every row created BEFORE them
+carries none (807 of 807 in prod), and the customer dashboard's Audiences page
+now lives under an offer and asks for that offer's audiences — so the only
+Audiences surface a customer has was empty for every brand. This sweep is that
+repair. `src/services/audience-offer-backfill.ts` owns the engine;
+`src/lib/brand-offers.ts` is the brand-service client; `src/routes/backfill.ts`
+is the thin HTTP layer.
+
+- **The join is the pair, and there is no heuristic to design.** An offer is per
+  `(org, brand)`, not per brand — brand identity is shared across orgs by domain,
+  so several orgs claim one brand and each holds its OWN offer row for it
+  (brand-service pinned exactly this in its #464 regression test). An audience
+  already carries both ids, so brand-service `GET /internal/brands/{brandId}/offers`
+  (with `x-org-id` — passed explicitly, never left to the single-claimer fallback)
+  resolves the pair, and where exactly one offer exists there is one correct
+  answer. Measured on prod at ship time: 756 rows on a one-offer pair, 0 on a
+  multi-offer pair, 51 on a pair with no offer.
+- **Deliberately NOT used**: outreach history, campaign links, name matching. The
+  pair join is exact; anything cleverer is a heuristic solving a problem that does
+  not exist.
+- **A pair with NO offer stays NULL** — absent means brand-wide, which is what the
+  column documents, and inventing an offer would be worse than the gap. A pair
+  with SEVERAL stays NULL too: no single correct answer, never guessed. Both are
+  counted in `unattributed` and itemised per pair in `skipped`, never swallowed;
+  that gap belongs to whoever owns the offer migration, not to this repair.
+- **Idempotent** (scoped to `offer_id IS NULL`, so a clean re-run attributes 0),
+  **dry-runnable** (`?dryRun=true` resolves the same answers and writes nothing),
+  **reversible** — the response returns the FULL `{audienceId, offerId}` mapping
+  (not a sample) and each write is logged, so the undo is
+  `UPDATE audiences SET offer_id = NULL WHERE id IN (<those ids>)`. No ledger
+  table: the mapping IS the reversal set.
+- One brand-service read + one UPDATE per pair (not per row). A missing
+  `BRAND_SERVICE_URL` / `BRAND_SERVICE_API_KEY` aborts loudly (**502**) rather
+  than reporting every pair as an offer-less gap; a per-pair brand-service failure
+  is counted in `skipped` and retried on a re-run. **No cost.** NOT on boot —
+  trigger manually after deploy.
+- The live audience routes are unchanged: they still store `offer_id` verbatim
+  with no cross-service lookup, exactly like `brand_id`. This sweep is the ONE
+  place human-service reads brand-service's offers.
 
 ### CRM source binding — one imported file = one audience
 
@@ -774,9 +813,10 @@ wave drops brand-service personas entirely + switches consumers'
   (id-preserving, tagged `source = 'brand_persona_backfill'`, filters mapped to
   canonical vocab) — then re-mapped to canonical filters. With brand-service
   personas being deleted platform-wide (Wave 2), both the endpoint and the
-  client are now dead and were removed; the `BRAND_SERVICE_URL` /
-  `BRAND_SERVICE_API_KEY` env vars they used are no longer read. The backfilled
-  rows + their provenance tag remain live in `audiences`.
+  client are now dead and were removed. The backfilled rows + their provenance
+  tag remain live in `audiences`. (`BRAND_SERVICE_URL` /
+  `BRAND_SERVICE_API_KEY` are read again — by the offer-attribution sweep's own
+  client `src/lib/brand-offers.ts`, which reads offers, not personas.)
   - **Filter vocabulary is MAPPED, not copied verbatim** (still used by the
     re-map endpoint below). brand-service personas spoke the LEGACY persona vocab
     (`industry`, `jobTitles`, `location`, `employeeRange`, `seniority`,

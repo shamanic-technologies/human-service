@@ -2347,6 +2347,102 @@
           "sample"
         ]
       },
+      "BackfillAudienceOffersResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "scanned": {
+            "type": "integer",
+            "description": "Audiences with offer_id IS NULL inspected by this sweep."
+          },
+          "pairs": {
+            "type": "integer",
+            "description": "Distinct (org, brand) pairs those audiences span — one brand-service offer read each."
+          },
+          "attributed": {
+            "type": "integer",
+            "description": "Audiences given their offer (0 on a dry-run; the would-be count is `wouldAttribute`)."
+          },
+          "wouldAttribute": {
+            "type": "integer",
+            "description": "Audiences whose (org, brand) resolves to exactly one offer."
+          },
+          "unattributed": {
+            "type": "integer",
+            "description": "Audiences still carrying no offer after this sweep — their (org, brand) holds none, or holds several so there is no single correct answer. Reported, never guessed: absent means brand-wide, which is what the column documents."
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "orgId": {
+                  "type": "string"
+                },
+                "brandId": {
+                  "type": "string"
+                },
+                "audiences": {
+                  "type": "integer"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "orgId",
+                "brandId",
+                "audiences",
+                "reason"
+              ]
+            },
+            "description": "One entry per (org, brand) pair left alone, with how many audiences it costs: 'no offer', 'several offers (N)', or a brand-service read failure (retried on re-run)."
+          },
+          "assignments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "orgId": {
+                  "type": "string"
+                },
+                "brandId": {
+                  "type": "string"
+                },
+                "offerId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "audienceId",
+                "name",
+                "orgId",
+                "brandId",
+                "offerId"
+              ]
+            },
+            "description": "The FULL mapping written (or that would be written) — not a sample, because it is the reversal set: undo with UPDATE audiences SET offer_id = NULL WHERE id IN (these ids). Also logged per row."
+          }
+        },
+        "required": [
+          "dryRun",
+          "scanned",
+          "pairs",
+          "attributed",
+          "wouldAttribute",
+          "unattributed",
+          "skipped",
+          "assignments"
+        ]
+      },
       "ResolveAudiencesResponse": {
         "type": "object",
         "properties": {
@@ -5732,6 +5828,57 @@
           },
           "502": {
             "description": "apollo-service outage / missing config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/backfill-audience-offers": {
+      "post": {
+        "summary": "One-time data fix: attribute every pre-existing offer-less audience to the offer its (org, brand) holds, read from brand-service. A pair with no offer — or with several — is left NULL and reported, never guessed (idempotent, dry-runnable, reversible)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', resolve which audiences would be attributed to which offer + return the full mapping and the unattributed count WITHOUT writing. Defaults to false (real run)."
+            },
+            "required": false,
+            "description": "When 'true', resolve which audiences would be attributed to which offer + return the full mapping and the unattributed count WITHOUT writing. Defaults to false (real run).",
+            "name": "dryRun",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Attribution result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillAudienceOffersResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "brand-service missing config",
             "content": {
               "application/json": {
                 "schema": {
