@@ -683,6 +683,47 @@ is the thin HTTP layer.
   with no cross-service lookup, exactly like `brand_id`. This sweep is the ONE
   place human-service reads brand-service's offers.
 
+#### The sweep runs on its own cadence — `startOfferAttributionSweep`
+
+The manual endpoint above closed the historical rows, but it does not close the
+hole: onboarding suggests audiences at its **audiences** step, which runs BEFORE
+the funnels write that creates the brand's offer — so a brand signing up today
+has no offer at the moment its audiences are written, they are born brand-wide,
+and its offer page is empty again until a human remembers to POST the backfill.
+Observed 2026-08-23 (brand `fbe3ce77-…`: 12 audiences, all offer-less, offer
+created 20:44Z by a write that came after). The write path was not what was
+missing (#223 lets a suggestion state its offer); what was missing is that a row
+born offer-less was never revisited.
+
+`src/services/offer-attribution-sweep.ts` gives that same repair its own cadence.
+It is **WHEN, not what** — `runOfferAttributionSweep` calls
+`loadOfferlessPairs` + `backfillAudienceOffers({dryRun:false})` verbatim, so the
+resolution rule is untouched: per `(org, brand)`, never per brand; a pair with no
+offer or with several stays NULL and is counted in `skipped`. No new table, no
+new column, nothing inferred.
+
+- **Never on the boot path.** `startOfferAttributionSweep()` is called after
+  `app.listen()` and only SCHEDULES timers — the first tick is delayed
+  (`OFFER_ATTRIBUTION_SWEEP_INITIAL_DELAY_MS`, default **60s**) and every tick is
+  fire-and-forget, so the O(pairs) brand-service reads can never delay port-bind
+  or fail a deploy health check. Timers are `unref`'d.
+- **Cadence**: every `OFFER_ATTRIBUTION_SWEEP_INTERVAL_MS` (default **15 min**).
+  `=0` is the kill switch; an unparseable value falls back to the default and
+  logs. So a brand whose offer lands minutes after its audiences is attributed on
+  the next tick, with nobody triggering anything.
+- **Honours the readiness gate**: a tick while `getMigrationState() !== "ready"`
+  is skipped before touching the DB (every DB-backed route is 503 in that
+  window). Skips are never errors — the rows are still offer-less, so the next
+  tick picks them up.
+- **Loud, never fatal, never overlapping**: a missing `BRAND_SERVICE_*` config or
+  any other failure logs and ends that tick (`offer_sweep.unconfigured` /
+  `offer_sweep.failed`) — a background worker must not take the process down. A
+  `running` flag keeps a slow tick from overlapping the next one. When zero
+  offer-less rows exist, **no brand-service read is issued at all**.
+- **No cost.** Guarded by `tests/unit/offer-attribution-sweep.test.ts` (cadence)
+  and `tests/integration/offer-attribution-sweep.test.ts` (attribution + the
+  later-tick pickup).
+
 ### CRM source binding — one imported file = one audience
 
 An audience committed to CRM used to implicitly mean "this brand's ENTIRE imported
