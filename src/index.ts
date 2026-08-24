@@ -14,6 +14,7 @@ import audiencesRoutes from "./routes/audiences.js";
 import internalAudiencesRoutes from "./routes/internal-audiences.js";
 import suppressionRecoveryRoutes from "./routes/suppression-recovery.js";
 import { register as runInstrumentation } from "./instrumentation.js";
+import { startOfferAttributionSweep } from "./services/offer-attribution-sweep.js";
 
 // Process-level safety net: a single request must NEVER crash-loop the whole
 // service. Before this, an unawaited async rejection (e.g. a bad `uuid` param →
@@ -77,6 +78,14 @@ if (process.env.NODE_ENV !== "test") {
   runInstrumentation().catch((err) => {
     console.error("[human-service] Platform-key registration failed:", err);
   });
+
+  // Recurring offer attribution. Audiences are suggested during onboarding
+  // BEFORE the brand's offer is written, so they are born offer-less and the
+  // customer's offer-scoped Audiences page stays empty until someone triggers
+  // the one-shot backfill by hand. This gives the same repair its own cadence.
+  // Arming it only SCHEDULES timers (first tick is delayed, every tick is
+  // fire-and-forget), so it never touches the network on the boot path.
+  startOfferAttributionSweep();
 }
 
 export default app;
