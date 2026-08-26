@@ -661,3 +661,97 @@ describe("cold-start connect retry", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("businessLanguages on the neutral Person", () => {
+  const apolloPerson = (over: Record<string, unknown>) => ({
+    id: "p1",
+    firstName: "A",
+    lastName: "B",
+    name: "A B",
+    email: "a@b.com",
+    emailStatus: "verified",
+    title: null,
+    headline: null,
+    seniority: null,
+    linkedinUrl: null,
+    photoUrl: null,
+    city: null,
+    state: null,
+    country: null,
+    organizationName: null,
+    organizationDomain: null,
+    organizationWebsiteUrl: null,
+    organizationIndustry: null,
+    organizationSize: null,
+    organizationAnnualRevenue: null,
+    organizationLinkedinUrl: null,
+    organizationLogoUrl: null,
+    organizationCity: null,
+    organizationState: null,
+    organizationCountry: null,
+    ...over,
+  });
+
+  async function searchOne(over: Record<string, unknown>) {
+    fetchSpy.mockResolvedValueOnce(
+      ok({ people: [apolloPerson(over)], done: true, totalEntries: 1 })
+    );
+    const res = await peopleSearch({ filters: {}, identity });
+    return res.people[0];
+  }
+
+  it("gives Ticino, Geneva and Zurich different leading languages", async () => {
+    expect((await searchOne({ city: "Lugano", state: "Ticino", country: "Switzerland" }))
+      .businessLanguages[0]).toBe("it");
+    expect((await searchOne({ city: "Geneva", state: "Geneva", country: "Switzerland" }))
+      .businessLanguages[0]).toBe("fr");
+    expect((await searchOne({ city: "Zurich", state: "Zurich", country: "Switzerland" }))
+      .businessLanguages[0]).toBe("de");
+  });
+
+  it("is empty (unknown) when the person has no usable geography", async () => {
+    expect((await searchOne({})).businessLanguages).toEqual([]);
+  });
+
+  it("falls back to the organization's country when the person has none", async () => {
+    expect(
+      (await searchOne({ organizationCountry: "Germany", organizationName: "Acme" }))
+        .businessLanguages
+    ).toEqual(["de"]);
+  });
+
+  it("apify hits carry it too", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      ok({
+        leads: [
+          {
+            firstName: "C",
+            lastName: "D",
+            fullName: "C D",
+            title: null,
+            seniority: null,
+            email: "c@d.be",
+            emailStatus: "verified",
+            source: "pipelinelabs",
+            isCatchAll: false,
+            isInferred: false,
+            linkedinUrl: null,
+            city: "Antwerp",
+            state: "Vlaams Gewest",
+            country: "Belgium",
+            companyName: null,
+            companyDomain: null,
+            companyIndustry: null,
+            companySize: null,
+            companyLinkedinUrl: null,
+          },
+        ],
+        totalMatched: 1,
+        hasMore: false,
+        nextOffset: null,
+      })
+    );
+    const res = await peopleSearch({ provider: "apify", filters: {}, identity });
+    expect(res.people[0].businessLanguages).toEqual(["nl"]);
+  });
+});

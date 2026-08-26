@@ -808,6 +808,13 @@
             "nullable": true,
             "description": "Recipient's IANA timezone (e.g. 'America/New_York'), threaded from the provider so downstream send-scheduling lands in the prospect's local business hours. null when the provider omits it."
           },
+          "businessLanguages": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Language(s) this person plausibly conducts business in, as ISO 639-1 codes (e.g. 'de', 'fr', 'it'). ORDERED, most plausible first — the ordering is a guarantee, consumers may select by position (index 0 = the single most plausible business language). An EMPTY array means UNKNOWN: we had no usable signal and deliberately do not fabricate one, which is distinct from ['en'] (= known to be English). Derived from the person's own city/state/country, falling back to their organization's; region beats country wherever a country is genuinely multilingual (Swiss cantons, Belgian regions, Canadian provinces)."
+          },
           "provider": {
             "type": "string",
             "enum": [
@@ -843,6 +850,7 @@
           "state",
           "country",
           "timezone",
+          "businessLanguages",
           "provider",
           "providerPersonId",
           "organization"

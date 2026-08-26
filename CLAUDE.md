@@ -144,6 +144,45 @@ confusing downstream 502.
   spelling as the code. `timezone` stays **null when the provider has none** —
   apify and crm emit null by design, and there is no fallback/derivation here
   (instantly-service owns its own default).
+- **`businessLanguages` — the language(s) the person plausibly does business in.**
+  Same gesture as `timezone`, for the same chain: cold emails go out in English to
+  every prospect, including prospects who do business in German / French / Italian /
+  Dutch, and content-generation-service wants to write each one in the recipient's
+  language. human-service is the canonical PRODUCER of the person, so it carries the
+  language rather than letting the consumer re-derive it from geography on every
+  single generation. `src/services/business-languages.ts` owns the derivation
+  (`deriveBusinessLanguages`); every normalizer (apollo / apify / crm) fills the
+  field, so **every person served carries it** — no flag, no opt-in param, not
+  required on any request. Purely additive.
+  - **ORDERED, most plausible first — that ordering is the CONTRACT** (stated in the
+    OpenAPI description): the consumer selects by position, so an unordered set would
+    make "the first one" meaningless downstream. ISO 639-1 lowercase codes.
+  - **EMPTY array = UNKNOWN, and it is never a guess.** Distinguishable from `["en"]`
+    (= known to be English) by construction. A country we hold no mapping for, or a
+    person with no usable geography, comes back empty — the consumer decides what to
+    do with unknown; we do not decide on its behalf by fabricating a value.
+  - **Region beats country wherever the country is genuinely multilingual**, because
+    country ALONE cannot answer it: Swiss cantons (Ticino → `it`, Geneva/Vaud/Valais →
+    `fr`, Zurich/Basel/St. Gallen/Zug → `de`), Belgian regions (Flanders → `nl`,
+    Wallonia → `fr`, Brussels genuinely mixed → `["fr","nl"]`), Canadian provinces
+    (Quebec → `["fr","en"]`, rest → `en`). The subdivision (`state`) is authoritative;
+    the `city` is consulted only when the region is absent, since providers often fill
+    one and not the other. Unmapped region ⟹ fall back to the country's own ordering.
+  - **Person geography wins; the organization's is a FALLBACK only** — the org is
+    frequently in a different country than the person it employs.
+  - **Apollo's undocumented `organization.languages` is deliberately NOT used.**
+    Measured on apollo-service's 30,352 stored raw payloads: present on 30,254,
+    non-empty on 11,210 (37%), heavily skewed to English, and it describes the
+    ORGANIZATION. It does track the canton correctly, but geography already resolves
+    that case, so it would add noise, a cross-repo dependency, and a second source of
+    truth for zero correctness. Reconsider only if a case appears that geography
+    cannot answer at all.
+  - **No storage, and that is not a read-side re-derivation** — the input (geography)
+    is already on the person human-service produces, the function is pure and
+    deterministic, so there is nothing a column would freeze that the writer holds and
+    drops. Guarded by `tests/unit/business-languages.test.ts` (the derivation) and the
+    `businessLanguages` block in `tests/unit/people-providers.test.ts` (that the
+    neutral `Person` actually carries it, apollo + apify).
 - **Pagination**: apollo keeps its server-managed cursor (keyed by org +
   `x-campaign-id`); human-service forwards next-page calls (empty body advances
   the cursor). apify is offset-based (`limit` + `offset`).
