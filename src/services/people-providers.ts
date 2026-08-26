@@ -19,6 +19,7 @@ import {
   recordServe,
   type ServedContact,
 } from "./suppression.js";
+import { deriveBusinessLanguages } from "./business-languages.js";
 
 // apify bills per RETURNED lead (each search hit carries a verified email — there
 // is no free teaser list like apollo's). So the gateway takes the strict minimum
@@ -135,6 +136,12 @@ export interface Person {
   // (apollo) so downstream (lead-service → email-gateway → instantly) can schedule
   // sends in the prospect's local business hours. null when the provider omits it.
   timezone: string | null;
+  // Language(s) this person plausibly conducts business in, ISO 639-1, ORDERED
+  // most plausible first (the consumer selects by position). EMPTY = unknown —
+  // never a guess, and distinct from ["en"] (= known to be English). Derived from
+  // the person's own geography, falling back to the organization's; see
+  // ./business-languages.ts.
+  businessLanguages: string[];
   provider: Provider;
   // apollo person id — usable for a later enrich/resolve. null for apify.
   providerPersonId: string | null;
@@ -527,6 +534,14 @@ function normalizeApolloPerson(p: ApolloPerson): Person {
     state: p.state,
     country: p.country,
     timezone: p.timeZone ?? null,
+    businessLanguages: deriveBusinessLanguages(
+      { city: p.city, state: p.state, country: p.country },
+      {
+        city: p.organizationCity,
+        state: p.organizationState,
+        country: p.organizationCountry,
+      },
+    ),
     provider: "apollo",
     providerPersonId: p.id,
     organization: hasOrg
@@ -590,6 +605,10 @@ function normalizeApifyLead(l: ApifyLead): Person {
     country: l.country,
     // apify has no recipient-timezone field; instantly defaults a safe tz when null.
     timezone: null,
+    businessLanguages: deriveBusinessLanguages(
+      { city: l.city, state: l.state, country: l.country },
+      null,
+    ),
     provider: "apify",
     providerPersonId: null,
     organization: hasOrg

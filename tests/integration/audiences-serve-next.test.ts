@@ -908,3 +908,52 @@ describe("CRM audience source binding", () => {
     expect(headers[0]["x-audience-id"]).toBe(created.id);
   });
 });
+
+// The person a serve hands back carries the language(s) they plausibly do business
+// in, ORDERED most plausible first — content-generation-service writes the email in
+// that language instead of re-deriving it from geography on every generation.
+describe("serve-next carries businessLanguages", () => {
+  // Each case uses its own person id / email / linkedin: the brand-wide suppression
+  // is shared across audiences, so reusing one identity would exhaust the later cases.
+  let seq = 0;
+  async function serveApolloPersonIn(
+    name: string,
+    geo: { city: string | null; state: string | null; country: string | null },
+  ) {
+    const pid = `bl${++seq}`;
+    const li = `linkedin.com/in/${pid}`;
+    const email = `${pid}@acme.com`;
+    fetchSpy.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.endsWith("/search/next"))
+        return ok({
+          people: [{ ...apolloTeaser(pid, li), ...geo }],
+          done: true,
+          totalEntries: 1,
+        });
+      if (u.endsWith("/enrich"))
+        return ok({ person: { ...apolloRevealed(pid, email, li), ...geo } });
+      throw new Error("unexpected url " + u);
+    });
+    const id = await createAudience("apollo", name);
+    const res = await serveNext(id);
+    expect(res.body.status).toBe("served");
+    return res.body.person.businessLanguages as string[];
+  }
+
+  it("Ticino, Geneva and Zurich come back with different leading languages", async () => {
+    expect(
+      (await serveApolloPersonIn("CH IT", { city: "Lugano", state: "Ticino", country: "Switzerland" }))[0],
+    ).toBe("it");
+    expect(
+      (await serveApolloPersonIn("CH FR", { city: "Geneva", state: "Geneva", country: "Switzerland" }))[0],
+    ).toBe("fr");
+    expect(
+      (await serveApolloPersonIn("CH DE", { city: "Zurich", state: "Zurich", country: "Switzerland" }))[0],
+    ).toBe("de");
+  });
+
+  it("a person with no usable signal comes back empty, not with a guessed value", async () => {
+    expect(await serveApolloPersonIn("No Geo", { city: null, state: null, country: null })).toEqual([]);
+  });
+});

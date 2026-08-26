@@ -161,6 +161,9 @@ export function normalizeCrmContact(c: CrmContact): Person {
     state: null,
     country: null,
     timezone: null,
+    // crm-service contacts carry no geography, so there is no language signal —
+    // empty is the honest answer and the consumer handles unknown.
+    businessLanguages: [],
     provider: "crm",
     // crm's own contact id — provenance only (crm has no enrich-by-id path).
     providerPersonId: c.id,

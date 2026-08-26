@@ -710,6 +710,10 @@ export const PersonSchema = z
       description:
         "Recipient's IANA timezone (e.g. 'America/New_York'), threaded from the provider so downstream send-scheduling lands in the prospect's local business hours. null when the provider omits it.",
     }),
+    businessLanguages: z.array(z.string()).openapi({
+      description:
+        "Language(s) this person plausibly conducts business in, as ISO 639-1 codes (e.g. 'de', 'fr', 'it'). ORDERED, most plausible first — the ordering is a guarantee, consumers may select by position (index 0 = the single most plausible business language). An EMPTY array means UNKNOWN: we had no usable signal and deliberately do not fabricate one, which is distinct from ['en'] (= known to be English). Derived from the person's own city/state/country, falling back to their organization's; region beats country wherever a country is genuinely multilingual (Swiss cantons, Belgian regions, Canadian provinces).",
+    }),
     provider: providerEnum,
     providerPersonId: z.string().nullable().openapi({
       description: "apollo person id (usable for a later enrich). null for apify.",
