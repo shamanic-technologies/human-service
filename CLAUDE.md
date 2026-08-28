@@ -371,6 +371,11 @@ pre-guard with no suppression row, of which **10,020 (brand, email) pairs across
 - Mounts **before** the global 100 KB `express.json()` with its OWN **25 MB**
   parser (same pattern as `/internal/audiences/resolve`) — the repair set is tens
   of thousands of entries. **No cost.** NOT on boot — trigger manually.
+  ⚠️ A 25 MB parser accepts a body the CLIENT will not wait for: Node's `fetch`
+  gives up after 300s (`UND_ERR_HEADERS_TIMEOUT`) and the whole batch reports as
+  a network failure even though the write is one atomic transaction that leaves
+  no partial state. Post the repair in chunks (1,500 entries ran comfortably);
+  idempotency makes a chunked re-run of an aborted batch free.
 
 ## Audiences (v1) — `/orgs/audiences/*`
 
