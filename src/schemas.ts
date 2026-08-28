@@ -1994,6 +1994,187 @@ registry.registerPath({
   },
 });
 
+// --- Internal: one-time suppression BACKFILL (reversible ledger) ---
+//
+// The inverse repair of the recovery below: per-brand suppression went live on
+// 2026-06-15 and was never backfilled, so everyone emailed before that date is
+// invisible to the dedup and is re-served — and re-paid for — as if we had never
+// seen them. The caller supplies the exact set of people who were ACTUALLY
+// EMAILED, each with the real send time, and each is suppressed for the
+// REMAINDER of their own three-month window. The window itself is unchanged.
+
+export const BackfillSentSuppressionsQuerySchema = z.object({
+  dryRun: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({
+      description:
+        "When 'true', report exactly which entries would get a suppression row (with per-brand counts and how many still fall inside the live window) WITHOUT writing. Defaults to false (real run).",
+    }),
+});
+
+export const BackfillSentSuppressionsRequestSchema = z
+  .object({
+    reason: z.string().min(1).openapi({
+      description:
+        "Incident tag written onto every created row's ledger entry — how the repair is later identified and reverted (e.g. 'pre-guard-sends-2026-08').",
+    }),
+    entries: z
+      .array(
+        z.object({
+          // Lax UUID SHAPE (not strict-v4): org ids can predate the v4
+          // convention, same as every other org-id read here.
+          orgId: z
+            .string()
+            .regex(LAX_UUID_REGEX, "orgId must be a valid UUID"),
+          brandId: z.string().uuid(),
+          email: z.string().min(1),
+          sentAt: z.string().datetime({ offset: true }).openapi({
+            description:
+              "When this person was ACTUALLY emailed for this brand (ISO 8601). It becomes the row's last_served_at, so the person is suppressed for the remainder of THEIR window rather than granted a fresh three months. Never inferred here.",
+          }),
+        })
+      )
+      .min(1)
+      .openapi({
+        description:
+          "The exact set of people who were actually EMAILED. The caller supplies it because evidence of what was really sent lives with the service that submitted to the vendor — it is never inferred, and never derived from bare serves (a serve the vendor never contacted is what /internal/recover-suppressions exists to repair).",
+      }),
+  })
+  .openapi("BackfillSentSuppressionsRequest");
+
+export const BackfillSentSuppressionsResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    reason: z.string(),
+    requested: z.number().int(),
+    distinct: z.number().int().openapi({
+      description:
+        "Distinct (org, brand, normalized email) keys — the grain brand_suppressions is unique on. Duplicates collapse onto their LATEST send.",
+    }),
+    backfilled: z.number().int().openapi({
+      description:
+        "Suppression rows created (0 on a dry-run; the would-act count is `wouldBackfill`).",
+    }),
+    wouldBackfill: z.number().int(),
+    wouldSuppressNow: z.number().int().openapi({
+      description:
+        "Of `wouldBackfill`, those whose send is still inside the live three-month window — the ones that actually stop a re-serve today.",
+    }),
+    alreadyBackfilled: z.number().int().openapi({
+      description:
+        "Entries already backfilled under this reason — idempotency: a re-run writes none of them.",
+    }),
+    alreadySuppressed: z.number().int().openapi({
+      description:
+        "Entries that already hold a live suppression row: left untouched, never re-dated.",
+    }),
+    byBrand: z.array(
+      z.object({
+        brandId: z.string(),
+        count: z.number().int(),
+        withinWindow: z.number().int(),
+      })
+    ),
+    sample: z.array(
+      z.object({
+        orgId: z.string(),
+        brandId: z.string(),
+        emailNorm: z.string(),
+        sentAt: z.string(),
+      })
+    ),
+  })
+  .openapi("BackfillSentSuppressionsResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/backfill-sent-suppressions",
+  summary:
+    "One-time data repair: suppress a caller-supplied set of people who were actually EMAILED before per-brand suppression existed, each for the remainder of their own three-month window, so the fleet stops re-buying emails it already owns (idempotent, dry-runnable, reversible via /internal/backfill-sent-suppressions/revert)",
+  security: [{ apiKey: [] }],
+  request: {
+    query: BackfillSentSuppressionsQuerySchema,
+    body: {
+      content: {
+        "application/json": { schema: BackfillSentSuppressionsRequestSchema },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Backfill result",
+      content: {
+        "application/json": { schema: BackfillSentSuppressionsResponseSchema },
+      },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+export const RevertSentSuppressionBackfillRequestSchema = z
+  .object({
+    reason: z.string().min(1).openapi({
+      description: "The incident tag whose created suppression rows should be removed.",
+    }),
+  })
+  .openapi("RevertSentSuppressionBackfillRequest");
+
+export const RevertSentSuppressionBackfillResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    reason: z.string(),
+    ledgerRows: z.number().int(),
+    removed: z.number().int(),
+    wouldRemove: z.number().int(),
+    skippedReserved: z.number().int().openapi({
+      description:
+        "Backfilled rows re-served since (last_served_at moved past the recorded sent_at) — that row now records a REAL emission, so it is kept.",
+    }),
+    alreadyRemoved: z.number().int().openapi({
+      description:
+        "Ledger rows whose suppression row is already gone (e.g. a recovery removed it).",
+    }),
+  })
+  .openapi("RevertSentSuppressionBackfillResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/backfill-sent-suppressions/revert",
+  summary:
+    "Undo a suppression backfill: delete every brand_suppressions row this reason created (keeping any re-served since) and drop the ledger rows",
+  security: [{ apiKey: [] }],
+  request: {
+    query: BackfillSentSuppressionsQuerySchema,
+    body: {
+      content: {
+        "application/json": {
+          schema: RevertSentSuppressionBackfillRequestSchema,
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Revert result",
+      content: {
+        "application/json": {
+          schema: RevertSentSuppressionBackfillResponseSchema,
+        },
+      },
+    },
+    400: {
+      description: "Invalid request",
+      content: { "application/json": { schema: ErrorSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
 // --- Internal: one-time suppression recovery (reversible ledger) ---
 
 export const RecoverSuppressionsQuerySchema = z.object({

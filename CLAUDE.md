@@ -58,6 +58,8 @@ section — the port binds first).
 | Internal | `POST /internal/backfill-audience-offers` | apiKey | One-time data fix: attribute every pre-existing offer-less audience to the offer its `(org, brand)` holds, read from brand-service. A pair with no offer — or with several — stays NULL and is reported, never guessed (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/recover-suppressions` | apiKey | One-time data repair: for a caller-supplied set of `{orgId, brandId, email}`, archive the `brand_suppressions` row into the reversible `suppression_recoveries` ledger (tagged with a `reason`) and DELETE it, so people who were served but never actually contacted become emittable again for their brand. Idempotent (unique `(reason, org, brand, email_norm)`), `?dryRun=true`, reversible. NOT a sweep — the set is supplied, never inferred |
 | Internal | `POST /internal/recover-suppressions/revert` | apiKey | Undo a recovery: restore every archived suppression row carrying `reason` verbatim + drop the ledger rows. A person re-suppressed by a fresh serve keeps the newer row |
+| Internal | `POST /internal/backfill-sent-suppressions` | apiKey | One-time data repair (the INVERSE of the recovery above): for a caller-supplied set of `{orgId, brandId, email, sentAt}`, create the missing `brand_suppressions` row dated from the REAL send, so people actually EMAILED before per-brand suppression existed (2026-06-15) stop being re-served and re-bought for the remainder of their own window. Idempotent (reversible `suppression_backfills` ledger keyed on `reason`), `?dryRun=true`. Dedicated **25 MB** body parser. NOT a sweep — the set is supplied, never inferred, and never derived from bare serves |
+| Internal | `POST /internal/backfill-sent-suppressions/revert` | apiKey | Undo a backfill: delete exactly the suppression rows that `reason` created + drop the ledger rows. A row re-served since (its `last_served_at` moved) records a real emission and is kept |
 | Internal | `POST /internal/audiences/resolve` | apiKey | **Bulk server-to-server audience resolver** for lead-service (#166): body `{orgId, brandId, audienceIds?, emails?}` → `{byAudienceId, byEmail}` maps of `{id,name,avatarUrl}` \| null. Brand-correct + active-preferred (deprecated→canonical), keyed by audienceId AND/OR email (historical coverage). Dedicated **25 MB** body parser (mounts before the global 100 KB json) — NO browser 413 cap. See below. |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
@@ -307,6 +309,68 @@ under another org and was excluded; **169 recovered** — 92 for brand
 `7604c385-1f02-4016-b42f-344565bcd36d`, 77 for
 `6e21bb6c-67bc-45f3-8a6d-52230338d7e4`. The producer bug is fixed
 (instantly-service#570); the affected set is CLOSED.
+
+### Suppression backfill — `POST /internal/backfill-sent-suppressions`
+
+The inverse repair of the recovery above, and the reason it exists is money, not
+correctness of the guard: per-brand suppression went live **2026-06-15** and has
+held perfectly since (measured across the fleet, zero re-serves inside the window
+whose previous serve postdates it). It was never **backfilled**. The fleet had
+been contacting people since February, so every person emailed while the guard
+did not exist is invisible to the dedup — the gateway re-serves them and the
+brand re-pays a provider to re-reveal an email it already owns and already used
+recently. Measured 2026-08-28: 19,456 distinct emails across 16 brands served
+pre-guard with no suppression row, of which **10,020 (brand, email) pairs across
+9 brands were still inside the live window**, i.e. being re-bought that day.
+`src/services/suppression-backfill.ts` owns the engine;
+`src/routes/suppression-backfill.ts` is the thin HTTP layer.
+
+- **Backfilling = CREATING the silver `brand_suppressions` row**, the one surface
+  every serve path reads (teaser filter, apify exclude-set, resolve-email block,
+  and the audiences Remaining rollup). Nothing about how serving or suppression
+  works changes — data repair, not behaviour.
+- **`last_served_at` is the moment the person was ACTUALLY EMAILED, never
+  `now()`.** That is the whole difference between "suppressed for the REMAINDER
+  of their window, exactly as if the guard had been live at the time" and
+  silently granting 10k people a fresh three months. The window itself is
+  untouched — the cutoff used to report how many entries still suppress today is
+  evaluated by Postgres from the same `windowCutoff()` expression every read path
+  uses, so there is no second definition of the window anywhere.
+- **The set is "was actually EMAILED", NOT "was served".** A serve the vendor
+  never contacted is precisely what `/internal/recover-suppressions` exists to
+  repair, so backfilling bare serves would re-break it at scale. Evidence of what
+  was really SENT lives with the service that submitted to the vendor
+  (instantly-service); this service cannot infer it and deliberately does not
+  try. Hence, exactly as for the recovery: **no detector, no sweep, no inference**
+  — the caller supplies `{orgId, brandId, email, sentAt}` per person.
+- **Insert-then-record in ONE transaction.** Every created row is recorded in
+  `suppression_backfills` (migration `0022`) tagged with the incident `reason`,
+  so a row can never be created without its ledger entry. That tag is what makes
+  the repair **identifiable** (`WHERE reason = '<tag>'`), **reversible**
+  (`/revert` deletes exactly those rows), and **idempotent** (unique
+  `(reason, org, brand, email_norm)` ⟹ a re-run reports `alreadyBackfilled` and
+  writes nothing). `?dryRun=true` reports `wouldBackfill` + `wouldSuppressNow` +
+  a per-brand breakdown and writes NOTHING.
+- **A person who already holds a live suppression row is left alone** (counted
+  `alreadySuppressed`, never re-dated) — moving a live `last_served_at` would
+  change a window this repair does not own. Duplicate sends for one person
+  collapse onto the **latest**, which is the one that decides the remainder.
+  `linkedin_url_norm` / `provider_person_id` / `last_provider` are written NULL:
+  unknown by construction (the caller knows a send happened, not which provider
+  sourced the person) and never invented.
+- **An entry whose send already lapsed the window is written truthfully and
+  suppresses nobody** — it is honest history, and `wouldSuppressNow` is the count
+  that says what actually changes today.
+- **Bronze `lead_serves` is deliberately untouched** — it is the append-only
+  audit of what the GATEWAY emitted, and a send it never made is not its to
+  record. A future silver rebuild from bronze MUST consult this ledger.
+- **The revert keeps a row re-served since.** If a genuine serve landed on a
+  backfilled person, its `last_served_at` no longer equals the recorded
+  `sent_at`; that row now records a real emission, so it survives the revert
+  (counted `skippedReserved`) and only the ledger row is dropped.
+- Mounts **before** the global 100 KB `express.json()` with its OWN **25 MB**
+  parser (same pattern as `/internal/audiences/resolve`) — the repair set is tens
+  of thousands of entries. **No cost.** NOT on boot — trigger manually.
 
 ## Audiences (v1) — `/orgs/audiences/*`
 
@@ -1180,6 +1244,9 @@ returns 404, never 403, to avoid leaking existence.
   `audiences.crm_upload_id` is **text** (a pointer into crm-service, same typing
   choice as `apollo_audience_id` — no cross-service FK), validated as a uuid at
   the API edge.
+- **`suppression_backfills`** (reversible backfill ledger): `org_id` / `brand_id` /
+  `suppression_id` uuid; `reason` / `email_norm` text; `sent_at` timestamptz (the
+  real send the row was dated from).
 - **`suppression_recoveries`** (reversible recovery ledger): `org_id` /
   `brand_id` / `suppression_id` uuid; `reason` / `email_norm` /
   `linkedin_url_norm` / `provider_person_id` / `last_provider` text.
