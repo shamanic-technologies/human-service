@@ -2529,6 +2529,201 @@
           "brandId"
         ]
       },
+      "BackfillSentSuppressionsResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "requested": {
+            "type": "integer"
+          },
+          "distinct": {
+            "type": "integer",
+            "description": "Distinct (org, brand, normalized email) keys — the grain brand_suppressions is unique on. Duplicates collapse onto their LATEST send."
+          },
+          "backfilled": {
+            "type": "integer",
+            "description": "Suppression rows created (0 on a dry-run; the would-act count is `wouldBackfill`)."
+          },
+          "wouldBackfill": {
+            "type": "integer"
+          },
+          "wouldSuppressNow": {
+            "type": "integer",
+            "description": "Of `wouldBackfill`, those whose send is still inside the live three-month window — the ones that actually stop a re-serve today."
+          },
+          "alreadyBackfilled": {
+            "type": "integer",
+            "description": "Entries already backfilled under this reason — idempotency: a re-run writes none of them."
+          },
+          "alreadySuppressed": {
+            "type": "integer",
+            "description": "Entries that already hold a live suppression row: left untouched, never re-dated."
+          },
+          "byBrand": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "brandId": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer"
+                },
+                "withinWindow": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "brandId",
+                "count",
+                "withinWindow"
+              ]
+            }
+          },
+          "sample": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "orgId": {
+                  "type": "string"
+                },
+                "brandId": {
+                  "type": "string"
+                },
+                "emailNorm": {
+                  "type": "string"
+                },
+                "sentAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "orgId",
+                "brandId",
+                "emailNorm",
+                "sentAt"
+              ]
+            }
+          }
+        },
+        "required": [
+          "dryRun",
+          "reason",
+          "requested",
+          "distinct",
+          "backfilled",
+          "wouldBackfill",
+          "wouldSuppressNow",
+          "alreadyBackfilled",
+          "alreadySuppressed",
+          "byBrand",
+          "sample"
+        ]
+      },
+      "BackfillSentSuppressionsRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Incident tag written onto every created row's ledger entry — how the repair is later identified and reverted (e.g. 'pre-guard-sends-2026-08')."
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "orgId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+                },
+                "brandId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "email": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sentAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "When this person was ACTUALLY emailed for this brand (ISO 8601). It becomes the row's last_served_at, so the person is suppressed for the remainder of THEIR window rather than granted a fresh three months. Never inferred here."
+                }
+              },
+              "required": [
+                "orgId",
+                "brandId",
+                "email",
+                "sentAt"
+              ]
+            },
+            "minItems": 1,
+            "description": "The exact set of people who were actually EMAILED. The caller supplies it because evidence of what was really sent lives with the service that submitted to the vendor — it is never inferred, and never derived from bare serves (a serve the vendor never contacted is what /internal/recover-suppressions exists to repair)."
+          }
+        },
+        "required": [
+          "reason",
+          "entries"
+        ]
+      },
+      "RevertSentSuppressionBackfillResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "ledgerRows": {
+            "type": "integer"
+          },
+          "removed": {
+            "type": "integer"
+          },
+          "wouldRemove": {
+            "type": "integer"
+          },
+          "skippedReserved": {
+            "type": "integer",
+            "description": "Backfilled rows re-served since (last_served_at moved past the recorded sent_at) — that row now records a REAL emission, so it is kept."
+          },
+          "alreadyRemoved": {
+            "type": "integer",
+            "description": "Ledger rows whose suppression row is already gone (e.g. a recovery removed it)."
+          }
+        },
+        "required": [
+          "dryRun",
+          "reason",
+          "ledgerRows",
+          "removed",
+          "wouldRemove",
+          "skippedReserved",
+          "alreadyRemoved"
+        ]
+      },
+      "RevertSentSuppressionBackfillRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The incident tag whose created suppression rows should be removed."
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
       "RecoverSuppressionsResponse": {
         "type": "object",
         "properties": {
@@ -5922,6 +6117,126 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ResolveAudiencesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/backfill-sent-suppressions": {
+      "post": {
+        "summary": "One-time data repair: suppress a caller-supplied set of people who were actually EMAILED before per-brand suppression existed, each for the remainder of their own three-month window, so the fleet stops re-buying emails it already owns (idempotent, dry-runnable, reversible via /internal/backfill-sent-suppressions/revert)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', report exactly which entries would get a suppression row (with per-brand counts and how many still fall inside the live window) WITHOUT writing. Defaults to false (real run)."
+            },
+            "required": false,
+            "description": "When 'true', report exactly which entries would get a suppression row (with per-brand counts and how many still fall inside the live window) WITHOUT writing. Defaults to false (real run).",
+            "name": "dryRun",
+            "in": "query"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackfillSentSuppressionsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Backfill result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillSentSuppressionsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/backfill-sent-suppressions/revert": {
+      "post": {
+        "summary": "Undo a suppression backfill: delete every brand_suppressions row this reason created (keeping any re-served since) and drop the ledger rows",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', report exactly which entries would get a suppression row (with per-brand counts and how many still fall inside the live window) WITHOUT writing. Defaults to false (real run)."
+            },
+            "required": false,
+            "description": "When 'true', report exactly which entries would get a suppression row (with per-brand counts and how many still fall inside the live window) WITHOUT writing. Defaults to false (real run).",
+            "name": "dryRun",
+            "in": "query"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevertSentSuppressionBackfillRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Revert result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevertSentSuppressionBackfillResponse"
                 }
               }
             }

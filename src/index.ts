@@ -13,6 +13,7 @@ import peopleRoutes from "./routes/people.js";
 import audiencesRoutes from "./routes/audiences.js";
 import internalAudiencesRoutes from "./routes/internal-audiences.js";
 import suppressionRecoveryRoutes from "./routes/suppression-recovery.js";
+import suppressionBackfillRoutes from "./routes/suppression-backfill.js";
 import { register as runInstrumentation } from "./instrumentation.js";
 import { startOfferAttributionSweep } from "./services/offer-attribution-sweep.js";
 
@@ -41,6 +42,7 @@ app.use(requireMigratedSchema);
 // then no-ops on those (body already parsed). Org-scoped routes keep the 100 KB
 // browser guard.
 app.use(internalAudiencesRoutes);
+app.use(suppressionBackfillRoutes);
 app.use(express.json());
 
 app.use(healthRoutes);

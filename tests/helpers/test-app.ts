@@ -12,6 +12,7 @@ import peopleRoutes from "../../src/routes/people.js";
 import audiencesRoutes from "../../src/routes/audiences.js";
 import internalAudiencesRoutes from "../../src/routes/internal-audiences.js";
 import suppressionRecoveryRoutes from "../../src/routes/suppression-recovery.js";
+import suppressionBackfillRoutes from "../../src/routes/suppression-backfill.js";
 
 export function createTestApp() {
   const app = express();
@@ -21,6 +22,7 @@ export function createTestApp() {
   // before the global 100 KB json parser.
   app.use(requireMigratedSchema);
   app.use(internalAudiencesRoutes);
+  app.use(suppressionBackfillRoutes);
   app.use(express.json());
 
   app.use(healthRoutes);

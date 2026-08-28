@@ -316,6 +316,42 @@ export const suppressionRecoveries = pgTable(
 
 export type SuppressionRecovery = typeof suppressionRecoveries.$inferSelect;
 
+// Reversible ledger for one-time suppression backfills. Backfilling a person
+// means INSERTING a silver `brand_suppressions` row whose `last_served_at` is
+// the moment they were ACTUALLY EMAILED — so they stay suppressed for exactly
+// the remainder of their three-month window, as if the guard had been live at
+// the time. This table records every row the repair created, tagged with the
+// incident `reason`, which is what makes it identifiable and undoable.
+// Unique on (reason, org, brand, email_norm) ⟹ a re-run writes nothing new.
+export const suppressionBackfills = pgTable(
+  "suppression_backfills",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    reason: text("reason").notNull(),
+    suppressionId: uuid("suppression_id").notNull(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    emailNorm: text("email_norm").notNull(),
+    // The real send time this row was written from. The revert compares it to
+    // the row's current `last_served_at` to spot a person re-served since.
+    sentAt: timestamp("sent_at", { withTimezone: true }).notNull(),
+    backfilledAt: timestamp("backfilled_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_suppression_backfills_unique").on(
+      table.reason,
+      table.orgId,
+      table.brandId,
+      table.emailNorm
+    ),
+    index("idx_suppression_backfills_reason").on(table.reason),
+  ]
+);
+
+export type SuppressionBackfill = typeof suppressionBackfills.$inferSelect;
+
 // --- People gateway v1: audiences + canonical people + membership bridge ---
 //
 // Naming follows CDP/CRM canon (Segment / Salesforce CDP / Adobe AEP / HubSpot):
