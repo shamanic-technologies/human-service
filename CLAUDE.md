@@ -1125,7 +1125,11 @@ apollo-service owns the NL→faithful-Apollo-filters loop now.)
        term that matches nothing and takes the rest of the audience down with it
        (`q_keywords: "psyllium OR Flohsamenschalen"` → 0 → the builder dropped
        the product AND the geography). Target the shop/company TYPE, the
-       occupation, the sector.
+       occupation, the sector — and do NOT name the product anywhere in the
+       sentence, not even as trailing context ("…relevant for purchasing psyllium
+       husks"), since the builder reads the whole sentence as the specification.
+       (Observed on the first post-fix prod run: the persona and the geography
+       were both correct and the product survived as a trailing clause.)
      - **Buying INTENT is not a job title.** "everyone relevant to buy X" names a
        role in the business; in a 2-5-person drogerie the *Inhaber* buys, there
        is no purchasing manager. Measured in Apollo: procurement titles = **52**

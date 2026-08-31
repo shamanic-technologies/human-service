@@ -131,6 +131,10 @@ describe("Layer 1 split prompt", () => {
     // the shop type.
     expect(prompt).toContain("PRODUCT is NEVER a targeting attribute");
     expect(prompt).toContain("shop or company TYPE");
+    // A trailing "...relevant for purchasing <product>" is still the product in
+    // the sentence, and the builder reads the whole sentence as the spec.
+    expect(prompt).toContain("Do not name the product");
+    expect(prompt).toContain("not as trailing");
   });
 
   it("forbids rendering a buying INTENT as a procurement job title", () => {
