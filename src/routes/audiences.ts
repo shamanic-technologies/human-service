@@ -190,16 +190,16 @@ router.post(
       return;
     }
     try {
-      const candidates = await suggestAudiences(
+      const { candidates, failedSegments } = await suggestAudiences(
         parsed.data.nlPrompt,
         parsed.data.brandId,
         buildIdentity(res),
         parsed.data.offerId ?? null
       );
       console.log(
-        `[human-service] audience.suggest org=${res.locals.orgId} brand=${parsed.data.brandId} offer=${parsed.data.offerId ?? "none"} candidates=${candidates.length}`
+        `[human-service] audience.suggest org=${res.locals.orgId} brand=${parsed.data.brandId} offer=${parsed.data.offerId ?? "none"} candidates=${candidates.length} failed=${failedSegments.length}`
       );
-      res.json({ candidates });
+      res.json({ candidates, failedSegments });
     } catch (err) {
       sendProviderError(res, err);
     }
