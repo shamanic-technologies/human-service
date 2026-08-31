@@ -960,6 +960,10 @@ export const AudienceSchema = z
     apolloCount: z.number().int().nullable(),
     apifyCount: z.number().int().nullable(),
     countedAt: z.string().nullable(),
+    degraded: z.boolean().openapi({
+      description:
+        "apollo-service's own verdict on the filter set it built for this audience: true when its refine loop judged no candidate a good fit and returned the best attempt anyway rather than failing. INFORMATION for the customer and the dashboard — nothing here blocks, filters or warns on it. false for rows created before the flag existed and for any build apollo-service does not flag.",
+    }),
     createdByUserId: z.string().uuid().nullable(),
     createdAt: z.string(),
     updatedAt: z.string(),
@@ -1190,6 +1194,10 @@ export const AudienceCandidateSchema = z
     truncated: z.boolean().openapi({
       description:
         "Reserved for response compatibility. Layer 1 has no hard cap, so freshly suggested candidates return false.",
+    }),
+    degraded: z.boolean().openapi({
+      description:
+        "apollo-service's verdict on the filter set it built: true when its refine loop judged no candidate a good fit and returned the best attempt anyway rather than failing. INFORMATION only — a degraded audience is served, persisted and activatable exactly like any other; the customer decides whether to keep it. false when apollo-service does not flag the build.",
     }),
   })
   .openapi("AudienceCandidate");

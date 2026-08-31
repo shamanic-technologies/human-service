@@ -29,6 +29,12 @@ export interface ApolloAudience {
   filters: ApolloFilters;
   count: number;
   status: string | null;
+  // apollo-service's own verdict on the build: true when its refine loop judged
+  // no candidate a good fit and returned the best attempt anyway rather than
+  // failing (apollo-service#228). Additive on their side, so an older deploy may
+  // omit it entirely — absent means "not flagged", i.e. false. Never an error,
+  // and never a value we invent: only an explicit `true` degrades the audience.
+  degraded: boolean;
 }
 
 function asApolloAudience(data: unknown, op: string): ApolloAudience {
@@ -37,6 +43,7 @@ function asApolloAudience(data: unknown, op: string): ApolloAudience {
   const filters = o.filters;
   const count = o.count;
   const status = typeof o.status === "string" ? o.status : null;
+  const degraded = o.degraded === true;
   if (
     typeof apolloAudienceId !== "string" ||
     apolloAudienceId.length === 0 ||
@@ -55,7 +62,13 @@ function asApolloAudience(data: unknown, op: string): ApolloAudience {
       `apollo-service ${op} returned an unusable audience build: ${JSON.stringify(o).slice(0, 200)}`
     );
   }
-  return { apolloAudienceId, filters: filters as ApolloFilters, count, status };
+  return {
+    apolloAudienceId,
+    filters: filters as ApolloFilters,
+    count,
+    status,
+    degraded,
+  };
 }
 
 // POST /audiences/suggest-from-segment — run apollo-service's agentic

@@ -1199,6 +1199,25 @@ apollo-service owns the NL→faithful-Apollo-filters loop now.)
    re-running refreshes a still-`suggested` row in place, never mutates an
    `active`/`paused`/`archived` one.
 
+- **`degraded` — apollo-service's own verdict on the build, carried through and
+  persisted.** apollo-service's refine loop grades each candidate filter set
+  against the described target; when NO candidate is judged a good fit it no
+  longer fails, it returns the best attempt flagged `degraded: true`
+  (apollo-service#228), so onboarding shows the customer something they can judge
+  and reject rather than an error screen. That verdict is read off the
+  `suggest-from-segment` response, stored on **`audiences.degraded`** (migration
+  `0023`, `boolean NOT NULL DEFAULT false`) and returned on the `/suggest`
+  candidate alongside `validationError`/`truncated` AND on every audience read
+  (`serializeAudience`), so a dashboard reading the row later sees the same truth
+  as at creation time. It is **INFORMATION, never a gate** — nothing here blocks,
+  filters or warns on a degraded audience; it is built, persisted and activatable
+  exactly like any other, and the customer decides. A response **without** the
+  field means `false` (additive on apollo-service's side — an older deploy sends
+  nothing), never an error and never a value invented here: only an explicit
+  `true` degrades. `false` is likewise the truthful value for every row created
+  before the concept existed. The same read is persisted by the two other paths
+  that build through apollo-service (`migrateApifyAudienceToApollo`,
+  `backfillApolloAudiencePointer`).
 - **The response stays an ARRAY — an array of one.** `{ candidates: [...],
   failedSegments: [...] }` is a consumer contract (the dashboard reads a list) and
   the split returns later, so the shape is unchanged. `failedSegments` is retained

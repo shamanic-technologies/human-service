@@ -119,6 +119,7 @@ describe("AudienceSchema — offerId is always present on a read", () => {
     apolloCount: null,
     apifyCount: null,
     countedAt: null,
+    degraded: false,
     createdByUserId: null,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",

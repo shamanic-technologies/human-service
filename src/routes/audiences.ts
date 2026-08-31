@@ -668,6 +668,7 @@ function serializeAudience(row: typeof audiences.$inferSelect) {
     apolloCount: row.apolloCount,
     apifyCount: row.apifyCount,
     countedAt: row.countedAt ? row.countedAt.toISOString() : null,
+    degraded: row.degraded,
     createdByUserId: row.createdByUserId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
