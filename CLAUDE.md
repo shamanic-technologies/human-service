@@ -1142,7 +1142,11 @@ apollo-service owns the NL→faithful-Apollo-filters loop now.)
        Switzerland outside of Zurich" is inexpressible and the builder resolved
        it by deleting the geography entirely (`person_locations: ["Switzerland"]`).
        Layer 1 cannot know that field is missing (it is deliberately blind to
-       provider vocabulary), so the rule is about FORM. A constraint the CALLER
+       provider vocabulary), so the rule is about FORM. **There is no "Other" /
+       "Rest" / "Remaining" bucket** and no `"including A, B and C"` — the last
+       slice is a named, EXHAUSTIVE list like every other one (measured on prod:
+       the residual-cantons bucket was where the negative form kept coming back,
+       as "German-speaking cantons excluding Zurich, Bern, ..."). A constraint the CALLER
        stated as an exclusion ("excluding pharmacies") is a caller constraint and
        still travels verbatim into every audience.
      Related: a single-country request partitions into **that country's own

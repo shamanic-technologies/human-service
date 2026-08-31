@@ -144,6 +144,7 @@ describe("Layer 1 split prompt", () => {
     expect(prompt).toContain("BUYING INTENT IS NOT A JOB TITLE");
     expect(prompt).toContain("unless the CALLER named those roles");
     expect(lower).toContain('"purchasing manager"');
+    expect(lower).toContain('"purchasing staff"');
   });
 
   it("requires every PARTITION VALUE to be stated positively", () => {
@@ -155,6 +156,10 @@ describe("Layer 1 split prompt", () => {
     expect(prompt).toContain('never "other than Y"');
     // A caller-stated SECTOR exclusion is a caller constraint and still travels.
     expect(prompt).toContain("is a caller constraint and you carry it verbatim");
+    // The residual bucket is the shape the rule kept leaking through: a final
+    // "Other / remaining cantons" slice defined by what it leaves out.
+    expect(prompt).toContain("bucket: the last slice is a named list");
+    expect(prompt).toContain("list ALL of them by name");
   });
 
   it("partitions a single country into its own administrative subdivisions", () => {
