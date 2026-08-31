@@ -39,13 +39,17 @@ interface ApolloResp {
   count: number;
 }
 
-// "One filter vocabulary" Wave 2: human-service runs ONLY Layer 1 (segment
-// decompose, via chat-service /complete) and then asks apollo-service to BUILD +
-// COUNT a faithful Apollo audience per segment (POST /audiences/suggest-from-
-// segment). No in-human-service Layer-2 loop / vocabulary anymore.
+// "One filter vocabulary" Wave 2: human-service runs ONLY Layer 1 (via
+// chat-service /complete) and then asks apollo-service to BUILD + COUNT a
+// faithful Apollo audience for it (POST /audiences/suggest-from-segment). No
+// in-human-service Layer-2 loop / vocabulary anymore.
+//
+// Layer 1 emits ONE audience (the split is deferred to the post-validation
+// A/B-split step, #235), so `segments` here is a one-element list; a longer one
+// exercises the "keep the first" guard.
 //
 // Mock both:
-// - chat-service /complete (Layer 1 — systemPrompt mentions "decompose"): segments.
+// - chat-service /complete (Layer 1 — systemPrompt mentions "ONE target audience"): segments.
 // - apollo-service /audiences/suggest-from-segment: {apolloAudienceId, filters, count}.
 // The description every relabel returns unless a test overrides it.
 const RELABELLED = "relabelled from the final filters";
@@ -76,7 +80,7 @@ function wire(opts: {
           json: { description: opts.relabel?.(body.message) ?? RELABELLED },
         });
       }
-      if (body.systemPrompt.includes("decompose a natural-language audience")) {
+      if (body.systemPrompt.includes("ONE target audience")) {
         return ok({
           json: { audiences: opts.segments },
           content: "",
@@ -107,26 +111,46 @@ function suggest(nlPrompt: string) {
 }
 
 describe("POST /orgs/audiences/suggest", () => {
-  it("layer 1 decomposes into N named audiences; one apollo candidate per audience", async () => {
+  it("returns exactly ONE audience, in an array", async () => {
+    wire({
+      segments: [{ name: "Swiss Drogerien", description: "owners of drugstores in Switzerland" }],
+    });
+    const res = await suggest("drugstores in German-speaking Switzerland");
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.candidates)).toBe(true);
+    expect(res.body.candidates).toHaveLength(1);
+    const c = res.body.candidates[0];
+    expect(c.name).toBe("Swiss Drogerien");
+    expect(c.audienceId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(c.status).toBe("suggested");
+    expect(c.provider).toBe("apollo"); // always apollo (pointer model)
+    expect(c.apolloAudienceId).toMatch(/^apollo-aud-/);
+    expect(c.validationError).toBeNull();
+    expect(c.truncated).toBe(false);
+    expect(res.body.failedSegments).toEqual([]);
+
+    // ONE apollo build, ONE persisted row — no fan-out.
+    const builds = fetchSpy.mock.calls.filter(([url]) =>
+      String(url).endsWith("/audiences/suggest-from-segment")
+    );
+    expect(builds).toHaveLength(1);
+    const rows = await db.select().from(audiences);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("keeps only the FIRST audience when layer 1 over-produces", async () => {
     wire({
       segments: [
         { name: "US companies", description: "companies in the US" },
         { name: "Europe companies", description: "companies in Europe" },
       ],
     });
-    const res = await suggest("companies in US and Europe separately");
+    const res = await suggest("companies in US and Europe");
     expect(res.status).toBe(200);
-    expect(res.body.candidates).toHaveLength(2);
-    const names = res.body.candidates.map((c: { name: string }) => c.name).sort();
-    expect(names).toEqual(["Europe companies", "US companies"]);
-    for (const c of res.body.candidates) {
-      expect(c.audienceId).toMatch(/^[0-9a-f-]{36}$/);
-      expect(c.status).toBe("suggested");
-      expect(c.provider).toBe("apollo"); // always apollo (pointer model)
-      expect(c.apolloAudienceId).toMatch(/^apollo-aud-/);
-      expect(c.validationError).toBeNull();
-      expect(c.truncated).toBe(false);
-    }
+    expect(res.body.candidates).toHaveLength(1);
+    expect(res.body.candidates[0].name).toBe("US companies");
+    const rows = await db.select().from(audiences);
+    expect(rows).toHaveLength(1);
   });
 
   it("returns + persists the apollo-service pointer, faithful filters and count", async () => {
@@ -215,49 +239,32 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(rows).toHaveLength(0);
   });
 
-  it("keeps every layer-1 audience and prompts for persona x company-type combinations", async () => {
-    wire({
-      segments: [
-        { name: "B2B SaaS Founders", description: "Founders at B2B SaaS" },
-        { name: "Digital Founders", description: "Founders at digital product cos" },
-        { name: "B2B SaaS Growth", description: "Heads of Growth at B2B SaaS" },
-        { name: "Digital Growth", description: "Heads of Growth at digital product cos" },
-        { name: "B2B SaaS Solo", description: "Solo marketers at B2B SaaS" },
-        { name: "Digital Solo", description: "Solo marketers at digital product cos" },
-      ],
-    });
+  it("prompts layer 1 for ONE audience and keeps the single-audience rules live", async () => {
+    wire({ segments: [{ name: "Swiss Drogerien", description: "drugstore owners" }] });
     const res = await suggest(
-      "Founders, Heads of Growth, or Solo Marketers at bootstrapped or seed-stage B2B SaaS and digital product companies"
+      "everyone relevant to buy psyllium husks in drugstores and organic shops in German-speaking Switzerland"
     );
     expect(res.status).toBe(200);
-    expect(res.body.candidates).toHaveLength(6);
-    expect(res.body.candidates.every((c: { truncated: boolean }) => c.truncated)).toBe(
-      false
-    );
     const layer1Call = fetchSpy.mock.calls
       .filter(([url]) => String(url).endsWith("/complete"))
       .map(([, init]) => JSON.parse(init?.body ?? "{}") as { systemPrompt: string })
-      .find((body) =>
-        body.systemPrompt.includes("decompose a natural-language audience")
-      );
+      .find((body) => body.systemPrompt.includes("ONE target audience"));
+    expect(layer1Call?.systemPrompt).toContain("You do NOT split it");
+    expect(layer1Call?.systemPrompt).toContain("EXACTLY ONE audience");
+    // The rules that shipped in #236 / #237 / #238 stay live for one audience.
+    expect(layer1Call?.systemPrompt).toContain("PRODUCT is NEVER a targeting attribute");
+    expect(layer1Call?.systemPrompt).toContain("BUYING INTENT IS NOT A JOB TITLE");
     expect(layer1Call?.systemPrompt).toContain(
-      "When multiple independent axes are explicitly present"
+      "describes ONE population, never a union of several"
     );
-    expect(layer1Call?.systemPrompt).toMatch(
-      /Example: 3 personas\s+x 2 company types = one audience per combination/
-    );
-    // #234: no numeric audience-count target survives in the layer-1 prompt.
+    expect(layer1Call?.systemPrompt).toContain("EVERY CONSTRAINT IS STATED POSITIVELY");
+    // No numeric audience-count target survives in the layer-1 prompt.
     expect(layer1Call?.systemPrompt).not.toMatch(/ballpark|6-8/);
   });
 
   it("persists candidates at status 'suggested' (inactive) and exposes them via GET ?status=suggested", async () => {
-    wire({
-      segments: [
-        { name: "Alpha", description: "alpha" },
-        { name: "Beta", description: "beta" },
-      ],
-    });
-    const res = await suggest("alpha and beta");
+    wire({ segments: [{ name: "Alpha", description: "alpha" }] });
+    const res = await suggest("alpha");
     expect(res.status).toBe(200);
     const ids = res.body.candidates.map((c: { audienceId: string }) => c.audienceId);
 
@@ -265,7 +272,7 @@ describe("POST /orgs/audiences/suggest", () => {
       .get(`/orgs/audiences?brandId=${BRAND}&status=suggested`)
       .set(getAuthHeaders());
     expect(suggested.status).toBe(200);
-    expect(suggested.body.audiences).toHaveLength(2);
+    expect(suggested.body.audiences).toHaveLength(1);
 
     // None are active until the caller flips them.
     const active = await request(app)
@@ -340,7 +347,7 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(body.model).toBe("flash");
     expect(body.disableThinking).toBe(true);
     expect((body.responseSchema as { type?: string }).type).toBe("object");
-    expect(body.systemPrompt).toContain("decompose a natural-language audience");
+    expect(body.systemPrompt).toContain("ONE target audience");
   });
 
   it("retries a transient chat-service 502 (malformed-JSON / blip) on Layer 1 and still succeeds", async () => {
@@ -355,7 +362,7 @@ describe("POST /orgs/audiences/suggest", () => {
         )
           return ok({ json: { description: RELABELLED } });
         const body = JSON.parse(init.body ?? "{}") as { systemPrompt: string };
-        if (body.systemPrompt.includes("decompose a natural-language audience")) {
+        if (body.systemPrompt.includes("ONE target audience")) {
           layer1Calls++;
           if (layer1Calls === 1) return err(502, "model returned non-parsable JSON");
           return ok({ json: { audiences: [{ name: "CMOs", description: "cmos" }] } });
@@ -387,40 +394,19 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(layer1Calls).toBe(1); // NOT retried — deterministic 4xx
   });
 
-  it("tolerates one segment's apollo-service failure and still returns the others", async () => {
-    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
-      const u = String(url);
-      if (u.endsWith("/complete")) {
-        if (
-          (JSON.parse(init.body ?? "{}") as { systemPrompt?: string }).systemPrompt?.includes(
-            "SINGLE concise sentence"
-          )
-        )
-          return ok({ json: { description: RELABELLED } });
-        return ok({
-          json: {
-            audiences: [
-              { name: "Good", description: "good seg" },
-              { name: "Bad", description: "bad seg" },
-            ],
-          },
-        });
-      }
-      if (u.endsWith("/audiences/suggest-from-segment")) {
-        const body = JSON.parse(init.body ?? "{}") as { description: string };
-        // Persistent 5xx for the Bad segment (survives the connect retry budget).
-        if (body.description.includes("bad seg")) return err(503, "apollo overloaded");
-        return ok({ apolloAudienceId: "a-good", filters: { personTitles: ["X"] }, count: 300 });
-      }
-      throw new Error("unexpected url " + u);
+  it("fails LOUD when the single apollo build fails — never an empty list", async () => {
+    wire({
+      segments: [{ name: "Swiss Drogerien", description: "drugstore owners" }],
+      apollo: () => "503",
     });
-    const res = await suggest("good and bad");
-    expect(res.status).toBe(200);
-    expect(res.body.candidates).toHaveLength(1); // Bad dropped, Good kept
-    expect(res.body.candidates[0].name).toBe("Good");
+    const res = await suggest("drugstores in Switzerland");
+    expect(res.status).toBe(502);
+    expect(res.body.candidates).toBeUndefined();
+    const rows = await db.select().from(audiences);
+    expect(rows).toHaveLength(0);
   });
 
-  it("502 when every segment's apollo-service build fails", async () => {
+  it("502 when the apollo-service build fails", async () => {
     wire({
       segments: [{ name: "X", description: "x" }],
       apollo: () => "503",
@@ -466,49 +452,25 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(row.description).toBe("owners of independent drugstores in Switzerland");
   });
 
-  it("fails the segment (no fallback) when the relabel call fails, and reports it", async () => {
-    wire({ segments: [{ name: "Alpha", description: "a" }, { name: "Beta", description: "b" }], relabel: "fail" });
-    const res = await suggest("alpha and beta");
-    expect(res.status).toBe(502); // every segment failed
+  it("fails the request (no fallback) when the relabel call fails", async () => {
+    wire({ segments: [{ name: "Alpha", description: "a" }], relabel: "fail" });
+    const res = await suggest("alpha");
+    expect(res.status).toBe(502); // the build failed — reported, never silent
   });
 
   // --- #234: a partial batch says which segments were lost ---
 
-  it("reports the segments that failed to build in failedSegments", async () => {
-    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
-      const u = String(url);
-      if (u.endsWith("/complete")) {
-        if (
-          (JSON.parse(init.body ?? "{}") as { systemPrompt?: string }).systemPrompt?.includes(
-            "SINGLE concise sentence"
-          )
-        )
-          return ok({ json: { description: RELABELLED } });
-        return ok({
-          json: {
-            audiences: [
-              { name: "Good", description: "good seg" },
-              { name: "Bad", description: "bad seg" },
-            ],
-          },
-        });
-      }
-      if (u.endsWith("/audiences/suggest-from-segment")) {
-        const body = JSON.parse(init.body ?? "{}") as { description: string };
-        if (body.description.includes("bad seg")) return err(503, "apollo overloaded");
-        return ok({ apolloAudienceId: "a-good", filters: { personTitles: ["X"] }, count: 300 });
-      }
-      throw new Error("unexpected url " + u);
+  it("reports the failure to the caller (502 + reason) rather than an empty batch", async () => {
+    wire({
+      segments: [{ name: "Bad", description: "bad seg" }],
+      apollo: () => "503",
     });
-    const res = await suggest("good and bad");
-    expect(res.status).toBe(200);
-    expect(res.body.candidates).toHaveLength(1);
-    expect(res.body.failedSegments).toHaveLength(1);
-    expect(res.body.failedSegments[0].name).toBe("Bad");
-    expect(res.body.failedSegments[0].reason).toBeTruthy();
+    const res = await suggest("bad");
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBeTruthy();
   });
 
-  it("returns an EMPTY failedSegments when the batch is complete", async () => {
+  it("returns an EMPTY failedSegments when the build succeeded", async () => {
     wire({ segments: [{ name: "Alpha", description: "a" }] });
     const res = await suggest("alpha");
     expect(res.status).toBe(200);

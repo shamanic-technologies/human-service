@@ -73,7 +73,7 @@ section — the port binds first).
 | Org-scoped (People v1) | `POST /orgs/people/resolve-email` | apiKey + `x-org-id` + `x-user-id` | Reveal a verified email — apollo by `providerPersonId` (`/enrich`, billed) or name+domain (`/match`); apify by name+domain |
 | Org-scoped (People v1) | `POST /orgs/people/search/dry-run` | apiKey + `x-org-id` + `x-user-id` | Count matches, free (apollo only in v1) |
 | Org-scoped (People v1) | `GET /orgs/people/filters-prompt` | apiKey + `x-org-id` + `x-user-id` | LLM filter-shape prompt (apollo only in v1) |
-| Org-scoped (Audiences v1) | `POST /orgs/audiences/suggest` | apiKey + `x-org-id` + `x-user-id` | NL → **persisted** candidate audiences (one per segment, best provider only), returns `audienceId`s at status `suggested` (inactive); optional `offerId` scopes the whole batch |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/suggest` | apiKey + `x-org-id` + `x-user-id` | NL → **ONE persisted** candidate audience (never split — the split is deferred to #235), returned as an array of one at status `suggested` (inactive); optional `offerId` scopes it |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider + optional `crmUploadId` source binding + optional `offerId` scope) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` / `offerId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
@@ -1074,52 +1074,53 @@ in `src/services/audiences.ts` owns the per-row work.
 
 ### Audience suggestion (onboarding) — `POST /orgs/audiences/suggest`
 
-Turns a natural-language audience description into a **set of persisted
-candidate audiences** the user picks from, during onboarding. `requireOrgAndUser`
-(`x-user-id` needed for chat-service + provider key resolution).
-`src/services/audiences.ts` `suggestAudiences` owns it; `src/lib/chat-client.ts`
-is the chat-service client.
+Turns a natural-language audience description into **ONE persisted candidate
+audience** the user validates during onboarding (the dashboard shows them the
+resulting Apollo filters). `requireOrgAndUser` (`x-user-id` needed for
+chat-service + provider key resolution). `src/services/audiences.ts`
+`suggestAudiences` owns it; `src/lib/chat-client.ts` is the chat-service client.
 
-**Two stages — layer-1 decompose (human-service) → per-segment faithful-Apollo
-build (apollo-service) → persist:** ("one filter vocabulary" Wave 2 — the
+**The request is NEVER split — that is the design, not a limitation.** Layer 1
+used to PARTITION the request into a set of audiences (MECE across geography /
+revenue / headcount / funding). Every quality bug this feature ever had came
+from partitioning a request *before anyone had measured the market*: personas
+drifting across headcount bands until a "201+" band held zero of the requested
+profession; the client's PRODUCT emitted as a search keyword; a partition value
+stated negatively ("German-speaking Switzerland outside of Zurich") that Apollo
+cannot express, which the builder resolved by deleting the geography. So layer 1
+now restates the request as ONE audience and stops.
+
+**The split is DEFERRED, not deleted.** It returns as a separate step that
+splits a **user-validated** audience into sub-audiences for A/B testing
+(shamanic-technologies/human-service#235 — that step does not exist yet). The
+partition prompt blocks and the multi-segment fan-out are kept **verbatim as
+commented-out code** in `src/services/audiences.ts` under two `SPLIT (deferred)`
+banners (one on `buildLayer1SystemPrompt`, one around `suggestAudiences`);
+restore them there rather than re-deriving what they learned. Their unit
+assertions were deferred with them (`tests/unit/layer1-prompt.test.ts`, renamed
+from `layer1-split-prompt.test.ts`).
+
+**Two stages — layer-1 restate (human-service) → faithful-Apollo build
+(apollo-service) → persist:** ("one filter vocabulary" Wave 2 — the
 in-human-service Layer-2 agentic loop + apolloDslToNeutral mapper are DELETED;
 apollo-service owns the NL→faithful-Apollo-filters loop now.)
 
 1. **LAYER 1 (provider-agnostic, ONE LLM call via chat-service)** —
-   `decomposeSegments` reads the caller's segmentation intent ("US and Europe
-   separately", "split by seniority", "one broad list") and emits a SET of
-   **named** audiences `{ name (≤4 words), description }`. There is **no hard cap**:
-   Layer 1 emits every distinct audience it infers. When the prompt explicitly
-   spans independent axes that both change provider filters, Layer 1 produces the
-   combinations, not a broad merged bucket (e.g. founders + heads of growth + solo
-   marketers × B2B SaaS + digital product companies = one audience per
-   combination). Each
-   `description` is the complete, self-contained prompt for the apollo build: it
-   must carry every shared and segment-specific constraint. **No rule-based
-   post-processing after layer 1** (no regex extraction, no forced filter merge) —
-   fix the layer-1 prompt/schema if a constraint is missing.
-   - **Split on UNSPECIFIED axes MECE, with NO numeric audience-count target**
-     (#183, target deleted in #234). Layer 1 does NOT wait for the caller to span
-     an axis explicitly — for a broad/under-specified ICP it TAKES THE INITIATIVE
-     and partitions unspecified axes MECE (mutually-exclusive,
-     collectively-exhaustive): geography → NA / Europe / Africa / Asia / S-C
-     America (primary lever); revenue → contiguous ranges; employee size →
-     headcount bands; funding stage → Bootstrapped / Seed / Series A / B / C+.
-     Explicit multi-value axes (roles, company types, tech A/B) still split as
-     before. The instruction is **emit the partition the request actually
-     implies — one audience is a correct answer**, never a count to reach: a
-     numeric target in a prompt is the documented prime suspect for fabrication,
-     and it collides with apollo-service's grader (#224), which refuses to bless
-     filler. **No SIZE THRESHOLD may replace it either** ("only split above N"
-     makes a layer with no measurement guess which bands clear N — exactly how
-     "Chief Medical Officers" got invented). A measured replacement (build the
-     root, count it, split only when worth splitting) is filed as #235. Each
-     `description` must state its assigned partition value so the apollo build
-     filters on it. More segments ⇒ proportionally more apollo/chat spend +
-     latency per `/suggest` (owned upstream; human-service still declares no
-     cost). Want more/fewer splits → tune `buildLayer1SystemPrompt`, nowhere else.
-   - **Three FORM rules a description must obey** (#234, from a prod Swiss
-     psyllium run whose 7 audiences held 4 targeting no drugstore at all):
+   `decomposeSegments` restates the caller's request as ONE named audience
+   `{ name (≤4 words), description }`. The `description` is the complete,
+   self-contained prompt for the apollo build: it carries every constraint the
+   caller stated and nothing else. **No rule-based post-processing** (no regex
+   extraction, no forced filter merge) — fix the layer-1 prompt/schema if a
+   constraint is missing. Layer 1 is instructed to emit exactly one; if the model
+   over-produces, `suggestAudiences` keeps the FIRST and logs it (never a silent
+   fan-out).
+   - **The audience is a RESTATEMENT, never a redefinition.** It holds exactly
+     the people the caller asked for: none added, none left out. So WHO the
+     caller asked for travels through unchanged — a narrow request is a SMALL
+     audience, and small is a correct answer, never a licence to widen WHO.
+   - **Four FORM rules a description must obey** (#236/#237/#238, from a prod
+     Swiss psyllium run, and the 2026-07-28 chiropractor run — all still LIVE for
+     a single audience):
      - **The client's PRODUCT is never a targeting attribute.** No profile says
        which product a person buys, so a product name becomes a free-text search
        term that matches nothing and takes the rest of the audience down with it
@@ -1128,162 +1129,105 @@ apollo-service owns the NL→faithful-Apollo-filters loop now.)
        occupation, the sector — and do NOT name the product anywhere in the
        sentence, not even as trailing context ("…relevant for purchasing psyllium
        husks"), since the builder reads the whole sentence as the specification.
-       (Observed on the first post-fix prod run: the persona and the geography
-       were both correct and the product survived as a trailing clause.)
      - **Buying INTENT is not a job title.** "everyone relevant to buy X" names a
        role in the business; in a 2-5-person drogerie the *Inhaber* buys, there
        is no purchasing manager. Measured in Apollo: procurement titles = **52**
        people country-wide vs **1,919** with decision-maker seniority. Never
        narrow a stated buying intent to `Buyer` / `Purchasing Manager` unless the
        CALLER named those roles.
-     - **Partition values are stated POSITIVELY.** Never "outside X", "other than
-       Y", "the rest of Z" — enumerate the members. Apollo has
-       `person_not_titles` but NO person-location exclusion, so "German-speaking
-       Switzerland outside of Zurich" is inexpressible and the builder resolved
-       it by deleting the geography entirely (`person_locations: ["Switzerland"]`).
-       Layer 1 cannot know that field is missing (it is deliberately blind to
-       provider vocabulary), so the rule is about FORM. **There is no "Other" /
-       "Rest" / "Remaining" bucket** and no `"including A, B and C"` — the last
-       slice is a named, EXHAUSTIVE list like every other one (measured on prod:
-       the residual-cantons bucket was where the negative form kept coming back,
-       as "German-speaking cantons excluding Zurich, Bern, ..."). A constraint the CALLER
+     - **A `description` describes ONE population, not a union of several — and
+       every generic role word is BOUND to the caller's occupation/sector.** The
+       apollo build receives ONLY `name` + `description` (no original prompt), so
+       the sentence IS the whole specification and must read exactly one way. A
+       role list reads as a UNION: `"Chiropractors and Practice Owners …"` is
+       understood as chiropractors PLUS practice owners of any kind (dentists,
+       vets, accountants). Write the single population instead — `"chiropractors
+       who own their practice"`. `owner` / `founder` / `director` / `manager` /
+       `partner` / `administrator` mean nothing alone; bind them.
+     - **Constraints are stated POSITIVELY.** Never "outside X", "other than Y",
+       "the rest of Z" — enumerate the members ("German-speaking Switzerland" is
+       written as its cantons, all of them, by name; never `"including A, B and
+       C"`, which leaves the set open). Apollo has `person_not_titles` but NO
+       person-location exclusion, so a negatively-stated constraint is silently
+       dropped along with whatever it qualified. Layer 1 is deliberately blind to
+       provider vocabulary, so the rule is about FORM. A constraint the CALLER
        stated as an exclusion ("excluding pharmacies") is a caller constraint and
-       still travels verbatim into every audience.
-     Related: a single-country request partitions into **that country's own
-     administrative subdivisions** (cantons, states, provinces, régions) — "one
-     notch down" was undefined for one country, which is what produced the
-     invented Zurich / Bern / Basel / "everything else" split.
-   - **The split is a PARTITION of the request, and MECE is measured against the
-     REQUESTED AUDIENCE — never merely against the axis.** Every emitted audience
-     is a SUBSET of what the caller asked for and together they COVER it (no
-     person added who shouldn't be there, none left out). So the **persona travels
-     into every segment UNCHANGED**; it is a partition lever ONLY when the caller
-     themselves named several roles. A partition band the requested people barely
-     occupy is a **SMALL audience — and small is a correct answer**, never a licence
-     to put different people in it. A finer partition is reached by **subdividing an
-     axis further** (geography always drops one notch: continent → countries →
-     a country's own subdivisions), NEVER by widening WHO. Guarded by `tests/unit/layer1-split-prompt.test.ts`.
-     (Cost 2026-07-28: `nl_prompt = "Chiropractors in the United States"` produced
-     12 audiences whose persona drifted monotonically with the employee band —
-     1-10 "chiropractors, solo practitioners" ✅ → 51-200 "Chiropractors, Clinic
-     Directors, and **Healthcare Executives**" → 201+ "**Chief Medical Officers**,
-     Directors of Chiropractic, and **Senior Physicians**", i.e. zero
-     chiropractors. Chiropractic practices are 1-10 people, so the upper headcount
-     bands are sparse; instead of accepting small audiences the model rewrote WHO
-     until each band was populated. The old prompt only required MECE to *"cover
-     the whole space"* = the AXIS, which a 201+ band satisfies while holding none
-     of the requested people. The count target was NOT the cause of that
-     incident and was kept then; it was deleted later in #234 for a different
-     reason — it fabricates filler against a grader that now rejects it.)
-   - **A `description` must describe ONE population, not a union of several — and
-     every generic role word must be BOUND to the caller's occupation/sector.**
-     The apollo build receives ONLY `name` + `description` (no original prompt, no
-     sight of the sibling segments), so the sentence IS the whole specification and
-     must read exactly one way. A role list reads as a UNION: `"Chiropractors and
-     Practice Owners …"` is understood as chiropractors PLUS practice owners of
-     any kind (dentists, vets, accountants). Write the single population instead —
-     `"chiropractors who own their practice"`. `owner` / `founder` / `director` /
-     `manager` / `partner` / `administrator` mean nothing alone; bind them
-     (`"owner of a chiropractic practice"`). (Cost 2026-07-28, same run: the
-     `"Chiropractors and Practice Owners"` description survived apollo-service's
-     new MECE gate **untouched** — apollo was FAITHFUL to it and graded it
-     `reachesOffTarget: false` four times, correctly, because "Practice Owners" IS
-     in the described target. The drift was already in the description, so the
-     apollo-side fix could not catch it. This layer is the only place it can be.)
+       travels verbatim.
    - **Two things are explicitly NOT Layer 1's business, and the prompt says so.**
      (a) **Audience SIZE** — it never estimates, compares or worries about how many
-     people a segment holds; the apollo build measures that. (b) **The provider's
-     filter vocabulary** — Layer 1 writes plain English, apollo-service translates.
-     The unit test asserts no Apollo field name (`person_titles`,
+     people the audience holds; the apollo build measures that. (b) **The
+     provider's filter vocabulary** — Layer 1 writes plain English, apollo-service
+     translates. The unit test asserts no Apollo field name (`person_titles`,
      `organization_industries`, `q_organization_keyword_tags`, …) leaks into this
      prompt. Corollary, deliberately rejected: **do NOT forward the original
-     `nlPrompt` to apollo-service alongside the per-segment description.** The
-     original request is the SUPERSET of each segment, so handing it down invites
-     the builder to re-widen toward it and blur the segment boundary — the exact
-     Mutually-Exclusive violation this layer exists to prevent — and it creates two
-     conflicting sources of truth for one build. The defence is a self-sufficient,
+     `nlPrompt` to apollo-service alongside the derived description** — two
+     sources of truth for one build; the defence is a self-sufficient,
      unambiguous description, which is already the contract.
-   - **⚠️ `buildLayer1SystemPrompt` is a `[...].join("\n")` array AND the
-     `audiences-suggest.test.ts` integration test asserts exact prompt SUBSTRINGS**
-     (`toContain("When multiple independent axes are explicitly present")`,
-     `toMatch(/Example: 3 personas\s+x 2 company types = one audience per combination/)`,
-     `.includes("decompose a natural-language audience")`). A `.includes(...)`
-     assert FAILS if you split the asserted phrase across two array elements (the
-     join inserts a `\n` mid-phrase). When editing the prompt, keep each
-     `toContain`/`.includes` phrase on ONE array line (a `\s+` in a `toMatch`
-     regex tolerates the join newline, a bare `.includes` does not), or update the
-     assertions in the same commit. **`tests/unit/layer1-split-prompt.test.ts`
-     asserts many more substrings** (the invariants above) — it is the cheap,
-     DB-free guard, so run `npm run test:unit` after any prompt edit. It pins the
-     INVARIANTS, not the prose: when rewording, keep each invariant expressed
-     somewhere in the prompt and move the assertion with it.
-2. **APOLLO BUILD (per segment, apollo-service owns it)** — `suggestApolloAudience`
-   calls apollo-service `POST /audiences/suggest-from-segment` with
+   - **⚠️ `buildLayer1SystemPrompt` is a `[...].join("\n")` array AND both
+     `tests/unit/layer1-prompt.test.ts` and `audiences-suggest.test.ts` assert
+     exact prompt SUBSTRINGS** (`"ONE target audience"` is the discriminator the
+     integration test uses to tell the layer-1 `/complete` call from the relabel
+     one). A `.includes(...)` assert FAILS if you split the asserted phrase across
+     two array elements (the join inserts a `\n` mid-phrase). Keep each asserted
+     phrase on ONE array line, or update the assertions in the same commit. The
+     unit test pins the INVARIANTS, not the prose — run `npm run test:unit` after
+     any prompt edit.
+2. **APOLLO BUILD (apollo-service owns it)** — `suggestApolloAudience` calls
+   apollo-service `POST /audiences/suggest-from-segment` with
    `{ name, description, brandId }`; apollo-service runs its agentic NL→faithful-
    Apollo-filters refine loop (LLM via chat-service, free Apollo dry-runs for live
    counts) INTERNALLY and returns `{ apolloAudienceId, filters (faithful, opaque),
    count }`. human-service does NOT build, validate, or even understand Apollo's
    filter vocabulary — it just routes + caches the opaque result. Best-provider
-   collapse **degenerates to apollo** (apify is inert; existing apify audiences are
-   migrated separately).
+   collapse degenerates to apollo (apify is inert).
 3. **RELABEL from the FINAL filters** (#234) — before insert, the row's
    `description` is regenerated by `generateAudienceDescription({name, filters})`
    from what apollo-service actually BUILT, not from the layer-1 input
    specification. The two were never kept in sync, so a customer could read
    "organic and health food shops in the canton of Zurich" over a filter set that
-   said Switzerland-wide retail. That function already existed (it derives a
-   sentence from a row's own filters and is instructed not to invent a constraint
-   the filters do not encode) and was gated to the `description IS NULL` backfill
-   sweep; `/suggest` now reuses it. **It is a LABELLING fix and must never launder
-   a targeting one** — without apollo-service's grader (#224) it would merely
-   rename a useless audience truthfully and make the defect go quiet while still
-   burning budget. Runs per segment, AFTER the build. **No fallback**: a relabel
-   failure fails THAT segment (reported in `failedSegments`), same as an apollo
-   build failure. The **name is deliberately NOT regenerated** — it is the
+   said Switzerland-wide retail. **It is a LABELLING fix and must never launder a
+   targeting one** — apollo-service's grader (#224) owns whether the audience is
+   good. **No fallback**: a relabel failure fails the request (502), same as an
+   apollo build failure. The **name is deliberately NOT regenerated** — it is the
    idempotency key (unique on `(org, brand, offer, lower(name))`), so renaming a
-   re-suggested segment would duplicate the row instead of refreshing it.
-4. **PERSIST** — each segment's result is written as an `audiences` row at status
+   re-suggested audience would duplicate the row instead of refreshing it.
+4. **PERSIST** — the result is written as an `audiences` row at status
    **`suggested`** (INACTIVE — never live until flipped to `active` via
    `PATCH /orgs/audiences/{id}/status`), storing `apollo_audience_id` (the pointer)
-   + the cached faithful `filters` + `apollo_count`. The `audienceId`s are returned
-   so the front activates the chosen ones. Unique per `(org_id, brand_id,
-   lower(name))`; re-running refreshes a still-`suggested` row in place, never
-   mutates an `active`/`paused`/`archived` one.
+   + the cached faithful `filters` + `apollo_count`. The `audienceId` is returned
+   so the front activates it. Unique per `(org_id, brand_id, offer, lower(name))`;
+   re-running refreshes a still-`suggested` row in place, never mutates an
+   `active`/`paused`/`archived` one.
 
-- **A PARTIAL batch says so — `failedSegments`** (#234). The per-segment builds
-  run under `allSettled`, so a segment that fails to build used to just vanish and
-  the caller received a shorter list with no explanation. The response now carries
-  `failedSegments: [{name, reason}]` alongside `candidates`: empty ⟹ complete,
-  non-empty ⟹ partial and the caller can see which segments are missing. Purely
-  additive; the 502-only-when-EVERY-segment-failed rule is unchanged.
+- **The response stays an ARRAY — an array of one.** `{ candidates: [...],
+  failedSegments: [...] }` is a consumer contract (the dashboard reads a list) and
+  the split returns later, so the shape is unchanged. `failedSegments` is retained
+  for the same reason and is **always empty on a 200** today.
+- **A failed build is NEVER an empty batch.** With one audience there is nothing
+  to partially succeed at: an apollo-service build failure or a relabel failure
+  **fails the request loud (502) carrying the underlying reason**, so the caller
+  is told plainly instead of receiving `candidates: []`.
 - **Two cost owners, none here.** Layer 1's LLM runs via chat-service `POST
-  /complete` (`google`, `flash-pro`, `disableThinking:true`, a Gemini
+  /complete` (`google`, `flash`, `disableThinking:true`, a Gemini
   `responseSchema` = `LAYER1_RESPONSE_SCHEMA`); chat-service owns that cost. The
   apollo build's LLM + dry-runs are owned by **apollo-service** (which calls
   chat-service internally). So **human-service still declares no cost** — the
   invariant holds.
-- **Reliability — Layer-1 retry + per-segment fault tolerance.** `chat-client`
-  retries a transient response status (502/429/503) + a missing/malformed `json`
-  field (bounded 250/500/1000ms) in addition to the connect-phase retry (NOT 4xx —
-  400/401/402 are deterministic). The per-segment apollo builds run under
-  `Promise.allSettled`: one segment's apollo-service failure doesn't nuke the
-  batch; still **fails loud (502)** when EVERY segment failed. apollo-service's
-  HTTP failures surface as a fail-loud `ProviderError` → 502 (connect-phase
-  retry via the gateway's `fetchWithConnectRetry`). An empty filter set from
-  apollo-service is honestly returned as a candidate (apollo-service confirms a
-  real audience or fails loud, so `validationError` is always null, `truncated`
-  always false — both retained for response-shape stability only).
-- **Granularity is emergent from the NL, not an input.** Input is ONLY
-  `{nlPrompt, brandId, offerId?}` — no `strategy`/count knob. Layer 1 reads the
-  caller's own segmentation intent and emits one **named** audience per implied
-  segment. `offerId` is a pure SCOPE stamped on the persisted rows (see "An
-  audience belongs to ONE offer"); it never reaches Layer 1's prompt or the
+- **Reliability.** `chat-client` retries a transient response status (502/429/503)
+  + a missing/malformed `json` field (bounded 250/500/1000ms) in addition to the
+  connect-phase retry (NOT 4xx — 400/401/402 are deterministic). apollo-service's
+  HTTP failures surface as a fail-loud `ProviderError` → 502 (connect-phase retry
+  via the gateway's `fetchWithConnectRetry`). `validationError` is always null and
+  `truncated` always false — both retained for response-shape stability only.
+- **Input is ONLY `{nlPrompt, brandId, offerId?}`** — no `strategy`/count knob and
+  no split threshold. `offerId` is a pure SCOPE stamped on the persisted row (see
+  "An audience belongs to ONE offer"); it never reaches Layer 1's prompt or the
   apollo build.
-- **Stateful — persists `suggested` rows, returns `audienceId`s.** The front
-  displays them, the user picks, and the front **activates** the chosen ones via
+- **Stateful — persists a `suggested` row, returns its `audienceId`.** The front
+  displays it, the user validates it, and the front **activates** it via
   `PATCH /orgs/audiences/{id}/status {status:"active"}` (existing endpoint, no new
-  save). Unselected `suggested` rows stay inactive (filterable via
-  `GET /orgs/audiences?status=suggested`; never surface in the brand's active view).
+  save). An unselected `suggested` row stays inactive (filterable via
+  `GET /orgs/audiences?status=suggested`; never surfaces in the brand's active view).
 - **Env vars**: `CHAT_SERVICE_URL`, `CHAT_SERVICE_API_KEY` (Layer 1) +
   `APOLLO_SERVICE_URL`, `APOLLO_SERVICE_API_KEY` (the apollo build) — read at call
   time, fail the request loudly if absent (`ChatConfigError`/`ProviderConfigError`

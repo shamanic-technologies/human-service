@@ -82,15 +82,13 @@ function list(query: string) {
 }
 
 describe("POST /orgs/audiences/suggest — offerId", () => {
-  it("persists the offer on every candidate, and the offer-scoped list returns them", async () => {
-    wire([
-      { name: "US founders", description: "founders in the US" },
-      { name: "EU founders", description: "founders in Europe" },
-    ]);
+  it("persists the offer on the candidate, and the offer-scoped list returns it", async () => {
+    // Layer 1 emits ONE audience (the split is deferred to #235).
+    wire([{ name: "US founders", description: "founders in the US" }]);
 
     const res = await suggest({ nlPrompt: "founders", offerId: OFFER_1 });
     expect(res.status).toBe(200);
-    expect(res.body.candidates).toHaveLength(2);
+    expect(res.body.candidates).toHaveLength(1);
 
     for (const c of res.body.candidates) {
       const [row] = await db
@@ -104,7 +102,7 @@ describe("POST /orgs/audiences/suggest — offerId", () => {
     expect(scoped.status).toBe(200);
     expect(
       scoped.body.audiences.map((a: { name: string }) => a.name).sort()
-    ).toEqual(["EU founders", "US founders"]);
+    ).toEqual(["US founders"]);
     expect(
       scoped.body.audiences.every((a: { offerId: string }) => a.offerId === OFFER_1)
     ).toBe(true);
