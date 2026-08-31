@@ -1194,9 +1194,24 @@ export const AudienceCandidateSchema = z
   })
   .openapi("AudienceCandidate");
 
+export const FailedSegmentSchema = z
+  .object({
+    name: z.string().openapi({
+      description: "The layer-1 segment name that failed to build.",
+    }),
+    reason: z.string().openapi({
+      description: "The underlying error message (apollo-service build or relabel failure).",
+    }),
+  })
+  .openapi("FailedSegment");
+
 export const SuggestAudiencesResponseSchema = z
   .object({
     candidates: z.array(AudienceCandidateSchema),
+    failedSegments: z.array(FailedSegmentSchema).openapi({
+      description:
+        "Segments layer 1 emitted that could NOT be built into an audience (apollo-service failure, or the relabel-from-filters call failing). Empty ⟹ the batch is complete; non-empty ⟹ PARTIAL, and the caller can tell which segments are missing instead of just receiving a shorter list. The request only fails (502) when EVERY segment failed.",
+    }),
   })
   .openapi("SuggestAudiencesResponse");
 

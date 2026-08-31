@@ -47,9 +47,13 @@ interface ApolloResp {
 // Mock both:
 // - chat-service /complete (Layer 1 — systemPrompt mentions "decompose"): segments.
 // - apollo-service /audiences/suggest-from-segment: {apolloAudienceId, filters, count}.
+// The description every relabel returns unless a test overrides it.
+const RELABELLED = "relabelled from the final filters";
+
 function wire(opts: {
   segments: Array<{ name: string; description: string }>;
   apollo?: (name: string, description: string) => ApolloResp | "503";
+  relabel?: ((message: string) => string) | "fail";
 }) {
   let seq = 0;
   const defaultApollo = (name: string): ApolloResp => ({
@@ -60,7 +64,18 @@ function wire(opts: {
   fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
     const u = String(url);
     if (u.endsWith("/complete")) {
-      const body = JSON.parse(init.body ?? "{}") as { systemPrompt: string };
+      const body = JSON.parse(init.body ?? "{}") as {
+        systemPrompt: string;
+        message: string;
+      };
+      // The relabel-from-final-filters call (#234) — ORG-BILLED, so it rides the
+      // same /complete path as layer 1 and is told apart by its system prompt.
+      if (body.systemPrompt.includes("SINGLE concise sentence")) {
+        if (opts.relabel === "fail") return err(503, "chat overloaded");
+        return ok({
+          json: { description: opts.relabel?.(body.message) ?? RELABELLED },
+        });
+      }
       if (body.systemPrompt.includes("decompose a natural-language audience")) {
         return ok({
           json: { audiences: opts.segments },
@@ -156,6 +171,12 @@ describe("POST /orgs/audiences/suggest", () => {
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
       if (u.endsWith("/complete")) {
+        if (
+          (JSON.parse(init.body ?? "{}") as { systemPrompt?: string }).systemPrompt?.includes(
+            "SINGLE concise sentence"
+          )
+        )
+          return ok({ json: { description: RELABELLED } });
         return ok({
           json: {
             audiences: [
@@ -223,8 +244,10 @@ describe("POST /orgs/audiences/suggest", () => {
       "When multiple independent axes are explicitly present"
     );
     expect(layer1Call?.systemPrompt).toMatch(
-      /Example: 3 personas\s+x 2 company types = 6 audiences/
+      /Example: 3 personas\s+x 2 company types = one audience per combination/
     );
+    // #234: no numeric audience-count target survives in the layer-1 prompt.
+    expect(layer1Call?.systemPrompt).not.toMatch(/ballpark|6-8/);
   });
 
   it("persists candidates at status 'suggested' (inactive) and exposes them via GET ?status=suggested", async () => {
@@ -293,6 +316,12 @@ describe("POST /orgs/audiences/suggest", () => {
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
       if (u.endsWith("/complete")) {
+        if (
+          (JSON.parse(init.body ?? "{}") as { systemPrompt?: string }).systemPrompt?.includes(
+            "SINGLE concise sentence"
+          )
+        )
+          return ok({ json: { description: RELABELLED } });
         const body = JSON.parse(init.body ?? "{}");
         completeBodies.push(body);
         return ok({ json: { audiences: [{ name: "CMOs", description: "cmos" }] } });
@@ -319,6 +348,12 @@ describe("POST /orgs/audiences/suggest", () => {
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
       if (u.endsWith("/complete")) {
+        if (
+          (JSON.parse(init.body ?? "{}") as { systemPrompt?: string }).systemPrompt?.includes(
+            "SINGLE concise sentence"
+          )
+        )
+          return ok({ json: { description: RELABELLED } });
         const body = JSON.parse(init.body ?? "{}") as { systemPrompt: string };
         if (body.systemPrompt.includes("decompose a natural-language audience")) {
           layer1Calls++;
@@ -356,6 +391,12 @@ describe("POST /orgs/audiences/suggest", () => {
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
       if (u.endsWith("/complete")) {
+        if (
+          (JSON.parse(init.body ?? "{}") as { systemPrompt?: string }).systemPrompt?.includes(
+            "SINGLE concise sentence"
+          )
+        )
+          return ok({ json: { description: RELABELLED } });
         return ok({
           json: {
             audiences: [
@@ -393,6 +434,85 @@ describe("POST /orgs/audiences/suggest", () => {
     wire({ segments: [{ name: "X", description: "x" }] });
     const res = await suggest("anyone");
     expect(res.status).toBe(502);
+  });
+
+  // --- #234: the stored label is derived from the FINAL filters ---
+
+  it("relabels the persisted description from the audience's final filters, not from layer 1", async () => {
+    wire({
+      segments: [
+        { name: "Swiss Drogerien", description: "layer-1 input specification" },
+      ],
+      apollo: () => ({
+        apolloAudienceId: "a-swiss",
+        filters: { organizationKeywords: ["drogerie"] },
+        count: 42,
+      }),
+      relabel: (message) => {
+        // The relabel sees the row's own name + the FINAL filters — never the
+        // layer-1 description, and never the batch nlPrompt.
+        expect(message).toContain("Swiss Drogerien");
+        expect(message).toContain("drogerie");
+        expect(message).not.toContain("layer-1 input specification");
+        return "owners of independent drugstores in Switzerland";
+      },
+    });
+    const res = await suggest("psyllium buyers in swiss drugstores");
+    expect(res.status).toBe(200);
+    expect(res.body.candidates[0].rationale).toBe(
+      "owners of independent drugstores in Switzerland"
+    );
+    const [row] = await db.select().from(audiences);
+    expect(row.description).toBe("owners of independent drugstores in Switzerland");
+  });
+
+  it("fails the segment (no fallback) when the relabel call fails, and reports it", async () => {
+    wire({ segments: [{ name: "Alpha", description: "a" }, { name: "Beta", description: "b" }], relabel: "fail" });
+    const res = await suggest("alpha and beta");
+    expect(res.status).toBe(502); // every segment failed
+  });
+
+  // --- #234: a partial batch says which segments were lost ---
+
+  it("reports the segments that failed to build in failedSegments", async () => {
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/complete")) {
+        if (
+          (JSON.parse(init.body ?? "{}") as { systemPrompt?: string }).systemPrompt?.includes(
+            "SINGLE concise sentence"
+          )
+        )
+          return ok({ json: { description: RELABELLED } });
+        return ok({
+          json: {
+            audiences: [
+              { name: "Good", description: "good seg" },
+              { name: "Bad", description: "bad seg" },
+            ],
+          },
+        });
+      }
+      if (u.endsWith("/audiences/suggest-from-segment")) {
+        const body = JSON.parse(init.body ?? "{}") as { description: string };
+        if (body.description.includes("bad seg")) return err(503, "apollo overloaded");
+        return ok({ apolloAudienceId: "a-good", filters: { personTitles: ["X"] }, count: 300 });
+      }
+      throw new Error("unexpected url " + u);
+    });
+    const res = await suggest("good and bad");
+    expect(res.status).toBe(200);
+    expect(res.body.candidates).toHaveLength(1);
+    expect(res.body.failedSegments).toHaveLength(1);
+    expect(res.body.failedSegments[0].name).toBe("Bad");
+    expect(res.body.failedSegments[0].reason).toBeTruthy();
+  });
+
+  it("returns an EMPTY failedSegments when the batch is complete", async () => {
+    wire({ segments: [{ name: "Alpha", description: "a" }] });
+    const res = await suggest("alpha");
+    expect(res.status).toBe(200);
+    expect(res.body.failedSegments).toEqual([]);
   });
 
   it("400 when nlPrompt is missing", async () => {

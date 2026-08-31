@@ -1231,10 +1231,18 @@
             "items": {
               "$ref": "#/components/schemas/AudienceCandidate"
             }
+          },
+          "failedSegments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FailedSegment"
+            },
+            "description": "Segments layer 1 emitted that could NOT be built into an audience (apollo-service failure, or the relabel-from-filters call failing). Empty ⟹ the batch is complete; non-empty ⟹ PARTIAL, and the caller can tell which segments are missing instead of just receiving a shorter list. The request only fails (502) when EVERY segment failed."
           }
         },
         "required": [
-          "candidates"
+          "candidates",
+          "failedSegments"
         ]
       },
       "AudienceCandidate": {
@@ -1311,6 +1319,23 @@
           "deprecated"
         ],
         "description": "Always 'suggested' (inactive) for a freshly-suggested audience."
+      },
+      "FailedSegment": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The layer-1 segment name that failed to build."
+          },
+          "reason": {
+            "type": "string",
+            "description": "The underlying error message (apollo-service build or relabel failure)."
+          }
+        },
+        "required": [
+          "name",
+          "reason"
+        ]
       },
       "SuggestAudiencesRequest": {
         "type": "object",

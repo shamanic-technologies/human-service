@@ -865,6 +865,19 @@ export interface AudienceCandidate {
   truncated: boolean;
 }
 
+// A layer-1 segment whose apollo build (or its relabel) failed. Returned to the
+// caller so a PARTIAL batch is distinguishable from a complete one — the batch
+// used to silently come back shorter with no explanation.
+export interface FailedSegment {
+  name: string;
+  reason: string;
+}
+
+export interface SuggestAudiencesResult {
+  candidates: AudienceCandidate[];
+  failedSegments: FailedSegment[];
+}
+
 // --- Layer 1: decompose NL into named audiences ---
 
 interface Segment {
@@ -878,11 +891,12 @@ interface Segment {
 export function buildLayer1SystemPrompt(): string {
   return [
     "You decompose a natural-language audience request into a SET of distinct,",
-    "named target audiences. Be GENEROUS: aim for a RICH set -- ballpark 6-8",
-    "audiences as an order of magnitude, and MORE is fine when the request",
-    "supports it. A larger, well-partitioned set is better than a few broad",
-    "buckets, because each audience maps to its own tighter people-search filter",
-    "set and gets contacted with a more relevant angle.",
+    "named target audiences. Emit THE PARTITION THE REQUEST ACTUALLY IMPLIES --",
+    "no more, no fewer. There is no audience-count target: ONE audience is a",
+    "correct answer when the request implies one, and a dozen is correct when it",
+    "implies a dozen. Split where the split is REAL (a segment that is genuinely",
+    "contacted with a different angle, or that maps to a different people-search",
+    "filter set); never split to make the list look richer.",
     "",
     "THE ONE INVARIANT -- you are PARTITIONING the audience the caller asked for,",
     "never redefining it. Every audience you emit is a SUBSET of the request, and",
@@ -902,9 +916,9 @@ export function buildLayer1SystemPrompt(): string {
     "(A) EXPLICIT axes -- values the caller actually stated.",
     "When multiple independent axes are explicitly present, output the concrete",
     "COMBINATIONS of those axes, not a broad merged bucket. Example: 3 personas",
-    "x 2 company types = 6 audiences. Each combination gets its OWN audience",
+    "x 2 company types = one audience per combination. Each combination gets its OWN audience",
     "because each maps to a different people-search filter set. E.g. \"PR",
-    "boutiques and communication agencies\" = 2 audiences; \"founders and heads",
+    "boutiques and communication agencies\" = one audience each; \"founders and heads",
     "of growth\" = one per role;",
     "\"companies using Salesforce or HubSpot\" = one per technology.",
     "",
@@ -919,7 +933,11 @@ export function buildLayer1SystemPrompt(): string {
     "unspecified and pertinent:",
     "  - GEOGRAPHY (primary lever): North America + Europe + Africa + Asia +",
     "    South/Central America (drop or refine regions that are clearly out of",
-    "    scope; if partly specified, partition MECE within what remains).",
+    "    scope; if partly specified, partition MECE within what remains). When",
+    "    the request is already ONE COUNTRY, the next notch down is that",
+    "    country's own administrative subdivisions -- cantons in Switzerland,",
+    "    states in the US or Germany, provinces in Canada, regions in France --",
+    "    each named explicitly, together covering the requested territory.",
     "  - REVENUE: explode into contiguous ranges (e.g. <$1M, $1M-$10M, $10M-$50M,",
     "    $50M-$250M, $250M+).",
     "  - EMPLOYEE SIZE: explode into contiguous headcount bands (e.g. 1-10,",
@@ -927,16 +945,29 @@ export function buildLayer1SystemPrompt(): string {
     "  - FUNDING STAGE: explode into stages (e.g. Bootstrapped/no-funding, Seed,",
     "    Series A, Series B, Series C+; add an Unknown/other bucket if useful).",
     "",
-    "Reaching the 6-8+ target: pick the axis (or a few axes) that make the most",
-    "BUSINESS sense to partition -- geography is usually the strongest first",
-    "lever, and it always subdivides one notch further (a country into its",
-    "regions, a region into its states). You do NOT have to take the full",
-    "cartesian product of every axis (that yields absurd 100+ tiny buckets);",
-    "explode generously but sensibly to reach a rich set. You reach the target by",
-    "subdividing an axis further, NEVER by widening WHO the audience is about. If",
-    "the caller is explicit about grouping (\"US and Europe separately\", \"one broad",
-    "list\"), honor that intent exactly -- a caller who asks for one broad list",
-    "gets one audience.",
+    "Choosing the axis: pick the one (or few) that make the most BUSINESS sense",
+    "to partition -- geography is usually the strongest first lever, and it",
+    "always subdivides one notch further (a continent into countries, a single",
+    "country into ITS OWN administrative subdivisions -- cantons, states,",
+    "provinces, regions, Laender). You do NOT take the full cartesian product of",
+    "every axis (that yields absurd tiny buckets); partition where the split is",
+    "real. When a partition needs to be finer, you get there by subdividing an axis further,",
+    "NEVER by widening WHO the audience is about. If the caller is",
+    "explicit about grouping (\"US and Europe separately\", \"one broad list\"),",
+    "honor that intent exactly -- a caller who asks for one broad list gets one",
+    "audience.",
+    "",
+    "EVERY PARTITION VALUE IS STATED POSITIVELY. Name the members of the slice,",
+    "never what it leaves out: never \"outside X\", never \"other than Y\", never",
+    "\"the rest of Z\". \"German-speaking Switzerland outside of Zurich\" is not a",
+    "partition value -- the partition values are the remaining cantons, listed by",
+    "name (Bern, Basel-Stadt, Aargau, St. Gallen, Lucerne, ...). A downstream",
+    "expert can search for places that ARE something; it cannot search for the",
+    "absence of a place, so a negatively-stated slice silently loses its",
+    "geography altogether. (This is about the PARTITION VALUE only: a constraint",
+    "the CALLER stated as an exclusion -- \"excluding pharmacies\", \"not",
+    "recruiters\" -- is a caller constraint and you carry it verbatim into every",
+    "audience.)",
     "",
     "Keep partitions MECE so no person is double-counted across audiences, and do",
     "not merge two distinct segments merely because they share other constraints.",
@@ -966,6 +997,20 @@ export function buildLayer1SystemPrompt(): string {
     "    \"director\", \"manager\", \"partner\", \"administrator\" each match any",
     "    business on earth. Bind every one of them to the occupation or sector the",
     '    caller asked for: "owner of a chiropractic practice", not "owner".',
+    "  - The client's own PRODUCT is NEVER a targeting attribute. Nobody's",
+    "    profile says which product they buy, so a product name in your sentence",
+    "    becomes a free-text search term that matches nothing and takes the rest",
+    "    of the audience down with it. Target the thing that IS on a profile: the",
+    "    shop or company TYPE, the occupation, the sector the product is sold",
+    "    into. \"buyers of psyllium husk products\" is wrong; \"independent",
+    "    drugstores and organic food shops\" is right.",
+    "  - BUYING INTENT IS NOT A JOB TITLE. \"the people relevant to buy X\" names a",
+    "    ROLE IN THE BUSINESS, not a procurement job title, and in a small",
+    "    business the person who buys is the owner or manager of the shop. Do NOT",
+    "    narrow a stated buying intent into \"buyer\", \"purchasing manager\" or",
+    "    \"head of procurement\" unless the CALLER named those roles -- write the",
+    "    decision-maker of the business instead (\"owners and managers of\" the",
+    "    shop type).",
     "  - Carry EVERY constraint the caller stated, plus the partition value you",
     "    assigned this audience (its region / revenue band / size band / funding",
     "    stage / role / company type), and nothing else. State that partition",
@@ -1060,23 +1105,33 @@ function buildDescriptionSystemPrompt(): string {
 // Runs via chat-service's ORG-LESS platform path (platformCompleteJson) so a
 // historical backfill does not bill users' orgs; chat-service owns the cost.
 // Same Gemini schemaless-JSON setup the /suggest layer-1 uses.
+// `identity` (#234): when the call rides an ORG-SCOPED request — the /suggest
+// relabel — the org pays, using the SAME identity the request already carries
+// (the platform path would be a convenience dodge). Omitted ⟹ the ORG-LESS
+// platform path, which is what the historical backfill sweep needs (billing
+// users' orgs retroactively would be wrong, and a sweep-all-orgs job has no
+// x-user-id). chat-service owns the cost either way; human-service declares none.
 export async function generateAudienceDescription(args: {
   name: string;
   filters: unknown;
+  identity?: Identity;
 }): Promise<string> {
   const message = [
     `Audience name: ${JSON.stringify(args.name)}`,
     "Filters (neutral PeopleSearchFilters JSON):",
     JSON.stringify(args.filters ?? {}),
   ].join("\n");
-  const json = await platformCompleteJson({
+  const completeArgs = {
     message,
     systemPrompt: buildDescriptionSystemPrompt(),
     provider: SUGGEST_LLM_PROVIDER,
     model: SUGGEST_LLM_MODEL,
     responseSchema: DESCRIPTION_RESPONSE_SCHEMA,
     disableThinking: SUGGEST_DISABLE_THINKING,
-  });
+  };
+  const json = args.identity
+    ? await completeJson({ ...completeArgs, identity: args.identity })
+    : await platformCompleteJson(completeArgs);
   const description = json.description;
   if (typeof description !== "string" || description.trim().length === 0) {
     throw new AudienceDescriptionError(
@@ -1216,7 +1271,7 @@ export async function suggestAudiences(
   brandId: string,
   identity: Identity,
   offerId: string | null = null
-): Promise<AudienceCandidate[]> {
+): Promise<SuggestAudiencesResult> {
   const segments = await decomposeSegments(nlPrompt, identity);
 
   // One apollo-service call per segment — concurrent but BOUNDED + fault-tolerant.
@@ -1236,7 +1291,26 @@ export async function suggestAudiences(
         brandId,
         identity,
       });
-      return { segment, apollo };
+      // RELABEL from the FINAL filters, before insert. The layer-1 description is
+      // the INPUT SPECIFICATION; `apollo.filters` is what apollo-service actually
+      // BUILT, and nothing kept the two in sync — so a customer could read
+      // "organic shops in the canton of Zurich" over a Switzerland-wide retail
+      // filter set. `generateAudienceDescription` derives the sentence from the
+      // row's own filters and is instructed not to invent a constraint the
+      // filters do not encode. This is a LABELLING fix only: it does not make a
+      // bad audience good (apollo-service's own grader owns that), it stops the
+      // stored label from promising something the row does not deliver.
+      // The NAME is deliberately NOT regenerated: it is the idempotency key
+      // (unique on (org, brand, offer, lower(name))), so renaming a re-suggested
+      // segment would duplicate the row instead of refreshing it.
+      // No fallback — a relabel failure fails THIS segment, exactly like an
+      // apollo build failure, and is reported to the caller.
+      const description = await generateAudienceDescription({
+        name: segment.name,
+        filters: apollo.filters,
+        identity,
+      });
+      return { segment: { name: segment.name, description }, apollo };
     }
   );
 
@@ -1253,6 +1327,17 @@ export async function suggestAudiences(
 
   const failures = settled.filter(
     (r): r is PromiseRejectedResult => r.status === "rejected"
+  );
+  const failedSegments: FailedSegment[] = settled.flatMap((r, i) =>
+    r.status === "rejected"
+      ? [
+          {
+            name: segments[i].name,
+            reason:
+              r.reason instanceof Error ? r.reason.message : String(r.reason),
+          },
+        ]
+      : []
   );
   if (failures.length > 0) {
     console.error(
@@ -1292,7 +1377,7 @@ export async function suggestAudiences(
       truncated: false,
     });
   }
-  return out;
+  return { candidates: out, failedSegments };
 }
 
 // --- apify→apollo migration (one-time) ---

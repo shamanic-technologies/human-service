@@ -56,7 +56,7 @@ describe("Layer 1 split prompt", () => {
     expect(prompt).toContain("small is a correct answer");
     expect(prompt).toContain("reason to widen WHO");
     // The count target is reached by subdividing further, never by widening.
-    expect(prompt).toContain("subdividing an axis further");
+    expect(lower).toContain("subdividing an axis further");
     expect(prompt).toContain("NEVER by widening WHO");
   });
 
@@ -97,19 +97,65 @@ describe("Layer 1 split prompt", () => {
     }
   });
 
-  it("keeps the pre-existing split behaviour: rich set target + explicit-axis combinations", () => {
-    // Kevin kept the 6-8 order of magnitude deliberately: it is reachable MECE-ly
-    // (geography always subdivides one notch further), so it is not the defect.
-    expect(prompt).toContain("ballpark 6-8");
-    expect(prompt).toContain("MORE is fine");
+  it("carries NO numeric audience-count target", () => {
+    // A numeric target in a prompt is the documented prime suspect for
+    // fabrication (CLAUDE.md), and it collides with apollo-service's grader,
+    // which refuses to bless filler. The partition the request implies is the
+    // whole instruction; one audience is a correct answer.
+    expect(lower).not.toContain("ballpark");
+    expect(lower).not.toContain("6-8");
+    expect(prompt).not.toMatch(/\b\d+\s*(-\s*\d+\s*)?audiences\b/);
+    expect(prompt).toContain("There is no audience-count target");
+    expect(prompt).toContain("ONE audience is a");
+    expect(prompt).toContain("never split to make the list look richer");
+  });
+
+  it("keeps the explicit-axis combination behaviour", () => {
     // Assertions also relied on by tests/integration/audiences-suggest.test.ts —
     // each must stay on ONE array line so `.includes` still matches after join.
     expect(prompt).toContain("decompose a natural-language audience");
     expect(prompt).toContain("When multiple independent axes are explicitly present");
-    expect(prompt).toMatch(/Example: 3 personas\s+x 2 company types = 6 audiences/);
+    expect(prompt).toMatch(
+      /Example: 3 personas\s+x 2 company types = one audience per combination/
+    );
     // The default firmographic partition axes stay available.
     for (const axis of ["GEOGRAPHY", "REVENUE", "EMPLOYEE SIZE", "FUNDING STAGE"]) {
       expect(prompt).toContain(axis);
     }
+  });
+
+  it("forbids the client's PRODUCT as a targeting attribute", () => {
+    // Prod (#234): "Buyers and purchasing managers of psyllium husk products"
+    // licensed a free-text keyword search for psyllium -> 0 matches -> the
+    // builder dropped the product AND the geography. The targetable concept is
+    // the shop type.
+    expect(prompt).toContain("PRODUCT is NEVER a targeting attribute");
+    expect(prompt).toContain("shop or company TYPE");
+  });
+
+  it("forbids rendering a buying INTENT as a procurement job title", () => {
+    // A Swiss drogerie has 2-5 employees: there is no purchasing manager, the
+    // owner buys. Measured in Apollo: procurement titles = 52 people country-wide
+    // vs 1,919 with decision-maker seniority.
+    expect(prompt).toContain("BUYING INTENT IS NOT A JOB TITLE");
+    expect(prompt).toContain("unless the CALLER named those roles");
+    expect(lower).toContain('"purchasing manager"');
+  });
+
+  it("requires every PARTITION VALUE to be stated positively", () => {
+    // Apollo has no person-location exclusion, so "German-speaking Switzerland
+    // outside of Zurich" is inexpressible and the builder resolved it by
+    // deleting the geography. The rule is about FORM, not provider vocabulary.
+    expect(prompt).toContain("EVERY PARTITION VALUE IS STATED POSITIVELY");
+    expect(prompt).toContain('never "outside X"');
+    expect(prompt).toContain('never "other than Y"');
+    // A caller-stated SECTOR exclusion is a caller constraint and still travels.
+    expect(prompt).toContain("is a caller constraint and you carry it verbatim");
+  });
+
+  it("partitions a single country into its own administrative subdivisions", () => {
+    expect(prompt).toContain("administrative subdivisions");
+    expect(lower).toContain("cantons");
+    expect(prompt).toContain("each named explicitly");
   });
 });
