@@ -1141,7 +1141,7 @@ export const SuggestAudiencesRequestSchema = z
   .object({
     nlPrompt: z.string().min(1).openapi({
       description:
-        "Natural-language audience description. The LLM reads the caller's own granularity intent from this text (e.g. 'split by country', 'founders in FR and DE separately') and emits one candidate per implied segment — granularity and count are NOT separate inputs.",
+        "Natural-language audience description. Layer 1 restates it as ONE audience — the request is never split (the split is deferred to the post-validation A/B-split step). The response is still a list: an array of one.",
     }),
     brandId: z.string().uuid(),
     offerId: z.string().uuid().optional().openapi({
@@ -1159,7 +1159,7 @@ export const AudienceCandidateSchema = z
     }),
     name: z.string().openapi({
       description:
-        "Short human label for this audience (<=4 words), shared across providers — the layer-1 segment name.",
+        "Short human label for this audience (<=4 words), shared across providers — the layer-1 name.",
     }),
     rationale: z.string().openapi({
       description: "One-sentence description of who this audience targets.",
@@ -1170,7 +1170,7 @@ export const AudienceCandidateSchema = z
     }),
     apolloAudienceId: z.string().openapi({
       description:
-        "Pointer to the faithful Apollo audience apollo-service built + persisted for this segment.",
+        "Pointer to the faithful Apollo audience apollo-service built + persisted for this audience.",
     }),
     filters: z.record(z.string(), z.unknown()).openapi({
       description:
@@ -1189,7 +1189,7 @@ export const AudienceCandidateSchema = z
     }),
     truncated: z.boolean().openapi({
       description:
-        "Reserved for response compatibility. Current Layer 1 has no hard cap, so freshly suggested candidates return false.",
+        "Reserved for response compatibility. Layer 1 has no hard cap, so freshly suggested candidates return false.",
     }),
   })
   .openapi("AudienceCandidate");
@@ -1197,7 +1197,7 @@ export const AudienceCandidateSchema = z
 export const FailedSegmentSchema = z
   .object({
     name: z.string().openapi({
-      description: "The layer-1 segment name that failed to build.",
+      description: "The layer-1 audience name that failed to build.",
     }),
     reason: z.string().openapi({
       description: "The underlying error message (apollo-service build or relabel failure).",
@@ -1210,7 +1210,7 @@ export const SuggestAudiencesResponseSchema = z
     candidates: z.array(AudienceCandidateSchema),
     failedSegments: z.array(FailedSegmentSchema).openapi({
       description:
-        "Segments layer 1 emitted that could NOT be built into an audience (apollo-service failure, or the relabel-from-filters call failing). Empty ⟹ the batch is complete; non-empty ⟹ PARTIAL, and the caller can tell which segments are missing instead of just receiving a shorter list. The request only fails (502) when EVERY segment failed.",
+        "Retained for response-shape stability (the split returns later). Layer 1 emits ONE audience today, so a failed build FAILS the request LOUD (502 carrying the underlying reason) rather than returning an empty list — this array is therefore always empty on a 200.",
     }),
   })
   .openapi("SuggestAudiencesResponse");

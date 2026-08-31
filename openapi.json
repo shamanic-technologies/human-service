@@ -1237,7 +1237,7 @@
             "items": {
               "$ref": "#/components/schemas/FailedSegment"
             },
-            "description": "Segments layer 1 emitted that could NOT be built into an audience (apollo-service failure, or the relabel-from-filters call failing). Empty ⟹ the batch is complete; non-empty ⟹ PARTIAL, and the caller can tell which segments are missing instead of just receiving a shorter list. The request only fails (502) when EVERY segment failed."
+            "description": "Retained for response-shape stability (the split returns later). Layer 1 emits ONE audience today, so a failed build FAILS the request LOUD (502 carrying the underlying reason) rather than returning an empty list — this array is therefore always empty on a 200."
           }
         },
         "required": [
@@ -1255,7 +1255,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Short human label for this audience (<=4 words), shared across providers — the layer-1 segment name."
+            "description": "Short human label for this audience (<=4 words), shared across providers — the layer-1 name."
           },
           "rationale": {
             "type": "string",
@@ -1270,7 +1270,7 @@
           },
           "apolloAudienceId": {
             "type": "string",
-            "description": "Pointer to the faithful Apollo audience apollo-service built + persisted for this segment."
+            "description": "Pointer to the faithful Apollo audience apollo-service built + persisted for this audience."
           },
           "filters": {
             "type": "object",
@@ -1293,7 +1293,7 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "Reserved for response compatibility. Current Layer 1 has no hard cap, so freshly suggested candidates return false."
+            "description": "Reserved for response compatibility. Layer 1 has no hard cap, so freshly suggested candidates return false."
           }
         },
         "required": [
@@ -1325,7 +1325,7 @@
         "properties": {
           "name": {
             "type": "string",
-            "description": "The layer-1 segment name that failed to build."
+            "description": "The layer-1 audience name that failed to build."
           },
           "reason": {
             "type": "string",
@@ -1343,7 +1343,7 @@
           "nlPrompt": {
             "type": "string",
             "minLength": 1,
-            "description": "Natural-language audience description. The LLM reads the caller's own granularity intent from this text (e.g. 'split by country', 'founders in FR and DE separately') and emits one candidate per implied segment — granularity and count are NOT separate inputs."
+            "description": "Natural-language audience description. Layer 1 restates it as ONE audience — the request is never split (the split is deferred to the post-validation A/B-split step). The response is still a list: an array of one."
           },
           "brandId": {
             "type": "string",
