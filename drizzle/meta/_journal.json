@@ -162,6 +162,13 @@
       "when": 1771587966893,
       "tag": "0022_add_suppression_backfills",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1771587966894,
+      "tag": "0023_add_audience_degraded",
+      "breakpoints": true
     }
   ]
 }

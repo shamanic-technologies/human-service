@@ -37,6 +37,9 @@ interface ApolloResp {
   apolloAudienceId: string;
   filters: Record<string, unknown>;
   count: number;
+  // apollo-service#228: additive on their side, so the default mock deliberately
+  // OMITS it — that is what an older apollo-service deploy looks like on the wire.
+  degraded?: boolean;
 }
 
 // "One filter vocabulary" Wave 2: human-service runs ONLY Layer 1 (via
@@ -475,6 +478,58 @@ describe("POST /orgs/audiences/suggest", () => {
     const res = await suggest("alpha");
     expect(res.status).toBe(200);
     expect(res.body.failedSegments).toEqual([]);
+  });
+
+  // --- degraded: apollo-service's verdict, carried through and persisted ---
+
+  it("carries degraded:true onto the candidate AND the persisted row", async () => {
+    wire({
+      segments: [{ name: "Off Target", description: "nobody the grader liked" }],
+      apollo: () => ({
+        apolloAudienceId: "apollo-degraded",
+        filters: { personTitles: ["Anything"] },
+        count: 42,
+        degraded: true,
+      }),
+    });
+    const res = await suggest("something the builder cannot hit");
+    expect(res.status).toBe(200);
+    expect(res.body.candidates[0].degraded).toBe(true);
+    // Not a gate: the audience is still built, still persisted, still suggested.
+    expect(res.body.candidates[0].status).toBe("suggested");
+    const rows = await db.select().from(audiences);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].degraded).toBe(true);
+  });
+
+  it("round-trips degraded on a later read of the audience", async () => {
+    wire({
+      segments: [{ name: "Off Target", description: "nobody the grader liked" }],
+      apollo: () => ({
+        apolloAudienceId: "apollo-degraded",
+        filters: { personTitles: ["Anything"] },
+        count: 42,
+        degraded: true,
+      }),
+    });
+    const suggested = await suggest("something the builder cannot hit");
+    const audienceId = suggested.body.candidates[0].audienceId as string;
+
+    const read = await request(app)
+      .get(`/orgs/audiences/${audienceId}`)
+      .set(getAuthHeaders());
+    expect(read.status).toBe(200);
+    expect(read.body.audience.degraded).toBe(true);
+  });
+
+  it("treats an apollo-service response WITHOUT the field as degraded:false", async () => {
+    // The default mock omits `degraded` entirely — an older apollo-service deploy.
+    wire({ segments: [{ name: "Fine", description: "a good audience" }] });
+    const res = await suggest("a good audience");
+    expect(res.status).toBe(200);
+    expect(res.body.candidates[0].degraded).toBe(false);
+    const rows = await db.select().from(audiences);
+    expect(rows[0].degraded).toBe(false);
   });
 
   it("400 when nlPrompt is missing", async () => {

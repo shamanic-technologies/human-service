@@ -5,6 +5,7 @@ import {
   timestamp,
   integer,
   jsonb,
+  boolean,
   index,
   uniqueIndex,
   type AnyPgColumn,
@@ -479,6 +480,17 @@ export const audiences = pgTable(
     apolloCount: integer("apollo_count"),
     apifyCount: integer("apify_count"),
     countedAt: timestamp("counted_at", { withTimezone: true }),
+    // apollo-service's own verdict on the filter set it built for this audience.
+    // Its refine loop grades each candidate against the described target; when no
+    // candidate is judged a good fit it returns the best attempt anyway, flagged
+    // `degraded: true` (apollo-service#228), so onboarding shows something the
+    // customer can judge and reject rather than an error screen. Persisted here so
+    // the verdict survives the request that created the row and any later read
+    // surfaces the same truth. NOT NULL, default false — false is the truthful
+    // value for rows created before the concept existed, and for a build
+    // apollo-service does not flag (an older deploy sends no field at all). It is
+    // INFORMATION only: nothing in this service filters, blocks or warns on it.
+    degraded: boolean("degraded").notNull().default(false),
     // True reachable-pool ceiling, learned when serve-next fully EXHAUSTS the
     // provider pool: at that point the count of distinct members we materialized
     // IS the reachable pool (everyone with a usable email we could serve). The

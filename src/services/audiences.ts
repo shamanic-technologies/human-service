@@ -863,6 +863,12 @@ export interface AudienceCandidate {
   // is never truncated — always null / false.
   validationError: string | null;
   truncated: boolean;
+  // apollo-service's verdict on the filter set it built: true when its refine
+  // loop judged no candidate a good fit and returned the best attempt anyway
+  // (apollo-service#228). INFORMATION for the caller — nothing here blocks,
+  // filters or warns on it. false when apollo-service does not flag the build,
+  // including when an older deploy sends no field at all.
+  degraded: boolean;
 }
 
 // A layer-1 segment whose apollo build (or its relabel) failed. Returned to the
@@ -1285,6 +1291,7 @@ async function persistSuggestedAudience(args: {
   apolloAudienceId: string;
   filters: ApolloFilters;
   count: number;
+  degraded: boolean;
 }): Promise<string> {
   const orgId = args.identity.orgId;
   return db.transaction(async (tx) => {
@@ -1313,6 +1320,7 @@ async function persistSuggestedAudience(args: {
             filters: args.filters as Record<string, unknown>,
             apolloCount: args.count,
             countedAt: new Date(),
+            degraded: args.degraded,
             nlPrompt: args.nlPrompt,
             description: args.segment.description,
             updatedAt: new Date(),
@@ -1337,6 +1345,7 @@ async function persistSuggestedAudience(args: {
         filters: args.filters as Record<string, unknown>,
         apolloCount: args.count,
         countedAt: new Date(),
+        degraded: args.degraded,
         createdByUserId: args.identity.userId ?? null,
       })
       .returning({ id: audiences.id });
@@ -1426,6 +1435,7 @@ export async function suggestAudiences(
     apolloAudienceId: apollo.apolloAudienceId,
     filters: apollo.filters,
     count: apollo.count,
+    degraded: apollo.degraded,
   });
 
   return {
@@ -1441,6 +1451,7 @@ export async function suggestAudiences(
         status: SUGGEST_STATUS,
         validationError: null,
         truncated: false,
+        degraded: apollo.degraded,
       },
     ],
     failedSegments: [],
@@ -1682,6 +1693,7 @@ export async function migrateApifyAudienceToApollo(
         filters: built.filters as Record<string, unknown>,
         apolloCount: built.count,
         countedAt: new Date(),
+        degraded: built.degraded,
         createdByUserId: row.createdByUserId,
       })
       .returning({ id: audiences.id });
@@ -1744,6 +1756,7 @@ export async function backfillApolloAudiencePointer(
       filters: built.filters as Record<string, unknown>,
       apolloCount: built.count,
       countedAt: new Date(),
+      degraded: built.degraded,
       updatedAt: new Date(),
     })
     .where(eq(audiences.id, row.id));
