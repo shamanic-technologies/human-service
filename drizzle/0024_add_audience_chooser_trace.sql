@@ -1,0 +1,26 @@
+-- Persist the chooser's whole decision on the audience it chose.
+--
+-- /suggest picks ONE audience out of every filter set apollo-service explored,
+-- and until now that decision was consumed and thrown away: the row kept the
+-- winner and the `degraded` flag, and nothing about what else was on offer or
+-- why it lost. So the only way to ask "did the chooser weigh the bigger, less
+-- constrained candidate, or did it never look at it?" was to infer intent from
+-- the outcome — which is exactly what was done, four times over, for the three
+-- apollo-side selection mechanisms that degenerated before this one.
+--
+-- The trace carries every candidate (its apollo audience id, live count, filter
+-- set, the filter FIELDS it used, a reduced sample of who it matched, whether it
+-- was chosen, and one sentence of rationale) plus the overall verdict (why the
+-- winner won, the degraded value and the reason given for it).
+--
+-- ON THE CHOSEN ROW rather than in a table of its own: the rejected candidates
+-- are not `audiences` rows — they live in apollo-service — so a join table would
+-- create cross-service references. A compact snapshot makes the whole decision
+-- readable in one query.
+--
+-- NULLABLE, with no default: null means "no decision was recorded for this row",
+-- which is the truthful value for every audience created before the chooser
+-- existed and for every audience that was not born of a /suggest choice. It is
+-- an audit record only — nothing in this service reads it to decide anything.
+ALTER TABLE audiences
+  ADD COLUMN IF NOT EXISTS chooser_trace jsonb;

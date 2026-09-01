@@ -169,6 +169,13 @@
       "when": 1771587966894,
       "tag": "0023_add_audience_degraded",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1771587966895,
+      "tag": "0024_add_audience_chooser_trace",
+      "breakpoints": true
     }
   ]
 }

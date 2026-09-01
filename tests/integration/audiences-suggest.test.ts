@@ -80,9 +80,23 @@ const CHOOSER_MARKER = "YOU PICK EXACTLY ONE";
 interface ChooserAnswer {
   chosen?: unknown;
   why?: string;
+  // One sentence per attempt, including the ones it did not take. Omitted ⇒ the
+  // harness synthesises full coverage from the attempt count in the message.
+  rationales?: unknown;
   name?: string;
   description?: string;
   degraded?: boolean;
+  degradedReason?: string;
+}
+
+// Full coverage, derived from the rendered candidate list, so every inline mock
+// answers the way a real chooser must: a sentence for every attempt.
+function defaultRationales(message: string): Array<{ attempt: number; rationale: string }> {
+  const n = Number(/THE (\d+) ATTEMPTS/.exec(message)?.[1] ?? "1");
+  return Array.from({ length: n }, (_, i) => ({
+    attempt: i + 1,
+    rationale: `attempt ${i + 1}: accounted for by the test harness`,
+  }));
 }
 
 function wire(opts: {
@@ -116,9 +130,11 @@ function wire(opts: {
           json: {
             chosen: answer.chosen ?? 1,
             why: answer.why ?? "its sample is recognisably the target",
+            rationales: answer.rationales ?? defaultRationales(body.message),
             name: answer.name ?? opts.segments[0].name,
             description: answer.description ?? CHOSEN_DESCRIPTION,
             degraded: answer.degraded ?? false,
+            degradedReason: answer.degradedReason ?? "",
           },
         });
       }
@@ -246,6 +262,7 @@ describe("POST /orgs/audiences/suggest", () => {
             json: {
               chosen: 1,
               why: "w",
+              rationales: [{ attempt: 1, rationale: "the only attempt offered" }],
               name: CHOSEN_NAME,
               description: CHOSEN_DESCRIPTION,
               degraded: false,
@@ -382,6 +399,7 @@ describe("POST /orgs/audiences/suggest", () => {
             json: {
               chosen: 1,
               why: "w",
+              rationales: [{ attempt: 1, rationale: "the only attempt offered" }],
               name: CHOSEN_NAME,
               description: CHOSEN_DESCRIPTION,
               degraded: false,
@@ -422,6 +440,7 @@ describe("POST /orgs/audiences/suggest", () => {
             json: {
               chosen: 1,
               why: "w",
+              rationales: [{ attempt: 1, rationale: "the only attempt offered" }],
               name: CHOSEN_NAME,
               description: CHOSEN_DESCRIPTION,
               degraded: false,
@@ -709,6 +728,74 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(row.apolloCount).toBe(659);
   });
 
+  it("persists the WHOLE decision on the chosen row — every attempt, with its rationale", async () => {
+    wire({
+      segments: [{ name: "Swiss Drogerien", description: "drugstore owners" }],
+      apollo: () => ({
+        apolloAudienceId: "apollo-huge",
+        filters: THREE_CANDIDATES[0].filters,
+        count: 179156,
+        candidates: THREE_CANDIDATES,
+      }),
+      chooser: () => ({
+        chosen: 2,
+        why: "its sample is recognisably Swiss drugstores",
+        rationales: [
+          { attempt: 1, rationale: "179k people, but Mars and Lidl are not drugstores" },
+          { attempt: 2, rationale: "the independents the client described" },
+          { attempt: 3, rationale: "hospital CMOs, a different profession entirely" },
+        ],
+        name: "Swiss Drogerien",
+        degraded: true,
+        degradedReason: "no attempt enumerated the German-speaking cantons",
+      }),
+    });
+    const res = await suggest("drugstores in German-speaking Switzerland");
+    expect(res.status).toBe(200);
+
+    const [row] = await db.select().from(audiences);
+    const trace = row.chooserTrace as Record<string, unknown>;
+    expect(trace).toBeTruthy();
+    // The overall verdict.
+    expect(trace.chosen).toBe(2);
+    expect(trace.why).toBe("its sample is recognisably Swiss drugstores");
+    expect(trace.degraded).toBe(true);
+    expect(trace.degradedReason).toBe(
+      "no attempt enumerated the German-speaking cantons"
+    );
+    // Every candidate — the rejected ones are the whole point.
+    const rows = trace.candidates as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(3);
+    expect(rows.map((r) => r.count)).toEqual([179156, 659, 12]);
+    expect(rows.map((r) => r.chosen)).toEqual([false, true, false]);
+    expect(rows[0].rationale).toContain("Mars and Lidl are not drugstores");
+    expect(rows[0].apolloAudienceId).toBe("apollo-huge");
+    expect(rows[0].filterFields).toEqual(["qOrganizationKeywordTags"]);
+    expect((rows[1].sample as unknown[]).length).toBeGreaterThan(0);
+  });
+
+  it("502s when the chooser leaves an attempt unaccounted for", async () => {
+    wire({
+      segments: [{ name: "Alpha", description: "a" }],
+      apollo: () => ({
+        apolloAudienceId: "apollo-huge",
+        filters: { personTitles: ["X"] },
+        count: 10,
+        candidates: THREE_CANDIDATES,
+      }),
+      // Only the pick is justified — the two it passed over are not.
+      chooser: () => ({
+        chosen: 2,
+        rationales: [{ attempt: 2, rationale: "the one I took" }],
+      }),
+    });
+    const res = await suggest("alpha");
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain("attempt(s) 1, 3");
+    const rows = await db.select().from(audiences);
+    expect(rows).toHaveLength(0);
+  });
+
   it("502s when the chooser names an attempt that was not offered", async () => {
     wire({
       segments: [{ name: "Alpha", description: "a" }],
@@ -767,9 +854,24 @@ describe("POST /orgs/audiences/suggest", () => {
     expect((chooserBody!.responseSchema as { required?: string[] }).required).toEqual([
       "chosen",
       "why",
+      "rationales",
       "name",
       "description",
       "degraded",
+      "degradedReason",
+    ]);
+    // The choice is written BEFORE any per-attempt sentence — a per-candidate
+    // grade asked first is the shape that degenerated three times upstream.
+    expect(
+      (chooserBody!.responseSchema as { propertyOrdering?: string[] }).propertyOrdering
+    ).toEqual([
+      "chosen",
+      "why",
+      "rationales",
+      "name",
+      "description",
+      "degraded",
+      "degradedReason",
     ]);
   });
 

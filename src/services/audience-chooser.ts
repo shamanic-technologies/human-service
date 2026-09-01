@@ -27,6 +27,18 @@
  * calls lets them disagree about what the audience is. Merging them means the
  * thing that picks is the thing that describes, so they cannot.
  *
+ * IT ACCOUNTS FOR EVERY ATTEMPT, AFTER CHOOSING. The answer carries one
+ * sentence per attempt, including the ones it passed over, and the whole
+ * decision is persisted on the chosen audience row (`audiences.chooser_trace`)
+ * so it can be READ instead of inferred from the outcome — inference from
+ * outcome is what was done four times over for the three apollo-side mechanisms
+ * that degenerated. Requiring a sentence for a rejection is also a guardrail in
+ * its own right: writing "I passed over the 2,078-person set because..." is hard
+ * when the real reason is "I did not look at it". The sentences are prose for a
+ * human; they are never a score, never a ranking, and nothing reads them back.
+ * The ORDER matters — the pick is committed before any of them is written,
+ * because a per-attempt grade asked first is exactly the degenerate shape.
+ *
  * NOTHING HERE SELECTS IN CODE. No argmax on count, no scoring function, no
  * ranking, no tie-break heuristic, no count floor, no target band. The model is
  * handed every candidate with its count AND its sample rows AND its notes, and
@@ -52,16 +64,53 @@ import type { Identity } from "./people-providers.js";
 const CHOOSER_LLM_PROVIDER = "google" as const;
 const CHOOSER_LLM_MODEL = "pro";
 
+// The ORDER of these keys is load-bearing, not cosmetic. `chosen` comes first
+// and `rationales` after it, because the model writes the JSON in order: it must
+// commit to a pick BEFORE it writes a sentence about any individual attempt.
+// Asking "is this attempt good?" per item, in isolation, ahead of the choice is
+// exactly the shape that degenerated to a constant three times upstream
+// (reachesOffTarget always clean, matchesRequest always true, showable true on
+// 60 of 60). `propertyOrdering` is Gemini's own knob for this.
 const CHOOSER_RESPONSE_SCHEMA: Record<string, unknown> = {
   type: "object",
   properties: {
     chosen: { type: "integer" },
     why: { type: "string" },
+    rationales: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          attempt: { type: "integer" },
+          rationale: { type: "string" },
+        },
+        required: ["attempt", "rationale"],
+        propertyOrdering: ["attempt", "rationale"],
+      },
+    },
     name: { type: "string" },
     description: { type: "string" },
     degraded: { type: "boolean" },
+    degradedReason: { type: "string" },
   },
-  required: ["chosen", "why", "name", "description", "degraded"],
+  required: [
+    "chosen",
+    "why",
+    "rationales",
+    "name",
+    "description",
+    "degraded",
+    "degradedReason",
+  ],
+  propertyOrdering: [
+    "chosen",
+    "why",
+    "rationales",
+    "name",
+    "description",
+    "degraded",
+    "degradedReason",
+  ],
 };
 
 export interface ChosenAudience {
@@ -70,6 +119,15 @@ export interface ChosenAudience {
   chosen: number;
   /** The model's one-sentence account of why this one beat the others. */
   why: string;
+  /**
+   * One sentence per attempt, 1-based by position, INCLUDING the ones it did
+   * not take. Prose for a human reading the trace back — never a score, never
+   * a ranking, never an input to the selection, which has already happened by
+   * the time these are written.
+   */
+  rationales: string[];
+  /** The model's own account of the `degraded` verdict. Empty when it has none. */
+  degradedReason: string;
   /** Stored as the audience name (max 4 words is asked of the model). */
   name: string;
   /** Stored as the audience description — the label for the CHOSEN set. */
@@ -120,6 +178,16 @@ export function buildChooserSystemPrompt(): string {
     "number by drifting into manufacturers, retail chains and multinationals did",
     "not find more of the client's people, it found other people.",
     "",
+    "WHAT EACH ATTEMPT COST IN VOLUME. The table lists, per attempt, how many",
+    "people it matched and which filter fields it used. Every field an attempt",
+    "adds intersects: it can only remove people, never add any. So two attempts",
+    "that differ by a field or two, at very different volumes, are showing you",
+    "what that constraint took out. This is INFORMATION, not a rule: no field is",
+    "good or bad in itself, more fields is neither better nor worse, and the",
+    "sample rows still decide. It is here so that an attempt reaching a fifth as",
+    "many people as its neighbour is legible as a choice you are making, rather",
+    "than something you pass over without seeing.",
+    "",
     "THE NAME AND THE DESCRIPTION DESCRIBE THE ATTEMPT YOU CHOSE -- not the",
     "client's original wording, and not what you wish the attempt had matched.",
     "Derive both from the chosen attempt's own filters and sample, and",
@@ -134,11 +202,24 @@ export function buildChooserSystemPrompt(): string {
     'ALSO ANSWER "degraded": true when NO attempt really answers the client\'s',
     "request and you are picking the least-bad one anyway; false when the attempt",
     "you picked genuinely answers it. This is information for the client, who",
-    "decides what to do with it -- it never means you return nothing.",
+    "decides what to do with it -- it never means you return nothing. In",
+    '"degradedReason", say in one sentence what the client asked for that no',
+    "attempt delivered; leave it empty when degraded is false.",
     "",
-    "Respond with ONLY valid JSON (no prose, no markdown):",
+    "THEN, HAVING PICKED, ACCOUNT FOR EVERY ATTEMPT. Write one sentence per",
+    "attempt in the order they are listed, including the ones you did not take:",
+    "what that attempt reaches, and what made you pass over it. A human reads",
+    "these back later to see whether a bigger attempt was weighed and rejected or",
+    'simply never looked at, so "not chosen" is not a sentence: name what is in',
+    "that attempt's sample or filters that decided it. Do this AFTER you have",
+    "named your pick, never before -- judging attempts one at a time in isolation",
+    "is not how this decision is made.",
+    "",
+    "Respond with ONLY valid JSON (no prose, no markdown), keys in this order:",
     '{"chosen":<attempt number>,"why":"one sentence on why it beat the others",',
-    '"name":"<=4 words","description":"one sentence","degraded":<true|false>}',
+    '"rationales":[{"attempt":1,"rationale":"one sentence"},...one per attempt],',
+    '"name":"<=4 words","description":"one sentence","degraded":<true|false>,',
+    '"degradedReason":"one sentence, or empty"}',
   ].join("\n");
 }
 
@@ -166,6 +247,43 @@ function renderNotes(candidate: ApolloCandidate): string[] {
   return lines;
 }
 
+/**
+ * The filter FIELDS an attempt used, in the order apollo-service sent them.
+ * Purely descriptive: a field name is a name, and an empty / null-valued field
+ * is not a constraint, so it is not listed. Exported because the persisted
+ * chooser trace records the same list the chooser was shown.
+ */
+export function filterFieldNames(filters: Record<string, unknown>): string[] {
+  return Object.entries(filters)
+    .filter(([, v]) => {
+      if (v === null || v === undefined) return false;
+      if (Array.isArray(v)) return v.length > 0;
+      if (typeof v === "string") return v.trim().length > 0;
+      return true;
+    })
+    .map(([k]) => k);
+}
+
+/**
+ * A side-by-side table of every attempt: volume next to the filter fields that
+ * produced it. The per-attempt blocks below already carry both, but scattered
+ * across hundreds of lines — an attempt at a fifth of its neighbour's volume
+ * carrying two more fields is only legible when the two sit on adjacent rows.
+ *
+ * It ranks nothing and sorts nothing: attempts stay in the order they were
+ * explored, and no column is a verdict. Presenting the trade is not making it.
+ */
+function renderAtAGlance(candidates: ApolloCandidate[]): string[] {
+  return [
+    "AT A GLANCE (same attempts, listed in the order they were explored):",
+    "  attempt | people matched | filter fields used",
+    ...candidates.map((c, i) => {
+      const fields = filterFieldNames(c.filters);
+      return `  ${i + 1} | ${c.count} | ${fields.length}: ${fields.join(", ") || "none"}`;
+    }),
+  ];
+}
+
 /** Every candidate is rendered, always — hiding some to "simplify" the prompt
  * would take the comparison away from the only step that can make it. */
 export function buildChooserMessage(args: {
@@ -176,13 +294,17 @@ export function buildChooserMessage(args: {
     "THE CLIENT'S REQUEST, VERBATIM:",
     args.nlPrompt,
     "",
+    ...renderAtAGlance(args.candidates),
+    "",
     `THE ${args.candidates.length} ATTEMPTS:`,
   ];
   args.candidates.forEach((c, i) => {
+    const fields = filterFieldNames(c.filters);
     lines.push(
       "",
       `ATTEMPT ${i + 1}`,
       `  people matched: ${c.count}`,
+      `  filter fields used (${fields.length}): ${fields.join(", ") || "none"}`,
       ...renderSample(c),
       ...renderNotes(c),
       `  filters it ran: ${JSON.stringify(c.filters)}`
@@ -245,14 +367,112 @@ export async function chooseAudienceCandidate(args: {
     );
   }
   const why = typeof json.why === "string" ? json.why.trim() : "";
+  const rationales = parseRationales(json.rationales, args.candidates.length);
+  const degradedReason =
+    typeof json.degradedReason === "string" ? json.degradedReason.trim() : "";
 
   return {
     candidate: args.candidates[chosen - 1],
     chosen,
     why,
+    rationales,
     name,
     description,
     // Only an explicit `true` degrades — a missing field is not a verdict.
     degraded: json.degraded === true,
+    degradedReason,
+  };
+}
+
+/**
+ * One sentence per attempt, by 1-based position, all of them present.
+ *
+ * FULL COVERAGE IS THE POINT, so a gap fails loud rather than being padded.
+ * Requiring a sentence for the attempts it did NOT take is the guardrail:
+ * writing "I passed over the 2,078-person set because..." is hard when the real
+ * reason is "I never looked at it". A trace with holes cannot answer the
+ * question it exists to answer, and a placeholder we wrote ourselves would
+ * answer it falsely — which is the failure mode this whole decision replaced.
+ */
+function parseRationales(raw: unknown, expected: number): string[] {
+  if (!Array.isArray(raw)) {
+    throw new ChatServiceError(
+      502,
+      "chooser returned no `rationales` array; one sentence per attempt is required"
+    );
+  }
+  const byAttempt = new Map<number, string>();
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const o = entry as Record<string, unknown>;
+    const attempt = o.attempt;
+    const rationale = typeof o.rationale === "string" ? o.rationale.trim() : "";
+    if (
+      typeof attempt === "number" &&
+      Number.isInteger(attempt) &&
+      attempt >= 1 &&
+      attempt <= expected &&
+      rationale.length > 0 &&
+      !byAttempt.has(attempt)
+    ) {
+      byAttempt.set(attempt, rationale);
+    }
+  }
+  const missing: number[] = [];
+  const out: string[] = [];
+  for (let i = 1; i <= expected; i += 1) {
+    const r = byAttempt.get(i);
+    if (r === undefined) missing.push(i);
+    out.push(r ?? "");
+  }
+  if (missing.length > 0) {
+    throw new ChatServiceError(
+      502,
+      `chooser gave no rationale for attempt(s) ${missing.join(", ")} of ${expected}; every attempt must be accounted for`
+    );
+  }
+  return out;
+}
+
+// How many sample rows of a candidate the trace keeps. The chooser is shown ten
+// per attempt; the trace keeps a REDUCED sample because its job is to let a
+// human recognise WHO an attempt reached ("Mars, Lidl, Bucherer" vs "Abderhalden
+// Drogerie AG"), which the first few rows already answer, and because ten
+// candidates x ten rows on every audience row is a snapshot nobody reads.
+const TRACE_SAMPLE_ROWS = 5;
+
+/** Trace format version, so a later reader can tell shapes apart. */
+export const CHOOSER_TRACE_VERSION = 1;
+
+/**
+ * The persisted, human-readable record of the decision.
+ *
+ * Everything here is prose or evidence: the rationales are sentences for a human
+ * reading the row back, NOT a score, NOT a ranking, and nothing in this service
+ * reads them. The choice was made before any of them was written.
+ */
+export function buildChooserTrace(args: {
+  nlPrompt: string;
+  candidates: ApolloCandidate[];
+  chosen: ChosenAudience;
+}): Record<string, unknown> {
+  return {
+    version: CHOOSER_TRACE_VERSION,
+    nlPrompt: args.nlPrompt,
+    chosen: args.chosen.chosen,
+    why: args.chosen.why,
+    degraded: args.chosen.degraded,
+    // Empty string is not a reason — record its absence honestly.
+    degradedReason: args.chosen.degradedReason || null,
+    candidates: args.candidates.map((c, i) => ({
+      attempt: i + 1,
+      apolloAudienceId: c.apolloAudienceId,
+      count: c.count,
+      filters: c.filters,
+      filterFields: filterFieldNames(c.filters),
+      sample: c.sample.slice(0, TRACE_SAMPLE_ROWS),
+      chosen: i + 1 === args.chosen.chosen,
+      rationale: args.chosen.rationales[i] ?? null,
+    })),
   };
 }

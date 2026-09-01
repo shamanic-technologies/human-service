@@ -1236,6 +1236,27 @@ EXPLORES; it no longer DECIDES.)
      re-suggestion that lands on a different name creates a second row rather than
      refreshing the first — accepted deliberately: a label that lies about the row
      is worse than a duplicate.
+   - **It justifies its REJECTIONS, not only its pick, and it does so AFTER
+     choosing.** The answer carries one sentence per attempt — including every
+     attempt it passed over — and the response schema's `propertyOrdering` puts
+     `chosen` before `rationales` so the model commits to a pick before writing
+     a sentence about any single attempt. Asking "is this attempt good?" per
+     item, in isolation, ahead of the choice is exactly the shape that
+     degenerated three times upstream. Forced articulation is the guardrail:
+     writing "I passed over the 2,078-person set because…" is hard when the real
+     reason is "I did not look at it". Coverage is REQUIRED — a missing sentence
+     fails the request loud (502 naming the attempts), never a placeholder we
+     wrote ourselves. The rationale is **prose for humans**: it is never a score,
+     never a ranking, and nothing in this service reads it back to decide.
+   - **The volume cost of a constraint is made LEGIBLE, not ruled on.** The
+     candidate list is preceded by an `AT A GLANCE` table — one row per attempt,
+     in exploration order, with its live count next to the filter FIELDS it used
+     — and each attempt block repeats its field list. Every field an Apollo
+     query adds intersects (an ablation measured one set going 4 → 664 when a
+     single field was removed), so an attempt at a fifth of its neighbour's
+     volume carrying two more fields is a trade the chooser should see it is
+     making. It is INFORMATION only: no field is named good or bad, nothing is
+     sorted or ranked, and the samples still decide.
    - Runs on **`google` / `pro`** with a `responseSchema` and thinking left **ON**
      — a comparative judgement over ten candidates x ten sample rows is reasoning,
      not extraction (layer 1 and the description generator disable thinking
@@ -1250,6 +1271,29 @@ EXPLORES; it no longer DECIDES.)
    re-running refreshes a still-`suggested` row in place, never mutates an
    `active`/`paused`/`archived` one.
 
+- **The decision is PERSISTED, not inferred — `audiences.chooser_trace`**
+  (migration `0024`, nullable `jsonb`). Until #245 the chooser's reasoning was
+  consumed and thrown away: the row kept the winner and `degraded`, and nothing
+  about what else was on offer or why it lost. So "did it weigh the bigger, less
+  constrained candidate, or never look at it?" could only be INFERRED from the
+  candidate list — the same inference-from-outcome that was run four times over
+  for `reachesOffTarget`, `matchesRequest`, `showable` and then the chooser. The
+  trace carries, per candidate: the apollo audience id, the live count, the
+  filters, the filter FIELDS, a **reduced sample** (first 5 rows — enough to
+  recognise WHO it reached), the `chosen` flag and the one-sentence rationale;
+  plus the overall verdict (`chosen`, `why`, `degraded`, `degradedReason`, and
+  the caller's `nlPrompt`). Written by `buildChooserTrace`
+  (`src/services/audience-chooser.ts`) and stored by `persistSuggestedAudience`.
+  - **On the CHOSEN row, not a table of its own**: the rejected candidates are
+    not `audiences` rows (they live in apollo-service), so a join table would
+    create cross-service references. A compact snapshot makes the whole decision
+    readable in one query.
+  - **Nullable with no default** — null means "no decision was recorded for this
+    row", the truthful value for every audience born before the chooser and
+    every audience not born of a `/suggest` choice. **AUDIT ONLY**: nothing in
+    this service reads it back, and it is deliberately NOT on the API surface
+    (`serializeAudience` is unchanged, the OpenAPI spec is unchanged) — it is
+    read straight out of the database.
 - **`degraded` — the CHOOSER's verdict, and a candidate is ALWAYS returned.**
   When no attempt apollo-service explored really answers the request, the chooser
   still picks the best available and raises the flag; it never returns nothing, so
@@ -1326,6 +1370,8 @@ returns 404, never 403, to avoid leaking existence.
   `audiences.crm_upload_id` is **text** (a pointer into crm-service, same typing
   choice as `apollo_audience_id` — no cross-service FK), validated as a uuid at
   the API edge.
+- **`audiences.chooser_trace`** is `jsonb` (nullable, no default) — the whole
+  `/suggest` decision, audit-only, never read back by this service.
 - **`suppression_backfills`** (reversible backfill ledger): `org_id` / `brand_id` /
   `suppression_id` uuid; `reason` / `email_norm` text; `sent_at` timestamptz (the
   real send the row was dated from).
