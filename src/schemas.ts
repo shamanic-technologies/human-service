@@ -962,7 +962,7 @@ export const AudienceSchema = z
     countedAt: z.string().nullable(),
     degraded: z.boolean().openapi({
       description:
-        "apollo-service's own verdict on the filter set it built for this audience: true when its refine loop judged no candidate a good fit and returned the best attempt anyway rather than failing. INFORMATION for the customer and the dashboard — nothing here blocks, filters or warns on it. false for rows created before the flag existed and for any build apollo-service does not flag.",
+        "The chooser's verdict on the audience it picked for this row: true when no attempt apollo-service explored really answered the request and the least-bad one was chosen anyway. INFORMATION for the customer and the dashboard — nothing here blocks, filters or warns on it, and an audience is always chosen. false for rows created before the flag existed and whenever the chooser judged the pick a genuine answer.",
     }),
     createdByUserId: z.string().uuid().nullable(),
     createdAt: z.string(),
@@ -1197,7 +1197,7 @@ export const AudienceCandidateSchema = z
     }),
     degraded: z.boolean().openapi({
       description:
-        "apollo-service's verdict on the filter set it built: true when its refine loop judged no candidate a good fit and returned the best attempt anyway rather than failing. INFORMATION only — a degraded audience is served, persisted and activatable exactly like any other; the customer decides whether to keep it. false when apollo-service does not flag the build.",
+        "The chooser's verdict: true when NO attempt apollo-service explored really answered the request and it picked the least-bad one anyway. INFORMATION only — a degraded audience is served, persisted and activatable exactly like any other; the customer decides whether to keep it. A candidate is always returned; this never withholds one.",
     }),
   })
   .openapi("AudienceCandidate");
@@ -1208,7 +1208,7 @@ export const FailedSegmentSchema = z
       description: "The layer-1 audience name that failed to build.",
     }),
     reason: z.string().openapi({
-      description: "The underlying error message (apollo-service build or relabel failure).",
+      description: "The underlying error message (apollo-service build or chooser failure).",
     }),
   })
   .openapi("FailedSegment");
