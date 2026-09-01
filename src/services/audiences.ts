@@ -55,7 +55,7 @@ import {
   apolloAudienceDryRun,
   type ApolloFilters,
 } from "../lib/apollo-audiences.js";
-import { chooseAudienceCandidate } from "./audience-chooser.js";
+import { chooseAudienceCandidate, buildChooserTrace } from "./audience-chooser.js";
 import { crmServeNext, normalizeCrmContact } from "../lib/crm-contacts.js";
 
 // The transaction handle drizzle passes to the `db.transaction` callback.
@@ -1298,6 +1298,10 @@ async function persistSuggestedAudience(args: {
   filters: ApolloFilters;
   count: number;
   degraded: boolean;
+  // The whole decision that produced this row — every candidate with its count,
+  // filters, sample, chosen flag and one sentence of rationale, plus the
+  // verdict. Audit only; nothing reads it back to decide anything.
+  chooserTrace: Record<string, unknown>;
 }): Promise<string> {
   const orgId = args.identity.orgId;
   return db.transaction(async (tx) => {
@@ -1327,6 +1331,7 @@ async function persistSuggestedAudience(args: {
             apolloCount: args.count,
             countedAt: new Date(),
             degraded: args.degraded,
+            chooserTrace: args.chooserTrace,
             nlPrompt: args.nlPrompt,
             description: args.segment.description,
             updatedAt: new Date(),
@@ -1352,6 +1357,7 @@ async function persistSuggestedAudience(args: {
         apolloCount: args.count,
         countedAt: new Date(),
         degraded: args.degraded,
+        chooserTrace: args.chooserTrace,
         createdByUserId: args.identity.userId ?? null,
       })
       .returning({ id: audiences.id });
@@ -1440,6 +1446,18 @@ export async function suggestAudiences(
   );
   const segment: Segment = { name: chosen.name, description: chosen.description };
 
+  // PERSIST THE REASONING, not only its outcome. Until now the decision was
+  // consumed and discarded, so "did it weigh the bigger, less constrained
+  // candidate or never look at it?" could only be INFERRED from the candidate
+  // list — the same inference-from-outcome that was run four times over for the
+  // three apollo-side mechanisms that degenerated before this one. The trace
+  // makes the answer readable instead.
+  const chooserTrace = buildChooserTrace({
+    nlPrompt,
+    candidates: apollo.candidates,
+    chosen,
+  });
+
   const audienceId = await persistSuggestedAudience({
     identity,
     brandId,
@@ -1450,6 +1468,7 @@ export async function suggestAudiences(
     filters: chosen.candidate.filters,
     count: chosen.candidate.count,
     degraded: chosen.degraded,
+    chooserTrace,
   });
 
   return {

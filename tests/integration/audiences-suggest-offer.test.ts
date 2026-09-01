@@ -54,6 +54,7 @@ function wire(segments: Array<{ name: string; description: string }>) {
           json: {
             chosen: 1,
             why: "its sample is the target",
+            rationales: [{ attempt: 1, rationale: "the only attempt offered" }],
             name: segments[0].name,
             description: "written by the chooser from the chosen filters",
             degraded: false,

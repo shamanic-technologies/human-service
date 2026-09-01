@@ -491,6 +491,18 @@ export const audiences = pgTable(
     // apollo-service does not flag (an older deploy sends no field at all). It is
     // INFORMATION only: nothing in this service filters, blocks or warns on it.
     degraded: boolean("degraded").notNull().default(false),
+    // The whole decision that produced this audience, when it was produced by
+    // the /suggest chooser: every candidate apollo-service explored (id, live
+    // count, filters, the filter FIELDS it used, a reduced sample of who it
+    // matched, whether it was chosen, one sentence of rationale) plus the
+    // overall verdict (why the winner won, degraded + the reason given for it).
+    // Kept on the chosen row rather than a table of its own — the rejected
+    // candidates are not audiences rows (they live in apollo-service), so a
+    // join table would create cross-service references. Nullable, no default:
+    // null is the truthful "no decision was recorded for this row" for every
+    // audience born before the chooser and every audience not born of a choice.
+    // AUDIT ONLY — nothing in this service reads it to decide anything.
+    chooserTrace: jsonb("chooser_trace").$type<Record<string, unknown>>(),
     // True reachable-pool ceiling, learned when serve-next fully EXHAUSTS the
     // provider pool: at that point the count of distinct members we materialized
     // IS the reachable pool (everyone with a usable email we could serve). The
