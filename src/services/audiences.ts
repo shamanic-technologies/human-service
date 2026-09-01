@@ -55,6 +55,7 @@ import {
   apolloAudienceDryRun,
   type ApolloFilters,
 } from "../lib/apollo-audiences.js";
+import { chooseAudienceCandidate } from "./audience-chooser.js";
 import { crmServeNext, normalizeCrmContact } from "../lib/crm-contacts.js";
 
 // The transaction handle drizzle passes to the `db.transaction` callback.
@@ -871,7 +872,7 @@ export interface AudienceCandidate {
   degraded: boolean;
 }
 
-// A layer-1 segment whose apollo build (or its relabel) failed. Returned to the
+// A layer-1 segment whose apollo build (or its chooser call) failed. Returned to the
 // caller so a PARTIAL batch is distinguishable from a complete one — the batch
 // used to silently come back shorter with no explanation.
 export interface FailedSegment {
@@ -1233,12 +1234,17 @@ function buildDescriptionSystemPrompt(): string {
 // Runs via chat-service's ORG-LESS platform path (platformCompleteJson) so a
 // historical backfill does not bill users' orgs; chat-service owns the cost.
 // Same Gemini schemaless-JSON setup the /suggest layer-1 uses.
-// `identity` (#234): when the call rides an ORG-SCOPED request — the /suggest
-// relabel — the org pays, using the SAME identity the request already carries
-// (the platform path would be a convenience dodge). Omitted ⟹ the ORG-LESS
-// platform path, which is what the historical backfill sweep needs (billing
-// users' orgs retroactively would be wrong, and a sweep-all-orgs job has no
-// x-user-id). chat-service owns the cost either way; human-service declares none.
+// `identity`: when the call rides an ORG-SCOPED request the org pays, using the
+// SAME identity the request already carries (the platform path would be a
+// convenience dodge). Omitted ⟹ the ORG-LESS platform path, which is what the
+// historical backfill sweep needs (billing users' orgs retroactively would be
+// wrong, and a sweep-all-orgs job has no x-user-id). chat-service owns the cost
+// either way; human-service declares none.
+// NOTE: /suggest no longer calls this. It used to relabel the chosen audience
+// from its final filters in a SECOND call; the chooser now writes the name and
+// the description in the SAME call that picks (src/services/audience-chooser.ts),
+// so two calls can no longer disagree about what the audience is. The remaining
+// caller is the one-time description backfill in src/routes/backfill.ts.
 export async function generateAudienceDescription(args: {
   name: string;
   filters: unknown;
@@ -1405,26 +1411,34 @@ export async function suggestAudiences(
     brandId,
     identity,
   });
-  // RELABEL from the FINAL filters, before insert. The layer-1 description is
-  // the INPUT SPECIFICATION; `apollo.filters` is what apollo-service actually
-  // BUILT, and nothing kept the two in sync — so a customer could read
-  // "organic shops in the canton of Zurich" over a Switzerland-wide retail
-  // filter set. `generateAudienceDescription` derives the sentence from the
-  // row's own filters and is instructed not to invent a constraint the filters
-  // do not encode. This is a LABELLING fix only: it does not make a bad
-  // audience good (apollo-service's own grader owns that), it stops the stored
-  // label from promising something the row does not deliver.
-  // The NAME is deliberately NOT regenerated: it is the idempotency key
-  // (unique on (org, brand, offer, lower(name))), so renaming a re-suggested
-  // audience would duplicate the row instead of refreshing it.
-  // No fallback — a relabel failure fails the request, exactly like an apollo
-  // build failure, and the caller is told.
-  const description = await generateAudienceDescription({
-    name: first.name,
-    filters: apollo.filters,
+
+  // CHOOSE. apollo-service explores and no longer decides — it returns every
+  // round it ran, each with its live count, ten of the people it matched, and
+  // its own notes. The pick is a PRODUCT decision (which of these serves this
+  // customer), so it is made here, comparatively, by a chooser that authored
+  // none of them. See src/services/audience-chooser.ts for why every
+  // apollo-side selection mechanism degenerated.
+  //
+  // The SAME call writes the name and the description stored for the audience.
+  // That merge is the point, not a shortcut: the audience used to be relabelled
+  // from its final filters by a second, separate call, and two calls can
+  // disagree about what the audience is. One call cannot. So there is no
+  // relabel step here any more (`generateAudienceDescription` stays — the
+  // historical backfill sweep is its remaining caller).
+  //
+  // No fallback: a chooser failure fails the request (502) carrying its reason,
+  // exactly like an apollo build failure. Selecting in code — argmax on count,
+  // any score, any tie-break — is the failure this replaced.
+  const chosen = await chooseAudienceCandidate({
+    nlPrompt,
+    candidates: apollo.candidates,
     identity,
   });
-  const segment: Segment = { name: first.name, description };
+  console.log(
+    `[human-service] audience.suggest chooser picked attempt ${chosen.chosen}/${apollo.candidates.length} ` +
+      `(count ${chosen.candidate.count}, degraded ${chosen.degraded}): ${chosen.why}`
+  );
+  const segment: Segment = { name: chosen.name, description: chosen.description };
 
   const audienceId = await persistSuggestedAudience({
     identity,
@@ -1432,10 +1446,10 @@ export async function suggestAudiences(
     offerId,
     nlPrompt,
     segment,
-    apolloAudienceId: apollo.apolloAudienceId,
-    filters: apollo.filters,
-    count: apollo.count,
-    degraded: apollo.degraded,
+    apolloAudienceId: chosen.candidate.apolloAudienceId,
+    filters: chosen.candidate.filters,
+    count: chosen.candidate.count,
+    degraded: chosen.degraded,
   });
 
   return {
@@ -1445,13 +1459,13 @@ export async function suggestAudiences(
         name: segment.name,
         rationale: segment.description,
         provider: "apollo",
-        apolloAudienceId: apollo.apolloAudienceId,
-        filters: apollo.filters,
-        count: apollo.count,
+        apolloAudienceId: chosen.candidate.apolloAudienceId,
+        filters: chosen.candidate.filters,
+        count: chosen.candidate.count,
         status: SUGGEST_STATUS,
         validationError: null,
         truncated: false,
-        degraded: apollo.degraded,
+        degraded: chosen.degraded,
       },
     ],
     failedSegments: [],

@@ -33,6 +33,18 @@ afterAll(async () => {
   await closeDb();
 });
 
+interface ApolloCandidateResp {
+  apolloAudienceId: string;
+  filters: Record<string, unknown>;
+  count: number;
+  sample?: Array<{ company: string | null; title: string | null }>;
+  notes?: {
+    whatWorked?: string;
+    whatToImprove?: string;
+    nextExperiment?: string;
+  };
+}
+
 interface ApolloResp {
   apolloAudienceId: string;
   filters: Record<string, unknown>;
@@ -40,6 +52,10 @@ interface ApolloResp {
   // apollo-service#228: additive on their side, so the default mock deliberately
   // OMITS it — that is what an older apollo-service deploy looks like on the wire.
   degraded?: boolean;
+  // Every round apollo-service explored. ALSO additive: the default mock omits
+  // it, which is what a pre-chooser apollo-service deploy looks like on the wire
+  // (the client then synthesises ONE candidate from the legacy fields).
+  candidates?: ApolloCandidateResp[];
 }
 
 // "One filter vocabulary" Wave 2: human-service runs ONLY Layer 1 (via
@@ -54,13 +70,27 @@ interface ApolloResp {
 // Mock both:
 // - chat-service /complete (Layer 1 — systemPrompt mentions "ONE target audience"): segments.
 // - apollo-service /audiences/suggest-from-segment: {apolloAudienceId, filters, count}.
-// The description every relabel returns unless a test overrides it.
-const RELABELLED = "relabelled from the final filters";
+// The description the chooser writes unless a test overrides it.
+const CHOSEN_DESCRIPTION = "written by the chooser from the chosen filters";
+// The name the chooser writes in the inline mocks that do not assert on it.
+const CHOSEN_NAME = "Chosen Audience";
+// The chooser's system prompt is told apart from layer 1's by this phrase.
+const CHOOSER_MARKER = "YOU PICK EXACTLY ONE";
+
+interface ChooserAnswer {
+  chosen?: unknown;
+  why?: string;
+  name?: string;
+  description?: string;
+  degraded?: boolean;
+}
 
 function wire(opts: {
   segments: Array<{ name: string; description: string }>;
   apollo?: (name: string, description: string) => ApolloResp | "503";
-  relabel?: ((message: string) => string) | "fail";
+  // The chooser sees the rendered candidate list; a test can inspect it and
+  // answer differently. "fail" makes chat-service reject the chooser call.
+  chooser?: ((message: string) => ChooserAnswer) | "fail";
 }) {
   let seq = 0;
   const defaultApollo = (name: string): ApolloResp => ({
@@ -75,12 +105,21 @@ function wire(opts: {
         systemPrompt: string;
         message: string;
       };
-      // The relabel-from-final-filters call (#234) — ORG-BILLED, so it rides the
-      // same /complete path as layer 1 and is told apart by its system prompt.
-      if (body.systemPrompt.includes("SINGLE concise sentence")) {
-        if (opts.relabel === "fail") return err(503, "chat overloaded");
+      // The CHOOSER call — ORG-BILLED, so it rides the same /complete path as
+      // layer 1 and is told apart by its system prompt. It picks the audience
+      // AND writes the name + description persisted for it (there is no
+      // separate relabel call any more).
+      if (body.systemPrompt.includes(CHOOSER_MARKER)) {
+        if (opts.chooser === "fail") return err(503, "chat overloaded");
+        const answer = opts.chooser?.(body.message) ?? {};
         return ok({
-          json: { description: opts.relabel?.(body.message) ?? RELABELLED },
+          json: {
+            chosen: answer.chosen ?? 1,
+            why: answer.why ?? "its sample is recognisably the target",
+            name: answer.name ?? opts.segments[0].name,
+            description: answer.description ?? CHOSEN_DESCRIPTION,
+            degraded: answer.degraded ?? false,
+          },
         });
       }
       if (body.systemPrompt.includes("ONE target audience")) {
@@ -200,10 +239,18 @@ describe("POST /orgs/audiences/suggest", () => {
       if (u.endsWith("/complete")) {
         if (
           (JSON.parse(init.body ?? "{}") as { systemPrompt?: string }).systemPrompt?.includes(
-            "SINGLE concise sentence"
+            CHOOSER_MARKER
           )
         )
-          return ok({ json: { description: RELABELLED } });
+          return ok({
+            json: {
+              chosen: 1,
+              why: "w",
+              name: CHOSEN_NAME,
+              description: CHOSEN_DESCRIPTION,
+              degraded: false,
+            },
+          });
         return ok({
           json: {
             audiences: [
@@ -328,10 +375,18 @@ describe("POST /orgs/audiences/suggest", () => {
       if (u.endsWith("/complete")) {
         if (
           (JSON.parse(init.body ?? "{}") as { systemPrompt?: string }).systemPrompt?.includes(
-            "SINGLE concise sentence"
+            CHOOSER_MARKER
           )
         )
-          return ok({ json: { description: RELABELLED } });
+          return ok({
+            json: {
+              chosen: 1,
+              why: "w",
+              name: CHOSEN_NAME,
+              description: CHOSEN_DESCRIPTION,
+              degraded: false,
+            },
+          });
         const body = JSON.parse(init.body ?? "{}");
         completeBodies.push(body);
         return ok({ json: { audiences: [{ name: "CMOs", description: "cmos" }] } });
@@ -360,10 +415,18 @@ describe("POST /orgs/audiences/suggest", () => {
       if (u.endsWith("/complete")) {
         if (
           (JSON.parse(init.body ?? "{}") as { systemPrompt?: string }).systemPrompt?.includes(
-            "SINGLE concise sentence"
+            CHOOSER_MARKER
           )
         )
-          return ok({ json: { description: RELABELLED } });
+          return ok({
+            json: {
+              chosen: 1,
+              why: "w",
+              name: CHOSEN_NAME,
+              description: CHOSEN_DESCRIPTION,
+              degraded: false,
+            },
+          });
         const body = JSON.parse(init.body ?? "{}") as { systemPrompt: string };
         if (body.systemPrompt.includes("ONE target audience")) {
           layer1Calls++;
@@ -425,40 +488,53 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(res.status).toBe(502);
   });
 
-  // --- #234: the stored label is derived from the FINAL filters ---
+  // --- the chooser picks, and the SAME call writes the stored label ---
 
-  it("relabels the persisted description from the audience's final filters, not from layer 1", async () => {
+  it("persists the name + description the chooser wrote, in ONE call — no separate relabel", async () => {
     wire({
       segments: [
-        { name: "Swiss Drogerien", description: "layer-1 input specification" },
+        { name: "Layer One Name", description: "layer-1 input specification" },
       ],
       apollo: () => ({
         apolloAudienceId: "a-swiss",
         filters: { organizationKeywords: ["drogerie"] },
         count: 42,
       }),
-      relabel: (message) => {
-        // The relabel sees the row's own name + the FINAL filters — never the
-        // layer-1 description, and never the batch nlPrompt.
-        expect(message).toContain("Swiss Drogerien");
+      chooser: (message) => {
+        // The chooser sees the client's request verbatim + the attempts it is
+        // choosing between (their filters), and writes both labels itself.
+        expect(message).toContain("psyllium buyers in swiss drugstores");
         expect(message).toContain("drogerie");
-        expect(message).not.toContain("layer-1 input specification");
-        return "owners of independent drugstores in Switzerland";
+        return {
+          name: "Swiss Drogerien",
+          description: "owners of independent drugstores in Switzerland",
+        };
       },
     });
     const res = await suggest("psyllium buyers in swiss drugstores");
     expect(res.status).toBe(200);
+    expect(res.body.candidates[0].name).toBe("Swiss Drogerien");
     expect(res.body.candidates[0].rationale).toBe(
       "owners of independent drugstores in Switzerland"
     );
     const [row] = await db.select().from(audiences);
+    expect(row.name).toBe("Swiss Drogerien");
     expect(row.description).toBe("owners of independent drugstores in Switzerland");
+
+    // Exactly TWO chat-service calls: layer 1 and the chooser. A third would be
+    // the relabel this replaced.
+    const completes = fetchSpy.mock.calls.filter(([url]) =>
+      String(url).endsWith("/complete")
+    );
+    expect(completes).toHaveLength(2);
   });
 
-  it("fails the request (no fallback) when the relabel call fails", async () => {
-    wire({ segments: [{ name: "Alpha", description: "a" }], relabel: "fail" });
+  it("fails the request (no fallback) when the chooser call fails", async () => {
+    wire({ segments: [{ name: "Alpha", description: "a" }], chooser: "fail" });
     const res = await suggest("alpha");
-    expect(res.status).toBe(502); // the build failed — reported, never silent
+    expect(res.status).toBe(502); // reported, never silently picked in code
+    const rows = await db.select().from(audiences);
+    expect(rows).toHaveLength(0);
   });
 
   // --- #234: a partial batch says which segments were lost ---
@@ -480,23 +556,24 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(res.body.failedSegments).toEqual([]);
   });
 
-  // --- degraded: apollo-service's verdict, carried through and persisted ---
+  // --- degraded: the CHOOSER's verdict, carried through and persisted ---
 
-  it("carries degraded:true onto the candidate AND the persisted row", async () => {
+  it("carries the chooser's degraded:true onto the candidate AND the persisted row", async () => {
     wire({
-      segments: [{ name: "Off Target", description: "nobody the grader liked" }],
+      segments: [{ name: "Off Target", description: "nobody the chooser liked" }],
       apollo: () => ({
         apolloAudienceId: "apollo-degraded",
         filters: { personTitles: ["Anything"] },
         count: 42,
-        degraded: true,
       }),
+      chooser: () => ({ degraded: true }),
     });
-    const res = await suggest("something the builder cannot hit");
+    const res = await suggest("something no attempt really answers");
     expect(res.status).toBe(200);
     expect(res.body.candidates[0].degraded).toBe(true);
-    // Not a gate: the audience is still built, still persisted, still suggested.
+    // Not a gate: an audience is still chosen, still persisted, still suggested.
     expect(res.body.candidates[0].status).toBe("suggested");
+    expect(res.body.candidates[0].apolloAudienceId).toBe("apollo-degraded");
     const rows = await db.select().from(audiences);
     expect(rows).toHaveLength(1);
     expect(rows[0].degraded).toBe(true);
@@ -504,15 +581,10 @@ describe("POST /orgs/audiences/suggest", () => {
 
   it("round-trips degraded on a later read of the audience", async () => {
     wire({
-      segments: [{ name: "Off Target", description: "nobody the grader liked" }],
-      apollo: () => ({
-        apolloAudienceId: "apollo-degraded",
-        filters: { personTitles: ["Anything"] },
-        count: 42,
-        degraded: true,
-      }),
+      segments: [{ name: "Off Target", description: "nobody the chooser liked" }],
+      chooser: () => ({ degraded: true }),
     });
-    const suggested = await suggest("something the builder cannot hit");
+    const suggested = await suggest("something no attempt really answers");
     const audienceId = suggested.body.candidates[0].audienceId as string;
 
     const read = await request(app)
@@ -522,14 +594,183 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(read.body.audience.degraded).toBe(true);
   });
 
-  it("treats an apollo-service response WITHOUT the field as degraded:false", async () => {
-    // The default mock omits `degraded` entirely — an older apollo-service deploy.
-    wire({ segments: [{ name: "Fine", description: "a good audience" }] });
+  it("treats a chooser answer WITHOUT the field as degraded:false", async () => {
+    wire({
+      segments: [{ name: "Fine", description: "a good audience" }],
+      chooser: () => ({ degraded: undefined }),
+    });
     const res = await suggest("a good audience");
     expect(res.status).toBe(200);
     expect(res.body.candidates[0].degraded).toBe(false);
     const rows = await db.select().from(audiences);
     expect(rows[0].degraded).toBe(false);
+  });
+
+  // --- the chooser sees every attempt, and its pick is what gets persisted ---
+
+  const THREE_CANDIDATES: ApolloCandidateResp[] = [
+    {
+      apolloAudienceId: "apollo-huge",
+      filters: { qOrganizationKeywordTags: ["retail"] },
+      count: 179156,
+      sample: [
+        { company: "Mars", title: "Procurement Manager" },
+        { company: "Lidl", title: "Category Buyer" },
+        { company: "Bucherer", title: "Store Manager" },
+        { company: "Manor", title: "Head of Purchasing" },
+      ],
+      notes: {
+        whatWorked: "broad retail tags returned a lot of people",
+        whatToImprove: "the sample is multinationals, not independent shops",
+        nextExperiment: "tighten to drugstore keyword tags",
+      },
+    },
+    {
+      apolloAudienceId: "apollo-tight",
+      filters: { qOrganizationKeywordTags: ["drogerie", "reformhaus"] },
+      count: 659,
+      sample: [
+        { company: "Abderhalden Drogerie AG", title: "Inhaber" },
+        { company: "Bio Partner Schweiz", title: "Geschaeftsfuehrer" },
+        { company: "DR. BAEHLER DROPA", title: "Filialleiter" },
+      ],
+      notes: {
+        whatWorked: "drugstore tags matched recognisable independents",
+        whatToImprove: "volume is small",
+        nextExperiment: "keep it and stop",
+      },
+    },
+    {
+      apolloAudienceId: "apollo-empty-ish",
+      filters: { personTitles: ["Chief Medical Officer"] },
+      count: 12,
+      sample: [{ company: "Kantonsspital", title: "Chief Medical Officer" }],
+    },
+  ];
+
+  it("shows the chooser every attempt with its count, its sample rows and its notes", async () => {
+    let seen = "";
+    wire({
+      segments: [{ name: "Swiss Drogerien", description: "drugstore owners" }],
+      apollo: () => ({
+        apolloAudienceId: "apollo-huge",
+        filters: THREE_CANDIDATES[0].filters,
+        count: 179156,
+        candidates: THREE_CANDIDATES,
+      }),
+      chooser: (message) => {
+        seen = message;
+        return { chosen: 2 };
+      },
+    });
+    const res = await suggest("drugstores and organic shops in German-speaking Switzerland");
+    expect(res.status).toBe(200);
+
+    // The client's request verbatim.
+    expect(seen).toContain("drugstores and organic shops in German-speaking Switzerland");
+    // All THREE attempts — never a hidden subset.
+    expect(seen).toContain("ATTEMPT 1");
+    expect(seen).toContain("ATTEMPT 2");
+    expect(seen).toContain("ATTEMPT 3");
+    // Counts.
+    expect(seen).toContain("179156");
+    expect(seen).toContain("659");
+    // Samples — the whole point.
+    expect(seen).toContain("Mars");
+    expect(seen).toContain("Abderhalden Drogerie AG");
+    expect(seen).toContain("Procurement Manager");
+    // Notes.
+    expect(seen).toContain("drugstore tags matched recognisable independents");
+    expect(seen).toContain("the sample is multinationals, not independent shops");
+  });
+
+  it("persists the attempt the chooser named, even when it is far from the largest", async () => {
+    wire({
+      segments: [{ name: "Swiss Drogerien", description: "drugstore owners" }],
+      apollo: () => ({
+        // The legacy top-level fields still carry the biggest set; they are NOT
+        // what gets persisted once the chooser has named one.
+        apolloAudienceId: "apollo-huge",
+        filters: THREE_CANDIDATES[0].filters,
+        count: 179156,
+        candidates: THREE_CANDIDATES,
+      }),
+      chooser: () => ({ chosen: 2, name: "Swiss Drogerien" }),
+    });
+    const res = await suggest("drugstores in German-speaking Switzerland");
+    expect(res.status).toBe(200);
+    const c = res.body.candidates[0];
+    expect(c.apolloAudienceId).toBe("apollo-tight");
+    expect(c.count).toBe(659);
+    expect(c.filters).toEqual({ qOrganizationKeywordTags: ["drogerie", "reformhaus"] });
+
+    const [row] = await db.select().from(audiences);
+    expect(row.apolloAudienceId).toBe("apollo-tight");
+    expect(row.apolloCount).toBe(659);
+  });
+
+  it("502s when the chooser names an attempt that was not offered", async () => {
+    wire({
+      segments: [{ name: "Alpha", description: "a" }],
+      apollo: () => ({
+        apolloAudienceId: "apollo-huge",
+        filters: { personTitles: ["X"] },
+        count: 10,
+        candidates: THREE_CANDIDATES,
+      }),
+      chooser: () => ({ chosen: 9 }),
+    });
+    const res = await suggest("alpha");
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain("not one of the 3 offered");
+    const rows = await db.select().from(audiences);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("still works against an apollo-service deploy that sends NO candidates array", async () => {
+    // The legacy single result becomes the one attempt the chooser is offered.
+    let seen = "";
+    wire({
+      segments: [{ name: "Legacy", description: "legacy" }],
+      apollo: () => ({
+        apolloAudienceId: "apollo-legacy",
+        filters: { personTitles: ["CEO"] },
+        count: 77,
+      }),
+      chooser: (message) => {
+        seen = message;
+        return { chosen: 1, name: "Legacy" };
+      },
+    });
+    const res = await suggest("legacy");
+    expect(res.status).toBe(200);
+    expect(seen).toContain("THE 1 ATTEMPTS");
+    expect(seen).toContain("none supplied for this attempt");
+    expect(res.body.candidates[0].apolloAudienceId).toBe("apollo-legacy");
+    expect(res.body.candidates[0].count).toBe(77);
+  });
+
+  it("calls the chooser on google/pro with a responseSchema and thinking left ON", async () => {
+    wire({ segments: [{ name: "Alpha", description: "a" }] });
+    const res = await suggest("alpha");
+    expect(res.status).toBe(200);
+    const chooserBody = fetchSpy.mock.calls
+      .filter(([url]) => String(url).endsWith("/complete"))
+      .map(([, init]) => JSON.parse(init?.body ?? "{}") as Record<string, unknown>)
+      .find((b) => String(b.systemPrompt).includes(CHOOSER_MARKER));
+    expect(chooserBody).toBeTruthy();
+    expect(chooserBody!.provider).toBe("google");
+    expect(chooserBody!.model).toBe("pro");
+    expect(chooserBody!.responseFormat).toBe("json");
+    // A comparative judgement is reasoning, not extraction — thinking stays on.
+    expect(chooserBody!.disableThinking).toBeUndefined();
+    expect((chooserBody!.responseSchema as { required?: string[] }).required).toEqual([
+      "chosen",
+      "why",
+      "name",
+      "description",
+      "degraded",
+    ]);
   });
 
   it("400 when nlPrompt is missing", async () => {

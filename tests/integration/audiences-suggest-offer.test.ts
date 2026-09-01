@@ -43,13 +43,22 @@ function wire(segments: Array<{ name: string; description: string }>) {
   fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
     const u = String(url);
     if (u.endsWith("/complete")) {
-      // #234: the relabel-from-final-filters call (org-billed, same path).
+      // The CHOOSER call (org-billed, same /complete path) — it picks the
+      // audience AND writes the name + description persisted for it.
       if (
         (JSON.parse(init.body ?? "{}") as { systemPrompt?: string }).systemPrompt?.includes(
-          "SINGLE concise sentence"
+          "YOU PICK EXACTLY ONE"
         )
       )
-        return ok({ json: { description: "relabelled from the final filters" } });
+        return ok({
+          json: {
+            chosen: 1,
+            why: "its sample is the target",
+            name: segments[0].name,
+            description: "written by the chooser from the chosen filters",
+            degraded: false,
+          },
+        });
       return ok({
         json: { audiences: segments },
         content: "",
