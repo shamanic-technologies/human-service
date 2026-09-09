@@ -811,14 +811,18 @@ export async function resolveAudiencesForBrand(
 const SUGGEST_STATUS = "suggested"; // inactive default for suggest-created rows
 
 // LLM provider/model for LAYER 1 (segment decompose) + the description backfill —
-// the ONLY LLM work human-service still does for audiences. Gemini in JSON mode
-// with a responseSchema (the provider ENFORCES the shape server-side, so the
-// response always parses — no schemaless "non-parsable → 502" flake). Layer 2
+// the ONLY LLM work human-service still does for audiences. OpenAI GPT-6 Astra
+// (`openai`/`gpt-pro`) in JSON mode with a responseSchema (the provider ENFORCES
+// the shape server-side, so the response always parses — no schemaless
+// "non-parsable → 502" flake). This is a PREFILL step a user waits on during
+// dashboard onboarding, so it runs on the strongest model available. Layer 2
 // (NL → faithful-Apollo-filters) NO LONGER runs here: apollo-service owns that
 // agentic refine loop; human-service only calls POST /audiences/suggest-from-
 // segment and caches the opaque result.
-const SUGGEST_LLM_PROVIDER = "google" as const;
-const SUGGEST_LLM_MODEL = "flash";
+// NOTE: Astra REJECTS `temperature` != 1 and `top_p` with a 400
+// (`unsupported_value`) — these calls send neither, and must not start.
+const SUGGEST_LLM_PROVIDER = "openai" as const;
+const SUGGEST_LLM_MODEL = "gpt-pro";
 // Layer 1 + description generation are narrow structured JSON tasks → thinking off.
 const SUGGEST_DISABLE_THINKING = true;
 
@@ -1233,7 +1237,7 @@ function buildDescriptionSystemPrompt(): string {
 // line, from the row's OWN name + filters (NEVER the shared batch nlPrompt).
 // Runs via chat-service's ORG-LESS platform path (platformCompleteJson) so a
 // historical backfill does not bill users' orgs; chat-service owns the cost.
-// Same Gemini schemaless-JSON setup the /suggest layer-1 uses.
+// Same JSON-mode setup the /suggest layer-1 uses (openai / gpt-pro).
 // `identity`: when the call rides an ORG-SCOPED request the org pays, using the
 // SAME identity the request already carries (the platform path would be a
 // convenience dodge). Omitted ⟹ the ORG-LESS platform path, which is what the
