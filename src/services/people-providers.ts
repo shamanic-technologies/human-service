@@ -337,14 +337,27 @@ export function downstreamHeaders(
 const TRANSIENT_CODES = ["ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "EAI_AGAIN"];
 const RETRY_BACKOFF_MS = [250, 500, 1000];
 
-// A single provider call may not run forever. apollo-service's per-segment
-// agentic build (suggest-from-segment) can stall when ITS own chat-service call
-// drops mid-flight; without a bound our `fetch` would hang until undici's
-// implicit ~300s headers timeout, and `/suggest` waits for the SLOWEST segment
-// via allSettled -> the whole request (and the frontend loader) hangs. Bound
-// each attempt so a stalled build fails loud fast; allSettled then returns the
-// segments that did resolve.
-const PROVIDER_TIMEOUT_MS = 120_000;
+// A single provider call may not run forever. apollo-service's agentic build
+// (suggest-from-segment) can stall when ITS own chat-service call drops
+// mid-flight; without a bound our `fetch` would hang until undici's implicit
+// ~300s headers timeout, and `/suggest` waits for the build -> the whole
+// request (and the frontend loader) hangs with it. So the bound stays.
+//
+// Its VALUE is sized on what a HEALTHY build actually costs: measured in
+// production, one complete agentic build took 149s of wall clock (10 model
+// turns at ~13-16s each), and apollo-service's worst case (including its
+// retries for unusable model output) is meaningfully above that. At 120s a
+// successful build lost a race against our own timeout — worse than a plain
+// failure, since apollo-service HAD finished and HAD persisted its candidates
+// while we had already hung up, so the credits were spent and the answer
+// thrown away.
+//
+// apollo-service now bounds its OWN wall clock at 210s and always answers
+// within it (returning whatever it explored by then), so we are no longer
+// waiting on something unbounded — 240s is that promise plus margin for the
+// network, and stays under undici's ~300s ceiling (chat-service sets no
+// timeout of its own on the path that reaches us).
+export const PROVIDER_TIMEOUT_MS = 240_000;
 
 // Walk err.cause / AggregateError.errors for a transient connect-phase code.
 // apollo/apify are Neon-backed siblings; their first request after an idle
@@ -353,7 +366,7 @@ const PROVIDER_TIMEOUT_MS = 120_000;
 // A client-side timeout ABORT is NOT transient — it means the request already
 // reached the server and stalled there, so retrying would only re-stall (and,
 // for a create like suggest-from-segment, risk a duplicate). Fail it loud.
-function isTransientConnectError(err: unknown): boolean {
+export function isTransientConnectError(err: unknown): boolean {
   const seen = new Set<unknown>();
   const visit = (e: unknown): boolean => {
     if (!e || typeof e !== "object" || seen.has(e)) return false;
