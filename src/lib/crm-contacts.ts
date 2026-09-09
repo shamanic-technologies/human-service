@@ -168,5 +168,7 @@ export function normalizeCrmContact(c: CrmContact): Person {
     // crm's own contact id — provenance only (crm has no enrich-by-id path).
     providerPersonId: c.id,
     organization: null,
+    // crm-service contacts carry no career history; absent stays absent.
+    employmentHistory: null,
   };
 }

@@ -673,6 +673,36 @@ export const PeopleSearchFiltersSchema = z
   })
   .openapi("PeopleSearchFilters");
 
+export const OrganizationTechnologySchema = z
+  .object({
+    uid: z.string().nullable(),
+    name: z.string().nullable(),
+    category: z.string().nullable(),
+  })
+  .openapi("OrganizationTechnology");
+
+export const OrganizationFundingEventSchema = z
+  .object({
+    id: z.string().nullable(),
+    date: z.string().nullable(),
+    type: z.string().nullable(),
+    investors: z.string().nullable(),
+    amount: z.number().nullable(),
+    currency: z.string().nullable(),
+  })
+  .openapi("OrganizationFundingEvent");
+
+export const EmploymentHistoryEntrySchema = z
+  .object({
+    title: z.string().nullable(),
+    organizationName: z.string().nullable(),
+    startDate: z.string().nullable(),
+    endDate: z.string().nullable(),
+    description: z.string().nullable(),
+    current: z.boolean().nullable(),
+  })
+  .openapi("EmploymentHistoryEntry");
+
 export const NeutralOrganizationSchema = z
   .object({
     name: z.string().nullable(),
@@ -686,6 +716,46 @@ export const NeutralOrganizationSchema = z
     city: z.string().nullable(),
     state: z.string().nullable(),
     country: z.string().nullable(),
+    providerOrganizationId: z.string().nullable().openapi({
+      description: "The provider's own organization id. null when the provider serves none.",
+    }),
+    shortDescription: z.string().nullable(),
+    seoDescription: z.string().nullable(),
+    keywords: z.array(z.string()).nullable().openapi({
+      description:
+        "The organization's keywords as the provider serves them, in provider order. null means the provider served none — which is NOT the same claim as an empty list.",
+    }),
+    industries: z.array(z.string()).nullable(),
+    secondaryIndustries: z.array(z.string()).nullable(),
+    technologyNames: z.array(z.string()).nullable().openapi({
+      description: "The organization's technology stack by name, in provider order. null when the provider serves none.",
+    }),
+    currentTechnologies: z.array(OrganizationTechnologySchema).nullable(),
+    foundedYear: z.number().nullable(),
+    annualRevenuePrinted: z.string().nullable().openapi({
+      description: "Human-readable annual revenue as the provider printed it (e.g. '$12.4M'). The numeric form is `annualRevenue`.",
+    }),
+    totalFunding: z.string().nullable(),
+    totalFundingPrinted: z.string().nullable(),
+    latestFundingStage: z.string().nullable(),
+    latestFundingRoundDate: z.string().nullable(),
+    fundingEvents: z.array(OrganizationFundingEventSchema).nullable().openapi({
+      description: "Every funding round the provider serves, in provider order. null when it serves none.",
+    }),
+    twitterUrl: z.string().nullable(),
+    facebookUrl: z.string().nullable(),
+    blogUrl: z.string().nullable(),
+    crunchbaseUrl: z.string().nullable(),
+    angellistUrl: z.string().nullable(),
+    primaryPhone: z.string().nullable(),
+    publiclyTradedSymbol: z.string().nullable(),
+    publiclyTradedExchange: z.string().nullable(),
+    streetAddress: z.string().nullable(),
+    postalCode: z.string().nullable(),
+    rawAddress: z.string().nullable(),
+    numSuborganizations: z.number().nullable(),
+    retailLocationCount: z.number().nullable(),
+    alexaRanking: z.number().nullable(),
   })
   .openapi("NeutralOrganization");
 
@@ -719,6 +789,10 @@ export const PersonSchema = z
       description: "apollo person id (usable for a later enrich). null for apify.",
     }),
     organization: NeutralOrganizationSchema.nullable(),
+    employmentHistory: z.array(EmploymentHistoryEntrySchema).nullable().openapi({
+      description:
+        "The person's FULL career history as the provider serves it — every role, in provider order (the ordering is part of the contract). `current: true` marks the role the provider flags as current. null when the provider serves no history; it is never reconstructed from the top-level organization.",
+    }),
   })
   .openapi("Person");
 

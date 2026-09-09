@@ -185,6 +185,40 @@ confusing downstream 502.
     drops. Guarded by `tests/unit/business-languages.test.ts` (the derivation) and the
     `businessLanguages` block in `tests/unit/people-providers.test.ts` (that the
     neutral `Person` actually carries it, apollo + apify).
+- **The organization facts + the career history are CARRIED, not summarised.** The
+  cold email a downstream consumer writes is only as good as what the neutral person
+  holds, and apollo-service already pays for far more than the eleven-field
+  organization subset this gateway used to keep. Measured over 30 days at the time
+  this shipped: company short description 94%, keywords 100%, technology list 100%,
+  founded year 79%, annual revenue 64%, latest funding stage 21%, career history
+  100% — while content-generation-service rendered the company-description,
+  keywords and tech-stack prompt variables EMPTY in 87% of 11,070 sales emails and
+  the funding stage in 100%, because the value was dropped at this hop.
+  `NeutralOrganization` therefore carries everything apollo-service serves
+  (descriptions, keywords, industry lists, technology names + current technologies,
+  funding stage/totals/events/latest round date, founded year, printed revenue,
+  web + social urls, phone, street/postal/raw address, suborganization + retail
+  counts, alexa rank, the provider's own organization id), and `Person` carries
+  **`employmentHistory`** — every role the provider returns, in provider order,
+  with `current` flagging the current one.
+  - **Absent stays absent, and `null` is not `[]`.** Every added field is nullable
+    and nothing is derived, inferred, defaulted or reconstructed from the top-level
+    organization: a `null` list means the provider said nothing, which is a
+    different claim from an empty list. `NO_ORGANIZATION_FACTS` is the all-null
+    block a provider that serves none of it (apify) spreads into its organization
+    literal, so a new provider cannot accidentally fabricate a value by omission.
+  - **No new spend and no new call.** Every field already rides the SAME
+    apollo-service responses (`POST /search/next` and `POST /enrich`) this gateway
+    consumes today — this is a mapping change, not an enrichment.
+  - **Purely additive** — no existing field changed name, type or meaning, the
+    `hasOrg` gate is untouched (so an organization that was null stays null), and a
+    consumer reading only the old fields observes nothing. `ApolloPerson` declares
+    every new key optional because apollo-service declares them
+    `.nullable().optional()`, so an older apollo-service that omits one reads as
+    null rather than erroring. Guarded by
+    `tests/unit/people-organization-facts.test.ts` (a rich provider response lands
+    intact and in order on both the search and the reveal path; a bare one still
+    yields a valid person with the fields null).
 - **Pagination**: apollo keeps its server-managed cursor (keyed by org +
   `x-campaign-id`); human-service forwards next-page calls (empty body advances
   the cursor). apify is offset-based (`limit` + `offset`).
