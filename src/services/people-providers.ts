@@ -100,6 +100,34 @@ export interface PeopleSearchFilters {
   technologies?: string[];
 }
 
+// One technology the organization is currently using, as the provider serves it.
+export interface OrganizationTechnology {
+  uid: string | null;
+  name: string | null;
+  category: string | null;
+}
+
+// One funding round the organization raised, as the provider serves it.
+export interface OrganizationFundingEvent {
+  id: string | null;
+  date: string | null;
+  type: string | null;
+  investors: string | null;
+  amount: number | null;
+  currency: string | null;
+}
+
+// One role in a person's career history, as the provider serves it. ORDERED as the
+// provider returned it — the ordering is part of the contract.
+export interface EmploymentHistoryEntry {
+  title: string | null;
+  organizationName: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  description: string | null;
+  current: boolean | null;
+}
+
 export interface NeutralOrganization {
   name: string | null;
   domain: string | null;
@@ -112,7 +140,87 @@ export interface NeutralOrganization {
   city: string | null;
   state: string | null;
   country: string | null;
+  // --- Everything below is carried VERBATIM from the provider, never derived.
+  // A provider that serves none of it leaves every field null (arrays included:
+  // null = "the provider said nothing", which is NOT the same claim as []).
+  providerOrganizationId: string | null;
+  shortDescription: string | null;
+  seoDescription: string | null;
+  keywords: string[] | null;
+  industries: string[] | null;
+  secondaryIndustries: string[] | null;
+  technologyNames: string[] | null;
+  currentTechnologies: OrganizationTechnology[] | null;
+  foundedYear: number | null;
+  annualRevenuePrinted: string | null;
+  totalFunding: string | null;
+  totalFundingPrinted: string | null;
+  latestFundingStage: string | null;
+  latestFundingRoundDate: string | null;
+  fundingEvents: OrganizationFundingEvent[] | null;
+  twitterUrl: string | null;
+  facebookUrl: string | null;
+  blogUrl: string | null;
+  crunchbaseUrl: string | null;
+  angellistUrl: string | null;
+  primaryPhone: string | null;
+  publiclyTradedSymbol: string | null;
+  publiclyTradedExchange: string | null;
+  streetAddress: string | null;
+  postalCode: string | null;
+  rawAddress: string | null;
+  numSuborganizations: number | null;
+  retailLocationCount: number | null;
+  alexaRanking: number | null;
 }
+
+// The new-material half of NeutralOrganization, all null: what a provider that
+// serves none of it produces. Spread into such a provider's organization literal
+// so absence stays absence (no defaults, no synthesis).
+export const NO_ORGANIZATION_FACTS = {
+  providerOrganizationId: null,
+  shortDescription: null,
+  seoDescription: null,
+  keywords: null,
+  industries: null,
+  secondaryIndustries: null,
+  technologyNames: null,
+  currentTechnologies: null,
+  foundedYear: null,
+  annualRevenuePrinted: null,
+  totalFunding: null,
+  totalFundingPrinted: null,
+  latestFundingStage: null,
+  latestFundingRoundDate: null,
+  fundingEvents: null,
+  twitterUrl: null,
+  facebookUrl: null,
+  blogUrl: null,
+  crunchbaseUrl: null,
+  angellistUrl: null,
+  primaryPhone: null,
+  publiclyTradedSymbol: null,
+  publiclyTradedExchange: null,
+  streetAddress: null,
+  postalCode: null,
+  rawAddress: null,
+  numSuborganizations: null,
+  retailLocationCount: null,
+  alexaRanking: null,
+} as const satisfies Omit<
+  NeutralOrganization,
+  | "name"
+  | "domain"
+  | "websiteUrl"
+  | "industry"
+  | "estimatedNumEmployees"
+  | "annualRevenue"
+  | "linkedinUrl"
+  | "logoUrl"
+  | "city"
+  | "state"
+  | "country"
+>;
 
 // Field names mirror lead-service FullLead (provider-independent).
 export interface Person {
@@ -146,6 +254,10 @@ export interface Person {
   // apollo person id — usable for a later enrich/resolve. null for apify.
   providerPersonId: string | null;
   organization: NeutralOrganization | null;
+  // The person's FULL career history as the provider serves it, in provider
+  // order (the ordering is the contract). null when the provider serves none —
+  // never reconstructed from the top-level organization.
+  employmentHistory: EmploymentHistoryEntry[] | null;
 }
 
 export interface PeopleSearchResult {
@@ -503,6 +615,70 @@ interface ApolloPerson {
   organizationCity: string | null;
   organizationState: string | null;
   organizationCountry: string | null;
+  // The organization + career material apollo-service already serves on BOTH
+  // /search/next and /enrich. Optional because every one of them is
+  // `.nullable().optional()` upstream — an older apollo-service that omits a key
+  // reads as null here, never as an error.
+  organizationId?: string | null;
+  organizationShortDescription?: string | null;
+  organizationSeoDescription?: string | null;
+  organizationKeywords?: string[] | null;
+  organizationIndustries?: string[] | null;
+  organizationSecondaryIndustries?: string[] | null;
+  organizationTechnologyNames?: string[] | null;
+  organizationCurrentTechnologies?: ApolloOrganizationTechnology[] | null;
+  organizationFoundedYear?: number | null;
+  organizationAnnualRevenuePrinted?: string | null;
+  organizationTotalFunding?: string | null;
+  organizationTotalFundingPrinted?: string | null;
+  organizationLatestFundingStage?: string | null;
+  organizationLatestFundingRoundDate?: string | null;
+  organizationFundingEvents?: ApolloFundingEvent[] | null;
+  organizationTwitterUrl?: string | null;
+  organizationFacebookUrl?: string | null;
+  organizationBlogUrl?: string | null;
+  organizationCrunchbaseUrl?: string | null;
+  organizationAngellistUrl?: string | null;
+  organizationPrimaryPhone?: string | null;
+  organizationPubliclyTradedSymbol?: string | null;
+  organizationPubliclyTradedExchange?: string | null;
+  organizationStreetAddress?: string | null;
+  organizationPostalCode?: string | null;
+  organizationRawAddress?: string | null;
+  organizationNumSuborganizations?: number | null;
+  organizationRetailLocationCount?: number | null;
+  organizationAlexaRanking?: number | null;
+  employmentHistory?: ApolloEmploymentHistoryEntry[] | null;
+}
+
+interface ApolloOrganizationTechnology {
+  uid?: string | null;
+  name?: string | null;
+  category?: string | null;
+}
+
+interface ApolloFundingEvent {
+  id?: string | null;
+  date?: string | null;
+  type?: string | null;
+  investors?: string | null;
+  amount?: number | null;
+  currency?: string | null;
+}
+
+interface ApolloEmploymentHistoryEntry {
+  title?: string | null;
+  organizationName?: string | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  description?: string | null;
+  current?: boolean | null;
+}
+
+// Carry a provider list through verbatim, in order. A non-array (absent / null)
+// stays null — "the provider said nothing" is not the same claim as an empty list.
+function carryList<T, U>(list: T[] | null | undefined, map: (item: T) => U): U[] | null {
+  return Array.isArray(list) ? list.map(map) : null;
 }
 
 function parseEmployees(size: string | null): number | null {
@@ -557,8 +733,62 @@ function normalizeApolloPerson(p: ApolloPerson): Person {
           city: p.organizationCity,
           state: p.organizationState,
           country: p.organizationCountry,
+          providerOrganizationId: p.organizationId ?? null,
+          shortDescription: p.organizationShortDescription ?? null,
+          seoDescription: p.organizationSeoDescription ?? null,
+          keywords: carryList(p.organizationKeywords, (k) => k),
+          industries: carryList(p.organizationIndustries, (i) => i),
+          secondaryIndustries: carryList(
+            p.organizationSecondaryIndustries,
+            (i) => i,
+          ),
+          technologyNames: carryList(p.organizationTechnologyNames, (t) => t),
+          currentTechnologies: carryList(
+            p.organizationCurrentTechnologies,
+            (t) => ({
+              uid: t.uid ?? null,
+              name: t.name ?? null,
+              category: t.category ?? null,
+            }),
+          ),
+          foundedYear: p.organizationFoundedYear ?? null,
+          annualRevenuePrinted: p.organizationAnnualRevenuePrinted ?? null,
+          totalFunding: p.organizationTotalFunding ?? null,
+          totalFundingPrinted: p.organizationTotalFundingPrinted ?? null,
+          latestFundingStage: p.organizationLatestFundingStage ?? null,
+          latestFundingRoundDate: p.organizationLatestFundingRoundDate ?? null,
+          fundingEvents: carryList(p.organizationFundingEvents, (e) => ({
+            id: e.id ?? null,
+            date: e.date ?? null,
+            type: e.type ?? null,
+            investors: e.investors ?? null,
+            amount: e.amount ?? null,
+            currency: e.currency ?? null,
+          })),
+          twitterUrl: p.organizationTwitterUrl ?? null,
+          facebookUrl: p.organizationFacebookUrl ?? null,
+          blogUrl: p.organizationBlogUrl ?? null,
+          crunchbaseUrl: p.organizationCrunchbaseUrl ?? null,
+          angellistUrl: p.organizationAngellistUrl ?? null,
+          primaryPhone: p.organizationPrimaryPhone ?? null,
+          publiclyTradedSymbol: p.organizationPubliclyTradedSymbol ?? null,
+          publiclyTradedExchange: p.organizationPubliclyTradedExchange ?? null,
+          streetAddress: p.organizationStreetAddress ?? null,
+          postalCode: p.organizationPostalCode ?? null,
+          rawAddress: p.organizationRawAddress ?? null,
+          numSuborganizations: p.organizationNumSuborganizations ?? null,
+          retailLocationCount: p.organizationRetailLocationCount ?? null,
+          alexaRanking: p.organizationAlexaRanking ?? null,
         }
       : null,
+    employmentHistory: carryList(p.employmentHistory, (e) => ({
+      title: e.title ?? null,
+      organizationName: e.organizationName ?? null,
+      startDate: e.startDate ?? null,
+      endDate: e.endDate ?? null,
+      description: e.description ?? null,
+      current: e.current ?? null,
+    })),
   };
 }
 
@@ -624,8 +854,12 @@ function normalizeApifyLead(l: ApifyLead): Person {
           city: l.city,
           state: l.state,
           country: l.country,
+          // apify serves none of the richer organization material.
+          ...NO_ORGANIZATION_FACTS,
         }
       : null,
+    // apify has no career-history field; absent stays absent.
+    employmentHistory: null,
   };
 }
 

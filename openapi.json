@@ -831,6 +831,14 @@
           },
           "organization": {
             "$ref": "#/components/schemas/NeutralOrganization"
+          },
+          "employmentHistory": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "$ref": "#/components/schemas/EmploymentHistoryEntry"
+            },
+            "description": "The person's FULL career history as the provider serves it — every role, in provider order (the ordering is part of the contract). `current: true` marks the role the provider flags as current. null when the provider serves no history; it is never reconstructed from the top-level organization."
           }
         },
         "required": [
@@ -853,7 +861,8 @@
           "businessLanguages",
           "provider",
           "providerPersonId",
-          "organization"
+          "organization",
+          "employmentHistory"
         ]
       },
       "NeutralOrganization": {
@@ -903,6 +912,145 @@
           "country": {
             "type": "string",
             "nullable": true
+          },
+          "providerOrganizationId": {
+            "type": "string",
+            "nullable": true,
+            "description": "The provider's own organization id. null when the provider serves none."
+          },
+          "shortDescription": {
+            "type": "string",
+            "nullable": true
+          },
+          "seoDescription": {
+            "type": "string",
+            "nullable": true
+          },
+          "keywords": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            },
+            "description": "The organization's keywords as the provider serves them, in provider order. null means the provider served none — which is NOT the same claim as an empty list."
+          },
+          "industries": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "secondaryIndustries": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "technologyNames": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            },
+            "description": "The organization's technology stack by name, in provider order. null when the provider serves none."
+          },
+          "currentTechnologies": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "$ref": "#/components/schemas/OrganizationTechnology"
+            }
+          },
+          "foundedYear": {
+            "type": "number",
+            "nullable": true
+          },
+          "annualRevenuePrinted": {
+            "type": "string",
+            "nullable": true,
+            "description": "Human-readable annual revenue as the provider printed it (e.g. '$12.4M'). The numeric form is `annualRevenue`."
+          },
+          "totalFunding": {
+            "type": "string",
+            "nullable": true
+          },
+          "totalFundingPrinted": {
+            "type": "string",
+            "nullable": true
+          },
+          "latestFundingStage": {
+            "type": "string",
+            "nullable": true
+          },
+          "latestFundingRoundDate": {
+            "type": "string",
+            "nullable": true
+          },
+          "fundingEvents": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "$ref": "#/components/schemas/OrganizationFundingEvent"
+            },
+            "description": "Every funding round the provider serves, in provider order. null when it serves none."
+          },
+          "twitterUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "facebookUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "blogUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "crunchbaseUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "angellistUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "primaryPhone": {
+            "type": "string",
+            "nullable": true
+          },
+          "publiclyTradedSymbol": {
+            "type": "string",
+            "nullable": true
+          },
+          "publiclyTradedExchange": {
+            "type": "string",
+            "nullable": true
+          },
+          "streetAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "postalCode": {
+            "type": "string",
+            "nullable": true
+          },
+          "rawAddress": {
+            "type": "string",
+            "nullable": true
+          },
+          "numSuborganizations": {
+            "type": "number",
+            "nullable": true
+          },
+          "retailLocationCount": {
+            "type": "number",
+            "nullable": true
+          },
+          "alexaRanking": {
+            "type": "number",
+            "nullable": true
           }
         },
         "required": [
@@ -916,7 +1064,132 @@
           "logoUrl",
           "city",
           "state",
-          "country"
+          "country",
+          "providerOrganizationId",
+          "shortDescription",
+          "seoDescription",
+          "keywords",
+          "industries",
+          "secondaryIndustries",
+          "technologyNames",
+          "currentTechnologies",
+          "foundedYear",
+          "annualRevenuePrinted",
+          "totalFunding",
+          "totalFundingPrinted",
+          "latestFundingStage",
+          "latestFundingRoundDate",
+          "fundingEvents",
+          "twitterUrl",
+          "facebookUrl",
+          "blogUrl",
+          "crunchbaseUrl",
+          "angellistUrl",
+          "primaryPhone",
+          "publiclyTradedSymbol",
+          "publiclyTradedExchange",
+          "streetAddress",
+          "postalCode",
+          "rawAddress",
+          "numSuborganizations",
+          "retailLocationCount",
+          "alexaRanking"
+        ]
+      },
+      "OrganizationTechnology": {
+        "type": "object",
+        "properties": {
+          "uid": {
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "category": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "uid",
+          "name",
+          "category"
+        ]
+      },
+      "OrganizationFundingEvent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "nullable": true
+          },
+          "date": {
+            "type": "string",
+            "nullable": true
+          },
+          "type": {
+            "type": "string",
+            "nullable": true
+          },
+          "investors": {
+            "type": "string",
+            "nullable": true
+          },
+          "amount": {
+            "type": "number",
+            "nullable": true
+          },
+          "currency": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "date",
+          "type",
+          "investors",
+          "amount",
+          "currency"
+        ]
+      },
+      "EmploymentHistoryEntry": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "organizationName": {
+            "type": "string",
+            "nullable": true
+          },
+          "startDate": {
+            "type": "string",
+            "nullable": true
+          },
+          "endDate": {
+            "type": "string",
+            "nullable": true
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "current": {
+            "type": "boolean",
+            "nullable": true
+          }
+        },
+        "required": [
+          "title",
+          "organizationName",
+          "startDate",
+          "endDate",
+          "description",
+          "current"
         ]
       },
       "PeopleSearchRequest": {
