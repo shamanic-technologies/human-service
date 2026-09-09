@@ -180,7 +180,7 @@ export async function completeJson(args: {
   systemPrompt: string;
   identity: ChatIdentity;
   responseSchema?: Record<string, unknown>;
-  provider?: "anthropic" | "google";
+  provider?: "anthropic" | "google" | "openai";
   model?: string;
   temperature?: number;
   // Minimize the model's internal reasoning so the whole output budget goes to
@@ -233,7 +233,7 @@ export async function platformCompleteJson(args: {
   message: string;
   systemPrompt: string;
   responseSchema?: Record<string, unknown>;
-  provider?: "anthropic" | "google";
+  provider?: "anthropic" | "google" | "openai";
   model?: string;
   temperature?: number;
   disableThinking?: boolean;
