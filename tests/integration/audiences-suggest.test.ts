@@ -385,7 +385,7 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(after.body.audience.status).toBe("active"); // untouched
   });
 
-  it("calls chat-service Layer 1 with google JSON mode, a responseSchema, flash + thinking disabled", async () => {
+  it("calls chat-service Layer 1 with openai JSON mode, a responseSchema, gpt-pro + thinking disabled", async () => {
     const completeBodies: Array<Record<string, unknown>> = [];
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
@@ -418,9 +418,9 @@ describe("POST /orgs/audiences/suggest", () => {
     // ONLY Layer 1 hits chat-service now — no Layer-2 fan-out.
     expect(completeBodies).toHaveLength(1);
     const body = completeBodies[0];
-    expect(body.provider).toBe("google");
+    expect(body.provider).toBe("openai");
     expect(body.responseFormat).toBe("json");
-    expect(body.model).toBe("flash");
+    expect(body.model).toBe("gpt-pro");
     expect(body.disableThinking).toBe(true);
     expect((body.responseSchema as { type?: string }).type).toBe("object");
     expect(body.systemPrompt).toContain("ONE target audience");

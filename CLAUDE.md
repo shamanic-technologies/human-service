@@ -1045,9 +1045,9 @@ from the row's **own name + filters** and writes it.
   preview, no spend). **Never the `nlPrompt`** — derived only from name+filters
   (`generateAudienceDescription` in `src/services/audiences.ts`).
 - **LLM via chat-service's ORG-LESS platform path** — `platformCompleteJson` →
-  `POST /internal/platform-complete` (service-auth, no org/user), Gemini JSON
-  with a `responseSchema` + `disableThinking` (`google`/`flash-pro`, same
-  reliability setup as `/suggest`, v0.18.5).
+  `POST /internal/platform-complete` (service-auth, no org/user), JSON mode
+  with a `responseSchema` + `disableThinking` (`openai`/`gpt-pro`, same
+  reliability setup as `/suggest`).
   **chat-service OWNS the cost** (platform-run declaration lives there) — so
   human-service declares none, and a historical backfill we owe users does NOT
   retroactively bill their orgs (and a sweep-all-orgs job has no `x-user-id`
@@ -1354,7 +1354,7 @@ EXPLORES; it no longer DECIDES.)
   to partially succeed at: an apollo-service build failure or a chooser failure
   **fails the request loud (502) carrying the underlying reason**, so the caller
   is told plainly instead of receiving `candidates: []`.
-- **Two cost owners, none here.** Layer 1 (`google`/`flash`/`disableThinking:true`,
+- **Two cost owners, none here.** Layer 1 (`openai`/`gpt-pro`/`disableThinking:true`,
   `LAYER1_RESPONSE_SCHEMA`) and the CHOOSER (`google`/`pro`, thinking on,
   `CHOOSER_RESPONSE_SCHEMA`) both run via chat-service `POST /complete`;
   chat-service owns that cost. The apollo exploration's LLM + dry-runs are owned by
@@ -1383,6 +1383,18 @@ EXPLORES; it no longer DECIDES.)
   — the request reached the server and stalled, so a retry only re-stalls and, for
   a create like `suggest-from-segment`, risks a duplicate. Pinned by
   `tests/unit/provider-timeout.test.ts`.
+- **Layer 1 + the description generator run on OpenAI GPT-6 Astra
+  (`provider:"openai"`, `model:"gpt-pro"`), not Gemini.** Both are dashboard
+  ONBOARDING prefill — a user waits on them and judges the product by what comes
+  back — so they run on the strongest model available and the ~7x per-token cost
+  is accepted. `SUGGEST_LLM_PROVIDER` / `SUGGEST_LLM_MODEL` in
+  `src/services/audiences.ts` are the single switch; `disableThinking:true` and
+  both `responseSchema`s are unchanged (chat-service maps `disableThinking` to
+  Astra's `reasoning_effort: low` floor). ⚠️ Astra REJECTS `temperature` != 1 and
+  `top_p` with a 400 `unsupported_value`, so these calls send NEITHER sampling
+  param and must never start. The CHOOSER
+  (`src/services/audience-chooser.ts`) is deliberately untouched — it runs at
+  serve time on `google`/`pro` with thinking ON.
 - **Input is ONLY `{nlPrompt, brandId, offerId?}`** — no `strategy`/count knob and
   no split threshold. `offerId` is a pure SCOPE stamped on the persisted row (see
   "An audience belongs to ONE offer"); it never reaches Layer 1's prompt or the
