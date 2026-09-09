@@ -1366,6 +1366,23 @@ EXPLORES; it no longer DECIDES.)
   HTTP failures surface as a fail-loud `ProviderError` → 502 (connect-phase retry
   via the gateway's `fetchWithConnectRetry`). `validationError` is always null and
   `truncated` always false — both retained for response-shape stability only.
+- **A single provider call is bounded at 240s** (`PROVIDER_TIMEOUT_MS`, fresh per
+  attempt). The bound itself is load-bearing — unbounded, a stalled apollo build
+  hangs `fetch` until undici's implicit ~300s headers timeout and takes the whole
+  `/suggest` request (and the frontend loader) with it. Its VALUE is sized on what
+  a HEALTHY build costs: one complete agentic build measured **149s** in production
+  (10 model turns at ~13-16s each) and apollo-service's worst case is above that,
+  so the previous 120s bound aborted successful builds — worse than a plain
+  failure, since apollo-service had finished and PERSISTED its candidates while we
+  had already hung up, spending the credits and throwing the answer away.
+  apollo-service now bounds its OWN wall clock at **210s** and always answers
+  within it (returning whatever it explored), so the wait is on something that has
+  promised to answer; 240s is that promise plus network margin, still under the
+  ~300s ceiling (chat-service sets no timeout of its own on the path that reaches
+  us). A client-side ABORT stays classified **non-transient** and is never retried
+  — the request reached the server and stalled, so a retry only re-stalls and, for
+  a create like `suggest-from-segment`, risks a duplicate. Pinned by
+  `tests/unit/provider-timeout.test.ts`.
 - **Input is ONLY `{nlPrompt, brandId, offerId?}`** — no `strategy`/count knob and
   no split threshold. `offerId` is a pure SCOPE stamped on the persisted row (see
   "An audience belongs to ONE offer"); it never reaches Layer 1's prompt or the
