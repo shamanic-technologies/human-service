@@ -58,11 +58,20 @@ import type { ApolloCandidate } from "../lib/apollo-audiences.js";
 import type { Identity } from "./people-providers.js";
 
 // A comparative judgement over ten candidates x ten sample rows is real
-// reasoning, not extraction — so the strongest Gemini, with thinking left ON
-// (layer 1 and the description generator disable it because they are narrow
-// structured tasks; this one is not).
-const CHOOSER_LLM_PROVIDER = "google" as const;
-const CHOOSER_LLM_MODEL = "pro";
+// reasoning, not extraction — so the strongest model available, with reasoning
+// left ON (layer 1 and the description generator disable it because they are
+// narrow structured tasks; this one is not).
+//
+// OpenAI GPT-6 Astra rather than Gemini 3.1 Pro: the onboarding audience step is
+// a ~100s wait a user sits through, and the chooser is a measured slice of it —
+// p50 12.3s / p90 19.7s on google/pro against p50 6.6s / p90 9.9s on this call's
+// own path on Astra. Astra REJECTS `temperature` and `top_p` with a 400, so this
+// call sends NEITHER (it never did) and must never start; `disableThinking` is
+// likewise not sent, which leaves Astra at its default reasoning level rather
+// than its low floor. Everything else — prompt, response schema, retries,
+// tracking — is unchanged.
+const CHOOSER_LLM_PROVIDER = "openai" as const;
+const CHOOSER_LLM_MODEL = "gpt-pro";
 
 // The ORDER of these keys is load-bearing, not cosmetic. `chosen` comes first
 // and `rationales` after it, because the model writes the JSON in order: it must

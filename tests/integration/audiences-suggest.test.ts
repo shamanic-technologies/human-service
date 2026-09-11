@@ -837,7 +837,7 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(res.body.candidates[0].count).toBe(77);
   });
 
-  it("calls the chooser on google/pro with a responseSchema and thinking left ON", async () => {
+  it("calls the chooser on openai/gpt-pro with a responseSchema and reasoning left ON", async () => {
     wire({ segments: [{ name: "Alpha", description: "a" }] });
     const res = await suggest("alpha");
     expect(res.status).toBe(200);
@@ -846,11 +846,14 @@ describe("POST /orgs/audiences/suggest", () => {
       .map(([, init]) => JSON.parse(init?.body ?? "{}") as Record<string, unknown>)
       .find((b) => String(b.systemPrompt).includes(CHOOSER_MARKER));
     expect(chooserBody).toBeTruthy();
-    expect(chooserBody!.provider).toBe("google");
-    expect(chooserBody!.model).toBe("pro");
+    expect(chooserBody!.provider).toBe("openai");
+    expect(chooserBody!.model).toBe("gpt-pro");
     expect(chooserBody!.responseFormat).toBe("json");
-    // A comparative judgement is reasoning, not extraction — thinking stays on.
+    // A comparative judgement is reasoning, not extraction — reasoning stays on.
     expect(chooserBody!.disableThinking).toBeUndefined();
+    // Astra 400s on a sampling param — this call must never send one.
+    expect(chooserBody!.temperature).toBeUndefined();
+    expect(chooserBody!.topP).toBeUndefined();
     expect((chooserBody!.responseSchema as { required?: string[] }).required).toEqual([
       "chosen",
       "why",
