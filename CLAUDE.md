@@ -1291,10 +1291,17 @@ EXPLORES; it no longer DECIDES.)
      volume carrying two more fields is a trade the chooser should see it is
      making. It is INFORMATION only: no field is named good or bad, nothing is
      sorted or ranked, and the samples still decide.
-   - Runs on **`google` / `pro`** with a `responseSchema` and thinking left **ON**
-     — a comparative judgement over ten candidates x ten sample rows is reasoning,
-     not extraction (layer 1 and the description generator disable thinking
-     because they are narrow structured tasks). **No fallback**: a chooser failure
+   - Runs on **`openai` / `gpt-pro`** (OpenAI GPT-6 Astra) with a `responseSchema`
+     and reasoning left **ON** — a comparative judgement over ten candidates x ten
+     sample rows is reasoning, not extraction (layer 1 and the description
+     generator disable thinking because they are narrow structured tasks). It ran
+     on `google`/`pro` until 2026-09-11; the move is LATENCY, not quality: the
+     onboarding audience step is a ~100s wait a user sits through and this call
+     measured p50 12.3s / p90 19.7s on Gemini 3.1 Pro against p50 6.6s / p90 9.9s
+     on Astra over the same path. Astra 400s on `temperature`/`top_p`, so the call
+     sends NEITHER (it never did) and must never start; `disableThinking` is not
+     sent either, so Astra stays at its default reasoning level rather than its low
+     floor. Prompt, schema, retries and tracking are byte-unchanged. **No fallback**: a chooser failure
      fails the request (502) carrying its reason, exactly like an apollo build
      failure. chat-service owns the cost.
 4. **PERSIST** — the result is written as an `audiences` row at status
@@ -1355,7 +1362,7 @@ EXPLORES; it no longer DECIDES.)
   **fails the request loud (502) carrying the underlying reason**, so the caller
   is told plainly instead of receiving `candidates: []`.
 - **Two cost owners, none here.** Layer 1 (`openai`/`gpt-pro`/`disableThinking:true`,
-  `LAYER1_RESPONSE_SCHEMA`) and the CHOOSER (`google`/`pro`, thinking on,
+  `LAYER1_RESPONSE_SCHEMA`) and the CHOOSER (`openai`/`gpt-pro`, reasoning on,
   `CHOOSER_RESPONSE_SCHEMA`) both run via chat-service `POST /complete`;
   chat-service owns that cost. The apollo exploration's LLM + dry-runs are owned by
   **apollo-service** (which calls chat-service internally). So **human-service
@@ -1392,9 +1399,11 @@ EXPLORES; it no longer DECIDES.)
   both `responseSchema`s are unchanged (chat-service maps `disableThinking` to
   Astra's `reasoning_effort: low` floor). ⚠️ Astra REJECTS `temperature` != 1 and
   `top_p` with a 400 `unsupported_value`, so these calls send NEITHER sampling
-  param and must never start. The CHOOSER
-  (`src/services/audience-chooser.ts`) is deliberately untouched — it runs at
-  serve time on `google`/`pro` with thinking ON.
+  param and must never start. That constraint binds the CHOOSER too
+  (`src/services/audience-chooser.ts`), which moved to Astra on 2026-09-11 for
+  latency and keeps its own switch (`CHOOSER_LLM_PROVIDER` /
+  `CHOOSER_LLM_MODEL`) with reasoning left ON — it sends no sampling param and no
+  `disableThinking`.
 - **Input is ONLY `{nlPrompt, brandId, offerId?}`** — no `strategy`/count knob and
   no split threshold. `offerId` is a pure SCOPE stamped on the persisted row (see
   "An audience belongs to ONE offer"); it never reaches Layer 1's prompt or the
