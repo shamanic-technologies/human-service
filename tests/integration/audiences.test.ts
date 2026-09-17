@@ -13,6 +13,17 @@ import { db } from "../../src/db/index.js";
 import { audiences, brandSuppressions } from "../../src/db/schema.js";
 import { eq, sql } from "drizzle-orm";
 
+// The serve path reads the org's consent log from instantly-service on every
+// serve. That gate has its own suite (opt-outs.test.ts / audiences-opt-out.test.ts);
+// here it is stubbed to an empty log so these tests stay about their own subject.
+vi.mock("../../src/lib/instantly-optouts.js", () => ({
+  listStandingOptOutEmails: vi.fn(async () => []),
+  isEmailOptedOut: vi.fn(async () => false),
+  OptOutSourceError: class OptOutSourceError extends Error {},
+  OptOutConfigError: class OptOutConfigError extends Error {},
+}));
+
+
 const app = createTestApp();
 
 // 4th group starts with 8/9/a/b — Zod 4 .uuid() is variant-strict (see CLAUDE.md).

@@ -15,6 +15,17 @@ import {
   resolveEmail,
 } from "../../src/services/people-providers.js";
 
+// The serve path reads the org's consent log from instantly-service on every
+// serve. That gate has its own suite (opt-outs.test.ts / audiences-opt-out.test.ts);
+// here it is stubbed to an empty log so these tests stay about their own subject.
+vi.mock("../../src/lib/instantly-optouts.js", () => ({
+  listStandingOptOutEmails: vi.fn(async () => []),
+  isEmailOptedOut: vi.fn(async () => false),
+  OptOutSourceError: class OptOutSourceError extends Error {},
+  OptOutConfigError: class OptOutConfigError extends Error {},
+}));
+
+
 const fetchSpy = vi.fn();
 vi.stubGlobal("fetch", fetchSpy);
 
