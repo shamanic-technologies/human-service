@@ -37,6 +37,11 @@ function buildIdentity(res: import("express").Response): Identity {
   };
 }
 
+import {
+  OptOutConfigError,
+  OptOutSourceError,
+} from "../lib/instantly-optouts.js";
+
 // Map a thrown provider error to the right HTTP status. Fail loud — a provider
 // outage surfaces as 502, an unsupported capability as 501; never swallowed.
 function sendProviderError(
@@ -49,6 +54,16 @@ function sendProviderError(
       provider: err.provider,
       capability: err.capability,
     });
+    return;
+  }
+  if (err instanceof OptOutConfigError || err instanceof OptOutSourceError) {
+    // The serve path could not read the org's consent log. A gate that cannot
+    // read its own input must not wave people through, so this fails the request
+    // rather than serving somebody who may have asked us to stop.
+    console.error(
+      `[human-service] people.opt_out_source_error ${err.name}: ${err.message}`
+    );
+    res.status(502).json({ error: err.message, source: "instantly-service" });
     return;
   }
   if (err instanceof ProviderConfigError) {
