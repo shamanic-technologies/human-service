@@ -37,6 +37,11 @@ import {
   type Identity,
 } from "../services/people-providers.js";
 import { ChatServiceError, ChatConfigError } from "../lib/chat-client.js";
+import {
+  OptOutConfigError,
+  OptOutSourceError,
+} from "../lib/instantly-optouts.js";
+
 import { crmListUploads } from "../lib/crm-contacts.js";
 
 const router = Router();
@@ -78,6 +83,16 @@ function sendProviderError(
     res
       .status(501)
       .json({ error: err.message, provider: err.provider, capability: err.capability });
+    return;
+  }
+  if (err instanceof OptOutConfigError || err instanceof OptOutSourceError) {
+    // The serve path could not read the org's consent log. A gate that cannot
+    // read its own input must not wave people through, so this fails the request
+    // rather than serving somebody who may have asked us to stop.
+    console.error(
+      `[human-service] audiences.opt_out_source_error ${err.name}: ${err.message}`
+    );
+    res.status(502).json({ error: err.message, source: "instantly-service" });
     return;
   }
   if (err instanceof ProviderConfigError) {

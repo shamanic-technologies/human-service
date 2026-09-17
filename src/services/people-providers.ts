@@ -20,6 +20,11 @@ import {
   type ServedContact,
 } from "./suppression.js";
 import { deriveBusinessLanguages } from "./business-languages.js";
+import {
+  filterOptedOut,
+  isEmailOptedOut,
+  loadOptOutExclusions,
+} from "./opt-outs.js";
 
 // apify bills per RETURNED lead (each search hit carries a verified email — there
 // is no free teaser list like apollo's). So the gateway takes the strict minimum
@@ -925,6 +930,18 @@ export async function peopleSearch(args: {
     let total = 0;
     let done = false;
 
+    // Standing opt-outs — ORG-wide and permanent, so this is loaded even when
+    // the request names no brand, and it is read live from instantly-service so
+    // a withdrawal puts the person back in the pool on the very next serve. A
+    // teaser is free, so an opted-out person is dropped here, before the reveal
+    // that would have cost a credit. Fail loud: a source we cannot read throws
+    // (502) rather than waving everyone through.
+    const optOuts = await loadOptOutExclusions(args.identity);
+    const hasOptOuts =
+      optOuts.emails.size > 0 ||
+      optOuts.linkedinUrls.size > 0 ||
+      optOuts.personIds.size > 0;
+
     // No brandIds → nothing to suppress against → single page, the caller drives
     // pagination exactly as before. With brandIds → keep paging the FREE teaser
     // cursor until a page yields a fresh (non-suppressed) lead OR Apollo reports
@@ -948,6 +965,7 @@ export async function peopleSearch(args: {
       total = data.totalEntries;
 
       let people = data.people.map(normalizeApolloPerson);
+      people = filterOptedOut(optOuts, people);
       if (brandIds.length > 0) {
         people = await filterSuppressed(args.identity.orgId, brandIds, people);
       }
@@ -958,10 +976,11 @@ export async function peopleSearch(args: {
         done = true;
         break;
       }
-      // Got fresh (non-suppressed) leads, or suppression is off → return them
-      // and let the caller request the next page.
-      if (brandIds.length === 0 || people.length > 0) break;
-      // Whole page already served for the brand → walk to the next free page.
+      // Got fresh (non-suppressed, non-opted-out) leads, or nothing is being
+      // excluded → return them and let the caller request the next page.
+      if ((brandIds.length === 0 && !hasOptOuts) || people.length > 0) break;
+      // Whole page already served for the brand, or opted out → walk to the next
+      // free page.
     }
 
     return { provider, people: collected, done, total, nextOffset: null };
@@ -978,10 +997,21 @@ export async function peopleSearch(args: {
   // lead carries a verified email ⟹ it IS a serve, recorded here.
   const { url, key } = requireApify();
   const limit = args.limit ?? APIFY_DEFAULT_LIMIT;
-  const exclude =
+  const suppression =
     brandIds.length > 0
       ? await getSuppressionSet(args.identity.orgId, brandIds)
       : { emails: [], linkedinUrls: [] };
+  // apify BILLS per returned lead, so the org's standing opt-outs ride the same
+  // push-down as the brand exclude-set: the actor never returns — never bills —
+  // somebody who asked us to stop. Loaded unconditionally, because an opt-out is
+  // org-wide and holds with or without a brand on the request.
+  const apifyOptOuts = await loadOptOutExclusions(args.identity);
+  const exclude = {
+    emails: [...new Set([...suppression.emails, ...apifyOptOuts.emails])],
+    linkedinUrls: [
+      ...new Set([...suppression.linkedinUrls, ...apifyOptOuts.linkedinUrls]),
+    ],
+  };
   const data = (await postProvider(
     "apify",
     url,
@@ -1018,9 +1048,15 @@ export async function peopleSearch(args: {
       }
     );
   }
+  // Second line of defence on the returned batch: the push-down is the thing
+  // that avoids the spend, but whether an opted-out person is EMITTED must not
+  // depend on the actor honouring it. The serve is still recorded above — apify
+  // did emit and bill them, and that history stays true — they are simply never
+  // handed back.
+  const apifyServable = filterOptedOut(apifyOptOuts, apifyPeople);
   return {
     provider,
-    people: apifyPeople,
+    people: apifyServable,
     done: data.hasMore !== true,
     total: data.totalMatched ?? data.leadCount,
     nextOffset: data.hasMore === true ? data.nextOffset ?? null : null,
@@ -1037,6 +1073,17 @@ async function finalizeResolved(
   audienceId?: string
 ): Promise<ResolveEmailResult> {
   if (!person) return { provider, person };
+  // Standing opt-out — the last line, for somebody this gateway never served
+  // before (so no `people` row tied their address to a pre-pay key) and whose
+  // opt-out therefore could not be matched on the free teaser. The credit is
+  // already spent; what this prevents is the email. ORG-wide and unconditional:
+  // checked whether or not the request names a brand.
+  if (await isEmailOptedOut(identity, person.email)) {
+    console.log(
+      `[human-service] opt_out.blocked_post_reveal org=${identity.orgId} provider=${provider}`
+    );
+    return { provider, person: null };
+  }
   const brandIds = identity.brandIds ?? [];
   if (
     brandIds.length > 0 &&
