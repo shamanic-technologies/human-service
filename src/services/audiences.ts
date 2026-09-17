@@ -21,6 +21,7 @@ import { alias } from "drizzle-orm/pg-core";
 import { db } from "../db/index.js";
 import {
   audienceMembers,
+  audienceScreenedOut,
   audiences,
   brandSuppressions,
   people,
@@ -34,6 +35,7 @@ import {
   type ServedContact,
 } from "./suppression.js";
 import { bufferTeasers, popTeaser } from "./teaser-buffer.js";
+import { screenTeaser } from "./teaser-screening.js";
 import {
   dryRun,
   peopleSearch,
@@ -519,12 +521,36 @@ export async function computeAudienceContactability(
     suppressedRows.map((r) => [r.audienceId, Number(r.suppressed)])
   );
 
+  // One grouped query: per audience, the people the pre-pay screen judged OFF
+  // TARGET. They are not members of the audience — the screen established that
+  // before anyone paid to reveal them — so they leave the POOL, not just the
+  // remaining-to-contact count. An audience Apollo sizes at 7,000 whose screen
+  // has rejected one person is an audience of 6,999. Subtracting them from
+  // Remaining alone would leave Size claiming a pool that provably contains
+  // people we will never serve.
+  const screenedOutRows = await db
+    .select({
+      audienceId: audienceScreenedOut.audienceId,
+      screenedOut: sql<number>`count(*)`,
+    })
+    .from(audienceScreenedOut)
+    .where(inArray(audienceScreenedOut.audienceId, audienceIds))
+    .groupBy(audienceScreenedOut.audienceId);
+
+  const screenedOutByAudience = new Map<string, number>(
+    screenedOutRows.map((r) => [r.audienceId, Number(r.screenedOut)])
+  );
+
   for (const row of rows) {
     // Pool = the committed provider's snapshot. apollo is the default provider,
     // so a neutral (provider null) row reads apolloCount.
     const rawSize =
       row.provider === "apify" ? row.apifyCount : row.apolloCount;
-    const sizeCount = rawSize ?? 0;
+    // Minus the people the screen disqualified. No double-count with the
+    // suppression subtraction below: a screened-out person is never served, so
+    // never becomes an audience_member, so cannot appear in `suppressed`.
+    const screenedOut = screenedOutByAudience.get(row.id) ?? 0;
+    const sizeCount = Math.max(0, (rawSize ?? 0) - screenedOut);
 
     const suppressed = suppressedByAudience.get(row.id) ?? 0;
     // Clamp: a stale snapshot can report fewer in the pool than we've served.
@@ -2124,6 +2150,27 @@ export async function serveNextPerson(
       [{ linkedinUrl: teaser.linkedinUrl, providerPersonId: teaser.providerPersonId }]
     );
     if (!fresh) continue;
+
+    // Pre-pay screen: does this person actually belong to the audience the
+    // client described? Apollo's filters cannot express every constraint an
+    // audience states in plain English, so a teaser can match them and still be
+    // the wrong person — and the credit, the generated email and the send are
+    // all spent before anyone finds out. A rejection is recorded (bronze verdict
+    // + silver exclusion) and we pop the next teaser; the credit is never spent.
+    // Fail loud: a chat-service failure propagates (502), because passing the
+    // teaser through would spend exactly what the screen protects.
+    const screen = await screenTeaser({
+      orgId: identity.orgId,
+      audience,
+      subject: teaser,
+      identity,
+    });
+    if (screen.screened && !screen.onTarget) {
+      console.log(
+        `[human-service] teaser_screen.rejected org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`
+      );
+      continue;
+    }
 
     const revealed = await resolveEmail({
       provider: "apollo",
