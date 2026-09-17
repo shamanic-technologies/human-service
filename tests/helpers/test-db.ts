@@ -9,6 +9,8 @@ import {
   audienceMembers,
   audiences,
   audienceTeaserBuffer,
+  audienceTeaserScreenings,
+  audienceScreenedOut,
   people,
   suppressionRecoveries,
   suppressionBackfills,
@@ -25,6 +27,8 @@ export async function cleanTestData() {
   await db.delete(suppressionBackfills);
   await db.delete(brandSuppressions);
   await db.delete(audienceTeaserBuffer);
+  await db.delete(audienceTeaserScreenings);
+  await db.delete(audienceScreenedOut);
   await db.delete(audienceMembers);
   await db.delete(audiences);
   await db.delete(people);

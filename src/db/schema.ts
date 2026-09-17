@@ -615,6 +615,12 @@ export const audienceTeaserBuffer = pgTable(
     // Raw linkedin url for the pre-pay suppression re-check at pop time (a teaser
     // may have been served under another audience for the brand since buffering).
     linkedinUrl: text("linkedin_url"),
+    // The judgeable snapshot the pre-pay screen reads (title, employer, sector,
+    // geography). Persisted HERE because the Person object is in hand at buffer
+    // time and the pop path holds only an enrich handle — re-deriving it would
+    // mean paying apollo for what we already had. NULL on rows buffered before
+    // the screen shipped: nothing to judge, so those serve unscreened.
+    teaser: jsonb("teaser").$type<TeaserSnapshot>(),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -636,3 +642,99 @@ export const audienceTeaserBuffer = pgTable(
 
 export type AudienceTeaserBuffer = typeof audienceTeaserBuffer.$inferSelect;
 export type NewAudienceTeaserBuffer = typeof audienceTeaserBuffer.$inferInsert;
+
+// --- Teaser screening (bronze + silver) ------------------------------------
+//
+// A free apollo teaser can satisfy the audience's Apollo filters and still be
+// off target, because Apollo's vocabulary cannot express every constraint an
+// audience states in plain English. The screen judges each teaser against the
+// audience's own description at the exact frontier between the free teaser and
+// the billed reveal.
+//
+// The snapshot the judge sees. Deliberately small: the fields that decide who
+// this person is, nothing else — a wider blob costs tokens per screen and adds
+// nothing a verdict can use.
+export interface TeaserSnapshot {
+  name: string | null;
+  title: string | null;
+  headline: string | null;
+  seniority: string | null;
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  organizationName: string | null;
+  organizationIndustry: string | null;
+  organizationEmployees: number | null;
+  organizationCity: string | null;
+  organizationState: string | null;
+  organizationCountry: string | null;
+  organizationKeywords: string[] | null;
+}
+
+// 🥉 BRONZE — append-only, EVERY verdict including the passes, each with the
+// snapshot it was judged on plus the model and prompt version that produced it.
+// No unique key: a re-screen under a new prompt appends a row, so a prompt
+// change can be measured against the history rather than erasing it.
+export const audienceTeaserScreenings = pgTable(
+  "audience_teaser_screenings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    providerPersonId: text("provider_person_id").notNull(),
+    linkedinUrl: text("linkedin_url"),
+    teaser: jsonb("teaser").$type<TeaserSnapshot>().notNull(),
+    // true = on target (proceed to the billed reveal), false = rejected.
+    verdict: boolean("verdict").notNull(),
+    // The model's own one-sentence justification. Prose for humans — nothing in
+    // this service reads it back to decide anything.
+    reason: text("reason"),
+    model: text("model").notNull(),
+    promptVersion: text("prompt_version").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("idx_audience_teaser_screenings_lookup").on(
+      table.audienceId,
+      table.providerPersonId
+    ),
+  ]
+);
+
+export type AudienceTeaserScreening = typeof audienceTeaserScreenings.$inferSelect;
+export type NewAudienceTeaserScreening = typeof audienceTeaserScreenings.$inferInsert;
+
+// 🥈 SILVER — the exclusion set the serve path reads, canonical per (audience,
+// provider person), promoted in the SAME transaction as its bronze row. Keyed on
+// the AUDIENCE and not the brand: the verdict is relative to the audience that
+// defined the target, so a person rejected here may be right for another
+// audience of the same brand. Brand-wide no-repeat remains brand_suppressions'.
+export const audienceScreenedOut = pgTable(
+  "audience_screened_out",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    providerPersonId: text("provider_person_id").notNull(),
+    linkedinUrl: text("linkedin_url"),
+    reason: text("reason"),
+    screenedAt: timestamp("screened_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_audience_screened_out_unique").on(
+      table.audienceId,
+      table.providerPersonId
+    ),
+  ]
+);
+
+export type AudienceScreenedOut = typeof audienceScreenedOut.$inferSelect;
+export type NewAudienceScreenedOut = typeof audienceScreenedOut.$inferInsert;

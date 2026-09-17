@@ -568,6 +568,16 @@ CRUD responses stay the plain `AudienceSchema`.
   pool later grows, the next serve-next serves the new people and re-exhausts,
   bumping `reachable_count` up. This clamp makes Remaining truthful even before the
   parallel apollo-service verified-email-only count lands (independently correct).
+- **Minus the people the pre-pay screen disqualified** (see "Pre-pay teaser
+  screening" below). A screened-out person is not a member of the audience — the
+  screen established that before anyone paid to reveal them — so they leave the
+  POOL, not only the remaining-to-contact count: an audience Apollo sizes at
+  7,000 whose screen has rejected one person is an audience of **6,999**.
+  Subtracting them from Remaining alone would leave Size claiming a pool that
+  provably contains people we will never serve, which is two surfaces
+  contradicting each other on the same row. No double-count with the suppression
+  subtraction: a screened-out person is never served, so never becomes an
+  `audience_members` row, so cannot appear in the suppressed count.
 - **`availableToContactPct`** — `round(availableToContactCount / sizeCount *
   100)`, integer `0..100`; `0` when `sizeCount` is `0` (the only divide-by-zero
   guard). Denominator is EXACTLY `sizeCount` so Size and Remaining's % never
@@ -865,6 +875,81 @@ new column, nothing inferred.
 - **No cost.** Guarded by `tests/unit/offer-attribution-sweep.test.ts` (cadence)
   and `tests/integration/offer-attribution-sweep.test.ts` (attribution + the
   later-tick pickup).
+
+### Pre-pay teaser screening — is this person actually in the audience?
+
+An apollo audience is a POINTER to a faithful Apollo filter set, and Apollo's
+vocabulary cannot express every constraint an audience states in plain English:
+"chiropractors who **own** their practice", "German-speaking Switzerland",
+"shops that stock the product" have no field. So a teaser can satisfy every
+filter and still be the wrong person — and we used to learn that only after the
+apollo credit, the generated email and the send were all spent on them.
+`src/services/teaser-screening.ts` owns the judge; the drain loop in
+`serveNextPerson` calls it.
+
+- **It sits at the frontier between free and billed**, between `popTeaser` and
+  `resolveEmail`. Apollo's teaser is free; the enrich that reveals the email is
+  ~11.8 cents. A rejection costs the screen and nothing else.
+- **ONE call, ONE person, ONE boolean — never a batch.** A cheap model asked for
+  a hundred verdicts keyed on a list index drifts, and a drifted verdict is worse
+  than no screen (it rejects people who were fine and passes people who were
+  not). Screening at POP time rather than at refill also means we only ever judge
+  people we were about to pay for, instead of judging a page of 100 to serve 1.
+- **`zai` / `glm-flash` (GLM-5.3-Flash)** — the cheapest model reachable through
+  chat-service `/complete` ($0.15/$0.50 per 1M tokens vendor, against Gemini 3.5
+  Flash-Lite's $0.30/$2.50 and DeepSeek V4.1 Flash's $0.15/$0.60 off-peak,
+  doubling at peak). ~**0.025 cents per screen** against ~**11.8 cents** for one
+  apollo reveal: roughly 470 screens per reveal, so it pays for itself above a
+  ~0.2% rejection rate. It is also the SLOWEST of the three (p50 4.2s vs
+  flash-lite's 2.1s, measured over 30 days of `chat-service` `/complete` runs) —
+  accepted deliberately, the path already waits on an apollo enrich and
+  lead-service buffers. `SCREEN_LLM_PROVIDER` / `SCREEN_LLM_MODEL` are the single
+  switch. zai takes `response_format: {type:"json_schema"}` and chat-service
+  already pins `reasoning_effort: "low"` for `glm-5.3-flash`, so its reasoning is
+  silent — nothing to disable from here.
+- **The prompt is asymmetric on purpose.** A wrong pass costs one email; a wrong
+  reject costs a prospect the client wanted and paid to find. So: a field the
+  free teaser masks (last name, email, often location) is UNKNOWN and never a
+  reason to reject, rejection must rest on something the record actually SAYS
+  (wrong occupation / employer kind / seniority / country), and borderline is a
+  YES. `tests/unit/teaser-screening-prompt.test.ts` pins those invariants (not
+  the prose).
+- **Layering (B/S/G)** — 🥉 bronze `audience_teaser_screenings` (migration
+  `0025`, append-only) records EVERY verdict, passes included, with the snapshot
+  it was judged on plus `model` + `prompt_version`; a re-screen under a new
+  prompt APPENDS, so a prompt change is measurable against the history instead of
+  erasing it. 🥈 silver `audience_screened_out` is the exclusion set the serve
+  path reads, canonical per `(audience_id, provider_person_id)`, promoted in the
+  SAME transaction — a person can never sit in the exclusion set without the
+  evidence that put them there. Same shape as `lead_serves` →
+  `brand_suppressions`, one grain over.
+- **Keyed on the AUDIENCE, not the brand.** The verdict is relative to the target
+  THAT audience defined, so a person rejected here may be exactly right for
+  another audience of the same brand. Brand-wide no-repeat stays
+  `brand_suppressions`' job, untouched. (The collective-scoring / atomic-exclusion
+  rule, pointed at relevance rather than at contact.)
+- **The judgeable snapshot is persisted at BUFFER time** on
+  `audience_teaser_buffer.teaser` (jsonb), because the `Person` object is in hand
+  there and the pop path holds only an enrich handle — re-deriving it would mean
+  paying apollo for what we already had. `toTeaserSnapshot` carries the fields
+  verbatim (title, headline, seniority, geography, employer name/industry/size/
+  geography, keywords capped at 20); nothing is derived or defaulted, so an absent
+  field reads as absent to the judge. NULL on rows buffered before this shipped ⟹
+  no screen, counted + logged.
+- **Rejected people are dropped at REFILL**, so a person apollo re-surfaces on a
+  later page is never re-buffered and never re-screened (one query per page).
+- **`description IS NULL` ⟹ no screen**, logged and counted. There is no target to
+  judge against and inventing one would be worse than serving as before. Every
+  apollo audience in prod carries a description (checked at ship: 918/918), so
+  this is a genuine edge, not the common path.
+- **Fail loud**: a chat-service failure propagates → **502**. Passing the teaser
+  through on a screening outage would spend exactly what the screen protects. A
+  response whose `onTarget` is not a boolean throws for the same reason — that
+  field is the only thing the call exists to produce.
+- **No cost declared here** — chat-service owns the LLM cost and bills the org
+  using serve-next's own identity headers, so human-service's "declares no cost"
+  invariant holds.
+- **Size shrinks by the rejections** — see "List contactability" above.
 
 ### CRM source binding — one imported file = one audience
 
@@ -1452,7 +1537,14 @@ returns 404, never 403, to avoid leaking existence.
   `linkedin_url_norm` / `provider_person_id` / `last_provider` text.
 - **`audience_teaser_buffer`** (serve-next apollo drain buffer): `org_id` uuid
   (new-table convention); `audience_id` uuid FK → `audiences` (ON DELETE CASCADE);
-  `provider_person_id` / `linkedin_url` text.
+  `provider_person_id` / `linkedin_url` text. `teaser` jsonb (the snapshot the
+  pre-pay screen judges; nullable — rows buffered before screening shipped).
+- **`audience_teaser_screenings`** (bronze, pre-pay screen): `org_id` uuid,
+  `audience_id` uuid FK → `audiences` (ON DELETE CASCADE); `provider_person_id` /
+  `linkedin_url` / `reason` / `model` / `prompt_version` text; `teaser` jsonb;
+  `verdict` boolean. No unique key — append-only by design.
+- **`audience_screened_out`** (silver, pre-pay screen): same id typing, unique on
+  `(audience_id, provider_person_id)`.
 
 The same request can hit both column families because the value passed in
 `x-org-id` is text-coercible-to-uuid in practice. New tables use `uuid`.
