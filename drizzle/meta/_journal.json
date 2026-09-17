@@ -176,6 +176,13 @@
       "when": 1771587966895,
       "tag": "0024_add_audience_chooser_trace",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1771587966896,
+      "tag": "0025_add_teaser_screening",
+      "breakpoints": true
     }
   ]
 }

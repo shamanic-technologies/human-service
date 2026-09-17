@@ -1879,7 +1879,7 @@
             "properties": {
               "sizeCount": {
                 "type": "integer",
-                "description": "Total contactable audience pool = the committed provider's count snapshot (apollo -> apolloCount, apify -> apifyCount). 0 for a never-counted audience."
+                "description": "Total contactable audience pool = the committed provider's count snapshot (apollo -> apolloCount, apify -> apifyCount) MINUS the people the pre-pay screen judged off target for this audience. Those people are provably not in the audience, so they leave the pool itself, not only the remaining-to-contact count. 0 for a never-counted audience."
               },
               "availableToContactCount": {
                 "type": "integer",
