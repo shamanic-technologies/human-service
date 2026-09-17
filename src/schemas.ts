@@ -1142,7 +1142,7 @@ export const GetAudienceResponseSchema = z
 export const AudienceListItemSchema = AudienceSchema.extend({
   sizeCount: z.number().int().openapi({
     description:
-      "Total contactable audience pool = the committed provider's count snapshot (apollo -> apolloCount, apify -> apifyCount). 0 for a never-counted audience.",
+      "Total contactable audience pool = the committed provider's count snapshot (apollo -> apolloCount, apify -> apifyCount) MINUS the people the pre-pay screen judged off target for this audience. Those people are provably not in the audience, so they leave the pool itself, not only the remaining-to-contact count. 0 for a never-counted audience.",
   }),
   availableToContactCount: z.number().int().openapi({
     description:

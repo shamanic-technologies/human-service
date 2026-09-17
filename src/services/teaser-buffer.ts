@@ -13,14 +13,21 @@
 // read — no cron). Rows cascade-delete with their audience.
 
 import { db, sql as pg } from "../db/index.js";
-import { audienceTeaserBuffer } from "../db/schema.js";
+import { audienceTeaserBuffer, type TeaserSnapshot } from "../db/schema.js";
+import { findScreenedOut, toTeaserSnapshot } from "./teaser-screening.js";
 import type { Person } from "./people-providers.js";
 
-// A buffered teaser carries only what the reveal + pre-pay suppression re-check
-// need: the apollo person id (enrich handle) and the raw linkedin url.
+// A buffered teaser carries what the pop path needs and cannot re-derive: the
+// apollo person id (enrich handle), the raw linkedin url (pre-pay suppression
+// re-check) and the snapshot the pre-pay screen judges. The snapshot is stored
+// rather than re-fetched because the Person object is in hand HERE and apollo's
+// cursor has moved on by the time the teaser is popped.
 export interface BufferedTeaser {
   providerPersonId: string;
   linkedinUrl: string | null;
+  // NULL on rows buffered before screening shipped — there is nothing to judge,
+  // so those serve unscreened (counted + logged in screenTeaser).
+  teaser: TeaserSnapshot | null;
 }
 
 // Enqueue a fetched apollo page's free teasers for later draining. Idempotent on
@@ -32,13 +39,21 @@ export async function bufferTeasers(
   audienceId: string,
   teasers: Person[]
 ): Promise<number> {
-  const rows = teasers
-    .filter((t) => t.providerPersonId)
+  const withHandle = teasers.filter((t) => t.providerPersonId);
+  // Drop the people this audience's screen already rejected, so a rejected
+  // person is never re-buffered and never re-screened. One query per page.
+  const screenedOut = await findScreenedOut(
+    audienceId,
+    withHandle.map((t) => t.providerPersonId as string)
+  );
+  const rows = withHandle
+    .filter((t) => !screenedOut.has(t.providerPersonId as string))
     .map((t) => ({
       orgId,
       audienceId,
       providerPersonId: t.providerPersonId as string,
       linkedinUrl: t.linkedinUrl,
+      teaser: toTeaserSnapshot(t),
     }));
   if (rows.length === 0) return 0;
   const inserted = await db
@@ -63,7 +78,11 @@ export async function popTeaser(
   audienceId: string
 ): Promise<BufferedTeaser | null> {
   const rows = await pg<
-    { provider_person_id: string; linkedin_url: string | null }[]
+    {
+      provider_person_id: string;
+      linkedin_url: string | null;
+      teaser: TeaserSnapshot | null;
+    }[]
   >`
     DELETE FROM audience_teaser_buffer
     WHERE id = (
@@ -73,10 +92,14 @@ export async function popTeaser(
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     )
-    RETURNING provider_person_id, linkedin_url
+    RETURNING provider_person_id, linkedin_url, teaser
   `;
   const r = rows[0];
   return r
-    ? { providerPersonId: r.provider_person_id, linkedinUrl: r.linkedin_url }
+    ? {
+        providerPersonId: r.provider_person_id,
+        linkedinUrl: r.linkedin_url,
+        teaser: r.teaser,
+      }
     : null;
 }
