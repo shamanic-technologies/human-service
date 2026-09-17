@@ -2,19 +2,34 @@ import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import request from "supertest";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
+import { isOptOutUrl, optOutResponse, setOptOutEnv } from "../helpers/opt-outs.js";
 
 const app = createTestApp();
 const BRAND = "00000000-0000-4000-8000-0000000000b1";
 
 const fetchSpy = vi.fn();
-vi.stubGlobal("fetch", fetchSpy);
+// The consent log is answered AHEAD of the spy, so none of the provider mocks
+// below has to know about it — they stay about their own subject, and the
+// `mockImplementation` each one installs sees only its own provider's calls.
+vi.stubGlobal("fetch", async (url: string, init: { body?: string }) => {
+  if (isOptOutUrl(url)) return ok(optOutResponse(url, standingOptOuts));
+  return fetchSpy(url, init);
+});
 
 function ok(json: unknown) {
   return { ok: true, status: 200, json: async () => json, text: async () => "" };
 }
 
+// The org's standing opt-outs for the test in flight. The serve path reads the
+// consent log on every serve and fails loud when it cannot, so every mock has to
+// answer it — empty by default, so the gate is a no-op and these tests stay about
+// what they are about.
+let standingOptOuts: string[] = [];
+
 beforeEach(async () => {
   fetchSpy.mockReset();
+  standingOptOuts = [];
+  setOptOutEnv();
   process.env.APOLLO_SERVICE_URL = "http://apollo:8080";
   process.env.APOLLO_SERVICE_API_KEY = "apollo-key";
   process.env.APIFY_SERVICE_URL = "http://apify:8080";

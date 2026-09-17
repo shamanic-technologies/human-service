@@ -36,6 +36,7 @@ import {
 } from "./suppression.js";
 import { bufferTeasers, popTeaser } from "./teaser-buffer.js";
 import { screenTeaser } from "./teaser-screening.js";
+import { loadOptOutExclusions, matchesOptOut } from "./opt-outs.js";
 import {
   dryRun,
   peopleSearch,
@@ -1992,6 +1993,11 @@ async function serveNextCrmContact(
       audienceId: audience.id,
     },
   };
+  // Standing opt-outs are ORG-wide, so they hold for a CRM contact exactly as
+  // they do for a bought lead — the person told the sender to stop, and the
+  // sender is the org, whichever list their address happens to sit in.
+  const optOuts = await loadOptOutExclusions(identity);
+
   for (;;) {
     const { contacts, exhausted } = await crmServeNext(
       audience.brandId,
@@ -2005,6 +2011,16 @@ async function serveNextCrmContact(
       return { status: "exhausted", person: null };
     }
     const person = normalizeCrmContact(contact);
+    // A person who asked us to stop is never handed back. crm-service has
+    // already burned the contact, which is the right outcome here rather than a
+    // loss: it must never be served again anyway.
+    if (matchesOptOut(optOuts, { email: person.email })) {
+      console.log(
+        `[human-service] opt_out.blocked_crm org=${identity.orgId} audience=${audience.id}`
+      );
+      if (exhausted) return { status: "exhausted", person: null };
+      continue;
+    }
     // served ⇒ usable email (LOCKED consumer contract). A crm contact without a
     // sendable email is not servable via the cold-email funnel; crm-service has
     // already permanently suppressed it, so drop it and ask for the next one.
@@ -2109,6 +2125,13 @@ export async function serveNextPerson(
   // LEGACY pre-Wave-2 apollo row (no pointer) still holds the old NEUTRAL blob →
   // let toApolloSearchParams remap it, so it keeps serving until the backfill
   // gives it a pointer. Mirrors the same guard in refreshAudienceCounts.
+  // Standing opt-outs for the org, read once for this serve. A buffered teaser
+  // may have been fetched before the person asked us to stop, so the check runs
+  // at POP time — the last free moment — beside the suppression re-check, and
+  // not only at refill. Read live, so a withdrawal is honoured on the next serve
+  // with nothing to expire or invalidate.
+  const optOuts = await loadOptOutExclusions(identity);
+
   const apolloSearchParams = audience.apolloAudienceId ? storedFilters : undefined;
   const apolloFilters = audience.apolloAudienceId
     ? {}
@@ -2150,6 +2173,22 @@ export async function serveNextPerson(
       [{ linkedinUrl: teaser.linkedinUrl, providerPersonId: teaser.providerPersonId }]
     );
     if (!fresh) continue;
+
+    // Standing opt-out, checked BEFORE the screen and before the reveal: the
+    // teaser is free, the enrich is not, and a person who asked us to stop must
+    // cost nothing further. Org-wide, so it fires for every brand of the org,
+    // and it never lapses.
+    if (
+      matchesOptOut(optOuts, {
+        linkedinUrl: teaser.linkedinUrl,
+        providerPersonId: teaser.providerPersonId,
+      })
+    ) {
+      console.log(
+        `[human-service] opt_out.blocked_teaser org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`
+      );
+      continue;
+    }
 
     // Pre-pay screen: does this person actually belong to the audience the
     // client described? Apollo's filters cannot express every constraint an

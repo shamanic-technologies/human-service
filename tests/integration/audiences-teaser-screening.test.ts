@@ -10,6 +10,17 @@ import {
   audienceTeaserScreenings,
 } from "../../src/db/schema.js";
 
+// The serve path reads the org's consent log from instantly-service on every
+// serve. That gate has its own suite (opt-outs.test.ts / audiences-opt-out.test.ts);
+// here it is stubbed to an empty log so these tests stay about their own subject.
+vi.mock("../../src/lib/instantly-optouts.js", () => ({
+  listStandingOptOutEmails: vi.fn(async () => []),
+  isEmailOptedOut: vi.fn(async () => false),
+  OptOutSourceError: class OptOutSourceError extends Error {},
+  OptOutConfigError: class OptOutConfigError extends Error {},
+}));
+
+
 // The pre-pay screen: an apollo free teaser is judged against the audience's own
 // description BEFORE the credit that reveals its email is spent. The point of
 // every test here is the SPEND — a rejected teaser must never reach /enrich.

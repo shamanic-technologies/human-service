@@ -295,6 +295,63 @@ confusing downstream 502.
   `APIFY_SERVICE_URL`, `APIFY_SERVICE_API_KEY`. Read at call time (not boot) so
   a missing var fails the request loudly rather than crash-looping boot.
 
+### Standing opt-outs — "this person asked us to stop"
+
+A recorded opt-out is a CONSENT STATEMENT, not a timing rule, and the serve path
+honours it before anyone pays. `src/lib/instantly-optouts.ts` is the client;
+`src/services/opt-outs.ts` is the gate.
+
+- **instantly-service OWNS the record** — it performed the terminal action, and
+  it holds who said it, when, through which channel, plus the withdrawal log
+  (`GET /orgs/opt-outs`, `standing_only=true`). Nothing here reconstructs the
+  fact from anything else: not a bounce, not a negative reply, not silence. The
+  read is LIVE on every serve, so a withdrawal puts the person back in the pool
+  on the very next one with nothing to invalidate.
+- **Two ways it differs from the per-brand suppression beside it**, and both are
+  the point rather than a tuning choice. It **never expires** — nothing about
+  the passage of time withdraws a consent statement, only an explicit withdrawal
+  does — and it is **ORG-wide, not per brand**: they asked the SENDER to stop,
+  and the sender is the org. So these gates fire even when the request names no
+  brand at all, unlike suppression, which is a no-op without `brandIds`.
+- **Resolution is local; the FACT is not.** An opt-out is stated against an
+  EMAIL, while apollo's free teaser masks the email and carries only a linkedin
+  url + a person id. Both keys already sit on our own canonical `people` row for
+  anyone this gateway has ever served, so `loadOptOutExclusions` turns the
+  address set into the pre-pay key set with one org-scoped join on a table we
+  own. That is identity resolution, not inference.
+- **Four gates, in the order the money is spent**: the apollo teaser filter in
+  `peopleSearch` (free, so an opted-out teaser never reaches the reveal); the
+  re-check at POP time in serve-next's drain loop (a teaser may have been
+  buffered BEFORE the person asked us to stop, so buffering time is not the
+  check); the apify exclude push-down, which rides the same `excludeEmails` /
+  `excludeLinkedinUrls` as the brand exclude-set so the billing actor never
+  returns them, plus a filter on the returned batch so emission never depends on
+  the actor honouring it; and `isEmailOptedOut` in `finalizeResolved`, the last
+  line for somebody this gateway never served before (no `people` row ⟹ no
+  pre-pay key to match on) — the credit is spent there, the email is not. The
+  crm path checks the contact's address and asks crm-service for the next one.
+- **Fail loud, always.** A consent log we cannot read is `OptOutSourceError` /
+  `OptOutConfigError` → **502** at the route, never a serve that skips the gate.
+  That includes the crm branch, whose other failure modes are deliberately
+  fail-soft: a gate that cannot read its own input must not wave people through.
+  The list read is capped at 500 rows by the producer with no cursor, so a FULL
+  page is treated as a truncated read and **refused** rather than honoured as a
+  shorter set (if an org ever reaches 500, instantly-service needs a cursor, not
+  a bigger cap).
+- **Nothing is deleted or rewritten.** `lead_serves` and `brand_suppressions`
+  stay exactly as they were: an opt-out changes what happens next, not what
+  happened. No new table, no new column, no cached copy of somebody else's
+  consent record.
+- **No cost** — a pure read plus one org-scoped query. **Env vars**:
+  `INSTANTLY_SERVICE_URL`, `INSTANTLY_SERVICE_API_KEY`, read at call time.
+- Measured on production the day this shipped: **28 standing opt-outs across 7
+  orgs**, 21 resolvable to a `people` row and **all 21 carrying a pre-pay key**,
+  so the free-teaser gate is what fires for three quarters of them. One of them
+  already held a `brand_suppressions` row whose three-month window had LAPSED —
+  i.e. that person was re-servable that day under the old rule alone. Guarded by
+  `tests/unit/opt-outs.test.ts` and
+  `tests/integration/audiences-opt-out.test.ts`.
+
 ### Suppression recovery — `POST /internal/recover-suppressions`
 
 A serve is recorded the moment the gateway hands a person back with a verified
