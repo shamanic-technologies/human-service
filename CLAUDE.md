@@ -1634,6 +1634,20 @@ real `fetch` (502 / hang). When adding a NEW provider-mocking describe, stub ins
 describe re-owns `fetch` at run time. (audiences.test.ts "Audience Size auto-refresh"
 vs "People route audience tagging".)
 
+⚠️ **The `beforeEach` fix has a tail: your stub OUTLIVES your file and disables the
+NEXT one's.** Files run sequentially against that same single global, so a stub
+installed at run time overwrites whatever a later-collected file installed at
+COLLECTION time — and that file's mock is then simply gone when its turn comes.
+It fails far away from the cause: one test in an unrelated suite gets a real
+`fetch`, 500s, and reports something like `Target cannot be null or undefined`
+on a body that should have had rows. The tell is that the file passes ALONE and
+fails in `npx vitest run`. Hand the global back on the way out — capture
+`const fetchBefore = globalThis.fetch` at module scope and restore it in
+`afterAll` (NOT `vi.unstubAllGlobals()`, which restores the ORIGINAL fetch and
+drops the collection-time stub the next file is relying on). Cost 2026-09-17
+(teaser screening): a new integration file's `beforeEach` stub broke one test in
+`audiences-suggest.test.ts`.
+
 **Migrations are hand-authored, not `drizzle-kit generate`d.** `drizzle/meta/`
 keeps only `0000_snapshot.json` (intermediate snapshots were never committed),
 so `drizzle-kit generate` mis-diffs — it prompts to "rename" EXISTING tables
