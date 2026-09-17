@@ -1705,6 +1705,30 @@ drops the collection-time stub the next file is relying on). Cost 2026-09-17
 (teaser screening): a new integration file's `beforeEach` stub broke one test in
 `audiences-suggest.test.ts`.
 
+⚠️ **To make EVERY mock in a file answer one extra endpoint, intercept at
+`vi.stubGlobal`, never by wrapping `fetchSpy.mockImplementation` at each call
+site.** The wrapper reads as the obvious refactor — a `routeFetch(handler)` that
+answers the new URL and delegates — and it blows the stack: a suite re-arms the
+mock from inside a running handler, so each re-arm nests another wrapper around
+the previous one and the first test dies on `RangeError: Maximum call stack size
+exceeded` pointing at your helper rather than at the re-arm. Stub the GLOBAL
+instead, with the spy behind it:
+
+```ts
+const fetchSpy = vi.fn();
+vi.stubGlobal("fetch", async (url: string, init: { body?: string }) => {
+  if (isOptOutUrl(url)) return ok(optOutResponse(url, standingOptOuts));
+  return fetchSpy(url, init);
+});
+```
+
+Every `mockImplementation` in the file then sees only its own provider's calls
+and none of them has to know the extra endpoint exists. For a suite built on
+`mockResolvedValueOnce` the wrapper is worse than useless — a queued one-time
+value is consumed in CALL ORDER, so the new endpoint's call eats the value the
+next provider call was meant to get; `vi.mock` the client module there instead.
+(Set 2026-09-17, wiring the opt-out read into 7 suites.)
+
 **Migrations are hand-authored, not `drizzle-kit generate`d.** `drizzle/meta/`
 keeps only `0000_snapshot.json` (intermediate snapshots were never committed),
 so `drizzle-kit generate` mis-diffs — it prompts to "rename" EXISTING tables
