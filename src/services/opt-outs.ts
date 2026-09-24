@@ -36,6 +36,7 @@ import {
   isEmailOptedOut,
   listStandingOptOutEmails,
 } from "../lib/instantly-optouts.js";
+import { isEmailWon, listWonEmails } from "../lib/lead-won.js";
 import { normalizeEmail, normalizeLinkedinUrl } from "./suppression.js";
 import type { Identity } from "./people-providers.js";
 
@@ -59,7 +60,56 @@ export const EMPTY_OPT_OUT_EXCLUSIONS: OptOutExclusions = {
 export async function loadOptOutExclusions(
   identity: Identity
 ): Promise<OptOutExclusions> {
-  const emails = await listStandingOptOutEmails(identity);
+  return resolveExclusionKeys(
+    identity.orgId,
+    await listStandingOptOutEmails(identity)
+  );
+}
+
+// Every person the serve path must not hand back for THIS request, expressed in
+// the pre-pay keys: the org's standing opt-outs (org-wide, see above) PLUS every
+// person any brand of the request has already WON (lead-service owns that fact —
+// see lib/lead-won). Won is keyed on the atomic BRAND: serving under brands
+// [A, B] contacts on behalf of both, so a person won by either is excluded, and
+// a person won only by brand C of the same org stays servable here. Like an
+// opt-out it never lapses — the 3-month window does not apply to a paying
+// client — and it is read live, so a sale withdrawn upstream puts the person
+// back in the pool on the next serve. No brand on the request ⟹ no won gate
+// (there is no brand whose clients to protect). Fail loud: an unreadable won set
+// throws (502) rather than serving through.
+//
+// NOT used by the crm path: crm-service owns its own dedup of a client's
+// uploaded contacts, and that path keeps reading opt-outs only.
+export async function loadServeExclusions(
+  identity: Identity
+): Promise<OptOutExclusions> {
+  const brandIds = [...new Set(identity.brandIds ?? [])];
+  const [optOutEmails, ...wonSets] = await Promise.all([
+    listStandingOptOutEmails(identity),
+    ...brandIds.map((brandId) => listWonEmails(identity, brandId)),
+  ]);
+  return resolveExclusionKeys(identity.orgId, [
+    ...new Set([...optOutEmails, ...wonSets.flat()]),
+  ]);
+}
+
+// Post-reveal: has any brand of this request already won this exact address?
+// One narrowed read per brand at the owner. No brand ⟹ false.
+export async function isEmailWonForRequest(
+  identity: Identity,
+  email: string | null | undefined
+): Promise<boolean> {
+  const brandIds = [...new Set(identity.brandIds ?? [])];
+  const hits = await Promise.all(
+    brandIds.map((brandId) => isEmailWon(identity, brandId, email))
+  );
+  return hits.some(Boolean);
+}
+
+async function resolveExclusionKeys(
+  orgId: string,
+  emails: string[]
+): Promise<OptOutExclusions> {
   if (emails.length === 0) return EMPTY_OPT_OUT_EXCLUSIONS;
 
   const rows = await db
@@ -70,7 +120,7 @@ export async function loadOptOutExclusions(
     })
     .from(people)
     .where(
-      and(eq(people.orgId, identity.orgId), inArray(people.emailNorm, emails))
+      and(eq(people.orgId, orgId), inArray(people.emailNorm, emails))
     );
 
   const linkedinUrls = new Set<string>();
