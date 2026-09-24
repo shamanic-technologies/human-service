@@ -642,6 +642,17 @@ CRUD responses stay the plain `AudienceSchema`.
 - **No cost** — pure DB read; no downstream calls. One grouped query per list
   page (not N+1). The window lives here by design (per-brand, cross-provider
   suppression is human-service's job) — never moved to another service.
+- **⚠️ The suppressed-member count is two `EXISTS` probes, NEVER a JOIN whose
+  condition ORs `email_norm` and `linkedin_url_norm`.** Postgres can use neither
+  an index nor a hash key for an OR across two columns, so the JOIN form
+  hash-joined every member of the page against every in-window suppression of
+  the brand and evaluated the OR per pair. It was quadratic and invisible on
+  small brands (16 ms), then 49 s in prod for a brand with 66 audiences and
+  16.5k suppressions (9.7M join-filter rows) — and this list is read on every
+  dashboard brand page AND by features-service on every lead pick, so it stacked
+  up behind itself. The EXISTS form is linear (227 ms on that brand, identical
+  counts). Measured 2026-09-24; guarded by the linkedin-only and other-brand
+  cases in `tests/integration/audiences.test.ts`.
 
 ### Internal bulk audience resolver — `POST /internal/audiences/resolve`
 
