@@ -36,7 +36,11 @@ import {
 } from "./suppression.js";
 import { bufferTeasers, popTeaser } from "./teaser-buffer.js";
 import { screenTeaser } from "./teaser-screening.js";
-import { loadOptOutExclusions, matchesOptOut } from "./opt-outs.js";
+import {
+  loadOptOutExclusions,
+  loadServeExclusions,
+  matchesOptOut,
+} from "./opt-outs.js";
 import {
   dryRun,
   peopleSearch,
@@ -2144,12 +2148,13 @@ export async function serveNextPerson(
   // LEGACY pre-Wave-2 apollo row (no pointer) still holds the old NEUTRAL blob →
   // let toApolloSearchParams remap it, so it keeps serving until the backfill
   // gives it a pointer. Mirrors the same guard in refreshAudienceCounts.
-  // Standing opt-outs for the org, read once for this serve. A buffered teaser
+  // Standing opt-outs for the org + the people this brand has already WON, read
+  // once for this serve (loadServeExclusions). A buffered teaser
   // may have been fetched before the person asked us to stop, so the check runs
   // at POP time — the last free moment — beside the suppression re-check, and
   // not only at refill. Read live, so a withdrawal is honoured on the next serve
   // with nothing to expire or invalidate.
-  const optOuts = await loadOptOutExclusions(identity);
+  const optOuts = await loadServeExclusions(identity);
 
   const apolloSearchParams = audience.apolloAudienceId ? storedFilters : undefined;
   const apolloFilters = audience.apolloAudienceId

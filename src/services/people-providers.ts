@@ -23,7 +23,8 @@ import { deriveBusinessLanguages } from "./business-languages.js";
 import {
   filterOptedOut,
   isEmailOptedOut,
-  loadOptOutExclusions,
+  isEmailWonForRequest,
+  loadServeExclusions,
 } from "./opt-outs.js";
 
 // apify bills per RETURNED lead (each search hit carries a verified email — there
@@ -936,7 +937,7 @@ export async function peopleSearch(args: {
     // teaser is free, so an opted-out person is dropped here, before the reveal
     // that would have cost a credit. Fail loud: a source we cannot read throws
     // (502) rather than waving everyone through.
-    const optOuts = await loadOptOutExclusions(args.identity);
+    const optOuts = await loadServeExclusions(args.identity);
     const hasOptOuts =
       optOuts.emails.size > 0 ||
       optOuts.linkedinUrls.size > 0 ||
@@ -1005,7 +1006,7 @@ export async function peopleSearch(args: {
   // push-down as the brand exclude-set: the actor never returns — never bills —
   // somebody who asked us to stop. Loaded unconditionally, because an opt-out is
   // org-wide and holds with or without a brand on the request.
-  const apifyOptOuts = await loadOptOutExclusions(args.identity);
+  const apifyOptOuts = await loadServeExclusions(args.identity);
   const exclude = {
     emails: [...new Set([...suppression.emails, ...apifyOptOuts.emails])],
     linkedinUrls: [
@@ -1081,6 +1082,16 @@ async function finalizeResolved(
   if (await isEmailOptedOut(identity, person.email)) {
     console.log(
       `[human-service] opt_out.blocked_post_reveal org=${identity.orgId} provider=${provider}`
+    );
+    return { provider, person: null };
+  }
+  // Already WON by a brand of this request — a paying client is never handed
+  // back to cold outreach by the brand that sold to them. Permanent (no 3-month
+  // window), per brand, read live from lead-service. This is the last line for a
+  // won person with no `people` row tying their address to a pre-pay key.
+  if (await isEmailWonForRequest(identity, person.email)) {
+    console.log(
+      `[human-service] won_lead.blocked_post_reveal org=${identity.orgId} provider=${provider}`
     );
     return { provider, person: null };
   }

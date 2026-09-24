@@ -352,6 +352,42 @@ honours it before anyone pays. `src/lib/instantly-optouts.ts` is the client;
   `tests/unit/opt-outs.test.ts` and
   `tests/integration/audiences-opt-out.test.ts`.
 
+### Won people — "this brand already sold to them"
+
+A brand must never cold-contact a person it has already WON (a paying client).
+Before this, the only guard was the per-brand 3-month suppression, which knows
+nothing about outcomes: a closed client became servable again once their window
+lapsed. `src/lib/lead-won.ts` is the client; the gate lives beside the opt-out
+one in `src/services/opt-outs.ts` (`loadServeExclusions`,
+`isEmailWonForRequest`).
+
+- **lead-service OWNS the fact** (`GET /orgs/brands/{brandId}/won-leads`, and
+  `?email=` for one address): a live, attributed `sale` on its outcome ledger,
+  whoever observed it. Read LIVE on every serve, never stored or reconstructed
+  here — a sale withdrawn upstream stops being reported and the person is
+  servable again on the next serve, with nothing to invalidate.
+- **Scope is the BRAND** (atomic member, per the identity-keying rule): a serve
+  under brands `[A, B]` excludes anyone won by A or B; a person won only by
+  brand C of the same org stays servable. No brand on the request ⟹ no won gate.
+- **Permanent** — the 3-month window does not apply; suppression for everyone
+  else is untouched.
+- **Same gates as the opt-out**, because `loadServeExclusions` merges the brand's
+  won addresses into the opt-out exclusion set (resolved to pre-pay keys through
+  our own `people` rows): the apollo teaser filter in `peopleSearch`, serve-next's
+  POP-time check, and the apify exclude push-down + returned-batch filter. Plus a
+  narrowed `?email=` read in `finalizeResolved` after the reveal, for a won person
+  with no `people` row (no pre-pay key to match on).
+- **The crm path is deliberately NOT gated** — crm-service owns its own dedup of a
+  client's uploaded contacts; `serveNextCrmContact` still reads opt-outs only.
+- **Fail loud**: an unreadable won set (non-2xx, network error, a body without an
+  `emails` array, missing env) is `WonLeadsSourceError` / `WonLeadsConfigError` →
+  **502** (`source: "lead-service"`), nothing served. lead-service itself answers
+  a failed read with 500, never an empty set.
+- **No cost.** **Env vars**: `LEAD_SERVICE_URL`, `LEAD_SERVICE_API_KEY`, read at
+  call time. Tests: `tests/integration/audiences-won-leads.test.ts`; every other
+  serving suite answers the call through `tests/helpers/won-leads.ts` or a
+  `vi.mock` of the client.
+
 ### Suppression recovery — `POST /internal/recover-suppressions`
 
 A serve is recorded the moment the gateway hands a person back with a verified

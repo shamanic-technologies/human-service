@@ -3,6 +3,7 @@ import request from "supertest";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { isOptOutUrl, optOutResponse, setOptOutEnv } from "../helpers/opt-outs.js";
+import { isWonLeadsUrl, setWonLeadsEnv, wonLeadsResponse } from "../helpers/won-leads.js";
 
 const app = createTestApp();
 const BRAND = "00000000-0000-4000-8000-0000000000b1";
@@ -13,6 +14,7 @@ const fetchSpy = vi.fn();
 // `mockImplementation` each one installs sees only its own provider's calls.
 vi.stubGlobal("fetch", async (url: string, init: { body?: string }) => {
   if (isOptOutUrl(url)) return ok(optOutResponse(url, standingOptOuts));
+  if (isWonLeadsUrl(url)) return ok(wonLeadsResponse(url));
   return fetchSpy(url, init);
 });
 
@@ -30,6 +32,7 @@ beforeEach(async () => {
   fetchSpy.mockReset();
   standingOptOuts = [];
   setOptOutEnv();
+  setWonLeadsEnv();
   process.env.APOLLO_SERVICE_URL = "http://apollo:8080";
   process.env.APOLLO_SERVICE_API_KEY = "apollo-key";
   process.env.APIFY_SERVICE_URL = "http://apify:8080";

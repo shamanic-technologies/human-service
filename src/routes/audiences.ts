@@ -41,6 +41,10 @@ import {
   OptOutConfigError,
   OptOutSourceError,
 } from "../lib/instantly-optouts.js";
+import {
+  WonLeadsConfigError,
+  WonLeadsSourceError,
+} from "../lib/lead-won.js";
 
 import { crmListUploads } from "../lib/crm-contacts.js";
 
@@ -93,6 +97,16 @@ function sendProviderError(
       `[human-service] audiences.opt_out_source_error ${err.name}: ${err.message}`
     );
     res.status(502).json({ error: err.message, source: "instantly-service" });
+    return;
+  }
+  if (err instanceof WonLeadsConfigError || err instanceof WonLeadsSourceError) {
+    // The serve path could not read the brand's won people. Same posture as the
+    // consent log: never serve through a gate that cannot read its own input —
+    // an empty answer would hand a paying client back to cold outreach.
+    console.error(
+      `[human-service] audiences.won_leads_source_error ${err.name}: ${err.message}`
+    );
+    res.status(502).json({ error: err.message, source: "lead-service" });
     return;
   }
   if (err instanceof ProviderConfigError) {

@@ -7,6 +7,13 @@ import {
 // The serve path reads the org's consent log from instantly-service on every
 // serve. That gate has its own suite (opt-outs.test.ts / audiences-opt-out.test.ts);
 // here it is stubbed to an empty log so these tests stay about their own subject.
+// Same for the brand's won people (lead-service) — stubbed to an empty set.
+vi.mock("../../src/lib/lead-won.js", () => ({
+  listWonEmails: vi.fn(async () => []),
+  isEmailWon: vi.fn(async () => false),
+  WonLeadsSourceError: class WonLeadsSourceError extends Error {},
+  WonLeadsConfigError: class WonLeadsConfigError extends Error {},
+}));
 vi.mock("../../src/lib/instantly-optouts.js", () => ({
   listStandingOptOutEmails: vi.fn(async () => []),
   isEmailOptedOut: vi.fn(async () => false),

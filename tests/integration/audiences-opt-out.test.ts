@@ -4,6 +4,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { isOptOutUrl, optOutResponse, setOptOutEnv } from "../helpers/opt-outs.js";
+import { isWonLeadsUrl, setWonLeadsEnv, wonLeadsResponse } from "../helpers/won-leads.js";
 import { db } from "../../src/db/index.js";
 import { brandSuppressions, people } from "../../src/db/schema.js";
 
@@ -26,11 +27,16 @@ let standingOptOuts: string[] = [];
 let optOutSourceDown = false;
 
 beforeEach(async () => {
-  vi.stubGlobal("fetch", fetchSpy);
+  // The brand's won set (lead-service) is answered ahead of the spy — empty, so
+  // this suite stays about opt-outs.
+  vi.stubGlobal("fetch", async (url: string, init: { body?: string }) =>
+    isWonLeadsUrl(url) ? ok(wonLeadsResponse(url)) : fetchSpy(url, init)
+  );
   fetchSpy.mockReset();
   standingOptOuts = [];
   optOutSourceDown = false;
   setOptOutEnv();
+  setWonLeadsEnv();
   process.env.APOLLO_SERVICE_URL = "http://apollo:8080";
   process.env.APOLLO_SERVICE_API_KEY = "apollo-key";
   process.env.APIFY_SERVICE_URL = "http://apify:8080";
