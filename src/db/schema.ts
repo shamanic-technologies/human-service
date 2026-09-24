@@ -218,6 +218,11 @@ export const leadServes = pgTable(
     runId: text("run_id"),
     // The audience this serve was made under (audit-only link to `audiences`).
     audienceId: uuid("audience_id"),
+    // Pre-serve email verification verdict (src/lib/email-verification.ts):
+    // valid | invalid | catch_all | risky | unknown. NULL = not verified (every
+    // serve before the gate shipped, and apify serves). Recorded for rejected
+    // reveals too, so the bounce rate per verdict can be measured later.
+    emailVerdict: text("email_verdict"),
     servedAt: timestamp("served_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
