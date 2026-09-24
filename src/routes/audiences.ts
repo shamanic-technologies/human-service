@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { EmailVerificationError } from "../lib/email-verification.js";
 import { and, asc, count, desc, eq, isNotNull, ne } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audienceMembers, audiences, people } from "../db/schema.js";
@@ -107,6 +108,13 @@ function sendProviderError(
       `[human-service] audiences.won_leads_source_error ${err.name}: ${err.message}`
     );
     res.status(502).json({ error: err.message, source: "lead-service" });
+    return;
+  }
+  if (err instanceof EmailVerificationError) {
+    // The revealed address could not be verified. Never serve it unverified —
+    // that spends the send and the sender reputation the check protects.
+    console.error(`[human-service] audiences.verify_email_error ${err.message}`);
+    res.status(502).json({ error: err.message, source: "email-verification" });
     return;
   }
   if (err instanceof ProviderConfigError) {

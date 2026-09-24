@@ -1,4 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// Pre-serve email verification (a billed Apify call) is its own suite's
+// concern; here every revealed address verifies as deliverable.
+vi.mock("../../src/lib/email-verification.js", async (importOriginal) => ({
+  ...((await importOriginal()) as Record<string, unknown>),
+  verifyEmail: async () => "valid",
+}));
 import {
   peopleSearch,
   resolveEmail,

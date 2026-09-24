@@ -19,7 +19,9 @@ Backend service that owns two distinct concerns:
    a **per-brand cross-provider suppression** log (tables `lead_serves` bronze +
    `brand_suppressions` silver — only the gateway sees both providers' emissions
    for a brand, so the "already served" truth lives here). Declares **no cost**
-   (apollo/apify own the paid call); forwards `x-run-id` for downstream tracing.
+   for the search or the reveal (apollo/apify own that paid call) — its ONE own
+   spend is the pre-serve email verification (see below), declared end to end
+   here; forwards `x-run-id` for downstream tracing.
    A **third** lead provider, `crm-service` (a client's uploaded contact list), is
    served — not searched — through this layer: an audience with `provider='crm'`
    is served by `/orgs/audiences/{id}/serve-next` straight from crm-service, which
@@ -289,8 +291,9 @@ confusing downstream 502.
     `src/services/suppression.ts` owns it; `org_id`/`brand_id` uuid,
     `campaign_id`/`run_id` text (audit-only).
 - **Recovery of an un-sent serve** — see "Suppression recovery" below.
-- **No cost declaration here** — apollo/apify own the paid call; human-service
-  only forwards `x-run-id`.
+- **No cost declaration for the search / reveal** — apollo/apify own the paid
+  call; human-service only forwards `x-run-id`. The pre-serve email verification
+  below is the single exception: it is spend this service makes itself.
 - **Env vars**: `APOLLO_SERVICE_URL`, `APOLLO_SERVICE_API_KEY`,
   `APIFY_SERVICE_URL`, `APIFY_SERVICE_API_KEY`. Read at call time (not boot) so
   a missing var fails the request loudly rather than crash-looping boot.
@@ -979,6 +982,46 @@ new column, nothing inferred.
 - **No cost.** Guarded by `tests/unit/offer-attribution-sweep.test.ts` (cadence)
   and `tests/integration/offer-attribution-sweep.test.ts` (attribution + the
   later-tick pickup).
+
+### Pre-serve email verification — will this address bounce?
+
+Apollo's "verified" addresses bounced at **~8%** in September 2026 (instantly-
+service, per lead contacted). `src/lib/email-verification.ts` checks every
+revealed address with the **BounceVerify** Apify actor (real SMTP + catch-all
+detection) inside `finalizeResolved`, i.e. after the billed reveal and before
+the person is served — so it covers serve-next AND `/orgs/people/resolve-email`.
+
+- **Measured before it shipped** (100 bounced + 100 delivered prod addresses):
+  `invalid` 24/3, `unknown` 32/15, catch-all 41/46, `valid` 3/36 — i.e. ~40%,
+  ~15%, ~7% (the fleet average: the verifier cannot tell on catch-all domains)
+  and <1% bounce inside each verdict. ~44% of our leads sit on catch-all domains,
+  which is the part no verifier fixes.
+- **Policy = `SERVABLE_VERDICTS`**, the single switch: serve `valid` + `catch_all`,
+  drop `invalid`, `unknown`, `risky` (spam traps). Serving `valid` only would put
+  delivery near 99% but serve only ~1/3 of reveals (~3 paid reveals per lead).
+- **A dropped address is still recorded as a serve** (bronze + silver), so the
+  suppression layer stops a later request paying to reveal them again; the
+  person is never handed back and never tagged as an audience member. Order in
+  `finalizeResolved`: opt-out → brand suppression (never pay to verify someone we
+  would not serve) → verify → record → serve/drop.
+- **Every verdict is persisted** on `lead_serves.email_verdict` (migration
+  `0026`, nullable: NULL = served before the gate, or no address). That column
+  is how the bounce rate PER VERDICT is measured afterwards — join it to
+  instantly-service's `email_bounced` events.
+- **Human-service declares this cost itself** (it is not a delegated call):
+  child run of the caller's `x-run-id` → PROVISION `apify-bounceverify-email` →
+  billing AUTHORIZE → Apify platform key from key-service → EXECUTE → ACTUALIZE
+  (only a decisive result is billed; the actor does not charge `unknown`) →
+  cancel the hold → complete the run. apify-service used to own this route but
+  is NOT deployed on the box; the cost name is the one it declared.
+- **Fail loud**: any step failing → `EmailVerificationError` → **502**, with the
+  hold released and the run marked failed. Serving unverified would spend the
+  send and the sender reputation the gate protects.
+- ~2.5-4.3s per address in production. Env: `RUNS_SERVICE_*`,
+  `BILLING_SERVICE_*`, `KEY_SERVICE_*`, read at call time.
+- Guarded by `tests/unit/email-verification.test.ts` (verdict mapping, the cost
+  protocol order, fail-loud paths) and `tests/unit/serve-email-verdict.test.ts`
+  (the gate). Every other serve-path suite mocks `verifyEmail` to `"valid"`.
 
 ### Pre-pay teaser screening — is this person actually in the audience?
 
