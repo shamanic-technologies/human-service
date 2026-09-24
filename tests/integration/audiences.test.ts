@@ -655,6 +655,62 @@ describe("Audiences list contactability (Size / Remaining)", () => {
     expect(item.availableToContactPct).toBe(90);
   });
 
+  it("a suppression matching only on linkedin subtracts, once per person", async () => {
+    const id = await createAudience(ORG_A, {
+      name: "Linkedin Match",
+      brandId: BRAND_1,
+      provider: "apollo",
+      apolloCount: 10,
+    });
+    await serve(
+      ORG_A,
+      BRAND_1,
+      id,
+      contact({
+        email: "li@x.com",
+        linkedinUrl: "https://linkedin.com/in/li-only",
+        provider: "apollo",
+      })
+    );
+    // Re-key the suppression so ONLY the linkedin url still matches the person.
+    await db
+      .update(brandSuppressions)
+      .set({ emailNorm: "someone-else@x.com" })
+      .where(eq(brandSuppressions.orgId, ORG_A));
+    expect((await listItem(ORG_A, id)).availableToContactCount).toBe(9);
+
+    // And a second in-window row matching the same person by email: both keys
+    // hit, the person still counts once.
+    await recordServe(
+      ORG_A,
+      [BRAND_1],
+      [contact({ email: "li@x.com", provider: "apollo" })],
+      { audienceId: id }
+    );
+
+    const item = await listItem(ORG_A, id);
+    expect(item.availableToContactCount).toBe(9);
+  });
+
+  it("a suppression for ANOTHER brand does not subtract", async () => {
+    const id = await createAudience(ORG_A, {
+      name: "Other Brand",
+      brandId: BRAND_1,
+      provider: "apollo",
+      apolloCount: 10,
+    });
+    const c = contact({
+      email: "other@x.com",
+      linkedinUrl: "https://linkedin.com/in/other-brand",
+      provider: "apollo",
+    });
+    await tagAudienceServe(ORG_A, id, [c]);
+    await recordServe(ORG_A, [BRAND_2], [c], { audienceId: id });
+
+    const item = await listItem(ORG_A, id);
+    expect(item.availableToContactCount).toBe(10);
+  });
+
   it("a serve older than the 3-month window is contactable again", async () => {
     const id = await createAudience(ORG_A, {
       name: "Lapsed",
