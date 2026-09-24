@@ -492,6 +492,26 @@ export async function computeAudienceContactability(
   // is currently suppressed for the audience's brand within the window. Match on
   // email_norm (canonical) OR linkedin_url_norm (cross-provider pre-pay key) —
   // exactly the identities the serve path suppresses on.
+  //
+  // ⚠️ The match is two EXISTS probes, never a JOIN whose condition ORs the two
+  // keys. Postgres cannot use an index or a hash key for `email = x OR linkedin
+  // = y`, so the JOIN form hash-joined every member of the page against every
+  // in-window suppression of the brand and evaluated the OR on each pair:
+  // 9.7M comparisons, 49 s in prod for a brand with 66 audiences and 16.5k
+  // suppressions — on a list the dashboard loads on every brand page and
+  // features-service reads on every lead pick. The EXISTS form is linear in
+  // members + suppressions (227 ms on the same brand, identical counts).
+  const inWindowSuppressionFor = (
+    key: typeof brandSuppressions.emailNorm | typeof brandSuppressions.linkedinUrlNorm,
+    value: typeof people.emailNorm | typeof people.linkedinUrlNorm
+  ) => sql`exists (
+    select 1 from ${brandSuppressions}
+    where ${brandSuppressions.orgId} = ${audiences.orgId}
+      and ${brandSuppressions.brandId} = ${audiences.brandId}
+      and ${key} = ${value}
+      and ${brandSuppressions.lastServedAt} > ${windowCutoff()}
+  )`;
+
   const suppressedRows = await db
     .select({
       audienceId: audienceMembers.audienceId,
@@ -500,22 +520,21 @@ export async function computeAudienceContactability(
     .from(audienceMembers)
     .innerJoin(audiences, eq(audienceMembers.audienceId, audiences.id))
     .innerJoin(people, eq(audienceMembers.personId, people.id))
-    .innerJoin(
-      brandSuppressions,
+    .where(
       and(
-        eq(brandSuppressions.orgId, audiences.orgId),
-        eq(brandSuppressions.brandId, audiences.brandId),
-        gt(brandSuppressions.lastServedAt, windowCutoff()),
+        inArray(audienceMembers.audienceId, audienceIds),
         or(
-          eq(brandSuppressions.emailNorm, people.emailNorm),
+          inWindowSuppressionFor(brandSuppressions.emailNorm, people.emailNorm),
           and(
             isNotNull(people.linkedinUrlNorm),
-            eq(brandSuppressions.linkedinUrlNorm, people.linkedinUrlNorm)
+            inWindowSuppressionFor(
+              brandSuppressions.linkedinUrlNorm,
+              people.linkedinUrlNorm
+            )
           )
         )
       )
     )
-    .where(inArray(audienceMembers.audienceId, audienceIds))
     .groupBy(audienceMembers.audienceId);
 
   const suppressedByAudience = new Map<string, number>(
