@@ -1,13 +1,8 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 
-// The gate under test: after the billed reveal, finalizeResolved asks the
-// verifier and serves only a deliverable address.
-const verification = vi.hoisted(() => ({ verifyEmail: vi.fn() }));
-vi.mock("../../src/lib/email-verification.js", async (importOriginal) => ({
-  ...((await importOriginal()) as Record<string, unknown>),
-  verifyEmail: verification.verifyEmail,
-}));
-
+// The gate under test: after the billed reveal, finalizeResolved reads the
+// provider's own verdict (apollo-service `emailVerification`) and serves only a
+// deliverable address.
 const supp = vi.hoisted(() => ({
   filterSuppressed: vi.fn(),
   getSuppressionSet: vi.fn(),
@@ -44,7 +39,7 @@ const identity = {
   brandIds: ["brand-A"],
 };
 
-function enriched(email: string | null) {
+function enriched(email: string | null, emailVerification: unknown) {
   return {
     ok: true,
     status: 200,
@@ -60,11 +55,22 @@ function enriched(email: string | null) {
         organizationIndustry: null, organizationSize: null, organizationLinkedinUrl: null,
         organizationLogoUrl: null, organizationCity: null, organizationState: null, organizationCountry: null,
       },
+      ...(emailVerification === undefined ? {} : { emailVerification }),
     }),
   };
 }
 
-describe("pre-serve email verification", () => {
+const verdict = (v: string, deliverable: boolean) => ({
+  email: "jane@acme.com",
+  verdict: v,
+  deliverable,
+  verifier: "bounceverify",
+  verificationId: "ver-1",
+  verifiedAt: "2026-09-25T00:00:00Z",
+  reused: false,
+});
+
+describe("serve gate on the provider's email verification", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     vi.stubGlobal("fetch", fetchSpy);
@@ -74,50 +80,34 @@ describe("pre-serve email verification", () => {
     supp.recordServe.mockResolvedValue(undefined);
   });
 
-  it.each(["valid"])("serves a %s address and records the verdict", async (verdict) => {
-    fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com"));
-    verification.verifyEmail.mockResolvedValue(verdict);
+  it("serves a deliverable address and records the verdict", async () => {
+    fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com", verdict("valid", true)));
     const r = await resolveEmail({ providerPersonId: "a1", identity });
     expect(r.person?.email).toBe("jane@acme.com");
-    expect(verification.verifyEmail).toHaveBeenCalledWith(
-      "jane@acme.com",
-      expect.objectContaining({ orgId: "org-1", userId: "user-1" })
-    );
-    expect(supp.recordServe.mock.calls[0][3]).toMatchObject({ emailVerdict: verdict });
+    expect(supp.recordServe.mock.calls[0][3]).toMatchObject({ emailVerdict: "valid" });
   });
 
   it.each(["catch_all", "invalid", "unknown", "risky"])(
-    "drops a %s address, but still records the paid reveal so it is never re-bought",
-    async (verdict) => {
-      fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com"));
-      verification.verifyEmail.mockResolvedValue(verdict);
+    "drops a non-deliverable (%s) address, but records the paid reveal so it is never re-bought",
+    async (v) => {
+      fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com", verdict(v, false)));
       const r = await resolveEmail({ providerPersonId: "a1", identity });
       expect(r.person).toBeNull();
       expect(supp.recordServe).toHaveBeenCalledTimes(1);
-      expect(supp.recordServe.mock.calls[0][3]).toMatchObject({ emailVerdict: verdict });
+      expect(supp.recordServe.mock.calls[0][3]).toMatchObject({ emailVerdict: v });
     }
   );
 
-  it("never pays to verify someone already suppressed for the brand", async () => {
-    fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com"));
-    supp.isEmailSuppressed.mockResolvedValue(true);
-    const r = await resolveEmail({ providerPersonId: "a1", identity });
-    expect(r.person).toBeNull();
-    expect(verification.verifyEmail).not.toHaveBeenCalled();
-  });
-
-  it("does not verify a reveal with no address (the caller's no-email drop handles it)", async () => {
-    fetchSpy.mockResolvedValueOnce(enriched(null));
-    await resolveEmail({ providerPersonId: "a1", identity });
-    expect(verification.verifyEmail).not.toHaveBeenCalled();
-  });
-
-  it("a verification failure fails the serve — never serves unverified", async () => {
-    fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com"));
-    verification.verifyEmail.mockRejectedValue(new EmailVerificationError("apify down"));
+  it("an email without a verdict fails loud — never served unverified", async () => {
+    fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com", undefined));
     await expect(resolveEmail({ providerPersonId: "a1", identity })).rejects.toBeInstanceOf(
       EmailVerificationError
     );
     expect(supp.recordServe).not.toHaveBeenCalled();
+  });
+
+  it("a reveal with no address needs no verdict (the caller's no-email drop handles it)", async () => {
+    fetchSpy.mockResolvedValueOnce(enriched(null, null));
+    await expect(resolveEmail({ providerPersonId: "a1", identity })).resolves.toBeDefined();
   });
 });

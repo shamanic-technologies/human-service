@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 
-// Pre-serve email verification (a billed Apify call) is its own suite's
-// concern; here every revealed address verifies as deliverable.
+// The provider's verdict on a revealed email (apollo-service emailVerification)
+// is its own suite's concern; here every revealed address reads as deliverable.
 vi.mock("../../src/lib/email-verification.js", async (importOriginal) => ({
   ...((await importOriginal()) as Record<string, unknown>),
-  verifyEmail: async () => "valid",
+  readEmailVerification: (_p: string, _r: unknown, email: string | null | undefined) =>
+    email ? { verdict: "valid", deliverable: true } : null,
 }));
 import request from "supertest";
 import { eq } from "drizzle-orm";
