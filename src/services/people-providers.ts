@@ -22,7 +22,7 @@ import {
   type ServedContact,
 } from "./suppression.js";
 import { deriveBusinessLanguages } from "./business-languages.js";
-import { isServableVerdict, verifyEmail } from "../lib/email-verification.js";
+import { readEmailVerification, type EmailVerification } from "../lib/email-verification.js";
 import {
   filterOptedOut,
   isEmailOptedOut,
@@ -1074,7 +1074,9 @@ async function finalizeResolved(
   provider: Provider,
   person: Person | null,
   identity: Identity,
-  audienceId?: string
+  audienceId: string | undefined,
+  // The provider's own verdict on the revealed email (null when no email).
+  verification: EmailVerification | null
 ): Promise<ResolveEmailResult> {
   if (!person) return { provider, person };
   // Standing opt-out — the last line, for somebody this gateway never served
@@ -1105,15 +1107,11 @@ async function finalizeResolved(
   ) {
     return { provider, person: null };
   }
-  // Will this address bounce? Checked AFTER the suppression block (never pay to
-  // verify someone we would not serve anyway) and BEFORE the person is handed
-  // back. A person with no address is left to the caller's own no-email drop.
-  // A verification failure throws (→ 502): serving unverified would spend the
-  // send + the sender reputation the gate exists to protect.
-  const emailVerdict = person.email?.trim()
-    ? await verifyEmail(person.email, identity)
-    : undefined;
-  const servable = emailVerdict === undefined || isServableVerdict(emailVerdict);
+  // Will this address bounce? The provider verified it at reveal time
+  // (apollo-service owns verification + its policy); we act on `deliverable`.
+  // A person with no address is left to the caller's own no-email drop.
+  const emailVerdict = verification?.verdict;
+  const servable = verification === null || verification.deliverable;
   // A rejected reveal is still recorded as a serve: the credit is spent, and the
   // suppression row is what stops a later request paying to reveal them again.
   if (brandIds.length > 0) {
@@ -1169,12 +1167,14 @@ export async function resolveEmail(args: {
         "/enrich",
         { apolloPersonId: args.providerPersonId },
         args.identity
-      )) as { person: ApolloPerson | null };
+      )) as { person: ApolloPerson | null; emailVerification?: unknown };
+      const person = data.person ? normalizeApolloPerson(data.person) : null;
       return finalizeResolved(
         provider,
-        data.person ? normalizeApolloPerson(data.person) : null,
+        person,
         args.identity,
-        args.audienceId
+        args.audienceId,
+        readEmailVerification("apollo", data.emailVerification, person?.email)
       );
     }
     // Fallback: identity-based match (name + domain) when no person id is known
@@ -1191,12 +1191,14 @@ export async function resolveEmail(args: {
           organizationDomain: args.domain,
         },
         args.identity
-      )) as { person: ApolloPerson | null };
+      )) as { person: ApolloPerson | null; emailVerification?: unknown };
+      const person = data.person ? normalizeApolloPerson(data.person) : null;
       return finalizeResolved(
         provider,
-        data.person ? normalizeApolloPerson(data.person) : null,
+        person,
         args.identity,
-        args.audienceId
+        args.audienceId,
+        readEmailVerification("apollo", data.emailVerification, person?.email)
       );
     }
     // Unreachable when called via the route (Zod refine guarantees one path);
@@ -1242,11 +1244,15 @@ export async function resolveEmail(args: {
     args.identity
   )) as { leads: ApifyLead[] };
   const lead = data.leads[0];
+  const person = lead ? normalizeApifyLead(lead) : null;
+  // apify-service returns no verification verdict (and is not deployed), so a
+  // revealed apify email fails loud here rather than being served unverified.
   return finalizeResolved(
     provider,
-    lead ? normalizeApifyLead(lead) : null,
+    person,
     args.identity,
-    args.audienceId
+    args.audienceId,
+    readEmailVerification("apify", undefined, person?.email)
   );
 }
 
