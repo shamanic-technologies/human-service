@@ -40,14 +40,12 @@ export type EmailVerdict = "valid" | "invalid" | "catch_all" | "risky" | "unknow
 
 // The verdicts a person may be SERVED with. Everything else is dropped after
 // the reveal (the credit is spent; the send, the generated email and the
-// sender reputation are not). THE single policy switch. `risky` (a spam trap,
-// or a mailbox the verifier flags as dangerous) is never served; `catch_all`
-// is, because the verifier cannot distinguish good from bad on those domains
-// and they bounce at the fleet average.
-export const SERVABLE_VERDICTS: ReadonlySet<EmailVerdict> = new Set<EmailVerdict>([
-  "valid",
-  "catch_all",
-]);
+// sender reputation are not). THE single policy switch: only a mailbox the
+// verifier CONFIRMED exists is served. `catch_all` is dropped too — the
+// verifier cannot tell good from bad on those domains and they bounced at the
+// ~7% fleet average, so serving them caps delivery near 96%; `valid` alone
+// bounced <1% in the sample (the owner's target is ~99% delivered).
+export const SERVABLE_VERDICTS: ReadonlySet<EmailVerdict> = new Set<EmailVerdict>(["valid"]);
 
 export function isServableVerdict(v: EmailVerdict): boolean {
   return SERVABLE_VERDICTS.has(v);
