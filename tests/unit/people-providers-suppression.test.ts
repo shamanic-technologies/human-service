@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
+// Pre-serve email verification (a billed Apify call) is its own suite's
+// concern; here every revealed address verifies as deliverable.
+vi.mock("../../src/lib/email-verification.js", async (importOriginal) => ({
+  ...((await importOriginal()) as Record<string, unknown>),
+  verifyEmail: async () => "valid",
+}));
+
 // Mock the suppression layer so we test the people-gateway WIRING (does it call
 // filter / exclude-set / record / block at the right moments?) without a db.
 const supp = vi.hoisted(() => ({

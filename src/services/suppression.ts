@@ -70,7 +70,13 @@ export async function recordServe(
   orgId: string,
   brandIds: string[],
   contacts: ServedContact[],
-  ctx: { campaignId?: string; runId?: string; audienceId?: string } = {}
+  ctx: {
+    campaignId?: string;
+    runId?: string;
+    audienceId?: string;
+    // Pre-serve verification verdict, recorded on the bronze row only.
+    emailVerdict?: string;
+  } = {}
 ): Promise<void> {
   if (brandIds.length === 0 || contacts.length === 0) return;
 
@@ -94,6 +100,7 @@ export async function recordServe(
         campaignId: ctx.campaignId ?? null,
         runId: ctx.runId ?? null,
         audienceId: ctx.audienceId ?? null,
+        emailVerdict: ctx.emailVerdict ?? null,
       });
 
       // 🥈 Silver — canonical row keyed on email_norm (the only stable

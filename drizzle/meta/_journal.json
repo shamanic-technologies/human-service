@@ -183,6 +183,13 @@
       "when": 1771587966896,
       "tag": "0025_add_teaser_screening",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1771587966897,
+      "tag": "0026_add_lead_serve_email_verdict",
+      "breakpoints": true
     }
   ]
 }

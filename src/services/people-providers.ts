@@ -4,7 +4,9 @@
 // shape whose field names mirror lead-service's `FullLead` so the future
 // Sales Lead Service mapping is trivial.
 //
-// Cost tracking stays with apollo/apify-service (they make the paid calls).
+// Cost tracking for search / reveal stays with apollo/apify-service (they make
+// the paid calls). The one spend this module triggers itself is the pre-serve
+// email verification (src/lib/email-verification.ts), which declares its own.
 // This module only forwards identity + run-tracking headers and FAILS LOUD:
 // a provider error propagates as a thrown ProviderError (→ 502 at the route),
 // never a silent fallback, because a gateway that masks a provider outage
@@ -20,6 +22,7 @@ import {
   type ServedContact,
 } from "./suppression.js";
 import { deriveBusinessLanguages } from "./business-languages.js";
+import { isServableVerdict, verifyEmail } from "../lib/email-verification.js";
 import {
   filterOptedOut,
   isEmailOptedOut,
@@ -1102,12 +1105,30 @@ async function finalizeResolved(
   ) {
     return { provider, person: null };
   }
+  // Will this address bounce? Checked AFTER the suppression block (never pay to
+  // verify someone we would not serve anyway) and BEFORE the person is handed
+  // back. A person with no address is left to the caller's own no-email drop.
+  // A verification failure throws (→ 502): serving unverified would spend the
+  // send + the sender reputation the gate exists to protect.
+  const emailVerdict = person.email?.trim()
+    ? await verifyEmail(person.email, identity)
+    : undefined;
+  const servable = emailVerdict === undefined || isServableVerdict(emailVerdict);
+  // A rejected reveal is still recorded as a serve: the credit is spent, and the
+  // suppression row is what stops a later request paying to reveal them again.
   if (brandIds.length > 0) {
     await recordServe(identity.orgId, brandIds, [toServedContact(person)], {
       campaignId: identity.campaignId,
       runId: identity.runId,
       audienceId,
+      emailVerdict,
     });
+  }
+  if (!servable) {
+    console.log(
+      `[human-service] verify_email.rejected org=${identity.orgId} provider=${provider} verdict=${emailVerdict}`
+    );
+    return { provider, person: null };
   }
   return { provider, person };
 }
