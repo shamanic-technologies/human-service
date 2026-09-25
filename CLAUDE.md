@@ -996,9 +996,11 @@ the person is served — so it covers serve-next AND `/orgs/people/resolve-email
   ~15%, ~7% (the fleet average: the verifier cannot tell on catch-all domains)
   and <1% bounce inside each verdict. ~44% of our leads sit on catch-all domains,
   which is the part no verifier fixes.
-- **Policy = `SERVABLE_VERDICTS`**, the single switch: serve `valid` + `catch_all`,
-  drop `invalid`, `unknown`, `risky` (spam traps). Serving `valid` only would put
-  delivery near 99% but serve only ~1/3 of reveals (~3 paid reveals per lead).
+- **Policy = `SERVABLE_VERDICTS`**, the single switch: serve `valid` ONLY; drop
+  `catch_all`, `invalid`, `unknown`, `risky` (spam traps). Target ~99% delivered.
+  v0.46.3 also served `catch_all` (~96%); dropped in v0.46.4 on the owner's call.
+  Cost of the choice, measured in the first 8h of prod: ~43% of reveals come back
+  `valid`, i.e. ~2.3 paid apollo reveals per lead served.
 - **A dropped address is still recorded as a serve** (bronze + silver), so the
   suppression layer stops a later request paying to reveal them again; the
   person is never handed back and never tagged as an audience member. Order in

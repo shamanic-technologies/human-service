@@ -96,9 +96,9 @@ describe("mapVerdict", () => {
 });
 
 describe("serving policy", () => {
-  it("serves valid and catch_all, never invalid / unknown / risky", () => {
+  it("serves valid only — never catch_all / invalid / unknown / risky", () => {
     expect(isServableVerdict("valid")).toBe(true);
-    expect(isServableVerdict("catch_all")).toBe(true);
+    expect(isServableVerdict("catch_all")).toBe(false);
     expect(isServableVerdict("invalid")).toBe(false);
     expect(isServableVerdict("unknown")).toBe(false);
     expect(isServableVerdict("risky")).toBe(false);

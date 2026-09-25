@@ -74,7 +74,7 @@ describe("pre-serve email verification", () => {
     supp.recordServe.mockResolvedValue(undefined);
   });
 
-  it.each(["valid", "catch_all"])("serves a %s address and records the verdict", async (verdict) => {
+  it.each(["valid"])("serves a %s address and records the verdict", async (verdict) => {
     fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com"));
     verification.verifyEmail.mockResolvedValue(verdict);
     const r = await resolveEmail({ providerPersonId: "a1", identity });
@@ -86,7 +86,7 @@ describe("pre-serve email verification", () => {
     expect(supp.recordServe.mock.calls[0][3]).toMatchObject({ emailVerdict: verdict });
   });
 
-  it.each(["invalid", "unknown", "risky"])(
+  it.each(["catch_all", "invalid", "unknown", "risky"])(
     "drops a %s address, but still records the paid reveal so it is never re-bought",
     async (verdict) => {
       fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com"));
