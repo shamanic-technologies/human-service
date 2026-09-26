@@ -316,9 +316,13 @@ honours it before anyone pays. `src/lib/instantly-optouts.ts` is the client;
   and the sender is the org. So these gates fire even when the request names no
   brand at all, unlike suppression, which is a no-op without `brandIds`.
 - **Resolution is local; the FACT is not.** An opt-out is stated against an
-  EMAIL, while apollo's free teaser masks the email and carries only a linkedin
-  url + a person id. Both keys already sit on our own canonical `people` row for
-  anyone this gateway has ever served, so `loadOptOutExclusions` turns the
+  EMAIL, while apollo's free teaser masks the email and carries only a person
+  id. ⚠️ **The teaser carries NO LinkedIn URL, last name or domain** — measured
+  2026-09-26: 0 of 6,308 `audience_teaser_buffer` rows hold a `linkedin_url`,
+  while 15,538 of 15,539 recent suppressions do (it arrives WITH the paid
+  reveal). So no LinkedIn-keyed finder (treg) can replace the Apollo reveal for
+  a new lead (apollo-service#280). The person id already sits on our own
+  canonical `people` row for anyone this gateway has ever served, so `loadOptOutExclusions` turns the
   address set into the pre-pay key set with one org-scoped join on a table we
   own. That is identity resolution, not inference.
 - **Four gates, in the order the money is spent**: the apollo teaser filter in
