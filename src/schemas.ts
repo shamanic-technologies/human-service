@@ -4,6 +4,7 @@ import {
   extendZodWithOpenApi,
 } from "@asteasolutions/zod-to-openapi";
 import { LAX_UUID_REGEX } from "./lib/uuid.js";
+import { SPLIT_AXES, SPLIT_ICONS } from "./lib/audience-split-vocab.js";
 
 extendZodWithOpenApi(z);
 export const registry = new OpenAPIRegistry();
@@ -2449,5 +2450,121 @@ registry.registerPath({
         "application/json": { schema: HealthResponseSchema },
       },
     },
+  },
+});
+
+// --- POST /orgs/audiences/split + /orgs/audiences/split/confirm ---
+// The light, conceptual split of a confirmed target into at most 6 audiences
+// (src/services/audience-split.ts). No Apollo call, no count: one writing call
+// splits the text, one typed judgment picks each card's icon.
+
+export const SplitAudiencesRequestSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    targetAudience: z.string().trim().min(1).openapi({
+      description:
+        "The confirmed free-text answer to 'who do you sell to?' (e.g. 'B2B SaaS founders in the US and Europe').",
+    }),
+  })
+  .openapi("SplitAudiencesRequest");
+
+export const SplitSegmentSchema = z
+  .object({
+    name: z.string().openapi({ description: "Short label, max 4 words, unique within the proposal." }),
+    description: z.string().openapi({
+      description:
+        "One plain-language sentence that fully specifies the segment on its own (who, where, what kind of company, plus this segment's partition value). Becomes the audience's description on confirm.",
+    }),
+    icon: z.enum(Object.keys(SPLIT_ICONS) as [string, ...string[]]).openapi({
+      description:
+        "Phosphor icon name (kebab-case) from a closed vocabulary; `globe-hemisphere-west` renders as <GlobeHemisphereWest /> in @phosphor-icons/react.",
+    }),
+    iconConfidence: z.number().min(0).max(1).openapi({
+      description: "The judge's own certainty about the icon (decorative: the icon is always set).",
+    }),
+  })
+  .openapi("SplitSegment");
+
+export const SplitAudiencesResponseSchema = z
+  .object({
+    axes: z.array(z.enum(SPLIT_AXES)).openapi({
+      description:
+        "The axes the segments partition the target along: empty when a single segment is returned, one axis, or two axes crossed. Only axes a people search can filter on.",
+    }),
+    segments: z.array(SplitSegmentSchema).min(1).max(6).openapi({
+      description:
+        "1 to 6 mutually exclusive segments that together cover the target. Nothing is persisted.",
+    }),
+  })
+  .openapi("SplitAudiencesResponse");
+
+export const ConfirmAudienceSplitRequestSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    offerId: z.string().uuid().openapi({
+      description: "The brand-service offer the new audiences belong to. Stored verbatim, like brandId.",
+    }),
+    targetAudience: z.string().trim().min(1).optional().openapi({
+      description: "The confirmed target the segments were split from. Stored as each audience's nlPrompt.",
+    }),
+    segments: z
+      .array(
+        z
+          .object({
+            name: z.string().trim().min(1),
+            description: z.string().trim().min(1),
+          })
+          .strip()
+      )
+      .min(1)
+      .max(6)
+      .openapi({
+        description:
+          "The segments the customer kept (at least one). Pass them back as returned by /orgs/audiences/split; icon fields are accepted and ignored.",
+      }),
+  })
+  .openapi("ConfirmAudienceSplitRequest");
+
+export const ConfirmAudienceSplitResponseSchema = z
+  .object({
+    audiences: z.array(AudienceSchema).openapi({
+      description:
+        "One ACTIVE audience per confirmed segment, in request order, scoped to the brand and offer, carrying the segment's description. provider=apollo with no apolloAudienceId/filters yet: the Apollo filters are built later by the existing pointer build.",
+    }),
+  })
+  .openapi("ConfirmAudienceSplitResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/split",
+  summary:
+    "Propose up to 6 non-overlapping audience segments from a target description (no search, no counts, persists nothing)",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: peopleHeaders,
+    body: { content: { "application/json": { schema: SplitAudiencesRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Proposed segments", content: { "application/json": { schema: SplitAudiencesResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "LLM / judgment error", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/split/confirm",
+  summary: "Create the chosen split segments as active audiences under the brand and offer",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: orgsListsHeaders,
+    body: { content: { "application/json": { schema: ConfirmAudienceSplitRequestSchema } } },
+  },
+  responses: {
+    201: { description: "Audiences created", content: { "application/json": { schema: ConfirmAudienceSplitResponseSchema } } },
+    400: { description: "Invalid request (incl. duplicate segment names)", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    409: { description: "A segment name is already an audience of this brand + offer; nothing created", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
