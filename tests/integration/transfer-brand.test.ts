@@ -53,6 +53,7 @@ describe("POST /internal/transfer-brand", () => {
     expect(res.status).toBe(200);
     expect(res.body.updatedTables).toEqual([
       { tableName: "human_methodologies", count: 1 },
+      { tableName: "humans", count: 1 },
     ]);
 
     // Verify org_id was updated
@@ -218,6 +219,7 @@ describe("POST /internal/transfer-brand", () => {
     expect(res.status).toBe(200);
     expect(res.body.updatedTables).toEqual([
       { tableName: "human_methodologies", count: 1 },
+      { tableName: "humans", count: 1 },
     ]);
 
     const [updated] = await db
