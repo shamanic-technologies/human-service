@@ -50,7 +50,7 @@ section — the port binds first).
 | Org-scoped (legacy) | `GET /humans/{id}` | apiKey + identity | Get a human by id |
 | Org-scoped (legacy) | `GET /humans/{id}/methodology` | apiKey + identity | Get cached methodology |
 | Org-scoped (legacy) | `POST /humans/{id}/extract` | apiKey + identity | Trigger scrape + AI extraction |
-| Internal | `POST /internal/transfer-brand` | apiKey | Move solo-brand methodology rows between orgs |
+| Internal | `POST /internal/transfer-brand` | apiKey | Fleet brand-transfer contract: move EVERY row of a brand from one org to another, in one transaction (see "Brand transfer" below) |
 | Internal | `POST /internal/remap-audience-filters` | apiKey | One-time data fix: translate already-backfilled audiences' filters from legacy persona vocab → canonical `PeopleSearchFilters` vocab, in place (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/backfill-audience-descriptions` | apiKey | One-time data fix: generate a per-audience one-sentence `description` (from name + filters via chat-service platform LLM) for every audience whose `description IS NULL` — pre-#82 rows (idempotent, `?dryRun=true`) |
 | Internal | `POST /internal/migrate-apify-audiences-to-apollo` | apiKey | One-time data fix (APOLLO-ONLY cutover): for every non-deprecated `provider='apify'` audience, build an equivalent apollo audience via apollo-service (`POST /audiences/suggest-from-segment`), store the pointer + faithful filters, create a new apollo audience mirroring the source status, and mark the apify one `deprecated` (idempotent, `?dryRun=true`, reversible) |
@@ -511,6 +511,37 @@ pre-guard with no suppression row, of which **10,020 (brand, email) pairs across
   a network failure even though the write is one atomic transaction that leaves
   no partial state. Post the repair in chunks (1,500 entries ran comfortably);
   idempotency makes a chunked re-run of an aborted batch free.
+
+### Brand transfer — `POST /internal/transfer-brand`
+
+Fleet contract orchestrated by brand-service (`POST /orgs/brands/:brandId/transfer`
+discovers every service registering this route). Body `{sourceBrandId,
+sourceOrgId, targetOrgId, targetBrandId?}`; moves every row human-service holds
+for the brand from the source org to the target org and rewrites the brand id
+when given. `src/services/transfer-brand.ts` owns it.
+
+- **ONE transaction** — a failure moves nothing (500 says so).
+- **Tables**: brand-keyed `audiences`, `lead_serves`, `brand_suppressions`,
+  `suppression_recoveries`, `suppression_backfills`, `lists` (brand lists only;
+  org-wide `brand_id IS NULL` lists stay); through an audience of the brand
+  `audience_members`, `audience_teaser_buffer`, `audience_teaser_screenings`,
+  `audience_screened_out`; through a list `list_members`; solo-brand
+  `human_methodologies` + their `humans` row. **A new table that carries
+  `org_id` + a brand (directly or through an audience) must be added here.**
+- **`people` is ORG-scoped, not brand-scoped**: a person only this brand's
+  audiences reference MOVES (same id); a person another brand of the source org
+  still references is COPIED to the target org and the transferred memberships
+  are re-pointed at the copy (prod 2026-09-27: org `17d240d8…` shares 60 people
+  across its 2 brands). A same-email person the target already holds absorbs it.
+- **Collisions with existing target rows merge**: suppressions keep the widest
+  window, ledgers keep the target's row. An audience NAME collision fails loud
+  (23505) — two audiences are two evidence trails, never merged.
+- **Idempotent**: every step selects rows still in the source position; a run
+  without `targetBrandId` followed by one with it completes the rewrite, scoped
+  to the target org (a brand id is shared across orgs — never rewrite globally).
+- **`lists` / `list_members` do not exist in the prod database** (migration
+  `0007` is journaled but the tables are absent since the Neon→box move), so the
+  transfer checks `to_regclass` before touching them. Moves no money.
 
 ## Audiences (v1) — `/orgs/audiences/*`
 

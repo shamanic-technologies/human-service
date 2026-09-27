@@ -3940,7 +3940,8 @@
     },
     "/internal/transfer-brand": {
       "post": {
-        "summary": "Transfer a solo-brand from one org to another",
+        "summary": "Move every row of a brand from one org to another",
+        "description": "Fleet brand-transfer contract (orchestrated by brand-service). In ONE transaction, moves every row human-service holds for `sourceBrandId` under `sourceOrgId` to `targetOrgId`, rewriting the brand id to `targetBrandId` when given: audiences and their members / teaser buffer / screenings / screened-out rows, lead serves, brand suppressions and their recovery / backfill ledgers, brand lists and their members, solo-brand methodologies and their expert profile. Canonical people referenced only by the brand move; people the source org still uses for another brand are copied. Idempotent: a second call moves nothing and returns an empty `updatedTables`. Moves no money.",
         "security": [
           {
             "apiKey": []
