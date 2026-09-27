@@ -18,7 +18,14 @@ import {
   AudienceStatsRequestSchema,
   SuggestAudiencesRequestSchema,
   GenerateAudienceAvatarRequestSchema,
+  SplitAudiencesRequestSchema,
+  ConfirmAudienceSplitRequestSchema,
 } from "../schemas.js";
+import {
+  proposeAudienceSplit,
+  confirmAudienceSplit,
+  SplitNameConflictError,
+} from "../services/audience-split.js";
 import {
   computeStats,
   computeAudienceContactability,
@@ -240,6 +247,84 @@ router.post(
     } catch (err) {
       sendProviderError(res, err);
     }
+  }
+);
+
+// --- POST /orgs/audiences/split ---
+// Target text -> up to 6 non-overlapping segments (name, sentence, icon) for the
+// new-campaign modal. One writing call + one typed judgment via chat-service; no
+// provider search, no counts, persists nothing. Needs x-user-id (chat-service).
+router.post(
+  "/orgs/audiences/split",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const parsed = SplitAudiencesRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+    const startedAt = Date.now();
+    try {
+      const proposal = await proposeAudienceSplit(
+        parsed.data.targetAudience,
+        buildIdentity(res)
+      );
+      console.log(
+        `[human-service] audience.split org=${res.locals.orgId} brand=${parsed.data.brandId} segments=${proposal.segments.length} axes=${proposal.axes.join("+") || "none"} ms=${Date.now() - startedAt}`
+      );
+      res.json(proposal);
+    } catch (err) {
+      sendProviderError(res, err);
+    }
+  }
+);
+
+// --- POST /orgs/audiences/split/confirm ---
+// The segments the customer kept -> ACTIVE audiences under (brand, offer), all
+// or nothing. Apollo filters are built later by the existing pointer build.
+router.post(
+  "/orgs/audiences/split/confirm",
+  requireApiKey,
+  requireOrgIdOnly,
+  async (req, res) => {
+    const parsed = ConfirmAudienceSplitRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+    const names = parsed.data.segments.map((s) => s.name.toLowerCase());
+    if (new Set(names).size !== names.length) {
+      res.status(400).json({ error: "Segment names must be unique." });
+      return;
+    }
+    const orgId = res.locals.orgId as string;
+    let created;
+    try {
+      created = await confirmAudienceSplit({
+        orgId,
+        userId: (res.locals.userId as string | undefined) ?? null,
+        brandId: parsed.data.brandId,
+        offerId: parsed.data.offerId,
+        targetAudience: parsed.data.targetAudience ?? null,
+        segments: parsed.data.segments,
+      });
+    } catch (err) {
+      if (err instanceof SplitNameConflictError || isUniqueViolation(err)) {
+        res.status(409).json({
+          error:
+            err instanceof SplitNameConflictError
+              ? err.message
+              : "An audience with this name already exists for this brand and offer.",
+        });
+        return;
+      }
+      throw err;
+    }
+    console.log(
+      `[human-service] audience.split_confirm org=${orgId} brand=${parsed.data.brandId} offer=${parsed.data.offerId} created=${created.length}`
+    );
+    res.status(201).json({ audiences: created.map(serializeAudience) });
   }
 );
 

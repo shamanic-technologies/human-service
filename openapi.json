@@ -3217,6 +3217,179 @@
           "status",
           "service"
         ]
+      },
+      "SplitAudiencesResponse": {
+        "type": "object",
+        "properties": {
+          "axes": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "geography",
+                "company_size",
+                "industry",
+                "seniority_role"
+              ]
+            },
+            "description": "The axes the segments partition the target along: empty when a single segment is returned, one axis, or two axes crossed. Only axes a people search can filter on."
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SplitSegment"
+            },
+            "minItems": 1,
+            "maxItems": 6,
+            "description": "1 to 6 mutually exclusive segments that together cover the target. Nothing is persisted."
+          }
+        },
+        "required": [
+          "axes",
+          "segments"
+        ]
+      },
+      "SplitSegment": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Short label, max 4 words, unique within the proposal."
+          },
+          "description": {
+            "type": "string",
+            "description": "One plain-language sentence that fully specifies the segment on its own (who, where, what kind of company, plus this segment's partition value). Becomes the audience's description on confirm."
+          },
+          "icon": {
+            "type": "string",
+            "enum": [
+              "globe-hemisphere-west",
+              "globe-hemisphere-east",
+              "map-pin",
+              "user",
+              "users-three",
+              "buildings",
+              "building-office",
+              "crown",
+              "briefcase",
+              "user-circle",
+              "rocket-launch",
+              "code",
+              "cpu",
+              "storefront",
+              "shopping-cart",
+              "factory",
+              "stethoscope",
+              "first-aid-kit",
+              "bank",
+              "scales",
+              "graduation-cap",
+              "megaphone",
+              "handshake",
+              "house-line",
+              "truck",
+              "fork-knife",
+              "airplane-tilt",
+              "leaf",
+              "paint-brush",
+              "heartbeat",
+              "target"
+            ],
+            "description": "Phosphor icon name (kebab-case) from a closed vocabulary; `globe-hemisphere-west` renders as <GlobeHemisphereWest /> in @phosphor-icons/react."
+          },
+          "iconConfidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "The judge's own certainty about the icon (decorative: the icon is always set)."
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "icon",
+          "iconConfidence"
+        ]
+      },
+      "SplitAudiencesRequest": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "targetAudience": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The confirmed free-text answer to 'who do you sell to?' (e.g. 'B2B SaaS founders in the US and Europe')."
+          }
+        },
+        "required": [
+          "brandId",
+          "targetAudience"
+        ]
+      },
+      "ConfirmAudienceSplitResponse": {
+        "type": "object",
+        "properties": {
+          "audiences": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Audience"
+            },
+            "description": "One ACTIVE audience per confirmed segment, in request order, scoped to the brand and offer, carrying the segment's description. provider=apollo with no apolloAudienceId/filters yet: the Apollo filters are built later by the existing pointer build."
+          }
+        },
+        "required": [
+          "audiences"
+        ]
+      },
+      "ConfirmAudienceSplitRequest": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "offerId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The brand-service offer the new audiences belong to. Stored verbatim, like brandId."
+          },
+          "targetAudience": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The confirmed target the segments were split from. Stored as each audience's nlPrompt."
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "name",
+                "description"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 6,
+            "description": "The segments the customer kept (at least one). Pass them back as returned by /orgs/audiences/split; icon fields are accepted and ignored."
+          }
+        },
+        "required": [
+          "brandId",
+          "offerId",
+          "segments"
+        ]
       }
     },
     "parameters": {}
@@ -6695,6 +6868,184 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/split": {
+      "post": {
+        "summary": "Propose up to 6 non-overlapping audience segments from a target description (no search, no counts, persists nothing)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SplitAudiencesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Proposed segments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SplitAudiencesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "LLM / judgment error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/split/confirm": {
+      "post": {
+        "summary": "Create the chosen split segments as active audiences under the brand and offer",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — populates created_by/added_by columns when present"
+            },
+            "required": false,
+            "description": "Internal user UUID — populates created_by/added_by columns when present",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — used as parentRunId when creating this service's run"
+            },
+            "required": false,
+            "description": "Caller's run ID — used as parentRunId when creating this service's run",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmAudienceSplitRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Audiences created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfirmAudienceSplitResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (incl. duplicate segment names)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "A segment name is already an audience of this brand + offer; nothing created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
