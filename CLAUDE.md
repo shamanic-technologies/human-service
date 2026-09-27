@@ -75,6 +75,8 @@ section — the port binds first).
 | Org-scoped (People v1) | `POST /orgs/people/search/dry-run` | apiKey + `x-org-id` + `x-user-id` | Count matches, free (apollo only in v1) |
 | Org-scoped (People v1) | `GET /orgs/people/filters-prompt` | apiKey + `x-org-id` + `x-user-id` | LLM filter-shape prompt (apollo only in v1) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/suggest` | apiKey + `x-org-id` + `x-user-id` | NL → **ONE persisted** candidate audience (never split — the split is deferred to #235), returned as an array of one at status `suggested` (inactive); optional `offerId` scopes it |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/split` | apiKey + `x-org-id` + `x-user-id` | Target text → 1-6 non-overlapping segments `{name, description, icon, iconConfidence}` + `axes`. No provider call, no count, persists nothing |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/split/confirm` | apiKey + `x-org-id` | Kept segments → ACTIVE audiences under brand + offer, all or nothing (409 on a taken name) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider + optional `crmUploadId` source binding + optional `offerId` scope) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` / `offerId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
@@ -1331,6 +1333,36 @@ in `src/services/audiences.ts` owns the per-row work.
   (502) — already-migrated rows persist (each is one atomic txn).
 - **NOT on boot** — O(N) × an agentic LLM loop each; trigger MANUALLY after deploy
   (`?dryRun=true` to size, then `?dryRun=false`).
+
+### Audience split (new-campaign modal) — `POST /orgs/audiences/split` + `/split/confirm`
+
+The LIGHT sibling of `/suggest`, for the in-dashboard "new org + brand + campaign"
+modal: the customer confirms who they sell to, we propose up to 6 segments to
+A/B test. `src/services/audience-split.ts` owns it; the closed vocabularies live
+in `src/lib/audience-split-vocab.ts` (dependency-free so `schemas.ts` publishes
+them as OpenAPI enums).
+
+- **Two calls, both via chat-service (which owns the cost), nothing else.** ONE
+  `/complete` (`openai`/`gpt-pro`, thinking off, `responseSchema`) writes the
+  split; ONE `/orgs/judgments` (Jev, `judgeChoices` in `chat-client.ts`) picks
+  each card's icon as a typed `choice` from `SPLIT_ICONS` (kebab-case Phosphor
+  names). No Apollo call, no count, no refine loop — that is the point: it runs
+  in seconds. `/suggest` is untouched.
+- **Findable later = a FORM rule in the prompt**: split only on `geography`,
+  `company_size`, `industry`, `seniority_role`; prefer one axis, two only
+  CROSSED; MECE; WHO travels unchanged; positive partition values; product is
+  never a target; no size reasoning. A narrow target is ONE segment (axes `[]`).
+- **Fail loud, never truncate**: >6 segments, an unfilterable axis, >2 axes, a
+  duplicate name, or an icon outside the vocabulary ⟹ 502. Dropping a segment
+  would silently lose part of the partition.
+- **Confirm = one transaction**: rows at `status='active'`, `provider='apollo'`,
+  `apollo_audience_id` + `filters` NULL, `description` = the segment sentence,
+  `nl_prompt` = the target, `source='split_proposal'`, `offer_id` required.
+  The Apollo filters are built LATER by the existing pointer build
+  (`POST /internal/backfill-apollo-audience-pointers` selects exactly
+  `provider='apollo' AND apollo_audience_id IS NULL`) — until then serve-next
+  422s these rows (no filters). A name taken in the same (org, brand, offer)
+  scope ⟹ 409, nothing written.
 
 ### Audience suggestion (onboarding) — `POST /orgs/audiences/suggest`
 

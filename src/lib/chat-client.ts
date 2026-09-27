@@ -354,3 +354,81 @@ export async function platformGenerateImage(args: {
   }
   return data as GeneratedImage;
 }
+
+// A typed CHOICE answer from chat-service POST /orgs/judgments (Jev/TypeSafe).
+// `confidence` is the model's own certainty (0..1); nothing here reduces the
+// answer to its winning value — the caller decides what a hesitant answer means.
+export interface ChoiceJudgment {
+  choice: string;
+  confidence: number;
+}
+
+// Ask N typed `choice` questions about one piece of state in ONE call via
+// chat-service POST /orgs/judgments. A classification ("pick one of N labels")
+// is a judgment, never a text completion: Jev bills input tokens only and
+// returns its confidence. chat-service owns the cost (org-billed, same identity
+// headers as /complete), so human-service declares none.
+//
+// Fail loud: a non-2xx throws ChatServiceError; an answer that is missing, not a
+// choice, or names an option that was not offered throws too — a label we did
+// not offer must never reach a caller that renders it.
+export async function judgeChoices(args: {
+  state: string | Record<string, unknown>;
+  questions: Record<
+    string,
+    { instructions: string; criteria: Record<string, string> }
+  >;
+  identity: ChatIdentity;
+}): Promise<Record<string, ChoiceJudgment>> {
+  const { url, key } = requireChat();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-API-Key": key,
+    "x-org-id": args.identity.orgId,
+    ...(args.identity.userId ? { "x-user-id": args.identity.userId } : {}),
+    ...(args.identity.runId ? { "x-run-id": args.identity.runId } : {}),
+    ...workflowTrackingToHeaders(args.identity.workflowTracking ?? {}),
+  };
+  const questions = Object.fromEntries(
+    Object.entries(args.questions).map(([k, q]) => [
+      k,
+      { type: "choice", instructions: q.instructions, criteria: q.criteria },
+    ])
+  );
+
+  let res: Response;
+  try {
+    res = await fetchWithConnectRetry(`${url}/orgs/judgments`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ state: args.state, questions }),
+    });
+  } catch (err) {
+    throw new ChatServiceError(0, `chat-service unreachable: ${String(err)}`);
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ChatServiceError(res.status, text);
+  }
+  const data = (await res.json()) as {
+    answers?: Record<string, { type?: string; choice?: unknown; confidence?: unknown }>;
+  };
+  const out: Record<string, ChoiceJudgment> = {};
+  for (const [k, q] of Object.entries(args.questions)) {
+    const a = data.answers?.[k];
+    if (
+      !a ||
+      a.type !== "choice" ||
+      typeof a.choice !== "string" ||
+      typeof a.confidence !== "number" ||
+      !(a.choice in q.criteria)
+    ) {
+      throw new ChatServiceError(
+        502,
+        `chat-service judgment "${k}" returned no usable choice`
+      );
+    }
+    out[k] = { choice: a.choice, confidence: a.confidence };
+  }
+  return out;
+}
