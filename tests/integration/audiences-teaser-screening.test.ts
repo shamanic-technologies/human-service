@@ -36,8 +36,9 @@ vi.mock("../../src/lib/instantly-optouts.js", () => ({
 }));
 
 
-// The pre-pay screen: an apollo free teaser is judged against the audience's own
-// description BEFORE the credit that reveals its email is spent. The point of
+// The pre-pay screen: an apollo free teaser is judged (Jev, yes-probability > 0.80)
+// against the customer's own words (nl_prompt) BEFORE the credit that reveals its
+// email is spent. The point of
 // every test here is the SPEND — a rejected teaser must never reach /enrich.
 
 const app = createTestApp();
@@ -102,11 +103,11 @@ function revealed(id: string, email: string) {
   return { ...teaser(id, "Chiropractor"), lastName: "D", name: "C D", email, emailStatus: "verified" };
 }
 
-// The create route does not accept `description` (it is written by /suggest), so
-// set it directly — it is what the screen judges against.
+// The screen judges against `nlPrompt` (the customer's words). `description` is
+// set too, to prove the screen never falls back to it.
 async function createDescribedAudience(
   name: string,
-  description: string | null,
+  nlPrompt: string | null,
   apolloCount?: number
 ) {
   const res = await request(app)
@@ -118,11 +119,15 @@ async function createDescribedAudience(
       provider: "apollo",
       filters: { personTitles: ["Chiropractor"] },
       apolloAudienceId: "apollo-aud-1",
+      ...(nlPrompt ? { nlPrompt } : {}),
       ...(apolloCount !== undefined ? { apolloCount } : {}),
     });
   expect(res.status).toBe(201);
   const id = res.body.audience.id as string;
-  await db.update(audiences).set({ description }).where(eq(audiences.id, id));
+  await db
+    .update(audiences)
+    .set({ description: "LLM rewrite of the filters", nlPrompt })
+    .where(eq(audiences.id, id));
   return id;
 }
 
@@ -130,12 +135,12 @@ function serveNext(id: string) {
   return request(app).post(`/orgs/audiences/${id}/serve-next`).set(getAuthHeaders());
 }
 
-// Route apollo + chat. `verdicts` maps an apollo person id to the screen's
-// answer. The screen's message carries the SNAPSHOT, which holds no person id —
-// so the mock identifies the candidate by its title, exactly as the model would.
+// Route apollo + chat. `verdicts` maps an apollo person id to Jev's
+// yes-probability. The judged state carries the SNAPSHOT, which holds no person
+// id — so the mock identifies the candidate by its title, as the model would.
 function mockFleet(opts: {
   pages: { id: string; title: string }[][];
-  verdicts: Record<string, boolean>;
+  verdicts: Record<string, number>;
   chatFails?: boolean;
 }) {
   const titleToId = new Map<string, string>();
@@ -145,6 +150,7 @@ function mockFleet(opts: {
   let page = 0;
   const enriched: string[] = [];
   const screened: string[] = [];
+  const targets: string[] = [];
   fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
     const u = String(url);
     if (u.endsWith("/search/next")) {
@@ -152,14 +158,20 @@ function mockFleet(opts: {
       page += 1;
       return ok({ people, done: people.length === 0, totalEntries: people.length });
     }
-    if (u.endsWith("/complete")) {
+    if (u.endsWith("/orgs/judgments")) {
       if (opts.chatFails)
         return { ok: false, status: 500, text: async () => "chat down", json: async () => ({}) };
-      const body = JSON.parse(init.body ?? "{}") as { message?: string };
-      const hit = [...titleToId.entries()].find(([title]) => body.message?.includes(title));
-      if (!hit) throw new Error("screen message named no known candidate: " + body.message);
-      screened.push(hit[1]);
-      return ok({ json: { onTarget: opts.verdicts[hit[1]], why: "because" } });
+      const body = JSON.parse(init.body ?? "{}") as {
+        state: { targetAudience: string; candidate: { title: string } };
+      };
+      const id = titleToId.get(body.state.candidate.title);
+      if (!id) throw new Error("screen state named no known candidate: " + init.body);
+      screened.push(id);
+      targets.push(body.state.targetAudience);
+      return ok({
+        model: "jev-1.13.0",
+        answers: { answer: { type: "noul", noul: opts.verdicts[id] } },
+      });
     }
     if (u.endsWith("/enrich")) {
       const body = JSON.parse(init.body ?? "{}") as { apolloPersonId?: string };
@@ -169,14 +181,14 @@ function mockFleet(opts: {
     }
     throw new Error("unexpected url " + u);
   });
-  return { enriched, screened };
+  return { enriched, screened, targets };
 }
 
 describe("pre-pay teaser screening", () => {
   it("passes an on-target teaser through to the billed reveal", async () => {
     const calls = mockFleet({
       pages: [[{ id: "p1", title: "Chiropractor" }]],
-      verdicts: { p1: true },
+      verdicts: { p1: 0.95 },
     });
     const id = await createDescribedAudience("Chiros", "chiropractors who own their practice");
 
@@ -186,12 +198,28 @@ describe("pre-pay teaser screening", () => {
     expect(res.body.person.email).toBe("p1@acme.com");
     expect(calls.screened).toEqual(["p1"]);
     expect(calls.enriched).toEqual(["p1"]);
+    // Judged against the customer's own words, never the LLM description.
+    expect(calls.targets).toEqual(["chiropractors who own their practice"]);
+  });
+
+  it("a hesitant yes (0.80, not above) is rejected and never enriched", async () => {
+    const calls = mockFleet({
+      pages: [[{ id: "p1", title: "Group CFO" }, { id: "p2", title: "Chiropractor" }]],
+      verdicts: { p1: 0.8, p2: 0.81 },
+    });
+    const id = await createDescribedAudience("Chiros", "chiropractors who own their practice");
+
+    const res = await serveNext(id);
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.email).toBe("p2@acme.com");
+    expect(calls.screened).toEqual(["p1", "p2"]);
+    expect(calls.enriched).toEqual(["p2"]);
   });
 
   it("an off-target teaser is NEVER enriched — the credit is not spent", async () => {
     const calls = mockFleet({
       pages: [[{ id: "p1", title: "Marketing Intern" }, { id: "p2", title: "Chiropractor" }]],
-      verdicts: { p1: false, p2: true },
+      verdicts: { p1: 0.3, p2: 0.95 },
     });
     const id = await createDescribedAudience("Chiros", "chiropractors who own their practice");
 
@@ -207,7 +235,7 @@ describe("pre-pay teaser screening", () => {
   it("records the verdict in bronze and the rejection in silver", async () => {
     mockFleet({
       pages: [[{ id: "p1", title: "Marketing Intern" }, { id: "p2", title: "Chiropractor" }]],
-      verdicts: { p1: false, p2: true },
+      verdicts: { p1: 0.3, p2: 0.95 },
     });
     const id = await createDescribedAudience("Chiros", "chiropractors who own their practice");
     await serveNext(id);
@@ -221,12 +249,14 @@ describe("pre-pay teaser screening", () => {
     expect(bronze).toHaveLength(2);
     const rejected = bronze.find((r) => r.providerPersonId === "p1");
     expect(rejected?.verdict).toBe(false);
-    expect(rejected?.reason).toBe("because");
-    expect(rejected?.model).toBe("zai/glm-flash");
-    expect(rejected?.promptVersion).toBe("v1");
+    expect(rejected?.yesProbability).toBe(0.3);
+    expect(rejected?.model).toBe("typesafe/jev-1.13.0");
+    expect(rejected?.promptVersion).toBe("v2");
     // The snapshot it was judged on is stored with it.
     expect(rejected?.teaser.title).toBe("Marketing Intern");
-    expect(bronze.find((r) => r.providerPersonId === "p2")?.verdict).toBe(true);
+    const passed = bronze.find((r) => r.providerPersonId === "p2");
+    expect(passed?.verdict).toBe(true);
+    expect(passed?.yesProbability).toBe(0.95);
 
     const silver = await db
       .select()
@@ -243,7 +273,7 @@ describe("pre-pay teaser screening", () => {
         [{ id: "p1", title: "Marketing Intern" }],
         [{ id: "p1", title: "Marketing Intern" }, { id: "p2", title: "Chiropractor" }],
       ],
-      verdicts: { p1: false, p2: true },
+      verdicts: { p1: 0.3, p2: 0.95 },
     });
     const id = await createDescribedAudience("Chiros", "chiropractors who own their practice");
 
@@ -257,7 +287,7 @@ describe("pre-pay teaser screening", () => {
   it("shrinks the audience SIZE by the people the screen disqualified", async () => {
     mockFleet({
       pages: [[{ id: "p1", title: "Marketing Intern" }, { id: "p2", title: "Chiropractor" }]],
-      verdicts: { p1: false, p2: true },
+      verdicts: { p1: 0.3, p2: 0.95 },
     });
     const id = await createDescribedAudience("Chiros", "chiropractors who own their practice", 7000);
 
@@ -276,7 +306,7 @@ describe("pre-pay teaser screening", () => {
   it("fails loud when chat-service is down — the credit is not spent on an unjudged teaser", async () => {
     const calls = mockFleet({
       pages: [[{ id: "p1", title: "Chiropractor" }]],
-      verdicts: { p1: true },
+      verdicts: { p1: 0.95 },
       chatFails: true,
     });
     const id = await createDescribedAudience("Chiros", "chiropractors who own their practice");
@@ -286,9 +316,9 @@ describe("pre-pay teaser screening", () => {
     expect(calls.enriched).toEqual([]);
   });
 
-  it("serves unscreened when the audience states no target", async () => {
-    // An audience with no description has nothing to judge against. Inventing a
-    // target would be worse than serving as before.
+  it("serves unscreened when the audience carries no nl_prompt — never falls back to description", async () => {
+    // No customer words ⟹ nothing to judge against. The LLM description is set
+    // on this row and must NOT be used as a stand-in.
     const calls = mockFleet({
       pages: [[{ id: "p1", title: "Chiropractor" }]],
       verdicts: {},

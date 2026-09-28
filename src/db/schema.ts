@@ -6,6 +6,7 @@ import {
   integer,
   jsonb,
   boolean,
+  doublePrecision,
   index,
   uniqueIndex,
   type AnyPgColumn,
@@ -693,6 +694,9 @@ export const audienceTeaserScreenings = pgTable(
     teaser: jsonb("teaser").$type<TeaserSnapshot>().notNull(),
     // true = on target (proceed to the billed reveal), false = rejected.
     verdict: boolean("verdict").notNull(),
+    // Jev's probability that the person belongs to the audience (prompt v2+).
+    // NULL on v1 rows, which were a bare boolean with no confidence.
+    yesProbability: doublePrecision("yes_probability"),
     // The model's own one-sentence justification. Prose for humans — nothing in
     // this service reads it back to decide anything.
     reason: text("reason"),

@@ -1,32 +1,40 @@
-// Pre-pay teaser screening — judge an apollo free teaser against the audience's
-// own description BEFORE spending the credit that reveals its email.
+// Pre-pay teaser screening — judge an apollo free teaser against the audience
+// the customer asked for, in their OWN words (`audiences.nl_prompt`), BEFORE
+// spending the credit that reveals its email.
 //
 // WHY THIS EXISTS. An apollo audience is a pointer to a faithful Apollo filter
 // set, and Apollo's vocabulary cannot express every constraint an audience
 // states in plain English: "chiropractors who own their practice", "German-
 // speaking Switzerland", "shops that stock the product" have no field. So a
-// teaser can satisfy every filter and still be the wrong person — and today we
-// learn that only after the apollo credit, the generated email and the send are
-// all spent on them.
+// teaser can satisfy every filter and still be the wrong person — and without
+// this we learn it only after the apollo credit, the generated email and the
+// send are all spent on them.
 //
 // WHERE IT SITS. Exactly at the frontier between free and billed: serve-next
 // pops a free teaser, we judge it, and only a pass reaches `resolveEmail`. One
-// call per person, never a batch: a cheap model asked for a hundred verdicts
-// keyed on a list index drifts, and a drifted verdict is worse than no screen
-// (it rejects people who were fine and passes people who were not). One person,
-// one boolean, is a task a cheap model does well.
+// question per person, never a batch.
 //
-// WHAT IT COSTS. At the model below, ~0.025 cents per screen against ~11.8
-// cents for one apollo reveal — roughly 470 screens for the price of one
-// reveal, so the screen pays for itself at a rejection rate above ~0.2%.
+// HOW IT DECIDES (v2). One Jev `noul` question through chat-service
+// /orgs/judgments: "does this person belong to this audience?". Jev returns the
+// model's own probability that the answer is YES, and the teaser passes ONLY
+// when that probability is above SCREEN_MIN_YES_PROBABILITY. Everything else —
+// a no, a hesitant yes — is rejected before the reveal. No guidance in the
+// question about what to do when unsure: the threshold IS that decision.
+//
+// v1 (2026-09-17 → 2026-09-28) asked glm-flash via /complete for a bare
+// boolean against the LLM-written `description`, with "borderline cases are a
+// yes" in its prompt. On LivingVital's "Swiss Health Shop Employees" it passed
+// 199 of 285 teasers, ~51 of them Galenica HQ staff (Group CFO, HR, recruiters,
+// engineers). Three causes, all removed here: no confidence to threshold, a
+// target that described Apollo mechanics instead of the customer's intent, and
+// a prompt that licensed the passes.
 //
 // LAYERING. Bronze `audience_teaser_screenings` records EVERY verdict (passes
-// included) with the snapshot, model and prompt version behind it; silver
-// `audience_screened_out` is the exclusion set the serve path reads. Both are
-// written in ONE transaction, so a rejection can never exist without the
-// evidence that produced it. Same shape as lead_serves -> brand_suppressions,
-// one grain over — keyed on the AUDIENCE, because the verdict is relative to
-// the target that audience defined.
+// included) with the snapshot, the yes-probability, the serving model and the
+// prompt version; silver `audience_screened_out` is the exclusion set the serve
+// path reads. Both are written in ONE transaction, so a rejection can never
+// exist without the evidence that produced it. Keyed on the AUDIENCE, because
+// the verdict is relative to the target that audience defined.
 
 import { and, eq, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -35,88 +43,30 @@ import {
   audienceTeaserScreenings,
   type TeaserSnapshot,
 } from "../db/schema.js";
-import { completeJson, type ChatIdentity } from "../lib/chat-client.js";
+import { judgeYesNo, type ChatIdentity } from "../lib/chat-client.js";
 import type { Person } from "./people-providers.js";
 
-// Cheapest model reachable through chat-service /complete: GLM-5.3-Flash lists
-// at $0.15/$0.50 per 1M tokens against Gemini 3.5 Flash-Lite's $0.30/$2.50 and
-// DeepSeek V4.1 Flash's $0.15/$0.60-at-off-peak (doubling at peak). It is also
-// the slowest of the three (p50 4.2s against flash-lite's 2.1s, measured over 30
-// days of chat-service /complete runs) — accepted deliberately: the screen sits
-// on a path that already waits on an apollo enrich, and the consumer buffers.
-//
-// zai takes `response_format: {type:"json_schema"}` (chat-service probed it
-// live), and glm-5.3-flash already carries `reasoning_effort: "low"` in
-// chat-service's per-model config, so its reasoning is silent — nothing to
-// disable from here, and no thinking tokens to pay for.
-export const SCREEN_LLM_PROVIDER = "zai" as const;
-export const SCREEN_LLM_MODEL = "glm-flash" as const;
+// A teaser is paid for only when Jev's probability that it belongs to the
+// audience is ABOVE this. Strict: exactly 0.80 rejects.
+export const SCREEN_MIN_YES_PROBABILITY = 0.8;
 
-// Bump when the prompt changes. Stored on every bronze row so a later verdict
-// can be read against the prompt that produced it rather than the current one.
-export const SCREEN_PROMPT_VERSION = "v1" as const;
+// Bump when the question changes. Stored on every bronze row so a later verdict
+// can be read against the question that produced it rather than the current one.
+export const SCREEN_PROMPT_VERSION = "v2" as const;
 
 // Keywords are the one unbounded field on the snapshot; a long tail of them buys
 // no signal and is paid for on every screen.
 const MAX_KEYWORDS = 20;
 
-const SCREEN_RESPONSE_SCHEMA = {
-  type: "object",
-  properties: {
-    // `onTarget` before `why`: the model commits to the verdict, then justifies
-    // it. Asking for the sentence first invites it to write its way into an
-    // answer.
-    onTarget: {
-      type: "boolean",
-      description: "true if this person belongs to the target audience.",
-    },
-    why: {
-      type: "string",
-      description: "One short sentence justifying the verdict.",
-    },
-  },
-  required: ["onTarget", "why"],
-  additionalProperties: false,
-} as const;
+export const SCREEN_QUESTION =
+  "Does this candidate belong to the target audience the client described?";
 
-export function buildScreenSystemPrompt(): string {
-  return [
-    "You decide whether ONE person belongs to a target audience.",
-    "",
-    "You are given the audience the client asked for, in their own words, and one",
-    "candidate as a cold-email database returned them. Answer whether this",
-    "candidate is a person the client meant.",
-    "",
-    "Judge the person, not the record. The candidate comes from a free preview:",
-    "the last name, the email and often the location are withheld, and many",
-    "fields are simply empty. A field you cannot see is unknown, never a reason",
-    "to reject — reject only on something the record actually says.",
-    "",
-    "Say no when the record contradicts the audience: the wrong occupation, the",
-    "wrong kind of employer, the wrong seniority, the wrong country when the",
-    "audience named one. Say yes when the record is consistent with it, including",
-    "when it is thin.",
-    "",
-    "Borderline cases are a yes. This audience feeds a cold-email campaign, so a",
-    "somewhat-imprecise recipient costs one email while a wrongly-rejected one",
-    "costs a prospect the client wanted and paid to find.",
-    "",
-    'Answer with {"onTarget": boolean, "why": one short sentence}.',
-  ].join("\n");
-}
-
-export function buildScreenMessage(
-  target: { name: string; description: string },
+// The state Jev judges: the customer's own words, verbatim, and the candidate.
+export function buildScreenState(
+  targetAudience: string,
   teaser: TeaserSnapshot
-): string {
-  return [
-    "TARGET AUDIENCE",
-    `Name: ${target.name}`,
-    `Described as: ${target.description}`,
-    "",
-    "CANDIDATE",
-    JSON.stringify(teaser, null, 2),
-  ].join("\n");
+): Record<string, unknown> {
+  return { targetAudience, candidate: teaser };
 }
 
 // The judgeable slice of a provider Person, taken at buffer time. Everything
@@ -143,11 +93,11 @@ export function toTeaserSnapshot(person: Person): TeaserSnapshot {
 }
 
 export type ScreenOutcome =
-  | { screened: true; onTarget: boolean; why: string }
-  // Skipped for a stated reason — no target to judge against, or no snapshot to
-  // judge. Both are honest absences, counted and logged, never a quiet pass
-  // dressed up as a verdict.
-  | { screened: false; skipReason: "no_description" | "no_snapshot" };
+  | { screened: true; onTarget: boolean; yesProbability: number }
+  // Skipped for a stated reason — no target in the customer's words, or no
+  // snapshot to judge. Both are honest absences, counted and logged, never a
+  // quiet pass dressed up as a verdict.
+  | { screened: false; skipReason: "no_nl_prompt" | "no_snapshot" };
 
 export interface ScreenSubject {
   providerPersonId: string;
@@ -158,23 +108,26 @@ export interface ScreenSubject {
 // Judge one teaser and PERSIST the outcome. Returns the verdict so the caller
 // can decide whether to pay for the reveal.
 //
-// Fail loud: a chat-service failure throws (ChatServiceError / ChatConfigError)
-// and serve-next surfaces it as 502. Passing the teaser through on a screening
-// outage would spend the credit the screen exists to protect, which is the
-// failure this feature is about.
+// Fail loud: a chat-service failure — or an answer without a yes-probability —
+// throws (ChatServiceError / ChatConfigError) and serve-next surfaces it as
+// 502. Passing the teaser through on a screening outage would spend the credit
+// the screen exists to protect.
 export async function screenTeaser(args: {
   orgId: string;
-  audience: { id: string; name: string; description: string | null };
+  audience: { id: string; nlPrompt: string | null };
   subject: ScreenSubject;
   identity: ChatIdentity;
 }): Promise<ScreenOutcome> {
   const { orgId, audience, subject, identity } = args;
 
-  if (!audience.description) {
+  // The customer's own words, never the LLM-written `description` — that one
+  // describes how the Apollo filters were built, not who the customer wants.
+  const target = audience.nlPrompt?.trim();
+  if (!target) {
     console.log(
-      `[human-service] teaser_screen.skipped org=${orgId} audience=${audience.id} reason=no_description`
+      `[human-service] teaser_screen.skipped org=${orgId} audience=${audience.id} reason=no_nl_prompt`
     );
-    return { screened: false, skipReason: "no_description" };
+    return { screened: false, skipReason: "no_nl_prompt" };
   }
   if (!subject.teaser) {
     // Buffered before the screen shipped, so there is no snapshot to judge and
@@ -185,37 +138,23 @@ export async function screenTeaser(args: {
     return { screened: false, skipReason: "no_snapshot" };
   }
 
-  const json = await completeJson({
-    systemPrompt: buildScreenSystemPrompt(),
-    message: buildScreenMessage(
-      { name: audience.name, description: audience.description },
-      subject.teaser
-    ),
-    responseSchema: SCREEN_RESPONSE_SCHEMA as unknown as Record<string, unknown>,
-    provider: SCREEN_LLM_PROVIDER,
-    model: SCREEN_LLM_MODEL,
+  const judgment = await judgeYesNo({
+    state: buildScreenState(target, subject.teaser),
+    instructions: SCREEN_QUESTION,
     identity,
   });
-
-  const onTarget = json.onTarget;
-  if (typeof onTarget !== "boolean") {
-    // The one field the whole call exists to produce. Anything else is not a
-    // verdict, and inventing one here would be the silent pass we are avoiding.
-    throw new Error(
-      `[human-service] teaser_screen returned no boolean onTarget (got ${JSON.stringify(json.onTarget)})`
-    );
-  }
-  const why = typeof json.why === "string" ? json.why : "";
+  const onTarget = judgment.yesProbability > SCREEN_MIN_YES_PROBABILITY;
 
   await recordScreening({
     orgId,
     audienceId: audience.id,
     subject: { ...subject, teaser: subject.teaser },
     onTarget,
-    why,
+    yesProbability: judgment.yesProbability,
+    model: `typesafe/${judgment.model}`,
   });
 
-  return { screened: true, onTarget, why };
+  return { screened: true, onTarget, yesProbability: judgment.yesProbability };
 }
 
 // Bronze row always; silver row too when the verdict is a rejection. ONE
@@ -226,9 +165,11 @@ async function recordScreening(args: {
   audienceId: string;
   subject: ScreenSubject & { teaser: TeaserSnapshot };
   onTarget: boolean;
-  why: string;
+  yesProbability: number;
+  model: string;
 }): Promise<void> {
-  const { orgId, audienceId, subject, onTarget, why } = args;
+  const { orgId, audienceId, subject, onTarget, yesProbability, model } = args;
+  const reason = `P(yes)=${yesProbability.toFixed(3)} threshold>${SCREEN_MIN_YES_PROBABILITY}`;
   await db.transaction(async (tx) => {
     await tx.insert(audienceTeaserScreenings).values({
       orgId,
@@ -237,8 +178,9 @@ async function recordScreening(args: {
       linkedinUrl: subject.linkedinUrl,
       teaser: subject.teaser,
       verdict: onTarget,
-      reason: why,
-      model: `${SCREEN_LLM_PROVIDER}/${SCREEN_LLM_MODEL}`,
+      yesProbability,
+      reason,
+      model,
       promptVersion: SCREEN_PROMPT_VERSION,
     });
     if (onTarget) return;
@@ -249,7 +191,7 @@ async function recordScreening(args: {
         audienceId,
         providerPersonId: subject.providerPersonId,
         linkedinUrl: subject.linkedinUrl,
-        reason: why,
+        reason,
       })
       // A person already excluded stays excluded at their original date — a
       // re-screen under a new prompt records its own bronze row and leaves the
