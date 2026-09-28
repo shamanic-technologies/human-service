@@ -1064,33 +1064,30 @@ apollo credit, the generated email and the send were all spent on them.
 - **It sits at the frontier between free and billed**, between `popTeaser` and
   `resolveEmail`. Apollo's teaser is free; the enrich that reveals the email is
   ~11.8 cents. A rejection costs the screen and nothing else.
-- **ONE call, ONE person, ONE boolean — never a batch.** A cheap model asked for
-  a hundred verdicts keyed on a list index drifts, and a drifted verdict is worse
-  than no screen (it rejects people who were fine and passes people who were
-  not). Screening at POP time rather than at refill also means we only ever judge
-  people we were about to pay for, instead of judging a page of 100 to serve 1.
-- **`zai` / `glm-flash` (GLM-5.3-Flash)** — the cheapest model reachable through
-  chat-service `/complete` ($0.15/$0.50 per 1M tokens vendor, against Gemini 3.5
-  Flash-Lite's $0.30/$2.50 and DeepSeek V4.1 Flash's $0.15/$0.60 off-peak,
-  doubling at peak). ~**0.025 cents per screen** against ~**11.8 cents** for one
-  apollo reveal: roughly 470 screens per reveal, so it pays for itself above a
-  ~0.2% rejection rate. It is also the SLOWEST of the three (p50 4.2s vs
-  flash-lite's 2.1s, measured over 30 days of `chat-service` `/complete` runs) —
-  accepted deliberately, the path already waits on an apollo enrich and
-  lead-service buffers. `SCREEN_LLM_PROVIDER` / `SCREEN_LLM_MODEL` are the single
-  switch. zai takes `response_format: {type:"json_schema"}` and chat-service
-  already pins `reasoning_effort: "low"` for `glm-5.3-flash`, so its reasoning is
-  silent — nothing to disable from here.
-- **The prompt is asymmetric on purpose.** A wrong pass costs one email; a wrong
-  reject costs a prospect the client wanted and paid to find. So: a field the
-  free teaser masks (last name, email, often location) is UNKNOWN and never a
-  reason to reject, rejection must rest on something the record actually SAYS
-  (wrong occupation / employer kind / seniority / country), and borderline is a
-  YES. `tests/unit/teaser-screening-prompt.test.ts` pins those invariants (not
-  the prose).
+- **ONE Jev `noul` question per person, never a batch** (v2, 2026-09-28):
+  chat-service `POST /orgs/judgments` (`judgeYesNo` in `chat-client.ts`) asks
+  "does this candidate belong to the target audience the client described?"
+  with state `{targetAudience: nl_prompt, candidate: snapshot}`. Jev returns
+  P(yes); the teaser is paid for ONLY when **P(yes) > 0.80**
+  (`SCREEN_MIN_YES_PROBABILITY`, strict — 0.80 rejects). No "borderline = yes"
+  guidance anywhere: the threshold IS that decision. Jev bills input tokens only
+  and chat-service owns the cost (org-billed with serve-next's identity).
+- **The target is `audiences.nl_prompt` — the customer's own words — NEVER
+  `description`.** `description` is an LLM rewrite that describes the Apollo
+  filter mechanics ("found by matching terms against company tags"), not who
+  the customer wants. No `nl_prompt` ⟹ skip with `no_nl_prompt`, logged; never a
+  fallback to `description`. (At ship every active/paused apollo audience had
+  one: 164/164.) Note a split audience's `nl_prompt` is the whole target it was
+  split from, not the segment sentence.
+- **v1 history (2026-09-17 → 09-28)**: glm-flash `/complete` returning a bare
+  boolean, judged against `description`, prompt said "borderline cases are a
+  yes". On LivingVital "Swiss Health Shop Employees" it passed 199/285 teasers,
+  ~51 of them Galenica HQ staff (Group CFO, HR, recruiters, engineers). v1 bronze
+  rows and silver exclusions stay as they are (no re-screen).
 - **Layering (B/S/G)** — 🥉 bronze `audience_teaser_screenings` (migration
   `0025`, append-only) records EVERY verdict, passes included, with the snapshot
-  it was judged on plus `model` + `prompt_version`; a re-screen under a new
+  it was judged on plus `yes_probability` (migration `0027`, NULL on v1 rows) +
+  `model` (`typesafe/<served release>`) + `prompt_version`; a re-screen under a new
   prompt APPENDS, so a prompt change is measurable against the history instead of
   erasing it. 🥈 silver `audience_screened_out` is the exclusion set the serve
   path reads, canonical per `(audience_id, provider_person_id)`, promoted in the
@@ -1112,14 +1109,10 @@ apollo credit, the generated email and the send were all spent on them.
   no screen, counted + logged.
 - **Rejected people are dropped at REFILL**, so a person apollo re-surfaces on a
   later page is never re-buffered and never re-screened (one query per page).
-- **`description IS NULL` ⟹ no screen**, logged and counted. There is no target to
-  judge against and inventing one would be worse than serving as before. Every
-  apollo audience in prod carries a description (checked at ship: 918/918), so
-  this is a genuine edge, not the common path.
 - **Fail loud**: a chat-service failure propagates → **502**. Passing the teaser
   through on a screening outage would spend exactly what the screen protects. A
-  response whose `onTarget` is not a boolean throws for the same reason — that
-  field is the only thing the call exists to produce.
+  Jev answer without a yes-probability in 0..1 (or without the serving model)
+  throws for the same reason — never defaulted, never clamped.
 - **No cost declared here** — chat-service owns the LLM cost and bills the org
   using serve-next's own identity headers, so human-service's "declares no cost"
   invariant holds.
@@ -1761,7 +1754,7 @@ returns 404, never 403, to avoid leaking existence.
 - **`audience_teaser_screenings`** (bronze, pre-pay screen): `org_id` uuid,
   `audience_id` uuid FK → `audiences` (ON DELETE CASCADE); `provider_person_id` /
   `linkedin_url` / `reason` / `model` / `prompt_version` text; `teaser` jsonb;
-  `verdict` boolean. No unique key — append-only by design.
+  `verdict` boolean; `yes_probability` double precision (nullable, v1 rows). No unique key — append-only by design.
 - **`audience_screened_out`** (silver, pre-pay screen): same id typing, unique on
   `(audience_id, provider_person_id)`.
 

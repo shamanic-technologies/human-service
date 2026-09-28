@@ -432,3 +432,71 @@ export async function judgeChoices(args: {
   }
   return out;
 }
+
+// A typed YES/NO answer from chat-service POST /orgs/judgments (Jev `noul`).
+// `yesProbability` is the model's own probability that the answer is yes; a
+// noul carries no separate confidence because this value IS it. `model` is the
+// release that served it, recorded by callers that freeze the verdict.
+export interface YesNoJudgment {
+  yesProbability: number;
+  model: string;
+}
+
+// Ask ONE yes/no question about a piece of state via chat-service
+// POST /orgs/judgments. Same identity, cost ownership and fail-loud rules as
+// `judgeChoices`: a non-2xx throws, and an answer without a yes-probability in
+// 0..1 throws too — a missing probability is never defaulted into a verdict.
+export async function judgeYesNo(args: {
+  state: string | Record<string, unknown>;
+  instructions: string;
+  identity: ChatIdentity;
+}): Promise<YesNoJudgment> {
+  const { url, key } = requireChat();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-API-Key": key,
+    "x-org-id": args.identity.orgId,
+    ...(args.identity.userId ? { "x-user-id": args.identity.userId } : {}),
+    ...(args.identity.runId ? { "x-run-id": args.identity.runId } : {}),
+    ...workflowTrackingToHeaders(args.identity.workflowTracking ?? {}),
+  };
+
+  let res: Response;
+  try {
+    res = await fetchWithConnectRetry(`${url}/orgs/judgments`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        state: args.state,
+        questions: { answer: { type: "noul", instructions: args.instructions } },
+      }),
+    });
+  } catch (err) {
+    throw new ChatServiceError(0, `chat-service unreachable: ${String(err)}`);
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ChatServiceError(res.status, text);
+  }
+  const data = (await res.json()) as {
+    model?: unknown;
+    answers?: Record<string, { type?: string; noul?: unknown }>;
+  };
+  const a = data.answers?.answer;
+  if (
+    !a ||
+    a.type !== "noul" ||
+    typeof a.noul !== "number" ||
+    !Number.isFinite(a.noul) ||
+    a.noul < 0 ||
+    a.noul > 1 ||
+    typeof data.model !== "string" ||
+    data.model.length === 0
+  ) {
+    throw new ChatServiceError(
+      502,
+      `chat-service yes/no judgment returned no usable yes-probability (got ${JSON.stringify(data)})`
+    );
+  }
+  return { yesProbability: a.noul, model: data.model };
+}
