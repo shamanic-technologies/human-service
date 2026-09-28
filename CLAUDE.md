@@ -809,7 +809,9 @@ person at a time, so the signed-out onboarding can show each resolve live.
 - **What runs**: for the FIRST 5 people of the stored sample
   (`PREVIEW_EMAIL_CHECK_SAMPLE`), apollo-service `POST /enrich` by the person's
   handle, which reveals the email AND returns the BounceVerify verdict beside it.
-  One reveal per `/next` call (~3-5s), in preview order. There is ONE finder
+  One reveal per `/next` call (~6-7s measured in prod), in preview order.
+  No campaign exists yet on a signed-out visit: apollo-service `/enrich` accepts a
+  reveal without `x-campaign-id` since v0.39.18 (records `campaign_id` NULL). There is ONE finder
   (apollo): treg cannot run first (the teaser carries no identity) and adds
   nothing after the reveal (apollo-service measured 124/125 same address), so no
   race of finders is shown — only attempts that ran.
