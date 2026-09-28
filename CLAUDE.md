@@ -1396,6 +1396,11 @@ them as OpenAPI enums).
   serve-next if it has not landed (org-billed with the serve's identity). So an
   active split audience is never unservable, at worst its first serve waits ~2-3
   min on the build. A build yielding no usable filters still 422s at serve.
+  **The pointer build runs THE CHOOSER whenever apollo-service returns more than
+  one explored round** (`backfillApolloAudiencePointer`), keeping the row's own
+  name + description and storing `chooser_trace` — apollo's top-level pick is
+  the argmax the chooser replaced: on Olive's "51+ employees" segment it was the
+  157,511-person `market making` round beside a 2,218-person crypto one.
   Until 2026-09-28 nothing ever triggered that build (only the manual
   `/internal/backfill-apollo-audience-pointers`), so Olive's four split
   audiences sat active with no filters and campaign 583a4e74 failed ~1/min for
