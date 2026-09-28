@@ -983,3 +983,77 @@ describe("serve-next carries businessLanguages", () => {
     expect(await serveApolloPersonIn("No Geo", { city: null, state: null, country: null })).toEqual([]);
   });
 });
+
+// Regression 2026-09-28 (Olive, campaign 583a4e74): the split flow wrote ACTIVE
+// apollo audiences with no pointer and no filters, and nothing ever built them,
+// so every serve-next 422'd "no stored filters" about once a minute. A split
+// audience must be servable: serve-next builds its Apollo filters inline (once,
+// even under concurrent serves) and then serves on them.
+describe("serve-next on a split audience whose Apollo filters were never built", () => {
+  async function confirmSplitSegment(name: string) {
+    const res = await request(app)
+      .post("/orgs/audiences/split/confirm")
+      .set(getAuthHeaders())
+      .send({
+        brandId: BRAND,
+        offerId: "00000000-0000-4000-8000-0000000000c1",
+        segments: [{ name, description: `Decision makers at ${name}.` }],
+      });
+    expect(res.status).toBe(201);
+    return res.body.audiences[0].id as string;
+  }
+
+  it("builds the filters, then serves on them — never 422", async () => {
+    let builds = 0;
+    const searchBodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/audiences/suggest-from-segment")) {
+        builds++;
+        // Slow enough that the confirm-fired build and both serves overlap.
+        await new Promise((r) => setTimeout(r, 50));
+        return ok({
+          apolloAudienceId: "apollo-ptr-mm",
+          filters: { q_organization_keyword_tags: ["crypto market making"] },
+          count: 600,
+        });
+      }
+      if (u.endsWith("/search/next")) {
+        searchBodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({ people: [], done: true, totalEntries: 0 });
+      }
+      throw new Error("unexpected url " + u);
+    });
+
+    const id = await confirmSplitSegment("Crypto Market Makers");
+    const [a, b] = await Promise.all([serveNext(id), serveNext(id)]);
+    for (const res of [a, b]) {
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("exhausted");
+    }
+    // One build for the confirm trigger + two concurrent serves.
+    expect(builds).toBe(1);
+    expect(searchBodies[0]).toMatchObject({
+      searchParams: { q_organization_keyword_tags: ["crypto market making"] },
+    });
+
+    const got = await request(app).get(`/orgs/audiences/${id}`).set(getAuthHeaders());
+    expect(got.body.audience).toMatchObject({
+      status: "active",
+      apolloAudienceId: "apollo-ptr-mm",
+      filters: { q_organization_keyword_tags: ["crypto market making"] },
+      apolloCount: 600,
+    });
+  });
+
+  it("still fails loud (422) when the build yields no usable filters", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).endsWith("/audiences/suggest-from-segment"))
+        return ok({ apolloAudienceId: "apollo-ptr-empty", filters: {}, count: 5 });
+      throw new Error("unexpected url " + url);
+    });
+    const id = await confirmSplitSegment("Nobody");
+    const res = await serveNext(id);
+    expect(res.status).toBe(422);
+  });
+});
