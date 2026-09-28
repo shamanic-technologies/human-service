@@ -1389,11 +1389,17 @@ them as OpenAPI enums).
 - **Confirm = one transaction**: rows at `status='active'`, `provider='apollo'`,
   `apollo_audience_id` + `filters` NULL, `description` = the segment sentence,
   `nl_prompt` = the target, `source='split_proposal'`, `offer_id` required.
-  The Apollo filters are built LATER by the existing pointer build
-  (`POST /internal/backfill-apollo-audience-pointers` selects exactly
-  `provider='apollo' AND apollo_audience_id IS NULL`) — until then serve-next
-  422s these rows (no filters). A name taken in the same (org, brand, offer)
-  scope ⟹ 409, nothing written.
+  The Apollo filters are built by the existing pointer build
+  (`backfillApolloAudiencePointer`), triggered TWICE and deduped through one
+  in-flight promise per audience (`ensureApolloPointer`): in the background right
+  after the confirm (org-billed with the confirm's identity), and INLINE on
+  serve-next if it has not landed (org-billed with the serve's identity). So an
+  active split audience is never unservable, at worst its first serve waits ~2-3
+  min on the build. A build yielding no usable filters still 422s at serve.
+  Until 2026-09-28 nothing ever triggered that build (only the manual
+  `/internal/backfill-apollo-audience-pointers`), so Olive's four split
+  audiences sat active with no filters and campaign 583a4e74 failed ~1/min for
+  12h. A name taken in the same (org, brand, offer) scope ⟹ 409, nothing written.
 
 ### Audience suggestion (onboarding) — `POST /orgs/audiences/suggest`
 

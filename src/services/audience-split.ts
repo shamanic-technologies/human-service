@@ -12,9 +12,10 @@
 //   - proposing persists NOTHING. Confirming writes one audiences row per chosen
 //     segment, provider `apollo` with NO pointer and NO filters: turning the
 //     description into faithful Apollo filters is the existing pointer build
-//     (`backfillApolloAudiencePointer`, POST /internal/backfill-apollo-audience-
-//     pointers), which selects exactly `provider='apollo' AND apollo_audience_id
-//     IS NULL`. Nothing here re-implements it.
+//     (`backfillApolloAudiencePointer`). The confirm route fires it in the
+//     background for every created row, and serve-next runs it inline if it has
+//     not landed (`ensureApolloPointer`), so an active split audience is never
+//     unservable. Nothing here re-implements it.
 //
 // "Findable later" is a FORM constraint on the split, not a search: the prompt
 // only allows the axes Apollo can filter on (geography, company headcount,
@@ -257,7 +258,7 @@ export class SplitNameConflictError extends Error {
  * ONE transaction: all or nothing, so a partial confirm can never leave the
  * campaign testing half the split. Each row carries its description and the
  * confirmed target as `nlPrompt`; `provider='apollo'` with no pointer and no
- * filters, so the existing pointer build picks it up (see file header).
+ * filters — the route then builds them (see file header).
  * A name already taken in the same (org, brand, offer) scope ⟹
  * SplitNameConflictError (409), nothing written.
  */

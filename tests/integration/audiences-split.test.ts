@@ -1,8 +1,8 @@
 // The new-campaign modal's split: a confirmed target text -> up to 6
 // non-overlapping segments (name, sentence, icon), then the kept ones become
 // ACTIVE audiences under the brand + offer. Proposing makes NO provider call and
-// persists nothing; confirming writes rows the existing Apollo pointer build
-// picks up (provider apollo, no pointer, no filters).
+// persists nothing; confirming writes the rows and immediately builds each
+// one's Apollo filters in the background (provider apollo).
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import request from "supertest";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
@@ -164,6 +164,40 @@ describe("POST /orgs/audiences/split/confirm", () => {
     expect(listed.body.audiences.map((a: { name: string }) => a.name).sort()).toEqual(
       TWO.map((s) => s.name).sort()
     );
+  });
+
+  it("builds every confirmed segment's Apollo filters right away, so none stays active and unservable", async () => {
+    process.env.APOLLO_SERVICE_URL = "http://apollo:8080";
+    process.env.APOLLO_SERVICE_API_KEY = "apollo-key";
+    const built: string[] = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      if (String(url).endsWith("/audiences/suggest-from-segment")) {
+        const body = JSON.parse(init.body ?? "{}") as { name: string; description: string };
+        built.push(body.name);
+        return ok({
+          apolloAudienceId: `ptr-${body.name}`,
+          filters: { person_titles: [body.name] },
+          count: 100 + built.length,
+        });
+      }
+      throw new Error("unexpected url " + String(url));
+    });
+    const res = await confirm({ segments: TWO });
+    expect(res.status).toBe(201);
+
+    let rows: Array<typeof audiences.$inferSelect> = [];
+    for (let i = 0; i < 50; i++) {
+      rows = await db.select().from(audiences);
+      if (rows.every((r) => r.apolloAudienceId && r.filters)) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(built.sort()).toEqual(TWO.map((s) => s.name).sort());
+    for (const r of rows) {
+      expect(r.status).toBe("active");
+      expect(r.apolloAudienceId).toBe(`ptr-${r.name}`);
+      expect(r.filters).toEqual({ person_titles: [r.name] });
+      expect(r.apolloCount).toBeGreaterThan(100);
+    }
   });
 
   it("is all-or-nothing: a name already taken under the offer 409s and writes nothing", async () => {
