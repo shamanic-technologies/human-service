@@ -58,6 +58,10 @@ import {
 
 import { crmListUploads } from "../lib/crm-contacts.js";
 import { getAudiencePreview } from "../services/audience-preview.js";
+import {
+  checkNextPreviewPerson,
+  getPreviewEmailChecks,
+} from "../services/audience-preview-email-checks.js";
 
 const router = Router();
 
@@ -627,6 +631,54 @@ router.get(
     }
     try {
       res.json(await getAudiencePreview(audience, buildIdentity(res)));
+    } catch (err) {
+      sendProviderError(res, err);
+    }
+  }
+);
+
+// --- GET /orgs/audiences/:id/preview/email-checks ---
+// Where the "can we reach them?" check stands for the preview's first people:
+// per person, pending / found (verified or not) / not found, by which finder.
+// Free: never runs a reveal. Never returns an address.
+router.get(
+  "/orgs/audiences/:id/preview/email-checks",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const orgId = res.locals.orgId as string;
+    const audience = await getAudienceInOrg(orgId, req.params.id);
+    if (!audience) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
+    try {
+      res.json(await getPreviewEmailChecks(audience, buildIdentity(res)));
+    } catch (err) {
+      sendProviderError(res, err);
+    }
+  }
+);
+
+// --- POST /orgs/audiences/:id/preview/email-checks/next ---
+// Resolve ONE more sampled person: apollo-service's billed reveal + email
+// verification (cost declared there, against the caller's org), outcome stored,
+// whole state returned. Call in a loop until `done`. At most
+// PREVIEW_EMAIL_CHECK_SAMPLE reveals per audience, ever. Not a serve: no
+// suppression, no membership. Never returns an address.
+router.post(
+  "/orgs/audiences/:id/preview/email-checks/next",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const orgId = res.locals.orgId as string;
+    const audience = await getAudienceInOrg(orgId, req.params.id);
+    if (!audience) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
+    try {
+      res.json(await checkNextPreviewPerson(audience, buildIdentity(res)));
     } catch (err) {
       sendProviderError(res, err);
     }

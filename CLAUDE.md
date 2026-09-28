@@ -86,6 +86,8 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/refresh-count` | apiKey + `x-org-id` + `x-user-id` | Re-snapshot apollo + apify counts via free dry-run |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/serve-next` | apiKey + `x-org-id` + `x-user-id` | Serve the NEXT unserved person of the audience (real provider match on its stored filters; records served; never repeats; clean exhausted signal) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview` | apiKey + `x-org-id` + `x-user-id` | Free sample of who the audience reaches: ~10 real companies + ~20 real people (no email/phone), taken once and stored on the row |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview/email-checks` | apiKey + `x-org-id` + `x-user-id` | Free read: for the preview's first 5 people, pending / found (verdict, finder) / not found. Never an address |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/preview/email-checks/next` | apiKey + `x-org-id` + `x-user-id` | Check ONE more sampled person: apollo billed reveal + verification (cost in apollo-service, caller's org), outcome stored, whole state returned. Loop until `done` |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/avatar` | apiKey + `x-org-id` + `x-user-id` | (Re)generate the audience avatar via chat-service; persisted as a `data:` URI on `avatarUrl` |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/members` | apiKey + `x-org-id` | List canonical people in the audience (paginated) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/stats` | apiKey + `x-org-id` | Per-audience membership stats for a list of emails / personIds |
@@ -792,9 +794,47 @@ their segments, then real companies and real people matching one of them.
   `unavailable` is not: `not_built_yet` (apollo audience whose pointer build has
   not landed, e.g. a split right after confirm) and `provider_not_previewable`
   (crm / apify: no free search to sample).
+- **Each stored person also keeps apollo's reveal handle** for the email
+  check below; the preview endpoint never returns it.
 - **Writes nothing else**: no serve, suppression, membership, buffer, cursor.
   Not on the API surface of `serializeAudience`. Declares no cost. A provider
   failure is a 502 and nothing is stored.
+
+### Preview email checks — can we REACH the people the preview shows?
+
+The preview proves we found real people; this proves we can reach them, one
+person at a time, so the signed-out onboarding can show each resolve live.
+`src/services/audience-preview-email-checks.ts` owns it.
+
+- **What runs**: for the FIRST 5 people of the stored sample
+  (`PREVIEW_EMAIL_CHECK_SAMPLE`), apollo-service `POST /enrich` by the person's
+  handle, which reveals the email AND returns the BounceVerify verdict beside it.
+  One reveal per `/next` call (~3-5s), in preview order. There is ONE finder
+  (apollo): treg cannot run first (the teaser carries no identity) and adds
+  nothing after the reveal (apollo-service measured 124/125 same address), so no
+  race of finders is shown — only attempts that ran.
+- **The handle** is apollo-service's per-person preview field, stored on
+  `audiences.preview` and stripped from the preview endpoint's response
+  (`toPublic`). A sample stored before apollo-service served handles is re-taken
+  (the preview call is free, page 1 deterministic); a sample still without them
+  answers `unavailable` / `no_reveal_handle`, spending nothing.
+- **Cost**: ~12¢ (apollo-credit) + ~0.4¢ (BounceVerify) per person at org price,
+  declared by apollo-service against the CALLER's org (the anonymous org when
+  signed out), attributed to the audience's brand (`x-brand-id`) and the audience
+  (`x-audience-id`). human-service declares none. At most 5 reveals per audience,
+  ever: `audience_preview_email_checks` (migration `0029`, one row per
+  `(audience, sample index)`) is the record, and a `checking` claim row is
+  inserted BEFORE the spend so concurrent callers never pay twice for a person.
+  A claim older than 2 min (a caller that died mid-reveal) may be re-taken.
+- **Never an address**: the row stores the domain only; the API returns
+  `maskedEmail: "***@domain"`, verdict, deliverable, finder, verifier.
+- **Not a serve**: no `lead_serves`, no `brand_suppressions`, no membership.
+  Nobody was contacted, so nobody becomes unservable.
+- **Fail loud**: a reveal failure or an email without a verdict is a 502, the
+  claim is dropped, nothing stored — the next call retries the same person.
+- The table carries no `org_id` (org via the audience), so it cascades with the
+  audience and needs no transfer-brand step. Guarded by
+  `tests/integration/audiences-preview-email-checks.test.ts`.
 
 ### Serve-next (lead primitive) — `POST /orgs/audiences/{id}/serve-next`
 

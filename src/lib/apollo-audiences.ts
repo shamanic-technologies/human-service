@@ -263,6 +263,11 @@ export interface ApolloPreviewPerson {
   lastNameObfuscated: string | null;
   title: string | null;
   company: string | null;
+  // The provider's handle for this person, accepted by apollo-service's billed
+  // `/enrich`. Internal: kept on the stored sample so the email check can reveal
+  // exactly the person shown, never returned by the preview endpoint. Null when
+  // apollo-service served none (a sample taken before it did).
+  providerPersonId: string | null;
 }
 
 export interface ApolloAudiencePreview {
@@ -272,6 +277,9 @@ export interface ApolloAudiencePreview {
 }
 
 const strOrNull = (v: unknown) => (typeof v === "string" ? v : null);
+
+// The preview field apollo-service carries each person's `/enrich` handle in.
+const APOLLO_PREVIEW_PERSON_HANDLE = "apolloPersonId";
 
 export async function getApolloAudiencePreview(
   apolloAudienceId: string,
@@ -312,6 +320,7 @@ export async function getApolloAudiencePreview(
       lastNameObfuscated: strOrNull(r.lastNameObfuscated),
       title: strOrNull(r.title),
       company: strOrNull(r.company),
+      providerPersonId: strOrNull(r[APOLLO_PREVIEW_PERSON_HANDLE]),
     };
   });
   return { count: o.count, companies, people };
