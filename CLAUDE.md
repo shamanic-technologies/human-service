@@ -88,6 +88,9 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview` | apiKey + `x-org-id` + `x-user-id` | Free sample of who the audience reaches: ~10 real companies + ~20 real people (no email/phone), taken once and stored on the row |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview/email-checks` | apiKey + `x-org-id` + `x-user-id` | Free read: for the preview's first 5 people, pending / found (verdict, finder) / not found. Never an address |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/preview/email-checks/next` | apiKey + `x-org-id` + `x-user-id` | Check ONE more sampled person: apollo billed reveal + verification (cost in apollo-service, caller's org), outcome stored, whole state returned. Loop until `done` |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview/companies` | apiKey + `x-org-id` + `x-user-id` | Up to 100 real companies (firmographics) + the one masked person to write to at each, paged by offset/limit, built progressively, stored once. Paid, declared by apollo-service |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview/companies/email-checks` | apiKey + `x-org-id` + `x-user-id` | Free read: per checkable company row (first 10), pending / found (verdict) / not found |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/preview/companies/{index}/email-check` | apiKey + `x-org-id` + `x-user-id` | ONE billed reveal + verification for that row's person; idempotent per row |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/avatar` | apiKey + `x-org-id` + `x-user-id` | (Re)generate the audience avatar via chat-service; persisted as a `data:` URI on `avatarUrl` |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/members` | apiKey + `x-org-id` | List canonical people in the audience (paginated) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/stats` | apiKey + `x-org-id` | Per-audience membership stats for a list of emails / personIds |
@@ -837,6 +840,37 @@ person at a time, so the signed-out onboarding can show each resolve live.
 - The table carries no `org_id` (org via the audience), so it cascades with the
   audience and needs no transfer-brand step. Guarded by
   `tests/integration/audiences-preview-email-checks.test.ts`.
+
+### Preview companies — `GET /orgs/audiences/{id}/preview/companies`
+
+The Explee-style table for signed-out onboarding: up to **100** companies the
+audience reaches, with firmographics, and the ONE person to write to at each.
+`src/services/audience-preview-companies.ts` owns it.
+
+- **apollo-service owns the Apollo calls, the person pick and the cost**
+  (`GET /audiences/{apolloAudienceId}/companies`, v0.39.19): employers come from
+  the free people search on the audience's full filters (person-level filters
+  hold), the person is the first-ranked audience member there, and the company
+  record is **1 apollo-credit per company** not already in its 90-day global
+  cache (~$11.80 per 100 uncached at org price), declared against the CALLER's
+  org. human-service declares none.
+- **Progressive**: a call builds only as far as `offset+limit` needs, one
+  apollo-service chunk at a time (asked by apollo's rank offset, kept in
+  `audiences.preview_companies_state`), and stores rows in
+  `audience_preview_companies` (migration `0030`, PK `(audience_id, idx)`), so a
+  reload never re-pays. Serialized per audience by a transaction-scoped advisory
+  lock: two concurrent callers never pay for the same chunk.
+- apollo-service requires `x-run-id`; a caller without one gets its own
+  `audience-preview-companies` run (org-billed), else fail loud.
+- `description` is apollo's text cut to its first sentence (≤200 chars,
+  `oneLine`), never rewritten. A field apollo lacks is null. Person LinkedIn is
+  always null (the free result has none). The reveal handle is stored, never
+  returned. Never an email or a phone. Not a serve.
+- **Per-row email check**: same reveal + verification as the /preview email
+  checks, keyed on the row index, first 10 rows only. Shares
+  `audience_preview_email_checks`, distinguished by its `sample` column
+  (`preview` | `companies`, unique `(audience_id, sample, person_index)`).
+- Tests: `tests/integration/audiences-preview-companies.test.ts`.
 
 ### Serve-next (lead primitive) — `POST /orgs/audiences/{id}/serve-next`
 

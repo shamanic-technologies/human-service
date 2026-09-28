@@ -158,11 +158,20 @@ function build(
   };
 }
 
-async function loadRows(audienceId: string): Promise<CheckRow[]> {
+// Which list a check row belongs to: the 5-person free sample of /preview, or
+// the company rows of /preview/companies (person_index = the row's index).
+export type EmailCheckSample = "preview" | "companies";
+
+async function loadRows(audienceId: string, sample: EmailCheckSample = "preview"): Promise<CheckRow[]> {
   return db
     .select()
     .from(audiencePreviewEmailChecks)
-    .where(eq(audiencePreviewEmailChecks.audienceId, audienceId))
+    .where(
+      and(
+        eq(audiencePreviewEmailChecks.audienceId, audienceId),
+        eq(audiencePreviewEmailChecks.sample, sample)
+      )
+    )
     .orderBy(asc(audiencePreviewEmailChecks.personIndex));
 }
 
@@ -181,11 +190,16 @@ export async function getPreviewEmailChecks(
 // Take the claim on one position before any spend. Inserts a `checking` row, or
 // takes over a stale claim / a row left by a re-taken sample. Returns false when
 // another caller holds it or it is already settled for this person.
-async function claim(audienceId: string, index: number, handle: string): Promise<boolean> {
+async function claim(
+  audienceId: string,
+  index: number,
+  handle: string,
+  sample: EmailCheckSample = "preview"
+): Promise<boolean> {
   const staleBefore = new Date(Date.now() - PREVIEW_EMAIL_CHECK_STALE_MS);
   const inserted = await db
     .insert(audiencePreviewEmailChecks)
-    .values({ audienceId, personIndex: index, providerPersonId: handle, status: "checking" })
+    .values({ audienceId, sample, personIndex: index, providerPersonId: handle, status: "checking" })
     .onConflictDoNothing()
     .returning({ id: audiencePreviewEmailChecks.id });
   if (inserted.length > 0) return true;
@@ -205,6 +219,7 @@ async function claim(audienceId: string, index: number, handle: string): Promise
     .where(
       and(
         eq(audiencePreviewEmailChecks.audienceId, audienceId),
+        eq(audiencePreviewEmailChecks.sample, sample),
         eq(audiencePreviewEmailChecks.personIndex, index),
         or(
           sql`${audiencePreviewEmailChecks.providerPersonId} <> ${handle}`,
@@ -219,12 +234,17 @@ async function claim(audienceId: string, index: number, handle: string): Promise
   return retaken.length > 0;
 }
 
-async function release(audienceId: string, index: number): Promise<void> {
+async function release(
+  audienceId: string,
+  index: number,
+  sample: EmailCheckSample = "preview"
+): Promise<void> {
   await db
     .delete(audiencePreviewEmailChecks)
     .where(
       and(
         eq(audiencePreviewEmailChecks.audienceId, audienceId),
+        eq(audiencePreviewEmailChecks.sample, sample),
         eq(audiencePreviewEmailChecks.personIndex, index),
         eq(audiencePreviewEmailChecks.status, "checking")
       )
@@ -257,6 +277,20 @@ export async function checkNextPreviewPerson(
     return build(audience.id, subset.people, await loadRows(audience.id));
   }
 
+  await revealAndRecord(audience, identity, next.index, handle, "preview");
+  return build(audience.id, subset.people, await loadRows(audience.id));
+}
+
+// ONE billed reveal for a claimed position, outcome persisted. The claim is
+// dropped when nothing usable came back, so the next call retries the person.
+// Exported for the companies list's per-row check.
+export async function revealAndRecord(
+  audience: AudienceRow,
+  identity: Identity,
+  index: number,
+  handle: string,
+  sample: EmailCheckSample
+): Promise<void> {
   let data: { person?: { email?: string | null } | null; emailVerification?: unknown };
   try {
     // The reveal is charged to the caller's org and attributed to this
@@ -276,7 +310,7 @@ export async function checkNextPreviewPerson(
     )) as typeof data;
   } catch (err) {
     // Nothing came back: drop the claim so the next call retries this person.
-    await release(audience.id, next.index);
+    await release(audience.id, index, sample);
     throw err;
   }
 
@@ -285,7 +319,7 @@ export async function checkNextPreviewPerson(
   try {
     verification = readEmailVerification("apollo", data.emailVerification, email);
   } catch (err) {
-    await release(audience.id, next.index);
+    await release(audience.id, index, sample);
     throw err;
   }
   const v = (data.emailVerification ?? null) as { verifier?: unknown } | null;
@@ -305,9 +339,43 @@ export async function checkNextPreviewPerson(
     .where(
       and(
         eq(audiencePreviewEmailChecks.audienceId, audience.id),
-        eq(audiencePreviewEmailChecks.personIndex, next.index)
+        eq(audiencePreviewEmailChecks.sample, sample),
+        eq(audiencePreviewEmailChecks.personIndex, index)
       )
     );
-
-  return build(audience.id, subset.people, await loadRows(audience.id));
 }
+
+// One check's public shape, for the companies list (row index keyed).
+export interface CompanyRowEmailCheck {
+  index: number;
+  status: PreviewEmailCheckStatus;
+  finder: string | null;
+  verifier: string | null;
+  verdict: string | null;
+  deliverable: boolean | null;
+  maskedEmail: string | null;
+  checkedAt: string | null;
+}
+
+export function toCompanyRowCheck(index: number, handle: string | null, row: CheckRow | undefined): CompanyRowEmailCheck {
+  const own = row && handle && row.providerPersonId === handle ? row : undefined;
+  const status: PreviewEmailCheckStatus =
+    !own || isStaleClaim(own, Date.now()) ? "pending" : (own.status as PreviewEmailCheckStatus);
+  const settled = status === "found" || status === "not_found";
+  return {
+    index,
+    status,
+    finder: settled ? own!.finder : null,
+    verifier: settled ? own!.verifier : null,
+    verdict: settled ? own!.verdict : null,
+    deliverable: settled ? own!.deliverable : null,
+    maskedEmail: settled ? maskEmail(own!.emailDomain) : null,
+    checkedAt: settled && own!.checkedAt ? own!.checkedAt.toISOString() : null,
+  };
+}
+
+export async function loadCompanyRowChecks(audienceId: string): Promise<CheckRow[]> {
+  return loadRows(audienceId, "companies");
+}
+
+export { claim as claimEmailCheck };

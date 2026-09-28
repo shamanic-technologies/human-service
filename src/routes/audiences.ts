@@ -20,6 +20,7 @@ import {
   GenerateAudienceAvatarRequestSchema,
   SplitAudiencesRequestSchema,
   ConfirmAudienceSplitRequestSchema,
+  PreviewCompaniesQuerySchema,
 } from "../schemas.js";
 import {
   proposeAudienceSplit,
@@ -62,6 +63,13 @@ import {
   checkNextPreviewPerson,
   getPreviewEmailChecks,
 } from "../services/audience-preview-email-checks.js";
+import {
+  checkCompanyRowEmail,
+  getAudiencePreviewCompanies,
+  getCompanyRowEmailChecks,
+  PREVIEW_COMPANIES_DEFAULT_LIMIT,
+  PreviewCompanyRowError,
+} from "../services/audience-preview-companies.js";
 
 const router = Router();
 
@@ -680,6 +688,90 @@ router.post(
     try {
       res.json(await checkNextPreviewPerson(audience, buildIdentity(res)));
     } catch (err) {
+      sendProviderError(res, err);
+    }
+  }
+);
+
+// --- GET /orgs/audiences/:id/preview/companies ---
+// Up to 100 real companies the audience reaches (firmographics) + the one
+// person to write to at each, masked, never an email. Built only as far as
+// offset+limit needs, stored once per audience (the company data is a paid
+// apollo-service call, declared there against the caller's org).
+router.get(
+  "/orgs/audiences/:id/preview/companies",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const q = PreviewCompaniesQuerySchema.safeParse(req.query);
+    if (!q.success) {
+      res.status(400).json({ error: "Invalid query", details: q.error.flatten() });
+      return;
+    }
+    const orgId = res.locals.orgId as string;
+    const audience = await getAudienceInOrg(orgId, req.params.id);
+    if (!audience) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
+    try {
+      res.json(
+        await getAudiencePreviewCompanies(
+          audience,
+          buildIdentity(res),
+          q.data.offset ?? 0,
+          q.data.limit ?? PREVIEW_COMPANIES_DEFAULT_LIMIT
+        )
+      );
+    } catch (err) {
+      sendProviderError(res, err);
+    }
+  }
+);
+
+// --- GET /orgs/audiences/:id/preview/companies/email-checks ---
+// Free read: per checkable company row, found / verified or still pending.
+router.get(
+  "/orgs/audiences/:id/preview/companies/email-checks",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const orgId = res.locals.orgId as string;
+    const audience = await getAudienceInOrg(orgId, req.params.id);
+    if (!audience) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
+    res.json(await getCompanyRowEmailChecks(audience));
+  }
+);
+
+// --- POST /orgs/audiences/:id/preview/companies/:index/email-check ---
+// ONE billed reveal + verification for a company row's person (apollo-service
+// declares the cost against the caller's org). Idempotent per row. Not a serve.
+router.post(
+  "/orgs/audiences/:id/preview/companies/:index/email-check",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const index = Number(req.params.index);
+    if (!Number.isInteger(index) || index < 0) {
+      res.status(400).json({ error: "index must be a non-negative integer" });
+      return;
+    }
+    const orgId = res.locals.orgId as string;
+    const audience = await getAudienceInOrg(orgId, req.params.id);
+    if (!audience) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
+    try {
+      res.json(await checkCompanyRowEmail(audience, buildIdentity(res), index));
+    } catch (err) {
+      if (err instanceof PreviewCompanyRowError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
       sendProviderError(res, err);
     }
   }
