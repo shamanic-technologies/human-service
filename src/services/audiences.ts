@@ -1830,23 +1830,52 @@ export async function backfillApolloAudiencePointer(
     orgId: row.orgId,
     userId: row.createdByUserId ?? undefined,
   };
-  const built = await suggestApolloAudience({
+  const apollo = await suggestApolloAudience({
     name: row.name,
     description: row.description ?? row.name,
     brandId: row.brandId,
     identity,
   });
-  if (!built.filters || Object.keys(built.filters).length === 0) {
+  // apollo-service EXPLORES; it does not decide. Its own top-level pick is the
+  // argmax-count that /suggest stopped trusting (see "THE CHOOSER" in CLAUDE.md):
+  // on Olive's "crypto market making firms, 51+ employees" it returned the
+  // 157,511-person "market making" round beside a 2,218-person crypto one. So
+  // whenever there is more than one round, the same chooser picks — keeping the
+  // row's own name + description (they were chosen by the customer).
+  let built: {
+    apolloAudienceId: string;
+    filters: unknown;
+    count: number;
+    degraded: boolean;
+  } = apollo;
+  let chooserTrace: Record<string, unknown> | undefined;
+  if (apollo.candidates.length > 1) {
+    const nlPrompt = row.description ?? row.nlPrompt ?? row.name;
+    const chosen = await chooseAudienceCandidate({
+      nlPrompt,
+      candidates: apollo.candidates,
+      identity,
+    });
+    console.log(
+      `[human-service] audience.pointer_build chooser picked attempt ${chosen.chosen}/${apollo.candidates.length} ` +
+        `(count ${chosen.candidate.count}, degraded ${chosen.degraded}) audience=${row.id}: ${chosen.why}`
+    );
+    built = { ...chosen.candidate, degraded: chosen.degraded };
+    chooserTrace = buildChooserTrace({ nlPrompt, candidates: apollo.candidates, chosen });
+  }
+  const builtFilters = built.filters as Record<string, unknown> | null;
+  if (!builtFilters || Object.keys(builtFilters).length === 0) {
     return null;
   }
   await db
     .update(audiences)
     .set({
       apolloAudienceId: built.apolloAudienceId,
-      filters: built.filters as Record<string, unknown>,
+      filters: builtFilters,
       apolloCount: built.count,
       countedAt: new Date(),
       degraded: built.degraded,
+      ...(chooserTrace ? { chooserTrace } : {}),
       updatedAt: new Date(),
     })
     .where(and(eq(audiences.id, row.id), isNull(audiences.apolloAudienceId)));

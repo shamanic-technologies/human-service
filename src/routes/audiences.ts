@@ -35,6 +35,7 @@ import {
   suggestAudiences,
   serveNextPerson,
   ensureApolloPointer,
+  needsApolloPointerBuild,
   generateAvatar,
   buildAvatarPrompt,
   AudienceNotServableError,
@@ -637,7 +638,9 @@ router.post(
     // this is fire-and-forget + best-effort: a refresh failure must never fail the
     // serve (lead-service crash-loops on a bad serve). The re-count is free (dry-
     // run, no credits).
-    void refreshAudienceCountIfStale(audience, identity).catch((err) =>
+    // Skipped while the Apollo pointer is not built yet: serve-next builds it
+    // (and its count) below, and a legacy dry-run on no filters means nothing.
+    if (!needsApolloPointerBuild(audience)) void refreshAudienceCountIfStale(audience, identity).catch((err) =>
       console.error(
         `[human-service] audience.count_refresh_failed org=${orgId} audience=${audience.id}`,
         err

@@ -1046,6 +1046,57 @@ describe("serve-next on a split audience whose Apollo filters were never built",
     });
   });
 
+  it("when apollo-service explored several rounds, the chooser picks — not apollo's argmax", async () => {
+    process.env.CHAT_SERVICE_URL = "http://chat:8080";
+    process.env.CHAT_SERVICE_API_KEY = "chat-key";
+    const wide = { q_organization_keyword_tags: ["market making"] };
+    const crypto = { q_organization_keyword_tags: ["crypto market making"] };
+    let chooserMessage = "";
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/audiences/suggest-from-segment"))
+        return ok({
+          // apollo-service's own top-level pick: the widest round.
+          apolloAudienceId: "ptr-wide",
+          filters: wide,
+          count: 157511,
+          candidates: [
+            { apolloAudienceId: "ptr-wide", filters: wide, count: 157511, sample: [], notes: [] },
+            { apolloAudienceId: "ptr-crypto", filters: crypto, count: 2218, sample: [], notes: [] },
+          ],
+        });
+      if (u.endsWith("/complete")) {
+        chooserMessage = JSON.parse(init.body ?? "{}").message;
+        return ok({
+          json: {
+            chosen: 2,
+            why: "the crypto round",
+            name: "ignored",
+            description: "ignored",
+            degraded: false,
+            rationales: [
+              { attempt: 1, rationale: "market making of any kind" },
+              { attempt: 2, rationale: "crypto market makers" },
+            ],
+          },
+        });
+      }
+      if (u.endsWith("/search/next")) return ok({ people: [], done: true, totalEntries: 0 });
+      throw new Error("unexpected url " + u);
+    });
+    const id = await confirmSplitSegment("Large Market Makers");
+    const res = await serveNext(id);
+    expect(res.status).toBe(200);
+    expect(chooserMessage).toContain("Decision makers at Large Market Makers.");
+    const got = await request(app).get(`/orgs/audiences/${id}`).set(getAuthHeaders());
+    expect(got.body.audience).toMatchObject({
+      name: "Large Market Makers",
+      apolloAudienceId: "ptr-crypto",
+      filters: crypto,
+      apolloCount: 2218,
+    });
+  });
+
   it("still fails loud (422) when the build yields no usable filters", async () => {
     fetchSpy.mockImplementation(async (url: string) => {
       if (String(url).endsWith("/audiences/suggest-from-segment"))
