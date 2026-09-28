@@ -1401,6 +1401,10 @@ them as OpenAPI enums).
   name + description and storing `chooser_trace` — apollo's top-level pick is
   the argmax the chooser replaced: on Olive's "51+ employees" segment it was the
   157,511-person `market making` round beside a 2,218-person crypto one.
+  apollo-service and chat-service REQUIRE `x-run-id`, so a build fired with no
+  inbound run (the confirm when the caller sends none, the manual backfill)
+  opens its OWN run (`audience-pointer-build`, row's org + user) and fails loud
+  if runs-service will not open one.
   Until 2026-09-28 nothing ever triggered that build (only the manual
   `/internal/backfill-apollo-audience-pointers`), so Olive's four split
   audiences sat active with no filters and campaign 583a4e74 failed ~1/min for
