@@ -57,6 +57,7 @@ import {
 } from "../lib/lead-won.js";
 
 import { crmListUploads } from "../lib/crm-contacts.js";
+import { getAudiencePreview } from "../services/audience-preview.js";
 
 const router = Router();
 
@@ -601,6 +602,31 @@ router.post(
         .where(and(eq(audiences.id, req.params.id), eq(audiences.orgId, orgId)))
         .returning();
       res.json({ audience: serializeAudience(updated) });
+    } catch (err) {
+      sendProviderError(res, err);
+    }
+  }
+);
+
+// --- GET /orgs/audiences/:id/preview ---
+// A free sample of who the audience reaches (real companies + real people, no
+// emails, no phones) for a visitor who has not signed up yet. Fetched once from
+// apollo-service and kept on the row, so a reload never re-asks the provider.
+// Needs x-user-id (apollo key resolution). Writes nothing that makes anyone a
+// lead or a member.
+router.get(
+  "/orgs/audiences/:id/preview",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const orgId = res.locals.orgId as string;
+    const audience = await getAudienceInOrg(orgId, req.params.id);
+    if (!audience) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
+    try {
+      res.json(await getAudiencePreview(audience, buildIdentity(res)));
     } catch (err) {
       sendProviderError(res, err);
     }

@@ -85,6 +85,7 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `DELETE /orgs/audiences/{id}` | apiKey + `x-org-id` | Hard delete (cascades members) — archive is a soft state, not delete |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/refresh-count` | apiKey + `x-org-id` + `x-user-id` | Re-snapshot apollo + apify counts via free dry-run |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/serve-next` | apiKey + `x-org-id` + `x-user-id` | Serve the NEXT unserved person of the audience (real provider match on its stored filters; records served; never repeats; clean exhausted signal) |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview` | apiKey + `x-org-id` + `x-user-id` | Free sample of who the audience reaches: ~10 real companies + ~20 real people (no email/phone), taken once and stored on the row |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/avatar` | apiKey + `x-org-id` + `x-user-id` | (Re)generate the audience avatar via chat-service; persisted as a `data:` URI on `avatarUrl` |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/members` | apiKey + `x-org-id` | List canonical people in the audience (paginated) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/stats` | apiKey + `x-org-id` | Per-audience membership stats for a list of emails / personIds |
@@ -771,6 +772,29 @@ each lead server-side. `src/routes/internal-audiences.ts` is the thin layer;
   Record<rawEmail, card|null> }` — `byEmail` is keyed by the **raw** email as sent
   (normalization is internal). **No cost** (pure DB read); no downstream calls.
   Fail loud on a DB error (propagates).
+
+### Preview — `GET /orgs/audiences/{id}/preview`
+
+Signed-out onboarding shows a founder real output before any account or card:
+their segments, then real companies and real people matching one of them.
+`src/services/audience-preview.ts` owns it; the route is thin.
+
+- **apollo-service owns the Apollo call** (`GET /audiences/{apolloAudienceId}/preview`,
+  apollo-service v0.39.16): one FREE people search, page 1, on the audience's
+  faithful filters (measured: zero credit movement). Companies are the distinct
+  employers on that page (name + `peopleInSample`, a share of the sample, not a
+  headcount), people are drawn from them (first name, masked last name, title,
+  employer). No email, phone, location, photo or company descriptors: each of
+  those needs a paid call, and a signed-out visitor must not trigger spend.
+- **Stored once on `audiences.preview`** (migration `0028`, nullable jsonb), so
+  a reload never re-asks the provider. Filters and the pointer are immutable,
+  so the sample never goes stale. `ready` and `empty` (`no_match`) are stored;
+  `unavailable` is not: `not_built_yet` (apollo audience whose pointer build has
+  not landed, e.g. a split right after confirm) and `provider_not_previewable`
+  (crm / apify: no free search to sample).
+- **Writes nothing else**: no serve, suppression, membership, buffer, cursor.
+  Not on the API surface of `serializeAudience`. Declares no cost. A provider
+  failure is a 502 and nothing is stored.
 
 ### Serve-next (lead primitive) — `POST /orgs/audiences/{id}/serve-next`
 
