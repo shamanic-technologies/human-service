@@ -63,6 +63,7 @@ import {
   type ApolloFilters,
 } from "../lib/apollo-audiences.js";
 import { chooseAudienceCandidate, buildChooserTrace } from "./audience-chooser.js";
+import { createRun, completeRun } from "./runs.js";
 import { crmServeNext, normalizeCrmContact } from "../lib/crm-contacts.js";
 
 // The transaction handle drizzle passes to the `db.transaction` callback.
@@ -1826,10 +1827,55 @@ export async function backfillApolloAudiencePointer(
   // sweep) ⟹ the row's own org + creator, i.e. still ORG-billed.
   identityOverride?: Identity
 ): Promise<ApolloPointerBackfillResult | null> {
-  const identity: Identity = identityOverride ?? {
+  const base: Identity = identityOverride ?? {
     orgId: row.orgId,
     userId: row.createdByUserId ?? undefined,
   };
+  // apollo-service (and chat-service) require an x-run-id. A build fired off a
+  // request that carries none (the split confirm, the manual backfill) opens
+  // its OWN run under the row's org, so it is still org-billed and traced.
+  // No run ⟹ fail loud: a build that cannot be attributed must not run.
+  if (base.runId) return buildPointerUnder(row, base);
+  if (!base.userId) {
+    throw new Error(
+      `audience ${row.id}: no x-run-id and no user to open a run for the Apollo pointer build`
+    );
+  }
+  const tracking = {
+    ...(base.workflowTracking ?? {}),
+    brandIds: [row.brandId],
+    audienceId: row.id,
+  };
+  const ownRunId = await createRun({
+    orgId: base.orgId,
+    userId: base.userId,
+    taskName: "audience-pointer-build",
+    workflowTracking: tracking,
+  });
+  if (!ownRunId) {
+    throw new Error(
+      `audience ${row.id}: runs-service did not open a run for the Apollo pointer build`
+    );
+  }
+  const runIdentity = { orgId: base.orgId, userId: base.userId, workflowTracking: tracking };
+  try {
+    const result = await buildPointerUnder(row, {
+      ...base,
+      runId: ownRunId,
+      workflowTracking: tracking,
+    });
+    await completeRun(ownRunId, "completed", runIdentity);
+    return result;
+  } catch (err) {
+    await completeRun(ownRunId, "failed", runIdentity);
+    throw err;
+  }
+}
+
+async function buildPointerUnder(
+  row: typeof audiences.$inferSelect,
+  identity: Identity
+): Promise<ApolloPointerBackfillResult | null> {
   const apollo = await suggestApolloAudience({
     name: row.name,
     description: row.description ?? row.name,

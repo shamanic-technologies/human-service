@@ -37,6 +37,9 @@ function wire(opts?: { byName?: (name: string) => ApolloResp }) {
   let seq = 0;
   fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
     const u = String(url);
+    // The build opens its own run when none is inbound (no x-run-id here).
+    if (u === "http://runs:8080/v1/runs") return ok({ id: "10000000-0000-4000-8000-000000000001" });
+    if (u.startsWith("http://runs:8080/v1/runs/")) return ok({});
     if (u.endsWith("/audiences/suggest-from-segment")) {
       const body = JSON.parse(init.body ?? "{}") as { name: string };
       if (opts?.byName) return ok(opts.byName(body.name));
@@ -99,12 +102,16 @@ async function seed() {
 
 beforeEach(async () => {
   fetchSpy.mockReset();
+  process.env.RUNS_SERVICE_URL = "http://runs:8080";
+  process.env.RUNS_SERVICE_API_KEY = "runs-key";
   process.env.APOLLO_SERVICE_URL = "http://apollo:8080";
   process.env.APOLLO_SERVICE_API_KEY = "apollo-key";
   await cleanTestData();
 });
 
 afterAll(async () => {
+  process.env.RUNS_SERVICE_URL = "";
+  process.env.RUNS_SERVICE_API_KEY = "";
   await cleanTestData();
   await closeDb();
 });
@@ -219,6 +226,25 @@ describe("POST /internal/backfill-apollo-audience-pointers", () => {
     expect(row.apolloAudienceId).toBeNull();
     expect(row.filters).toEqual({ titles: ["CEO"] });
     expect(row.apolloCount).toBeNull();
+  });
+
+  it("with no inbound run, the build opens its OWN run under the row's org and forwards it", async () => {
+    await seed();
+    wire();
+    const res = await request(app)
+      .post("/internal/backfill-apollo-audience-pointers?dryRun=false")
+      .set(apiKeyHeader);
+    expect(res.status).toBe(200);
+    const calls = fetchSpy.mock.calls.map((c) => ({
+      url: String(c[0]),
+      headers: (c[1]?.headers ?? {}) as Record<string, string>,
+    }));
+    const opened = calls.find((c) => c.url === "http://runs:8080/v1/runs");
+    expect(opened?.headers["x-org-id"]).toBe(ORG);
+    expect(opened?.headers["x-user-id"]).toBe(USER);
+    const build = calls.find((c) => c.url.endsWith("/audiences/suggest-from-segment"));
+    expect(build?.headers["x-run-id"]).toBe("10000000-0000-4000-8000-000000000001");
+    expect(build?.headers["x-org-id"]).toBe(ORG);
   });
 
   it("fails loud (502) on missing apollo config (truly systemic)", async () => {
