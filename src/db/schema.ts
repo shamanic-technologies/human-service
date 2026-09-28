@@ -754,3 +754,36 @@ export const audienceScreenedOut = pgTable(
 
 export type AudienceScreenedOut = typeof audienceScreenedOut.$inferSelect;
 export type NewAudienceScreenedOut = typeof audienceScreenedOut.$inferInsert;
+
+// Proof that the people shown in an audience's free preview can be REACHED: for
+// the first few sampled people, apollo-service's billed reveal ran and the
+// revealed email was verified. One row per (audience, sample position). Never
+// stores the address, only its domain and the verifier's verdict. `status`:
+// `checking` (claim taken BEFORE the spend, so concurrent callers never pay
+// twice for one person), `found`, `not_found`. Keyed on the audience only (org
+// via the audience row), so it follows the audience on delete and transfer.
+export const audiencePreviewEmailChecks = pgTable(
+  "audience_preview_email_checks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    personIndex: integer("person_index").notNull(),
+    providerPersonId: text("provider_person_id").notNull(),
+    status: text("status").notNull(),
+    finder: text("finder"),
+    verifier: text("verifier"),
+    verdict: text("verdict"),
+    deliverable: boolean("deliverable"),
+    emailDomain: text("email_domain"),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+    checkedAt: timestamp("checked_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("idx_audience_preview_email_checks_unique").on(
+      table.audienceId,
+      table.personIndex
+    ),
+  ]
+);

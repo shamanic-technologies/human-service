@@ -1518,6 +1518,80 @@ registry.registerPath({
   },
 });
 
+export const AudiencePreviewEmailChecksResponseSchema = z
+  .object({
+    audienceId: z.string().uuid(),
+    status: z
+      .enum(["ready", "unavailable"])
+      .describe("ready = `people` below. unavailable = no check can run for this audience; see `reason`."),
+    reason: z
+      .enum(["no_match", "not_built_yet", "provider_not_previewable", "empty_sample", "no_reveal_handle"])
+      .nullable()
+      .describe(
+        "Why unavailable. The preview's own reasons (no_match, not_built_yet: ask again shortly, provider_not_previewable), empty_sample (the preview holds no people), no_reveal_handle (the provider did not identify the sampled people, so none can be revealed)."
+      ),
+    done: z.boolean().describe("True when every checked person is settled (found or not_found), or when unavailable. Stop calling /next."),
+    people: z
+      .array(
+        z.object({
+          index: z.number().int().describe("Position of this person in the preview's `people` array."),
+          firstName: z.string().nullable(),
+          lastNameObfuscated: z.string().nullable(),
+          title: z.string().nullable(),
+          company: z.string().nullable(),
+          status: z
+            .enum(["pending", "checking", "found", "not_found"])
+            .describe("pending = not attempted yet. checking = a reveal is running now (another call). found = an email came back. not_found = the finder ran and returned no email."),
+          finder: z.string().nullable().describe("The finder that ran (today always \"apollo\"). Null until settled."),
+          verifier: z.string().nullable().describe("The verifier that judged the found address, as the provider names it (e.g. \"bounceverify\"). Null unless found."),
+          verdict: z
+            .enum(["valid", "catch_all", "invalid", "risky", "unknown"])
+            .nullable()
+            .describe("The verifier's verdict on the found address. Null unless found."),
+          deliverable: z.boolean().nullable().describe("True only for verdict valid. Null unless found."),
+          maskedEmail: z.string().nullable().describe("The found address's domain behind a masked local part, e.g. \"***@acme.com\". The address itself is never returned."),
+          checkedAt: z.string().nullable().describe("When the outcome came back (ISO 8601). Null until settled."),
+        })
+      )
+      .describe("The first few people of the preview (at most 5), in preview order. Only real attempts and real outcomes: nothing is marked found or not_found until the finder answered."),
+    summary: z.object({
+      checked: z.number().int(),
+      found: z.number().int(),
+      deliverable: z.number().int(),
+    }),
+  })
+  .openapi("AudiencePreviewEmailChecksResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/audiences/{id}/preview/email-checks",
+  summary:
+    "Where the email check of an audience preview stands: for its first people, whether a deliverable email was found and verified, by which finder. Free, never runs a reveal, never returns an address.",
+  security: [{ apiKey: [] }],
+  request: { headers: peopleHeaders, params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    200: { description: "Current state", content: { "application/json": { schema: AudiencePreviewEmailChecksResponseSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "Provider error", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/{id}/preview/email-checks/next",
+  summary:
+    "Check ONE more person of an audience preview: run the provider's billed email reveal + verification for the next pending person (cost declared by apollo-service against the caller's org, ~12 cents), store the outcome, return the whole state. Call in a loop until done. At most 5 reveals per audience ever; spends nothing once done. Not a serve: nobody becomes a lead. Never returns an address.",
+  security: [{ apiKey: [] }],
+  request: { headers: peopleHeaders, params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    200: { description: "State after this check", content: { "application/json": { schema: AudiencePreviewEmailChecksResponseSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "Provider or verification error; nothing stored for that person, the next call retries it", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 registry.registerPath({
   method: "post",
   path: "/orgs/audiences/{id}/serve-next",
