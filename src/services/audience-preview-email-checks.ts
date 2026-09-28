@@ -8,7 +8,7 @@
 //
 // One person per call (`checkNextPreviewPerson`), so a consumer calling in a
 // loop watches the people resolve one by one, and each call's latency is one
-// reveal (~3-5s). Real by construction: a row exists only for a reveal that ran
+// reveal (~6-7s in prod). Real by construction: a row exists only for a reveal that ran
 // and came back; `pending` means not attempted yet.
 //
 // Cost: apollo-service declares it (apollo-credit for the reveal, BounceVerify
