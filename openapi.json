@@ -2053,6 +2053,106 @@
         ],
         "additionalProperties": false
       },
+      "AudiencePreviewResponse": {
+        "type": "object",
+        "properties": {
+          "audienceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "empty",
+              "unavailable"
+            ],
+            "description": "ready = real rows below. empty = the provider's search matched nobody (reason no_match); final for this audience. unavailable = no sample can be taken right now: reason not_built_yet (the audience's provider-side filters are still being built; ask again shortly) or provider_not_previewable (a CRM-upload or retired apify audience has no free search to sample)."
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "no_match",
+              "not_built_yet",
+              "provider_not_previewable",
+              null
+            ]
+          },
+          "matchCount": {
+            "type": "integer",
+            "nullable": true,
+            "description": "The provider's live match count (people with a verified email) at the moment the sample was taken. Null when unavailable."
+          },
+          "companies": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "peopleInSample": {
+                  "type": "integer",
+                  "description": "How many of the provider's first page of matching people work there. A share of the sample, not a headcount."
+                }
+              },
+              "required": [
+                "name",
+                "peopleInSample"
+              ]
+            },
+            "description": "Up to ~10 real employers of people who match the audience, in the provider's order. Name only: descriptors (domain, industry, size) would need a paid company search."
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "firstName": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "lastNameObfuscated": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Masked by the provider's free search, e.g. \"Ni***s\"."
+                },
+                "title": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "company": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Always one of the listed companies."
+                }
+              },
+              "required": [
+                "firstName",
+                "lastNameObfuscated",
+                "title",
+                "company"
+              ]
+            },
+            "description": "Up to ~20 real people who match the audience, as the provider's free search serves them. Never an email, a phone, a location or a photo."
+          },
+          "generatedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "When the sample was taken (ISO 8601). Null when unavailable."
+          }
+        },
+        "required": [
+          "audienceId",
+          "status",
+          "reason",
+          "matchCount",
+          "companies",
+          "people",
+          "generatedAt"
+        ]
+      },
       "ServeNextResponse": {
         "type": "object",
         "properties": {
@@ -5820,6 +5920,95 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GetAudienceResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/{id}/preview": {
+      "get": {
+        "summary": "A free sample of who an audience reaches: up to ~10 real companies and ~20 real people, never an email or a phone. Taken once and stored, so repeat calls cost no provider spend.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sample (or an honest empty/unavailable answer with a reason)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudiencePreviewResponse"
                 }
               }
             }

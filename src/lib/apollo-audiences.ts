@@ -245,3 +245,74 @@ export async function apolloAudienceDryRun(
   }
   return { count: o.count };
 }
+
+// GET /audiences/{apolloAudienceId}/preview — a FREE sample of who a persisted
+// apollo audience reaches: the distinct employers on Apollo's first page of
+// results and people drawn from them, exactly as Apollo's free people-search
+// teaser serves them (first name, masked last name, title, employer). Never an
+// email or a phone, and no company descriptors (those would need Apollo's paid
+// company search). Writes nothing on apollo-service's side and never touches
+// the serve cursor. Deterministic (always page 1).
+export interface ApolloPreviewCompany {
+  name: string;
+  peopleInSample: number;
+}
+
+export interface ApolloPreviewPerson {
+  firstName: string | null;
+  lastNameObfuscated: string | null;
+  title: string | null;
+  company: string | null;
+}
+
+export interface ApolloAudiencePreview {
+  count: number;
+  companies: ApolloPreviewCompany[];
+  people: ApolloPreviewPerson[];
+}
+
+const strOrNull = (v: unknown) => (typeof v === "string" ? v : null);
+
+export async function getApolloAudiencePreview(
+  apolloAudienceId: string,
+  identity: Identity
+): Promise<ApolloAudiencePreview> {
+  const data = await apolloGet(
+    `/audiences/${encodeURIComponent(apolloAudienceId)}/preview`,
+    identity
+  );
+  const o = (data ?? {}) as Record<string, unknown>;
+  // A 2xx body without the three fields is an apollo-service defect: fail loud
+  // rather than cache an empty sample that would read as "nobody matches".
+  if (
+    typeof o.count !== "number" ||
+    !Array.isArray(o.companies) ||
+    !Array.isArray(o.people)
+  ) {
+    throw new ProviderError(
+      "apollo",
+      502,
+      `apollo-service preview returned an unexpected body: ${JSON.stringify(o).slice(0, 200)}`
+    );
+  }
+  const companies = o.companies.flatMap((c) => {
+    const r = (c ?? {}) as Record<string, unknown>;
+    if (typeof r.name !== "string" || r.name.length === 0) return [];
+    return [
+      {
+        name: r.name,
+        peopleInSample: typeof r.peopleInSample === "number" ? r.peopleInSample : 0,
+      },
+    ];
+  });
+  const people = o.people.map((p) => {
+    const r = (p ?? {}) as Record<string, unknown>;
+    return {
+      firstName: strOrNull(r.firstName),
+      lastNameObfuscated: strOrNull(r.lastNameObfuscated),
+      title: strOrNull(r.title),
+      company: strOrNull(r.company),
+    };
+  });
+  return { count: o.count, companies, people };
+}

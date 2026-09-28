@@ -1464,6 +1464,60 @@ registry.registerPath({
   },
 });
 
+export const AudiencePreviewResponseSchema = z
+  .object({
+    audienceId: z.string().uuid(),
+    status: z
+      .enum(["ready", "empty", "unavailable"])
+      .describe(
+        "ready = real rows below. empty = the provider's search matched nobody (reason no_match); final for this audience. unavailable = no sample can be taken right now: reason not_built_yet (the audience's provider-side filters are still being built; ask again shortly) or provider_not_previewable (a CRM-upload or retired apify audience has no free search to sample)."
+      ),
+    reason: z.enum(["no_match", "not_built_yet", "provider_not_previewable"]).nullable(),
+    matchCount: z
+      .number()
+      .int()
+      .nullable()
+      .describe("The provider's live match count (people with a verified email) at the moment the sample was taken. Null when unavailable."),
+    companies: z
+      .array(
+        z.object({
+          name: z.string(),
+          peopleInSample: z
+            .number()
+            .int()
+            .describe("How many of the provider's first page of matching people work there. A share of the sample, not a headcount."),
+        })
+      )
+      .describe("Up to ~10 real employers of people who match the audience, in the provider's order. Name only: descriptors (domain, industry, size) would need a paid company search."),
+    people: z
+      .array(
+        z.object({
+          firstName: z.string().nullable(),
+          lastNameObfuscated: z.string().nullable().describe("Masked by the provider's free search, e.g. \"Ni***s\"."),
+          title: z.string().nullable(),
+          company: z.string().nullable().describe("Always one of the listed companies."),
+        })
+      )
+      .describe("Up to ~20 real people who match the audience, as the provider's free search serves them. Never an email, a phone, a location or a photo."),
+    generatedAt: z.string().nullable().describe("When the sample was taken (ISO 8601). Null when unavailable."),
+  })
+  .openapi("AudiencePreviewResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/audiences/{id}/preview",
+  summary:
+    "A free sample of who an audience reaches: up to ~10 real companies and ~20 real people, never an email or a phone. Taken once and stored, so repeat calls cost no provider spend.",
+  security: [{ apiKey: [] }],
+  request: { headers: peopleHeaders, params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    200: { description: "Sample (or an honest empty/unavailable answer with a reason)", content: { "application/json": { schema: AudiencePreviewResponseSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "Provider error", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 registry.registerPath({
   method: "post",
   path: "/orgs/audiences/{id}/serve-next",

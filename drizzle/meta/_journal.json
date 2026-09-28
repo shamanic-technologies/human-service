@@ -197,6 +197,13 @@
       "when": 1771587966898,
       "tag": "0027_add_teaser_screening_yes_probability",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1771587966899,
+      "tag": "0028_add_audience_preview",
+      "breakpoints": true
     }
   ]
 }
