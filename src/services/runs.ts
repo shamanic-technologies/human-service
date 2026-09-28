@@ -1,8 +1,13 @@
 import type { WorkflowTrackingHeaders } from "../middleware/auth.js";
 import { workflowTrackingToHeaders } from "../middleware/auth.js";
 
-const RUNS_SERVICE_URL = process.env.RUNS_SERVICE_URL;
-const RUNS_SERVICE_API_KEY = process.env.RUNS_SERVICE_API_KEY;
+// Read at call time (not import time), like every other sibling client here.
+function runsEnv(): { url: string | undefined; key: string | undefined } {
+  return {
+    url: process.env.RUNS_SERVICE_URL,
+    key: process.env.RUNS_SERVICE_API_KEY,
+  };
+}
 
 interface IdentityContext {
   orgId: string;
@@ -24,6 +29,7 @@ interface CostItem {
 export async function createRun(
   params: CreateRunParams
 ): Promise<string | null> {
+  const { url: RUNS_SERVICE_URL, key: RUNS_SERVICE_API_KEY } = runsEnv();
   if (!RUNS_SERVICE_URL || !RUNS_SERVICE_API_KEY) return null;
 
   try {
@@ -56,6 +62,7 @@ export async function addCosts(
   items: CostItem[],
   identity: IdentityContext
 ): Promise<void> {
+  const { url: RUNS_SERVICE_URL, key: RUNS_SERVICE_API_KEY } = runsEnv();
   if (!RUNS_SERVICE_URL || !RUNS_SERVICE_API_KEY) return;
 
   try {
@@ -81,6 +88,7 @@ export async function completeRun(
   status: "completed" | "failed",
   identity: IdentityContext
 ): Promise<void> {
+  const { url: RUNS_SERVICE_URL, key: RUNS_SERVICE_API_KEY } = runsEnv();
   if (!RUNS_SERVICE_URL || !RUNS_SERVICE_API_KEY) return;
 
   try {
