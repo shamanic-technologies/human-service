@@ -34,6 +34,7 @@ import {
   refreshAudienceCountIfStale,
   suggestAudiences,
   serveNextPerson,
+  ensureApolloPointer,
   generateAvatar,
   buildAvatarPrompt,
   AudienceNotServableError,
@@ -282,7 +283,8 @@ router.post(
 
 // --- POST /orgs/audiences/split/confirm ---
 // The segments the customer kept -> ACTIVE audiences under (brand, offer), all
-// or nothing. Apollo filters are built later by the existing pointer build.
+// or nothing. Apollo filters are built right after, in the background (and
+// inline on the first serve-next if the background build has not landed).
 router.post(
   "/orgs/audiences/split/confirm",
   requireApiKey,
@@ -324,6 +326,18 @@ router.post(
     console.log(
       `[human-service] audience.split_confirm org=${orgId} brand=${parsed.data.brandId} offer=${parsed.data.offerId} created=${created.length}`
     );
+    // Build each segment's Apollo filters now, in the background (org-billed
+    // with this request's identity). serve-next builds inline if one has not
+    // landed yet, so a confirmed segment is never active AND unservable.
+    const buildIdentityForSplit = buildIdentity(res);
+    for (const row of created) {
+      void ensureApolloPointer(row, buildIdentityForSplit).catch((err) =>
+        console.error(
+          `[human-service] audience.pointer_build.failed org=${orgId} audience=${row.id}`,
+          err
+        )
+      );
+    }
     res.status(201).json({ audiences: created.map(serializeAudience) });
   }
 );

@@ -1821,9 +1821,12 @@ export interface ApolloPointerBackfillResult {
 }
 
 export async function backfillApolloAudiencePointer(
-  row: typeof audiences.$inferSelect
+  row: typeof audiences.$inferSelect,
+  // The identity the build is billed + traced under. Omitted (the historical
+  // sweep) ⟹ the row's own org + creator, i.e. still ORG-billed.
+  identityOverride?: Identity
 ): Promise<ApolloPointerBackfillResult | null> {
-  const identity: Identity = {
+  const identity: Identity = identityOverride ?? {
     orgId: row.orgId,
     userId: row.createdByUserId ?? undefined,
   };
@@ -1846,13 +1849,84 @@ export async function backfillApolloAudiencePointer(
       degraded: built.degraded,
       updatedAt: new Date(),
     })
-    .where(eq(audiences.id, row.id));
+    .where(and(eq(audiences.id, row.id), isNull(audiences.apolloAudienceId)));
   return {
     id: row.id,
     name: row.name,
     apolloAudienceId: built.apolloAudienceId,
     count: built.count,
   };
+}
+
+// --- Build-on-demand for an apollo audience born WITHOUT its pointer ---
+//
+// The split flow (`confirmAudienceSplit`) writes ACTIVE apollo rows with no
+// pointer and no filters: turning a plain-English segment into faithful Apollo
+// filters is apollo-service's agentic build (~2-3 min), too slow for the modal.
+// Until 2026-09-28 nothing ever ran that build except the manual
+// `/internal/backfill-apollo-audience-pointers` sweep, so every split audience
+// stayed active AND unservable: serve-next 422'd "no stored filters" on every
+// lead pull (Olive's campaign failed ~1/min for 12h).
+//
+// Now the build runs (1) in the background right after the confirm, and (2)
+// inline on serve-next if it has not landed yet — so an active split audience is
+// always servable, at worst with a slow first serve. Both paths go through ONE
+// in-flight promise per audience, so concurrent serves and the confirm trigger
+// never pay for two builds. Org-billed like every other build (apollo-service
+// owns and meters the cost against the org of the identity passed).
+const pointerBuildsInFlight = new Map<
+  string,
+  Promise<typeof audiences.$inferSelect>
+>();
+
+export function needsApolloPointerBuild(
+  audience: typeof audiences.$inferSelect
+): boolean {
+  const filters = audience.filters as Record<string, unknown> | null;
+  return (
+    audience.provider === "apollo" &&
+    !audience.apolloAudienceId &&
+    (!filters || Object.keys(filters).length === 0)
+  );
+}
+
+/**
+ * Build the Apollo pointer + filters for an audience that has none, once, and
+ * return the row as re-read afterwards. A row that does not need it is returned
+ * unchanged. A build that yields no usable filters leaves the row as it was (the
+ * caller still sees no filters and fails loud). Build errors propagate.
+ */
+export async function ensureApolloPointer(
+  audience: typeof audiences.$inferSelect,
+  identity: Identity
+): Promise<typeof audiences.$inferSelect> {
+  if (!needsApolloPointerBuild(audience)) return audience;
+  const existing = pointerBuildsInFlight.get(audience.id);
+  if (existing) return existing;
+  const build = (async () => {
+    console.log(
+      `[human-service] audience.pointer_build.start org=${audience.orgId} audience=${audience.id}`
+    );
+    const built = await backfillApolloAudiencePointer(audience, {
+      orgId: identity.orgId,
+      ...(identity.userId ? { userId: identity.userId } : {}),
+      ...(identity.runId ? { runId: identity.runId } : {}),
+      ...(identity.campaignId ? { campaignId: identity.campaignId } : {}),
+      ...(identity.workflowTracking
+        ? { workflowTracking: identity.workflowTracking }
+        : {}),
+    });
+    console.log(
+      `[human-service] audience.pointer_build.${built ? "done" : "empty"} org=${audience.orgId} audience=${audience.id} count=${built?.count ?? "n/a"}`
+    );
+    const [row] = await db
+      .select()
+      .from(audiences)
+      .where(eq(audiences.id, audience.id));
+    return row ?? audience;
+  })().finally(() => pointerBuildsInFlight.delete(audience.id));
+  pointerBuildsInFlight.set(audience.id, build);
+  return build;
 }
 
 // --- Canonical-link backfill (deprecated provider-variant -> active replacement) ---
@@ -2103,6 +2177,11 @@ export async function serveNextPerson(
   }
   // Stored filters are OPAQUE here: apollo rows hold the faithful Apollo filter
   // object (apollo-service's shape); apify rows hold the neutral PeopleSearchFilters.
+  // A split-born apollo audience whose build has not landed yet: build it now
+  // rather than refuse the serve (see ensureApolloPointer).
+  if (needsApolloPointerBuild(audience)) {
+    audience = await ensureApolloPointer(audience, identity);
+  }
   const storedFilters = (audience.filters ?? null) as Record<string, unknown> | null;
   if (!storedFilters || Object.keys(storedFilters).length === 0) {
     throw new AudienceNotServableError(
