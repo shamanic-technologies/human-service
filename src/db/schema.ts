@@ -520,6 +520,13 @@ export const audiences = pgTable(
     // clamp). The writer holds this value; the read side cannot re-derive it
     // (it can't tell "exhausted" from "still serving"), so we persist at write.
     reachableCount: integer("reachable_count"),
+    // A free sample of who this audience reaches — real companies and real
+    // people as the provider's free search serves them, never an email or a
+    // phone — fetched once by GET /orgs/audiences/{id}/preview and kept here so
+    // a repeat read (a visitor reloading the page) costs no second provider
+    // call. Filters and the apollo pointer are immutable, so the sample never
+    // goes stale against the audience it describes. NULL = never previewed.
+    preview: jsonb("preview").$type<Record<string, unknown>>(),
     createdByUserId: uuid("created_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
