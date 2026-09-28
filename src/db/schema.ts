@@ -9,6 +9,7 @@ import {
   doublePrecision,
   index,
   uniqueIndex,
+  primaryKey,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
@@ -527,6 +528,11 @@ export const audiences = pgTable(
     // call. Filters and the apollo pointer are immutable, so the sample never
     // goes stale against the audience it describes. NULL = never previewed.
     preview: jsonb("preview").$type<Record<string, unknown>>(),
+    // Build state of GET /orgs/audiences/{id}/preview/companies: the provider's
+    // opaque cursor for the next chunk, whether the list is complete, and the
+    // terminal empty/unavailable reason. NULL = never built. Rows live in
+    // audience_preview_companies.
+    previewCompaniesState: jsonb("preview_companies_state").$type<Record<string, unknown>>(),
     createdByUserId: uuid("created_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -755,6 +761,25 @@ export const audienceScreenedOut = pgTable(
 export type AudienceScreenedOut = typeof audienceScreenedOut.$inferSelect;
 export type NewAudienceScreenedOut = typeof audienceScreenedOut.$inferInsert;
 
+// The companies an audience reaches (firmographics + the one person to write to
+// at each), up to 100 per audience, built progressively by
+// GET /orgs/audiences/{id}/preview/companies and kept so a reload never re-pays.
+// `idx` = stable 0-based rank. `person` keeps the provider's reveal handle,
+// never returned by the API. Never an email or a phone.
+export const audiencePreviewCompanies = pgTable(
+  "audience_preview_companies",
+  {
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    idx: integer("idx").notNull(),
+    company: jsonb("company").$type<Record<string, unknown>>().notNull(),
+    person: jsonb("person").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.audienceId, table.idx] })]
+);
+
 // Proof that the people shown in an audience's free preview can be REACHED: for
 // the first few sampled people, apollo-service's billed reveal ran and the
 // revealed email was verified. One row per (audience, sample position). Never
@@ -769,6 +794,10 @@ export const audiencePreviewEmailChecks = pgTable(
     audienceId: uuid("audience_id")
       .notNull()
       .references(() => audiences.id, { onDelete: "cascade" }),
+    // "preview" = the 5-person free sample of /preview (person_index = its
+    // position); "companies" = the company rows of /preview/companies
+    // (person_index = the row's index).
+    sample: text("sample").notNull().default("preview"),
     personIndex: integer("person_index").notNull(),
     providerPersonId: text("provider_person_id").notNull(),
     status: text("status").notNull(),
@@ -781,8 +810,9 @@ export const audiencePreviewEmailChecks = pgTable(
     checkedAt: timestamp("checked_at", { withTimezone: true }),
   },
   (table) => [
-    uniqueIndex("idx_audience_preview_email_checks_unique").on(
+    uniqueIndex("idx_audience_preview_email_checks_sample_unique").on(
       table.audienceId,
+      table.sample,
       table.personIndex
     ),
   ]

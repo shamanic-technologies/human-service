@@ -2305,6 +2305,269 @@
           "summary"
         ]
       },
+      "AudiencePreviewCompaniesResponse": {
+        "type": "object",
+        "properties": {
+          "audienceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "empty",
+              "unavailable"
+            ],
+            "description": "ready = rows below (possibly more to page). empty = the audience matched nobody (reason no_match). unavailable = reason not_built_yet (ask again shortly) or provider_not_previewable (CRM-upload / retired apify audience)."
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "no_match",
+              "not_built_yet",
+              "provider_not_previewable",
+              null
+            ]
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer",
+                  "description": "Stable 0-based rank of the company in this audience's list. Never changes once built."
+                },
+                "company": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "domain": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "website": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "logoUrl": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "description": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "One line, as the provider describes the company."
+                    },
+                    "location": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Display string, e.g. \"Zurich, Switzerland\"."
+                    },
+                    "city": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "country": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "employeeCount": {
+                      "type": "integer",
+                      "nullable": true
+                    },
+                    "industry": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "linkedinUrl": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "foundedYear": {
+                      "type": "integer",
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "domain",
+                    "website",
+                    "logoUrl",
+                    "description",
+                    "location",
+                    "city",
+                    "country",
+                    "employeeCount",
+                    "industry",
+                    "linkedinUrl",
+                    "foundedYear"
+                  ]
+                },
+                "person": {
+                  "type": "object",
+                  "properties": {
+                    "firstName": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "lastNameObfuscated": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Masked by the provider, e.g. \"Ni***s\". The full name is revealed only after signup."
+                    },
+                    "title": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "linkedinUrl": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Only when the provider gives it without a reveal; usually null."
+                    }
+                  },
+                  "required": [
+                    "firstName",
+                    "lastNameObfuscated",
+                    "title",
+                    "linkedinUrl"
+                  ],
+                  "description": "The one person of the audience to write to at this company. Never an email or a phone."
+                }
+              },
+              "required": [
+                "index",
+                "company",
+                "person"
+              ]
+            },
+            "description": "The requested page of rows, in index order. A field the provider does not give is null, never invented."
+          },
+          "totalAvailable": {
+            "type": "integer",
+            "description": "Rows built and stored so far for this audience (grows as callers page)."
+          },
+          "nextOffset": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Offset of the next page; null when there is nothing more to ask for."
+          },
+          "done": {
+            "type": "boolean",
+            "description": "True once the list is complete (maxRows reached, or the audience ran out of companies)."
+          },
+          "maxRows": {
+            "type": "integer",
+            "description": "The list's ceiling (100)."
+          }
+        },
+        "required": [
+          "audienceId",
+          "status",
+          "reason",
+          "rows",
+          "totalAvailable",
+          "nextOffset",
+          "done",
+          "maxRows"
+        ]
+      },
+      "AudiencePreviewCompaniesEmailChecksResponse": {
+        "type": "object",
+        "properties": {
+          "audienceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "maxCheckable": {
+            "type": "integer",
+            "description": "Only rows with index below this can be email-checked (10)."
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PreviewCompanyRowEmailCheck"
+            },
+            "description": "One per built row with index < maxCheckable, in index order."
+          }
+        },
+        "required": [
+          "audienceId",
+          "maxCheckable",
+          "checks"
+        ]
+      },
+      "PreviewCompanyRowEmailCheck": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer",
+            "description": "The company row's index."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "checking",
+              "found",
+              "not_found"
+            ],
+            "description": "pending = not attempted yet. checking = a reveal is running now (another call). found = an email came back. not_found = the finder ran and returned no email."
+          },
+          "finder": {
+            "type": "string",
+            "nullable": true,
+            "description": "The finder that ran (today always \"apollo\"). Null until settled."
+          },
+          "verifier": {
+            "type": "string",
+            "nullable": true,
+            "description": "The verifier that judged the found address (e.g. \"bounceverify\"). Null unless found."
+          },
+          "verdict": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "valid",
+              "catch_all",
+              "invalid",
+              "risky",
+              "unknown",
+              null
+            ],
+            "description": "The verifier's verdict. Null unless found."
+          },
+          "deliverable": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "True only for verdict valid. Null unless found."
+          },
+          "maskedEmail": {
+            "type": "string",
+            "nullable": true,
+            "description": "e.g. \"***@acme.com\". The address itself is never returned."
+          },
+          "checkedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "When the outcome came back (ISO 8601). Null until settled."
+          }
+        },
+        "required": [
+          "index",
+          "status",
+          "finder",
+          "verifier",
+          "verdict",
+          "deliverable",
+          "maskedEmail",
+          "checkedAt"
+        ]
+      },
       "ServeNextResponse": {
         "type": "object",
         "properties": {
@@ -6358,6 +6621,327 @@
           },
           "502": {
             "description": "Provider or verification error; nothing stored for that person, the next call retries it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/{id}/preview/companies": {
+      "get": {
+        "summary": "Up to 100 real companies an audience reaches, with firmographics, and the one person to write to at each (masked name + title, never an email or a phone). Built progressively: each call builds only as far as offset+limit needs, so the first page comes back in seconds; rows are stored once per audience, so a repeat read costs nothing. The company data is a paid provider call, declared by apollo-service against the caller's org.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "nullable": true,
+              "minimum": 0,
+              "description": "0-based index of the first row to return. Default 0."
+            },
+            "required": false,
+            "description": "0-based index of the first row to return. Default 0.",
+            "name": "offset",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "Rows to return, 1-100. Default 25."
+            },
+            "required": false,
+            "description": "Rows to return, 1-100. Default 25.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of rows (or an honest empty/unavailable answer)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudiencePreviewCompaniesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid offset/limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider error (nothing stored for the failed chunk)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/{id}/preview/companies/email-checks": {
+      "get": {
+        "summary": "Where the email check of each checkable company row stands (found / verified, by which finder). Free, never runs a reveal, never returns an address.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudiencePreviewCompaniesEmailChecksResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/{id}/preview/companies/{index}/email-check": {
+      "post": {
+        "summary": "Check whether the person on ONE company row can be reached: runs the provider's billed email reveal + verification (cost declared by apollo-service against the caller's org, ~12 cents), stores the outcome, returns it. Idempotent: a settled row spends nothing. Only the first 10 rows are checkable. Not a serve: nobody becomes a lead. Never returns an address.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "nullable": true,
+              "minimum": 0
+            },
+            "required": false,
+            "name": "index",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "This row's check",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewCompanyRowEmailCheck"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Index not checkable (>= 10) or invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience not found, or the row is not built yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The row carries no reveal handle",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider or verification error; nothing stored, the next call retries",
             "content": {
               "application/json": {
                 "schema": {

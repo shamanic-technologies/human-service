@@ -1592,6 +1592,126 @@ registry.registerPath({
   },
 });
 
+export const PreviewCompaniesQuerySchema = z.object({
+  offset: z.coerce.number().int().min(0).optional().describe("0-based index of the first row to return. Default 0."),
+  limit: z.coerce.number().int().min(1).max(100).optional().describe("Rows to return, 1-100. Default 25."),
+});
+
+const PreviewCompanyRowEmailCheckSchema = z
+  .object({
+    index: z.number().int().describe("The company row's index."),
+    status: z
+      .enum(["pending", "checking", "found", "not_found"])
+      .describe("pending = not attempted yet. checking = a reveal is running now (another call). found = an email came back. not_found = the finder ran and returned no email."),
+    finder: z.string().nullable().describe("The finder that ran (today always \"apollo\"). Null until settled."),
+    verifier: z.string().nullable().describe("The verifier that judged the found address (e.g. \"bounceverify\"). Null unless found."),
+    verdict: z.enum(["valid", "catch_all", "invalid", "risky", "unknown"]).nullable().describe("The verifier's verdict. Null unless found."),
+    deliverable: z.boolean().nullable().describe("True only for verdict valid. Null unless found."),
+    maskedEmail: z.string().nullable().describe("e.g. \"***@acme.com\". The address itself is never returned."),
+    checkedAt: z.string().nullable().describe("When the outcome came back (ISO 8601). Null until settled."),
+  })
+  .openapi("PreviewCompanyRowEmailCheck");
+
+export const AudiencePreviewCompaniesResponseSchema = z
+  .object({
+    audienceId: z.string().uuid(),
+    status: z
+      .enum(["ready", "empty", "unavailable"])
+      .describe("ready = rows below (possibly more to page). empty = the audience matched nobody (reason no_match). unavailable = reason not_built_yet (ask again shortly) or provider_not_previewable (CRM-upload / retired apify audience)."),
+    reason: z.enum(["no_match", "not_built_yet", "provider_not_previewable"]).nullable(),
+    rows: z
+      .array(
+        z.object({
+          index: z.number().int().describe("Stable 0-based rank of the company in this audience's list. Never changes once built."),
+          company: z.object({
+            name: z.string(),
+            domain: z.string().nullable(),
+            website: z.string().nullable(),
+            logoUrl: z.string().nullable(),
+            description: z.string().nullable().describe("One line, as the provider describes the company."),
+            location: z.string().nullable().describe("Display string, e.g. \"Zurich, Switzerland\"."),
+            city: z.string().nullable(),
+            country: z.string().nullable(),
+            employeeCount: z.number().int().nullable(),
+            industry: z.string().nullable(),
+            linkedinUrl: z.string().nullable(),
+            foundedYear: z.number().int().nullable(),
+          }),
+          person: z
+            .object({
+              firstName: z.string().nullable(),
+              lastNameObfuscated: z.string().nullable().describe("Masked by the provider, e.g. \"Ni***s\". The full name is revealed only after signup."),
+              title: z.string().nullable(),
+              linkedinUrl: z.string().nullable().describe("Only when the provider gives it without a reveal; usually null."),
+            })
+            .describe("The one person of the audience to write to at this company. Never an email or a phone."),
+        })
+      )
+      .describe("The requested page of rows, in index order. A field the provider does not give is null, never invented."),
+    totalAvailable: z.number().int().describe("Rows built and stored so far for this audience (grows as callers page)."),
+    nextOffset: z.number().int().nullable().describe("Offset of the next page; null when there is nothing more to ask for."),
+    done: z.boolean().describe("True once the list is complete (maxRows reached, or the audience ran out of companies)."),
+    maxRows: z.number().int().describe("The list's ceiling (100)."),
+  })
+  .openapi("AudiencePreviewCompaniesResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/audiences/{id}/preview/companies",
+  summary:
+    "Up to 100 real companies an audience reaches, with firmographics, and the one person to write to at each (masked name + title, never an email or a phone). Built progressively: each call builds only as far as offset+limit needs, so the first page comes back in seconds; rows are stored once per audience, so a repeat read costs nothing. The company data is a paid provider call, declared by apollo-service against the caller's org.",
+  security: [{ apiKey: [] }],
+  request: { headers: peopleHeaders, params: z.object({ id: z.string().uuid() }), query: PreviewCompaniesQuerySchema },
+  responses: {
+    200: { description: "A page of rows (or an honest empty/unavailable answer)", content: { "application/json": { schema: AudiencePreviewCompaniesResponseSchema } } },
+    400: { description: "Invalid offset/limit", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "Provider error (nothing stored for the failed chunk)", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+export const AudiencePreviewCompaniesEmailChecksResponseSchema = z
+  .object({
+    audienceId: z.string().uuid(),
+    maxCheckable: z.number().int().describe("Only rows with index below this can be email-checked (10)."),
+    checks: z.array(PreviewCompanyRowEmailCheckSchema).describe("One per built row with index < maxCheckable, in index order."),
+  })
+  .openapi("AudiencePreviewCompaniesEmailChecksResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/audiences/{id}/preview/companies/email-checks",
+  summary: "Where the email check of each checkable company row stands (found / verified, by which finder). Free, never runs a reveal, never returns an address.",
+  security: [{ apiKey: [] }],
+  request: { headers: peopleHeaders, params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    200: { description: "Current state", content: { "application/json": { schema: AudiencePreviewCompaniesEmailChecksResponseSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/{id}/preview/companies/{index}/email-check",
+  summary:
+    "Check whether the person on ONE company row can be reached: runs the provider's billed email reveal + verification (cost declared by apollo-service against the caller's org, ~12 cents), stores the outcome, returns it. Idempotent: a settled row spends nothing. Only the first 10 rows are checkable. Not a serve: nobody becomes a lead. Never returns an address.",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: peopleHeaders,
+    params: z.object({ id: z.string().uuid(), index: z.coerce.number().int().min(0) }),
+  },
+  responses: {
+    200: { description: "This row's check", content: { "application/json": { schema: PreviewCompanyRowEmailCheckSchema } } },
+    400: { description: "Index not checkable (>= 10) or invalid", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Audience not found, or the row is not built yet", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "The row carries no reveal handle", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "Provider or verification error; nothing stored, the next call retries", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 registry.registerPath({
   method: "post",
   path: "/orgs/audiences/{id}/serve-next",

@@ -325,3 +325,137 @@ export async function getApolloAudiencePreview(
   });
   return { count: o.count, companies, people };
 }
+
+// --- Companies an audience reaches (GET /orgs/audiences/{id}/preview/companies) ---
+// One chunk of companies from apollo-service: firmographics + the one person to
+// write to at each (masked, never an email). apollo-service owns the Apollo
+// calls, the person pick and the cost (declared against the caller's org).
+
+export interface ApolloPreviewCompanyRow {
+  company: {
+    providerCompanyId: string | null;
+    name: string;
+    domain: string | null;
+    website: string | null;
+    logoUrl: string | null;
+    description: string | null;
+    location: string | null;
+    city: string | null;
+    country: string | null;
+    employeeCount: number | null;
+    industry: string | null;
+    linkedinUrl: string | null;
+    foundedYear: number | null;
+    annualRevenue: string | null;
+    totalFunding: string | null;
+    latestFundingStage: string | null;
+    keywords: string[];
+  };
+  person: {
+    providerPersonId: string | null;
+    firstName: string | null;
+    lastNameObfuscated: string | null;
+    title: string | null;
+    linkedinUrl: string | null;
+  };
+}
+
+export interface ApolloPreviewCompaniesChunk {
+  rows: ApolloPreviewCompanyRow[];
+  // apollo-service's offset for the next chunk; null = no more companies.
+  nextOffset: number | null;
+  matchCount: number | null;
+  creditsCharged: number;
+}
+
+// apollo-service's own cap: offset + limit never exceeds 100.
+export const APOLLO_COMPANIES_MAX = 100;
+
+const numOrNull = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+// "One line": apollo-service serves Apollo's description verbatim, often
+// several paragraphs. Keep the first sentence, capped, never rewritten.
+export const DESCRIPTION_MAX_CHARS = 200;
+export function oneLine(text: string | null): string | null {
+  if (!text) return null;
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (!flat) return null;
+  const m = flat.match(/^.*?[.!?](?=\s|$)/);
+  const first = m ? m[0] : flat;
+  return first.length <= DESCRIPTION_MAX_CHARS
+    ? first
+    : `${first.slice(0, DESCRIPTION_MAX_CHARS - 1).trimEnd()}…`;
+}
+
+function locationOf(city: string | null, state: string | null, country: string | null): string | null {
+  const parts = [city, state, country].filter((p): p is string => !!p);
+  return parts.length > 0 ? [...new Set(parts)].join(", ") : null;
+}
+
+export async function getApolloAudienceCompanies(
+  apolloAudienceId: string,
+  offset: number,
+  limit: number,
+  identity: Identity
+): Promise<ApolloPreviewCompaniesChunk> {
+  const data = await apolloGet(
+    `/audiences/${encodeURIComponent(apolloAudienceId)}/companies?offset=${offset}&limit=${limit}`,
+    identity
+  );
+  const o = (data ?? {}) as Record<string, unknown>;
+  // A 2xx without these fields is an apollo-service defect: fail loud rather
+  // than store a list that would read as "no companies".
+  if (!Array.isArray(o.companies) || typeof o.hasMore !== "boolean") {
+    throw new ProviderError(
+      "apollo",
+      502,
+      `apollo-service companies returned an unexpected body: ${JSON.stringify(o).slice(0, 200)}`
+    );
+  }
+  const rows = o.companies.flatMap((c): ApolloPreviewCompanyRow[] => {
+    const r = (c ?? {}) as Record<string, unknown>;
+    if (typeof r.name !== "string" || r.name.length === 0) return [];
+    const p = (r.person ?? {}) as Record<string, unknown>;
+    const city = strOrNull(r.city);
+    const state = strOrNull(r.state);
+    const country = strOrNull(r.country);
+    return [
+      {
+        company: {
+          providerCompanyId: strOrNull(r.apolloOrganizationId),
+          name: r.name,
+          domain: strOrNull(r.domain),
+          website: strOrNull(r.websiteUrl),
+          logoUrl: strOrNull(r.logoUrl),
+          description: oneLine(strOrNull(r.shortDescription)),
+          location: locationOf(city, state, country),
+          city,
+          country,
+          employeeCount: numOrNull(r.estimatedNumEmployees),
+          industry: strOrNull(r.industry),
+          linkedinUrl: strOrNull(r.linkedinUrl),
+          foundedYear: numOrNull(r.foundedYear),
+          annualRevenue: strOrNull(r.annualRevenuePrinted),
+          totalFunding: strOrNull(r.totalFundingPrinted),
+          latestFundingStage: strOrNull(r.latestFundingStage),
+          keywords: Array.isArray(r.keywords) ? r.keywords.filter((k): k is string => typeof k === "string") : [],
+        },
+        person: {
+          providerPersonId: strOrNull(p.apolloPersonId),
+          firstName: strOrNull(p.firstName),
+          lastNameObfuscated: strOrNull(p.lastNameObfuscated),
+          title: strOrNull(p.title),
+          // Apollo's free result carries no person LinkedIn; a reveal would.
+          linkedinUrl: null,
+        },
+      },
+    ];
+  });
+  const end = offset + o.companies.length;
+  return {
+    rows,
+    nextOffset: o.hasMore && end < APOLLO_COMPANIES_MAX ? end : null,
+    matchCount: numOrNull(o.count),
+    creditsCharged: numOrNull(o.creditsCharged) ?? 0,
+  };
+}
