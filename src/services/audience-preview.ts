@@ -62,13 +62,61 @@ function unavailable(
   };
 }
 
+// What is stored on `audiences.preview`: the public sample plus, per person,
+// the provider's reveal handle. The handle never leaves this service through
+// the preview endpoint; only the email check reads it.
+type StoredPreviewPerson = AudiencePreview["people"][number] & {
+  providerPersonId?: string | null;
+};
+export type StoredAudiencePreview = Omit<AudiencePreview, "people"> & {
+  people: StoredPreviewPerson[];
+};
+
+function toPublic(stored: StoredAudiencePreview, audienceId: string): AudiencePreview {
+  return {
+    ...stored,
+    audienceId,
+    people: stored.people.map((p) => ({
+      firstName: p.firstName,
+      lastNameObfuscated: p.lastNameObfuscated,
+      title: p.title,
+      company: p.company,
+    })),
+  };
+}
+
 export async function getAudiencePreview(
   audience: AudienceRow,
   identity: Identity
 ): Promise<AudiencePreview> {
   if (audience.preview) {
-    return { ...(audience.preview as unknown as AudiencePreview), audienceId: audience.id };
+    return toPublic(audience.preview as unknown as StoredAudiencePreview, audience.id);
   }
+  const taken = await takeAudiencePreview(audience, identity);
+  return taken.status === "unavailable"
+    ? (taken as AudiencePreview)
+    : toPublic(taken, audience.id);
+}
+
+// The stored sample WITH reveal handles, for the email check. A sample stored
+// before apollo-service served handles is re-taken (the preview call is free
+// and page 1 is deterministic, so the people are the same ones) and replaces
+// the stored one. Unavailable answers are returned as-is and not stored.
+export async function getRevealablePreview(
+  audience: AudienceRow,
+  identity: Identity
+): Promise<StoredAudiencePreview> {
+  const stored = audience.preview as unknown as StoredAudiencePreview | null;
+  if (stored && stored.people.every((p) => typeof p.providerPersonId === "string")) {
+    return { ...stored, audienceId: audience.id };
+  }
+  return takeAudiencePreview(audience, identity);
+}
+
+async function takeAudiencePreview(
+  audience: AudienceRow,
+  identity: Identity
+): Promise<StoredAudiencePreview> {
   if (audience.provider !== "apollo") {
     return unavailable(audience.id, "provider_not_previewable");
   }
@@ -79,7 +127,7 @@ export async function getAudiencePreview(
 
   const sample = await getApolloAudiencePreview(audience.apolloAudienceId, identity);
   const empty = sample.people.length === 0 && sample.companies.length === 0;
-  const preview: AudiencePreview = {
+  const preview: StoredAudiencePreview = {
     audienceId: audience.id,
     status: empty ? "empty" : "ready",
     reason: empty ? "no_match" : null,

@@ -2153,6 +2153,158 @@
           "generatedAt"
         ]
       },
+      "AudiencePreviewEmailChecksResponse": {
+        "type": "object",
+        "properties": {
+          "audienceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "unavailable"
+            ],
+            "description": "ready = `people` below. unavailable = no check can run for this audience; see `reason`."
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "no_match",
+              "not_built_yet",
+              "provider_not_previewable",
+              "empty_sample",
+              "no_reveal_handle",
+              null
+            ],
+            "description": "Why unavailable. The preview's own reasons (no_match, not_built_yet: ask again shortly, provider_not_previewable), empty_sample (the preview holds no people), no_reveal_handle (the provider did not identify the sampled people, so none can be revealed)."
+          },
+          "done": {
+            "type": "boolean",
+            "description": "True when every checked person is settled (found or not_found), or when unavailable. Stop calling /next."
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer",
+                  "description": "Position of this person in the preview's `people` array."
+                },
+                "firstName": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "lastNameObfuscated": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "title": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "company": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "checking",
+                    "found",
+                    "not_found"
+                  ],
+                  "description": "pending = not attempted yet. checking = a reveal is running now (another call). found = an email came back. not_found = the finder ran and returned no email."
+                },
+                "finder": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "The finder that ran (today always \"apollo\"). Null until settled."
+                },
+                "verifier": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "The verifier that judged the found address, as the provider names it (e.g. \"bounceverify\"). Null unless found."
+                },
+                "verdict": {
+                  "type": "string",
+                  "nullable": true,
+                  "enum": [
+                    "valid",
+                    "catch_all",
+                    "invalid",
+                    "risky",
+                    "unknown",
+                    null
+                  ],
+                  "description": "The verifier's verdict on the found address. Null unless found."
+                },
+                "deliverable": {
+                  "type": "boolean",
+                  "nullable": true,
+                  "description": "True only for verdict valid. Null unless found."
+                },
+                "maskedEmail": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "The found address's domain behind a masked local part, e.g. \"***@acme.com\". The address itself is never returned."
+                },
+                "checkedAt": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "When the outcome came back (ISO 8601). Null until settled."
+                }
+              },
+              "required": [
+                "index",
+                "firstName",
+                "lastNameObfuscated",
+                "title",
+                "company",
+                "status",
+                "finder",
+                "verifier",
+                "verdict",
+                "deliverable",
+                "maskedEmail",
+                "checkedAt"
+              ]
+            },
+            "description": "The first few people of the preview (at most 5), in preview order. Only real attempts and real outcomes: nothing is marked found or not_found until the finder answered."
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "checked": {
+                "type": "integer"
+              },
+              "found": {
+                "type": "integer"
+              },
+              "deliverable": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "checked",
+              "found",
+              "deliverable"
+            ]
+          }
+        },
+        "required": [
+          "audienceId",
+          "status",
+          "reason",
+          "done",
+          "people",
+          "summary"
+        ]
+      },
       "ServeNextResponse": {
         "type": "object",
         "properties": {
@@ -6028,6 +6180,184 @@
           },
           "502": {
             "description": "Provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/{id}/preview/email-checks": {
+      "get": {
+        "summary": "Where the email check of an audience preview stands: for its first people, whether a deliverable email was found and verified, by which finder. Free, never runs a reveal, never returns an address.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudiencePreviewEmailChecksResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/{id}/preview/email-checks/next": {
+      "post": {
+        "summary": "Check ONE more person of an audience preview: run the provider's billed email reveal + verification for the next pending person (cost declared by apollo-service against the caller's org, ~12 cents), store the outcome, return the whole state. Call in a loop until done. At most 5 reveals per audience ever; spends nothing once done. Not a serve: nobody becomes a lead. Never returns an address.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "State after this check",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudiencePreviewEmailChecksResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider or verification error; nothing stored for that person, the next call retries it",
             "content": {
               "application/json": {
                 "schema": {

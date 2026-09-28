@@ -204,6 +204,13 @@
       "when": 1771587966899,
       "tag": "0028_add_audience_preview",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1771587966999,
+      "tag": "0029_add_audience_preview_email_checks",
+      "breakpoints": true
     }
   ]
 }
