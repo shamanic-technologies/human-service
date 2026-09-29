@@ -839,6 +839,9 @@
               "$ref": "#/components/schemas/EmploymentHistoryEntry"
             },
             "description": "The person's FULL career history as the provider serves it — every role, in provider order (the ordering is part of the contract). `current: true` marks the role the provider flags as current. null when the provider serves no history; it is never reconstructed from the top-level organization."
+          },
+          "buyingSignal": {
+            "$ref": "#/components/schemas/BuyingSignal"
           }
         },
         "required": [
@@ -862,7 +865,8 @@
           "provider",
           "providerPersonId",
           "organization",
-          "employmentHistory"
+          "employmentHistory",
+          "buyingSignal"
         ]
       },
       "NeutralOrganization": {
@@ -1191,6 +1195,48 @@
           "description",
           "current"
         ]
+      },
+      "BuyingSignal": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "hiring",
+              "job_change",
+              "funding"
+            ]
+          },
+          "occurredOn": {
+            "type": "string",
+            "description": "Day the signal happened (YYYY-MM-DD), as the provider recorded it.",
+            "example": "2026-09-21"
+          },
+          "fact": {
+            "type": "string",
+            "description": "One English sentence stating the signal, for the email writer to reference.",
+            "example": "Acme Clinics posted a job for Office Manager (Austin, United States) on September 21, 2026"
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the evidence came from (e.g. 'apollo:job_postings').",
+            "example": "apollo:job_postings"
+          },
+          "sourceUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "The posting or news link when the provider gives one."
+          }
+        },
+        "required": [
+          "type",
+          "occurredOn",
+          "fact",
+          "source",
+          "sourceUrl"
+        ],
+        "description": "The buying signal this person's audience matched (the company is hiring, the person just changed jobs, the company just raised), with its date and a one-line fact the email writer can reference. Present only on a revealed person served from a buying-signal audience; null otherwise (free search teasers, apify, crm, and any person the provider holds no dated evidence for). Never defaulted or invented."
       },
       "PeopleSearchRequest": {
         "type": "object",

@@ -762,6 +762,19 @@ export const NeutralOrganizationSchema = z
   })
   .openapi("NeutralOrganization");
 
+export const BuyingSignalSchema = z
+  .object({
+    type: z.enum(["hiring", "job_change", "funding"]),
+    occurredOn: z.string().openapi({ description: "Day the signal happened (YYYY-MM-DD), as the provider recorded it.", example: "2026-09-21" }),
+    fact: z.string().openapi({
+      description: "One English sentence stating the signal, for the email writer to reference.",
+      example: "Acme Clinics posted a job for Office Manager (Austin, United States) on September 21, 2026",
+    }),
+    source: z.string().openapi({ description: "Where the evidence came from (e.g. 'apollo:job_postings').", example: "apollo:job_postings" }),
+    sourceUrl: z.string().nullable().openapi({ description: "The posting or news link when the provider gives one." }),
+  })
+  .openapi("BuyingSignal");
+
 export const PersonSchema = z
   .object({
     firstName: z.string().nullable(),
@@ -795,6 +808,10 @@ export const PersonSchema = z
     employmentHistory: z.array(EmploymentHistoryEntrySchema).nullable().openapi({
       description:
         "The person's FULL career history as the provider serves it — every role, in provider order (the ordering is part of the contract). `current: true` marks the role the provider flags as current. null when the provider serves no history; it is never reconstructed from the top-level organization.",
+    }),
+    buyingSignal: BuyingSignalSchema.nullable().openapi({
+      description:
+        "The buying signal this person's audience matched (the company is hiring, the person just changed jobs, the company just raised), with its date and a one-line fact the email writer can reference. Present only on a revealed person served from a buying-signal audience; null otherwise (free search teasers, apify, crm, and any person the provider holds no dated evidence for). Never defaulted or invented.",
     }),
   })
   .openapi("Person");
