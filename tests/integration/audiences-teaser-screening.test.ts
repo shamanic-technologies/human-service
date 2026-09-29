@@ -36,7 +36,7 @@ vi.mock("../../src/lib/instantly-optouts.js", () => ({
 }));
 
 
-// The pre-pay screen: an apollo free teaser is judged (Jev, yes-probability > 0.80)
+// The pre-pay screen: an apollo free teaser is judged (Jev, yes-probability > 0.50)
 // against the customer's own words (nl_prompt) BEFORE the credit that reveals its
 // email is spent. The point of
 // every test here is the SPEND — a rejected teaser must never reach /enrich.
@@ -202,10 +202,10 @@ describe("pre-pay teaser screening", () => {
     expect(calls.targets).toEqual(["chiropractors who own their practice"]);
   });
 
-  it("a hesitant yes (0.80, not above) is rejected and never enriched", async () => {
+  it("a coin flip (0.50, not above) is rejected and never enriched", async () => {
     const calls = mockFleet({
       pages: [[{ id: "p1", title: "Group CFO" }, { id: "p2", title: "Chiropractor" }]],
-      verdicts: { p1: 0.8, p2: 0.81 },
+      verdicts: { p1: 0.5, p2: 0.6 },
     });
     const id = await createDescribedAudience("Chiros", "chiropractors who own their practice");
 
