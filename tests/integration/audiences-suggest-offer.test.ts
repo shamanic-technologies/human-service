@@ -9,7 +9,16 @@ import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import { audiences } from "../../src/db/schema.js";
+
+// The person-level target draft (brand-service offer read + one LLM call) is
+// pinned in tests/unit/audience-target.test.ts. Here it answers "no offer" so
+// the customer's words are stored verbatim, exactly as before it existed.
+vi.mock("../../src/services/audience-target.js", async (orig) => ({
+  ...(await orig<typeof import("../../src/services/audience-target.js")>()),
+  draftAudienceTarget: vi.fn(async () => null),
+}));
 import { eq } from "drizzle-orm";
+import { draftAudienceTarget } from "../../src/services/audience-target.js";
 
 const app = createTestApp();
 const BRAND = "00000000-0000-4000-8000-0000000000b1";
@@ -116,6 +125,26 @@ describe("POST /orgs/audiences/suggest — offerId", () => {
     expect(
       scoped.body.audiences.every((a: { offerId: string }) => a.offerId === OFFER_1)
     ).toBe(true);
+  });
+
+  it("stores the PERSON-level target drafted from the offer as nlPrompt, not the customer's raw words", async () => {
+    vi.mocked(draftAudienceTarget).mockResolvedValueOnce(
+      "Founders and CEOs at startups, plus their assistants and chiefs of staff. Not HR or legal."
+    );
+    wire([{ name: "US founders", description: "founders in the US" }]);
+
+    const res = await suggest({ nlPrompt: "startups", offerId: OFFER_1 });
+    expect(res.status).toBe(200);
+    expect(vi.mocked(draftAudienceTarget)).toHaveBeenCalledWith(
+      expect.objectContaining({ customerTarget: "startups", brandId: BRAND, offerId: OFFER_1 })
+    );
+    const [row] = await db
+      .select()
+      .from(audiences)
+      .where(eq(audiences.id, res.body.candidates[0].audienceId));
+    expect(row.nlPrompt).toBe(
+      "Founders and CEOs at startups, plus their assistants and chiefs of staff. Not HR or legal."
+    );
   });
 
   it("without an offer, stays brand-wide: offer null, absent from an offer-scoped read", async () => {

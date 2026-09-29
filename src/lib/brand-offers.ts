@@ -10,10 +10,10 @@
 // rejected 400 ORG_REQUIRED, and a wrong org would attribute an audience to
 // another company's offer.
 //
-// Read-only. Used ONLY by the one-time offer-attribution repair
-// (POST /internal/backfill-audience-offers) — the live audience routes still
-// store `offer_id` verbatim with no cross-service lookup, exactly like
-// `brand_id`.
+// Read-only. Used by the offer-attribution repair (manual endpoint + sweep)
+// and by the audience-target drafting (src/services/audience-target.ts), which
+// reads what the offer SELLS. The live audience routes still store `offer_id`
+// verbatim with no validation, exactly like `brand_id`.
 //
 // Fail loud: a non-2xx throws BrandServiceError (the caller decides whether that
 // is per-pair skippable or fatal); a missing env throws BrandConfigError.
@@ -47,6 +47,10 @@ const BrandOfferSchema = z.object({
   offerId: z.string().uuid(),
   brandId: z.string().uuid(),
   name: z.string(),
+  // One sentence saying what this offer sells (brand-service `OfferSchema`),
+  // `null` when never stated. Read by the audience-target drafting, which needs
+  // to know WHAT the client sells to name who cares about it.
+  description: z.string().nullable().optional(),
 });
 
 export type BrandOffer = z.infer<typeof BrandOfferSchema>;
