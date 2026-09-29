@@ -82,30 +82,30 @@ describe("screenTeaser — Jev yes-probability against the customer's own words"
     judgeYesNo.mockReset();
   });
 
-  it("accepts only ABOVE 0.80", () => {
-    expect(SCREEN_MIN_YES_PROBABILITY).toBe(0.8);
+  it("accepts only ABOVE 0.50", () => {
+    expect(SCREEN_MIN_YES_PROBABILITY).toBe(0.5);
   });
 
-  it("0.81 passes: bronze row only, no exclusion", async () => {
-    const out = await screen(0.81);
-    expect(out).toEqual({ screened: true, onTarget: true, yesProbability: 0.81 });
+  it("0.60 passes: bronze row only, no exclusion", async () => {
+    const out = await screen(0.6);
+    expect(out).toEqual({ screened: true, onTarget: true, yesProbability: 0.6 });
     expect(inserted.map((r) => r.table)).toEqual([audienceTeaserScreenings]);
     expect(inserted[0].values).toMatchObject({
       verdict: true,
-      yesProbability: 0.81,
+      yesProbability: 0.6,
       model: "typesafe/jev-1.13.0",
       promptVersion: "v2",
     });
   });
 
-  it("exactly 0.80 rejects, and lands in the silver exclusion set", async () => {
-    const out = await screen(0.8);
+  it("exactly 0.50 rejects, and lands in the silver exclusion set", async () => {
+    const out = await screen(0.5);
     expect(out).toMatchObject({ screened: true, onTarget: false });
     expect(inserted.map((r) => r.table)).toEqual([
       audienceTeaserScreenings,
       audienceScreenedOut,
     ]);
-    expect(inserted[0].values).toMatchObject({ verdict: false, yesProbability: 0.8 });
+    expect(inserted[0].values).toMatchObject({ verdict: false, yesProbability: 0.5 });
   });
 
   it("0.30 rejects", async () => {
