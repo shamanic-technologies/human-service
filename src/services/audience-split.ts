@@ -40,9 +40,11 @@ import {
 export { SPLIT_AXES, SPLIT_ICONS, type SplitAxis };
 
 // Same model + switch as /suggest's layer 1: a user waits on this inside the
-// new-org modal. Astra rejects temperature/top_p, so neither is sent.
-const SPLIT_LLM_PROVIDER = "openai" as const;
-const SPLIT_LLM_MODEL = "gpt-pro";
+// onboarding. Claude Sonnet 5.5 (owner decision 2026-09-29, replacing GPT-6
+// Astra, p50 7.4s). It rejects temperature, so neither temperature nor top_p is
+// sent; `disableThinking` makes chat-service send its lowest effort (`low`).
+const SPLIT_LLM_PROVIDER = "anthropic" as const;
+const SPLIT_LLM_MODEL = "sonnet";
 const SPLIT_DISABLE_THINKING = true;
 
 export const MAX_SPLIT_SEGMENTS = 6;

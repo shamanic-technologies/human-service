@@ -1403,7 +1403,7 @@ from the row's **own name + filters** and writes it.
   (`generateAudienceDescription` in `src/services/audiences.ts`).
 - **LLM via chat-service's ORG-LESS platform path** — `platformCompleteJson` →
   `POST /internal/platform-complete` (service-auth, no org/user), JSON mode
-  with a `responseSchema` + `disableThinking` (`openai`/`gpt-pro`, same
+  with a `responseSchema` + `disableThinking` (`anthropic`/`sonnet`, same
   reliability setup as `/suggest`).
   **chat-service OWNS the cost** (platform-run declaration lives there) — so
   human-service declares none, and a historical backfill we owe users does NOT
@@ -1472,7 +1472,7 @@ in `src/lib/audience-split-vocab.ts` (dependency-free so `schemas.ts` publishes
 them as OpenAPI enums).
 
 - **Two calls, both via chat-service (which owns the cost), nothing else.** ONE
-  `/complete` (`openai`/`gpt-pro`, thinking off, `responseSchema`) writes the
+  `/complete` (`anthropic`/`sonnet`, thinking off, `responseSchema`) writes the
   split; ONE `/orgs/judgments` (Jev, `judgeChoices` in `chat-client.ts`) picks
   each card's icon as a typed `choice` from `SPLIT_ICONS` (kebab-case Phosphor
   names). No Apollo call, no count, no refine loop — that is the point: it runs
@@ -1693,17 +1693,19 @@ EXPLORES; it no longer DECIDES.)
      volume carrying two more fields is a trade the chooser should see it is
      making. It is INFORMATION only: no field is named good or bad, nothing is
      sorted or ranked, and the samples still decide.
-   - Runs on **`openai` / `gpt-pro`** (OpenAI GPT-6 Astra) with a `responseSchema`
-     and reasoning left **ON** — a comparative judgement over ten candidates x ten
+   - Runs on **`anthropic` / `sonnet`** (Claude Sonnet 5.5, since 2026-09-29;
+     GPT-6 Astra before, p50 7.7s) with a `responseSchema` and reasoning left **ON** — a comparative judgement over ten candidates x ten
      sample rows is reasoning, not extraction (layer 1 and the description
      generator disable thinking because they are narrow structured tasks). It ran
      on `google`/`pro` until 2026-09-11; the move is LATENCY, not quality: the
      onboarding audience step is a ~100s wait a user sits through and this call
      measured p50 12.3s / p90 19.7s on Gemini 3.1 Pro against p50 6.6s / p90 9.9s
-     on Astra over the same path. Astra 400s on `temperature`/`top_p`, so the call
-     sends NEITHER (it never did) and must never start; `disableThinking` is not
-     sent either, so Astra stays at its default reasoning level rather than its low
-     floor. Prompt, schema, retries and tracking are byte-unchanged. **No fallback**: a chooser failure
+     on Astra over the same path. Sonnet 5.5 400s on `temperature`, so the call
+     sends NEITHER sampling param and must never start; `disableThinking` is not
+     sent either, so the model stays at its default effort rather than its low
+     floor. ⚠️ Anthropic 400s on the Gemini-only `propertyOrdering` schema keyword,
+     so `CHOOSER_RESPONSE_SCHEMA` carries none: the pick-before-rationales order
+     rides the `properties` key order, which Anthropic emits in. Prompt, schema, retries and tracking are byte-unchanged. **No fallback**: a chooser failure
      fails the request (502) carrying its reason, exactly like an apollo build
      failure. chat-service owns the cost.
 4. **PERSIST** — the result is written as an `audiences` row at status
@@ -1763,8 +1765,8 @@ EXPLORES; it no longer DECIDES.)
   to partially succeed at: an apollo-service build failure or a chooser failure
   **fails the request loud (502) carrying the underlying reason**, so the caller
   is told plainly instead of receiving `candidates: []`.
-- **Two cost owners, none here.** Layer 1 (`openai`/`gpt-pro`/`disableThinking:true`,
-  `LAYER1_RESPONSE_SCHEMA`) and the CHOOSER (`openai`/`gpt-pro`, reasoning on,
+- **Two cost owners, none here.** Layer 1 (`anthropic`/`sonnet`/`disableThinking:true`,
+  `LAYER1_RESPONSE_SCHEMA`) and the CHOOSER (`anthropic`/`sonnet`, reasoning on,
   `CHOOSER_RESPONSE_SCHEMA`) both run via chat-service `POST /complete`;
   chat-service owns that cost. The apollo exploration's LLM + dry-runs are owned by
   **apollo-service** (which calls chat-service internally). So **human-service
@@ -1792,18 +1794,19 @@ EXPLORES; it no longer DECIDES.)
   — the request reached the server and stalled, so a retry only re-stalls and, for
   a create like `suggest-from-segment`, risks a duplicate. Pinned by
   `tests/unit/provider-timeout.test.ts`.
-- **Layer 1 + the description generator run on OpenAI GPT-6 Astra
-  (`provider:"openai"`, `model:"gpt-pro"`), not Gemini.** Both are dashboard
+- **Layer 1, the description generator, the split AND the chooser run on Claude
+  Sonnet 5.5 (`provider:"anthropic"`, `model:"sonnet"`)** — owner decision
+  2026-09-29 for every onboarding LLM call (GPT-6 Astra before: slow at frontier
+  price, and it broke onboarding when the OpenAI credit ran out). Both are dashboard
   ONBOARDING prefill — a user waits on them and judges the product by what comes
   back — so they run on the strongest model available and the ~7x per-token cost
   is accepted. `SUGGEST_LLM_PROVIDER` / `SUGGEST_LLM_MODEL` in
   `src/services/audiences.ts` are the single switch; `disableThinking:true` and
   both `responseSchema`s are unchanged (chat-service maps `disableThinking` to
-  Astra's `reasoning_effort: low` floor). ⚠️ Astra REJECTS `temperature` != 1 and
-  `top_p` with a 400 `unsupported_value`, so these calls send NEITHER sampling
-  param and must never start. That constraint binds the CHOOSER too
-  (`src/services/audience-chooser.ts`), which moved to Astra on 2026-09-11 for
-  latency and keeps its own switch (`CHOOSER_LLM_PROVIDER` /
+  `output_config.effort: "low"`, since Sonnet 5.5 cannot turn thinking off).
+  ⚠️ Sonnet 5.5 REJECTS `temperature` with a 400, so these calls send NEITHER
+  sampling param and must never start. That constraint binds the CHOOSER too
+  (`src/services/audience-chooser.ts`), which keeps its own switch (`CHOOSER_LLM_PROVIDER` /
   `CHOOSER_LLM_MODEL`) with reasoning left ON — it sends no sampling param and no
   `disableThinking`.
 - **Input is ONLY `{nlPrompt, brandId, offerId?}`** — no `strategy`/count knob and

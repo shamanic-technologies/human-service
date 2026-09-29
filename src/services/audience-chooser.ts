@@ -62,16 +62,17 @@ import type { Identity } from "./people-providers.js";
 // left ON (layer 1 and the description generator disable it because they are
 // narrow structured tasks; this one is not).
 //
-// OpenAI GPT-6 Astra rather than Gemini 3.1 Pro: the onboarding audience step is
-// a ~100s wait a user sits through, and the chooser is a measured slice of it —
-// p50 12.3s / p90 19.7s on google/pro against p50 6.6s / p90 9.9s on this call's
-// own path on Astra. Astra REJECTS `temperature` and `top_p` with a 400, so this
-// call sends NEITHER (it never did) and must never start; `disableThinking` is
-// likewise not sent, which leaves Astra at its default reasoning level rather
-// than its low floor. Everything else — prompt, response schema, retries,
-// tracking — is unchanged.
-const CHOOSER_LLM_PROVIDER = "openai" as const;
-const CHOOSER_LLM_MODEL = "gpt-pro";
+// Claude Sonnet 5.5 (owner decision 2026-09-29: every LLM call of the public
+// onboarding runs on it, replacing GPT-6 Astra, which was slow at frontier
+// price and broke onboarding outright when the OpenAI credit ran out). Sonnet
+// 5.5 REJECTS `temperature` with a 400, so this call sends NEITHER temperature
+// nor top_p and must never start; `disableThinking` is likewise not sent, which
+// leaves the model at its default reasoning effort (this call's intent since it
+// was written) rather than chat-service's `low` floor. Everything else — prompt,
+// response schema, retries, tracking — is unchanged. Previous p50 on Astra:
+// 7.7s.
+const CHOOSER_LLM_PROVIDER = "anthropic" as const;
+const CHOOSER_LLM_MODEL = "sonnet";
 
 // The ORDER of these keys is load-bearing, not cosmetic. `chosen` comes first
 // and `rationales` after it, because the model writes the JSON in order: it must
@@ -79,7 +80,10 @@ const CHOOSER_LLM_MODEL = "gpt-pro";
 // Asking "is this attempt good?" per item, in isolation, ahead of the choice is
 // exactly the shape that degenerated to a constant three times upstream
 // (reachesOffTarget always clean, matchesRequest always true, showable true on
-// 60 of 60). `propertyOrdering` is Gemini's own knob for this.
+// 60 of 60). The ORDER is carried by the `properties` key order alone:
+// Anthropic's structured output emits keys in schema order, and it REJECTS the
+// Gemini-only `propertyOrdering` keyword with a 400 (`property 'propertyOrdering'
+// is not supported`, probed live 2026-09-29), so that keyword is gone.
 const CHOOSER_RESPONSE_SCHEMA: Record<string, unknown> = {
   type: "object",
   properties: {
@@ -94,7 +98,6 @@ const CHOOSER_RESPONSE_SCHEMA: Record<string, unknown> = {
           rationale: { type: "string" },
         },
         required: ["attempt", "rationale"],
-        propertyOrdering: ["attempt", "rationale"],
       },
     },
     name: { type: "string" },
@@ -103,15 +106,6 @@ const CHOOSER_RESPONSE_SCHEMA: Record<string, unknown> = {
     degradedReason: { type: "string" },
   },
   required: [
-    "chosen",
-    "why",
-    "rationales",
-    "name",
-    "description",
-    "degraded",
-    "degradedReason",
-  ],
-  propertyOrdering: [
     "chosen",
     "why",
     "rationales",
