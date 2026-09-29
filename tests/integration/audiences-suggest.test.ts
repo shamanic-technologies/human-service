@@ -385,7 +385,7 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(after.body.audience.status).toBe("active"); // untouched
   });
 
-  it("calls chat-service Layer 1 with openai JSON mode, a responseSchema, gpt-pro + thinking disabled", async () => {
+  it("calls chat-service Layer 1 with anthropic JSON mode, a responseSchema, sonnet + thinking disabled", async () => {
     const completeBodies: Array<Record<string, unknown>> = [];
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
@@ -418,9 +418,9 @@ describe("POST /orgs/audiences/suggest", () => {
     // ONLY Layer 1 hits chat-service now — no Layer-2 fan-out.
     expect(completeBodies).toHaveLength(1);
     const body = completeBodies[0];
-    expect(body.provider).toBe("openai");
+    expect(body.provider).toBe("anthropic");
     expect(body.responseFormat).toBe("json");
-    expect(body.model).toBe("gpt-pro");
+    expect(body.model).toBe("sonnet");
     expect(body.disableThinking).toBe(true);
     expect((body.responseSchema as { type?: string }).type).toBe("object");
     expect(body.systemPrompt).toContain("ONE target audience");
@@ -837,7 +837,7 @@ describe("POST /orgs/audiences/suggest", () => {
     expect(res.body.candidates[0].count).toBe(77);
   });
 
-  it("calls the chooser on openai/gpt-pro with a responseSchema and reasoning left ON", async () => {
+  it("calls the chooser on anthropic/sonnet with a responseSchema and reasoning left ON", async () => {
     wire({ segments: [{ name: "Alpha", description: "a" }] });
     const res = await suggest("alpha");
     expect(res.status).toBe(200);
@@ -846,8 +846,8 @@ describe("POST /orgs/audiences/suggest", () => {
       .map(([, init]) => JSON.parse(init?.body ?? "{}") as Record<string, unknown>)
       .find((b) => String(b.systemPrompt).includes(CHOOSER_MARKER));
     expect(chooserBody).toBeTruthy();
-    expect(chooserBody!.provider).toBe("openai");
-    expect(chooserBody!.model).toBe("gpt-pro");
+    expect(chooserBody!.provider).toBe("anthropic");
+    expect(chooserBody!.model).toBe("sonnet");
     expect(chooserBody!.responseFormat).toBe("json");
     // A comparative judgement is reasoning, not extraction — reasoning stays on.
     expect(chooserBody!.disableThinking).toBeUndefined();
@@ -865,8 +865,13 @@ describe("POST /orgs/audiences/suggest", () => {
     ]);
     // The choice is written BEFORE any per-attempt sentence — a per-candidate
     // grade asked first is the shape that degenerated three times upstream.
+    // Anthropic emits keys in schema order and 400s on the Gemini-only
+    // `propertyOrdering`, so the order is carried by the properties' key order.
     expect(
       (chooserBody!.responseSchema as { propertyOrdering?: string[] }).propertyOrdering
+    ).toBeUndefined();
+    expect(
+      Object.keys((chooserBody!.responseSchema as { properties: Record<string, unknown> }).properties)
     ).toEqual([
       "chosen",
       "why",
