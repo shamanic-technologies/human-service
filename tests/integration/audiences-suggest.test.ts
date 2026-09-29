@@ -5,6 +5,14 @@ import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import { audiences } from "../../src/db/schema.js";
 
+// The person-level target draft (brand-service offer read + one LLM call) is
+// pinned in tests/unit/audience-target.test.ts. Here it answers "no offer" so
+// the customer's words are stored verbatim, exactly as before it existed.
+vi.mock("../../src/services/audience-target.js", async (orig) => ({
+  ...(await orig<typeof import("../../src/services/audience-target.js")>()),
+  draftAudienceTarget: vi.fn(async () => null),
+}));
+
 const app = createTestApp();
 const BRAND = "00000000-0000-4000-8000-0000000000a1";
 

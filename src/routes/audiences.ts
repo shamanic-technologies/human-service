@@ -28,6 +28,11 @@ import {
   SplitNameConflictError,
 } from "../services/audience-split.js";
 import {
+  AudienceTargetOfferNotFoundError,
+  draftAudienceTarget,
+} from "../services/audience-target.js";
+import { BrandConfigError, BrandServiceError } from "../lib/brand-offers.js";
+import {
   computeStats,
   computeAudienceContactability,
   getAudienceInOrg,
@@ -104,6 +109,19 @@ function sendProviderError(
       `[human-service] audiences.chat_error status=${err.status}`
     );
     res.status(502).json({ error: err.message, upstreamStatus: err.status });
+    return;
+  }
+  if (err instanceof BrandConfigError || err instanceof BrandServiceError) {
+    // What the client sells could not be read, so no audience target can be
+    // written from it. Never stored without one.
+    console.error(
+      `[human-service] audiences.brand_source_error ${err.name}: ${err.message}`
+    );
+    res.status(502).json({ error: err.message, source: "brand-service" });
+    return;
+  }
+  if (err instanceof AudienceTargetOfferNotFoundError) {
+    res.status(502).json({ error: err.message, source: "brand-service" });
     return;
   }
   if (err instanceof ProviderUnsupportedError) {
@@ -315,6 +333,27 @@ router.post(
       return;
     }
     const orgId = res.locals.orgId as string;
+    // The customer's words become a PERSON-level target (who to write to, who
+    // stays in around them, which functions are out) before they are stored as
+    // nl_prompt, the sentence the pre-pay screen judges every candidate against.
+    // Read against THIS offer, so the roles come from what it sells.
+    let target: string | null = null;
+    if (parsed.data.targetAudience) {
+      try {
+        target = await draftAudienceTarget({
+          customerTarget: parsed.data.targetAudience,
+          brandId: parsed.data.brandId,
+          offerId: parsed.data.offerId,
+          identity: buildIdentity(res),
+        });
+      } catch (err) {
+        sendProviderError(res, err);
+        return;
+      }
+      console.log(
+        `[human-service] audience.target_drafted org=${orgId} brand=${parsed.data.brandId} offer=${parsed.data.offerId} target=${JSON.stringify(target)}`
+      );
+    }
     let created;
     try {
       created = await confirmAudienceSplit({
@@ -322,7 +361,7 @@ router.post(
         userId: (res.locals.userId as string | undefined) ?? null,
         brandId: parsed.data.brandId,
         offerId: parsed.data.offerId,
-        targetAudience: parsed.data.targetAudience ?? null,
+        targetAudience: target,
         segments: parsed.data.segments,
       });
     } catch (err) {

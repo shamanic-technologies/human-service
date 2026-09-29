@@ -16,6 +16,7 @@
 //
 // No silent fallbacks: a provider error during refreshCounts propagates (502).
 
+import { draftAudienceTarget } from "./audience-target.js";
 import { and, eq, gt, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { db } from "../db/index.js";
@@ -1453,6 +1454,20 @@ export async function suggestAudiences(
   identity: Identity,
   offerId: string | null = null
 ): Promise<SuggestAudiencesResult> {
+  // The PERSON-level target stored as nl_prompt (what the pre-pay screen judges
+  // against) is drafted from the customer's words + what the client sells, in
+  // parallel with the build below so it adds no wait. The build itself keeps
+  // the customer's words: the Apollo pool stays the companies they named.
+  const targetP = draftAudienceTarget({
+    customerTarget: nlPrompt,
+    brandId,
+    offerId,
+    identity,
+  });
+  // Awaited after the build; this only keeps an early rejection from being
+  // reported as unhandled while the build is still running.
+  targetP.catch(() => undefined);
+
   const emitted = await decomposeSegments(nlPrompt, identity);
   const first = emitted[0];
   if (!first) {
@@ -1513,11 +1528,20 @@ export async function suggestAudiences(
     chosen,
   });
 
+  const drafted = await targetP;
+  if (drafted === null) {
+    // The brand holds no offer, so nothing says what it sells and no role can
+    // be derived: the customer's words are stored as they are.
+    console.warn(
+      `[human-service] audience.target_not_drafted reason=no_offer org=${identity.orgId} brand=${brandId}`
+    );
+  }
+
   const audienceId = await persistSuggestedAudience({
     identity,
     brandId,
     offerId,
-    nlPrompt,
+    nlPrompt: drafted ?? nlPrompt,
     segment,
     apolloAudienceId: chosen.candidate.apolloAudienceId,
     filters: chosen.candidate.filters,

@@ -1177,13 +1177,17 @@ apollo credit, the generated email and the send were all spent on them.
   each bronze row's `reason` names the bar it was judged under. No "borderline = yes"
   guidance anywhere: the threshold IS that decision. Jev bills input tokens only
   and chat-service owns the cost (org-billed with serve-next's identity).
-- **The target is `audiences.nl_prompt` — the customer's own words — NEVER
-  `description`.** `description` is an LLM rewrite that describes the Apollo
-  filter mechanics ("found by matching terms against company tags"), not who
-  the customer wants. No `nl_prompt` ⟹ skip with `no_nl_prompt`, logged; never a
-  fallback to `description`. (At ship every active/paused apollo audience had
-  one: 164/164.) Note a split audience's `nl_prompt` is the whole target it was
-  split from, not the segment sentence.
+- **The target is `audiences.nl_prompt` — NEVER `description`.** `description`
+  is an LLM rewrite that describes the Apollo filter mechanics ("found by
+  matching terms against company tags"), not who the customer wants. No
+  `nl_prompt` ⟹ skip with `no_nl_prompt`, logged; never a fallback to
+  `description`. A split audience's `nl_prompt` is the whole target it was split
+  from, not the segment sentence.
+- **`nl_prompt` names PEOPLE, not only companies** (see "Audience target"
+  below). A customer's company-only words ("crypto market making firms") let
+  every employee of such a firm pass: Olive's campaign emailed an HR manager,
+  an employer-branding specialist and a compliance officer about a Solana
+  derivatives exchange, and "decision makers only" still passed a Head of HR.
 - **v1 history (2026-09-17 → 09-28)**: glm-flash `/complete` returning a bare
   boolean, judged against `description`, prompt said "borderline cases are a
   yes". On LivingVital "Swiss Health Shop Employees" it passed 199/285 teasers,
@@ -1222,6 +1226,38 @@ apollo credit, the generated email and the send were all spent on them.
   using serve-next's own identity headers, so human-service's "declares no cost"
   invariant holds.
 - **Size shrinks by the rejections** — see "List contactability" above.
+
+### Audience target — who is worth writing to (`src/services/audience-target.ts`)
+
+Before split-confirm or `/suggest` stores `nl_prompt`, `draftAudienceTarget`
+restates the customer's words as a PERSON-level target, from what the client
+SELLS (the offer's own `description`, read from brand-service
+`GET /internal/brands/{brandId}/offers` with `x-org-id`). Owner rule (Kevin,
+2026-09-29), both directions: (1) the roles whose job makes them decide on or
+care about what is sold, (2) the people around them are IN too (executive
+assistants, chiefs of staff, advisors, coaches, managers of those teams),
+(3) no-stake functions named OUT, seniority alone never qualifies.
+
+- **The model derives the roles; there is NO role list in code** (the unit test
+  asserts the prompt names no function or industry). Companies are restated,
+  never redefined: no kind, place or size added or dropped. Roles the customer
+  already named are kept exactly, plus entourage + out functions.
+- **Where**: split-confirm (THE offer; unknown offer ⟹ 502, nothing written)
+  and `/suggest` (its offer, else every offer of the brand; drafted in parallel
+  with the build, zero added wait). A brand with NO offer ⟹ customer's words
+  kept verbatim + `audience.target_not_drafted` warning (nothing says what it
+  sells). `POST /orgs/audiences` (staff) stores its `nlPrompt` verbatim.
+- **Apollo filters are deliberately NOT narrowed to these roles**: the
+  entourage has no title/seniority a filter can bind to the buyer, so title
+  filters would drop exactly the people the rule keeps. `/suggest`'s layer 1 and
+  chooser, and the pointer build, still read the customer's own words / the
+  segment sentence.
+- One Sonnet 5.5 `/complete` (~3-6s, low effort), chat-service owns the cost.
+  chat-service REQUIRES `x-run-id`; a confirm often has none, so it opens its
+  own `audience-target-draft` run (same pattern as the pointer build). Brand /
+  chat failures ⟹ 502. Existing audiences untouched (immutable).
+- Tests: `tests/unit/audience-target.test.ts`; the integration suites mock
+  `draftAudienceTarget`.
 
 ### CRM source binding — one imported file = one audience
 
@@ -1486,7 +1522,8 @@ them as OpenAPI enums).
   would silently lose part of the partition.
 - **Confirm = one transaction**: rows at `status='active'`, `provider='apollo'`,
   `apollo_audience_id` + `filters` NULL, `description` = the segment sentence,
-  `nl_prompt` = the target, `source='split_proposal'`, `offer_id` required.
+  `nl_prompt` = the person-level target drafted from the customer's words (see
+"Audience target"), `source='split_proposal'`, `offer_id` required.
   The Apollo filters are built by the existing pointer build
   (`backfillApolloAudiencePointer`), triggered TWICE and deduped through one
   in-flight promise per audience (`ensureApolloPointer`): in the background right
