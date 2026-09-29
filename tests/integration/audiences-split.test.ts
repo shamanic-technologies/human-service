@@ -9,6 +9,19 @@ import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import { audiences } from "../../src/db/schema.js";
+import {
+  AudienceTargetOfferNotFoundError,
+  draftAudienceTarget,
+} from "../../src/services/audience-target.js";
+
+// The draft itself (offer read + LLM) is pinned in
+// tests/unit/audience-target.test.ts; here it answers a fixed person-level target.
+const DRAFTED =
+  "Founders and CEOs of B2B SaaS companies in the US and Europe, plus their assistants and chiefs of staff. Not HR, legal or recruiting.";
+vi.mock("../../src/services/audience-target.js", async (orig) => ({
+  ...(await orig<typeof import("../../src/services/audience-target.js")>()),
+  draftAudienceTarget: vi.fn(),
+}));
 
 const app = createTestApp();
 const BRAND = "00000000-0000-4000-8000-0000000000b1";
@@ -25,6 +38,8 @@ function ok(json: unknown) {
 beforeEach(async () => {
   vi.stubGlobal("fetch", fetchSpy);
   fetchSpy.mockReset();
+  vi.mocked(draftAudienceTarget).mockReset();
+  vi.mocked(draftAudienceTarget).mockResolvedValue(DRAFTED);
   process.env.CHAT_SERVICE_URL = "http://chat:8080";
   process.env.CHAT_SERVICE_API_KEY = "chat-key";
   await cleanTestData();
@@ -154,10 +169,18 @@ describe("POST /orgs/audiences/split/confirm", () => {
         provider: "apollo",
         apolloAudienceId: null,
         filters: null,
-        nlPrompt: "B2B SaaS founders in the US and Europe",
+        nlPrompt: DRAFTED,
         source: "split_proposal",
       });
     }
+    // The person-level target is drafted from the customer's words against THIS offer.
+    expect(vi.mocked(draftAudienceTarget)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        customerTarget: "B2B SaaS founders in the US and Europe",
+        brandId: BRAND,
+        offerId: OFFER,
+      })
+    );
     const listed = await request(app)
       .get(`/orgs/audiences?offerId=${OFFER}&status=active`)
       .set(getAuthHeaders());
@@ -222,5 +245,16 @@ describe("POST /orgs/audiences/split/confirm", () => {
       .set(getAuthHeaders())
       .send({ brandId: BRAND, segments: TWO });
     expect(noOffer.status).toBe(400);
+  });
+});
+
+describe("POST /orgs/audiences/split/confirm — target draft failure", () => {
+  it("writes nothing and answers 502 when the offer's target cannot be drafted", async () => {
+    vi.mocked(draftAudienceTarget).mockRejectedValueOnce(
+      new AudienceTargetOfferNotFoundError(BRAND, OFFER)
+    );
+    const res = await confirm({ targetAudience: "B2B SaaS founders", segments: TWO });
+    expect(res.status).toBe(502);
+    expect(await db.select().from(audiences)).toHaveLength(0);
   });
 });

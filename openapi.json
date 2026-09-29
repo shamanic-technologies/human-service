@@ -3874,7 +3874,7 @@
           "targetAudience": {
             "type": "string",
             "minLength": 1,
-            "description": "The confirmed target the segments were split from. Stored as each audience's nlPrompt."
+            "description": "The confirmed target the segments were split from, in the customer's words. Restated as a person-level target (who to write to given what this offer sells, the people around them, and the functions that are out) and stored as each audience's nlPrompt."
           },
           "segments": {
             "type": "array",

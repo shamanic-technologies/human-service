@@ -2755,7 +2755,8 @@ export const ConfirmAudienceSplitRequestSchema = z
       description: "The brand-service offer the new audiences belong to. Stored verbatim, like brandId.",
     }),
     targetAudience: z.string().trim().min(1).optional().openapi({
-      description: "The confirmed target the segments were split from. Stored as each audience's nlPrompt.",
+      description:
+        "The confirmed target the segments were split from, in the customer's words. Restated as a person-level target (who to write to given what this offer sells, the people around them, and the functions that are out) and stored as each audience's nlPrompt.",
     }),
     segments: z
       .array(
