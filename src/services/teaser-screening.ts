@@ -47,8 +47,19 @@ import { judgeYesNo, type ChatIdentity } from "../lib/chat-client.js";
 import type { Person } from "./people-providers.js";
 
 // A teaser is paid for only when Jev's probability that it belongs to the
-// audience is ABOVE this. Strict: exactly 0.80 rejects.
-export const SCREEN_MIN_YES_PROBABILITY = 0.8;
+// audience is ABOVE this. Strict: exactly 0.50 rejects.
+//
+// WHY 0.50 (owner decision, 2026-09-29). The bar started at 0.80 and almost
+// nobody cleared it: on prompt v2 bronze, 147 of 5,758 teasers passed for one
+// org (2.5%), 39 of 3,294 for another (1.2%), 3 of 817 for a Paraguay
+// construction audience — while the real targets (a Works Director at a
+// builder, a Construction Manager, a developer's Project Manager) sat at
+// 0.5-0.78. Campaigns stalled on audience_exhausted with the right people
+// rejected. Above 0.50 = the model thinks yes is more likely than no, which is
+// what "belongs to the audience" means; the same populations pass at ~60-75%.
+// The bar is written into each bronze row's `reason`, so verdicts taken under
+// 0.80 stay readable against the bar that produced them.
+export const SCREEN_MIN_YES_PROBABILITY = 0.5;
 
 // Bump when the question changes. Stored on every bronze row so a later verdict
 // can be read against the question that produced it rather than the current one.

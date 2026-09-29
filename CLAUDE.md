@@ -1168,8 +1168,13 @@ apollo credit, the generated email and the send were all spent on them.
   chat-service `POST /orgs/judgments` (`judgeYesNo` in `chat-client.ts`) asks
   "does this candidate belong to the target audience the client described?"
   with state `{targetAudience: nl_prompt, candidate: snapshot}`. Jev returns
-  P(yes); the teaser is paid for ONLY when **P(yes) > 0.80**
-  (`SCREEN_MIN_YES_PROBABILITY`, strict — 0.80 rejects). No "borderline = yes"
+  P(yes); the teaser is paid for ONLY when **P(yes) > 0.50**
+  (`SCREEN_MIN_YES_PROBABILITY`, strict — 0.50 rejects). The bar was 0.80
+  until 2026-09-29: on v2 bronze it passed 1-2.5% of teasers (3 of 817 for a
+  construction audience) while real targets sat at 0.5-0.78 and campaigns
+  stalled on `audience_exhausted`; owner moved it to 0.50 for every org.
+  Rejections taken under 0.80 stay in `audience_screened_out` (no re-screen);
+  each bronze row's `reason` names the bar it was judged under. No "borderline = yes"
   guidance anywhere: the threshold IS that decision. Jev bills input tokens only
   and chat-service owns the cost (org-billed with serve-next's identity).
 - **The target is `audiences.nl_prompt` — the customer's own words — NEVER
