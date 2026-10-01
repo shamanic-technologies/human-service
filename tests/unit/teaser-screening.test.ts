@@ -53,6 +53,7 @@ function person(overrides: Partial<Person> = {}): Person {
     providerPersonId: "p1",
     organization: null,
     employmentHistory: null,
+    buyingSignal: null,
     ...overrides,
   } as Person;
 }

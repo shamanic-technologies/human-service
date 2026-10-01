@@ -170,5 +170,7 @@ export function normalizeCrmContact(c: CrmContact): Person {
     organization: null,
     // crm-service contacts carry no career history; absent stays absent.
     employmentHistory: null,
+    // a client's uploaded contact carries no buying signal.
+    buyingSignal: null,
   };
 }

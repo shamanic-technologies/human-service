@@ -267,6 +267,22 @@ export interface Person {
   // order (the ordering is the contract). null when the provider serves none —
   // never reconstructed from the top-level organization.
   employmentHistory: EmploymentHistoryEntry[] | null;
+  // The buying signal this person's audience matched (the company is hiring,
+  // the person just changed jobs, the company just raised), as apollo-service's
+  // reveal returned it beside the person. null when the person was not served
+  // from a signal audience, on a free search teaser (only the reveal carries
+  // it), and for apify / crm — never defaulted, never inferred.
+  buyingSignal: BuyingSignal | null;
+}
+
+export interface BuyingSignal {
+  type: "hiring" | "job_change" | "funding";
+  // YYYY-MM-DD, as the provider recorded it.
+  occurredOn: string;
+  // One English sentence stating the signal, for the email writer to reference.
+  fact: string;
+  source: string;
+  sourceUrl: string | null;
 }
 
 export interface PeopleSearchResult {
@@ -709,7 +725,42 @@ function parseEmployees(size: string | null): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function normalizeApolloPerson(p: ApolloPerson): Person {
+// Read apollo-service's reveal-level `buyingSignal` verbatim. Absent / null ⟹
+// null. A PRESENT value missing any field the contract requires fails loud:
+// a half-signal handed to the email writer would be a fabricated claim.
+export function readBuyingSignal(raw: unknown): BuyingSignal | null {
+  if (raw === undefined || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  const TYPES = ["hiring", "job_change", "funding"];
+  if (
+    typeof r !== "object" ||
+    typeof r.type !== "string" ||
+    !TYPES.includes(r.type) ||
+    typeof r.occurredOn !== "string" ||
+    typeof r.fact !== "string" ||
+    r.fact.trim() === "" ||
+    typeof r.source !== "string" ||
+    !(r.sourceUrl === null || r.sourceUrl === undefined || typeof r.sourceUrl === "string")
+  ) {
+    throw new ProviderError(
+      "apollo",
+      502,
+      `apollo returned a malformed buyingSignal: ${JSON.stringify(raw).slice(0, 300)}`
+    );
+  }
+  return {
+    type: r.type as BuyingSignal["type"],
+    occurredOn: r.occurredOn,
+    fact: r.fact,
+    source: r.source,
+    sourceUrl: (r.sourceUrl as string | null | undefined) ?? null,
+  };
+}
+
+function normalizeApolloPerson(
+  p: ApolloPerson,
+  buyingSignal: BuyingSignal | null = null,
+): Person {
   const hasOrg =
     p.organizationName ||
     p.organizationDomain ||
@@ -811,6 +862,7 @@ function normalizeApolloPerson(p: ApolloPerson): Person {
       description: e.description ?? null,
       current: e.current ?? null,
     })),
+    buyingSignal,
   };
 }
 
@@ -882,6 +934,7 @@ function normalizeApifyLead(l: ApifyLead): Person {
       : null,
     // apify has no career-history field; absent stays absent.
     employmentHistory: null,
+    buyingSignal: null,
   };
 }
 
@@ -968,7 +1021,7 @@ export async function peopleSearch(args: {
       )) as { people: ApolloPerson[]; done: boolean; totalEntries: number };
       total = data.totalEntries;
 
-      let people = data.people.map(normalizeApolloPerson);
+      let people = data.people.map((p) => normalizeApolloPerson(p));
       people = filterOptedOut(optOuts, people);
       if (brandIds.length > 0) {
         people = await filterSuppressed(args.identity.orgId, brandIds, people);
@@ -1167,8 +1220,10 @@ export async function resolveEmail(args: {
         "/enrich",
         { apolloPersonId: args.providerPersonId },
         args.identity
-      )) as { person: ApolloPerson | null; emailVerification?: unknown };
-      const person = data.person ? normalizeApolloPerson(data.person) : null;
+      )) as { person: ApolloPerson | null; emailVerification?: unknown; buyingSignal?: unknown };
+      const person = data.person
+        ? normalizeApolloPerson(data.person, readBuyingSignal(data.buyingSignal))
+        : null;
       return finalizeResolved(
         provider,
         person,
@@ -1191,8 +1246,10 @@ export async function resolveEmail(args: {
           organizationDomain: args.domain,
         },
         args.identity
-      )) as { person: ApolloPerson | null; emailVerification?: unknown };
-      const person = data.person ? normalizeApolloPerson(data.person) : null;
+      )) as { person: ApolloPerson | null; emailVerification?: unknown; buyingSignal?: unknown };
+      const person = data.person
+        ? normalizeApolloPerson(data.person, readBuyingSignal(data.buyingSignal))
+        : null;
       return finalizeResolved(
         provider,
         person,

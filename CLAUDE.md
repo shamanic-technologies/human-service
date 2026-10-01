@@ -228,6 +228,18 @@ confusing downstream 502.
     `tests/unit/people-organization-facts.test.ts` (a rich provider response lands
     intact and in order on both the search and the reveal path; a bare one still
     yields a valid person with the fields null).
+- **`buyingSignal` — the signal a buying-signal audience matched, carried to
+  the email writer.** An apollo audience may be ICP + one buying signal (hiring /
+  job_change / funding) + a recency window; its stored filters carry that as an
+  opaque `buying_signal` key forwarded verbatim, so SERVING needs nothing here.
+  apollo-service's reveal (`/enrich`, `/match`) returns `buyingSignal: {type,
+  occurredOn, fact, source, sourceUrl} | null` BESIDE `person`; `readBuyingSignal`
+  carries it verbatim onto the neutral `Person.buyingSignal`, so serve-next's
+  `served` person holds it. **null** on a free search teaser (only the reveal
+  carries it), for apify / crm, and whenever apollo returns none — never
+  defaulted or inferred. A PRESENT but malformed signal fails loud (502): half a
+  claim must not reach a cold email. No storage, no cost here (apollo-service
+  bills the job-postings read). Guarded by `tests/unit/buying-signal.test.ts`.
 - **Pagination**: apollo keeps its server-managed cursor (keyed by org +
   `x-campaign-id`); human-service forwards next-page calls (empty body advances
   the cursor). apify is offset-based (`limit` + `offset`).
