@@ -75,7 +75,7 @@ section — the port binds first).
 | Org-scoped (People v1) | `POST /orgs/people/search/dry-run` | apiKey + `x-org-id` + `x-user-id` | Count matches, free (apollo only in v1) |
 | Org-scoped (People v1) | `GET /orgs/people/filters-prompt` | apiKey + `x-org-id` + `x-user-id` | LLM filter-shape prompt (apollo only in v1) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/suggest` | apiKey + `x-org-id` + `x-user-id` | NL → **ONE persisted** candidate audience (never split — the split is deferred to #235), returned as an array of one at status `suggested` (inactive); optional `offerId` scopes it |
-| Org-scoped (Audiences v1) | `POST /orgs/audiences/split` | apiKey + `x-org-id` + `x-user-id` | Target text → 1-6 non-overlapping segments `{name, description, icon, iconConfidence}` + `axes`. No provider call, no count, persists nothing |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/split` | apiKey + `x-org-id` + `x-user-id` | Target text → 1-6 non-overlapping segments `{name, description, icon, iconConfidence, estimatedLeadCount}` + `axes`. No provider call, no count, persists nothing |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/split/confirm` | apiKey + `x-org-id` | Kept segments → ACTIVE audiences under brand + offer, all or nothing (409 on a taken name) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider + optional `crmUploadId` source binding + optional `offerId` scope) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` / `offerId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
@@ -1525,6 +1525,13 @@ them as OpenAPI enums).
   each card's icon as a typed `choice` from `SPLIT_ICONS` (kebab-case Phosphor
   names). No Apollo call, no count, no refine loop — that is the point: it runs
   in seconds. `/suggest` is untouched.
+- **`estimatedLeadCount` is the model's own size GUESS, written by that same
+  `/complete`** (one required integer per segment in the response schema) so the
+  onboarding card shows "14K leads" with the cards, at zero added call or cost.
+  Order of magnitude only; the real count is the pointer build's after confirm.
+  The prompt asks for it ONLY once the split is final and still forbids size
+  shaping the split. Unusable (non-number, <= 0) ⟹ `null`, never 0. The Jev icon
+  judge never sees it. Not persisted on confirm.
 - **Findable later = a FORM rule in the prompt**: split only on `geography`,
   `company_size`, `industry`, `seniority_role`; prefer one axis, two only
   CROSSED; MECE; WHO travels unchanged; positive partition values; product is
