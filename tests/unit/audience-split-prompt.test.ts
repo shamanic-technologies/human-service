@@ -35,8 +35,10 @@ describe("audience split prompt", () => {
     expect(lower).toContain("never name the customer's own product");
   });
 
-  it("does not reason about size or provider vocabulary", () => {
-    expect(lower).toContain("never estimate size");
+  it("does not let size shape the split, nor write provider vocabulary", () => {
+    expect(lower).toContain("never estimate size to decide the split");
+    expect(prompt).toContain("ONLY ONCE THE SPLIT IS FINAL");
+    expect(prompt).toContain('"estimatedLeadCount"');
     for (const field of ["person_titles", "organization_locations", "q_keywords"]) {
       expect(prompt).not.toContain(field);
     }

@@ -5,7 +5,10 @@
 // brand's ACTIVE audiences under the offer.
 //
 // What this deliberately does NOT do (and why it is fast):
-//   - no Apollo call, no count, no volume estimate, no filter-refinement loop.
+//   - no Apollo call, no count, no filter-refinement loop. The only size is the
+//     model's own rough guess (`estimatedLeadCount`), written by the SAME call
+//     that writes the segments, after the split is final: zero added call, zero
+//     added cost, so a card can show "14K leads" the moment it appears.
 //     ONE writing call (chat-service /complete) splits the text; ONE typed
 //     judgment call (chat-service /orgs/judgments, Jev) picks each card's icon
 //     from a closed vocabulary.
@@ -57,6 +60,10 @@ export interface SplitSegment {
   /** Jev's own certainty (0..1) about the icon. Decorative choice: the icon is
    * always returned; a low value just means several icons fit. */
   iconConfidence: number;
+  /** The model's order-of-magnitude guess of how many decision-makers the
+   * segment reaches in a large B2B contact database. null when it gave none
+   * (never 0). Approximate by design: the real count is measured later. */
+  estimatedLeadCount: number | null;
 }
 
 export interface SplitProposal {
@@ -79,8 +86,9 @@ const SPLIT_RESPONSE_SCHEMA: Record<string, unknown> = {
         properties: {
           name: { type: "string" },
           description: { type: "string" },
+          estimatedLeadCount: { type: "integer" },
         },
-        required: ["name", "description"],
+        required: ["name", "description", "estimatedLeadCount"],
       },
     },
   },
@@ -148,17 +156,33 @@ export function buildSplitSystemPrompt(): string {
     "  - Plain words, no jargon, no em dashes, no hype.",
     '  - "axes": the axes you split along (empty when you return one segment).',
     "",
-    "NOT YOUR JOB: how many people a segment holds, and any search tool's filter",
-    "vocabulary. Never estimate size; never write field names.",
+    "NOT YOUR JOB: any search tool's filter vocabulary (never write field names),",
+    "and size as a reason to split. Never estimate size to decide the split: never",
+    "merge, drop, widen or invent a segment because of how many people it holds.",
+    "",
+    "ONLY ONCE THE SPLIT IS FINAL, size each segment for the customer's card:",
+    '  - "estimatedLeadCount": your best rough estimate, as one whole number, of',
+    "    how many people matching this segment's description (the people the",
+    "    customer would email: decision-makers in the companies described) are",
+    "    listed in a large B2B contact database such as Apollo or LinkedIn. The",
+    "    right order of magnitude is enough. Always give your best guess, never 0.",
     "",
     "Respond with ONLY valid JSON (no prose, no markdown):",
-    '{"axes":["geography"],"segments":[{"name":"<=4 words","description":"one sentence"}]}',
+    '{"axes":["geography"],"segments":[{"name":"<=4 words","description":"one sentence","estimatedLeadCount":12000}]}',
   ].join("\n");
+}
+
+/** The model's size guess, or null when it gave none usable. Never 0: an
+ * absent estimate must not read as an empty market on the card. */
+function parseEstimatedLeadCount(v: unknown): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  const n = Math.round(v);
+  return n > 0 ? n : null;
 }
 
 function parseSplit(obj: Record<string, unknown>): {
   axes: SplitAxis[];
-  segments: Array<{ name: string; description: string }>;
+  segments: Array<{ name: string; description: string; estimatedLeadCount: number | null }>;
 } {
   const rawAxes = obj.axes;
   const rawSegments = obj.segments;
@@ -195,7 +219,7 @@ function parseSplit(obj: Record<string, unknown>): {
       throw new ChatServiceError(502, `LLM split returned duplicate segment name "${name}"`);
     }
     seen.add(k);
-    return { name, description };
+    return { name, description, estimatedLeadCount: parseEstimatedLeadCount(o.estimatedLeadCount) };
   });
   return { axes, segments };
 }
@@ -231,7 +255,10 @@ export async function proposeAudienceSplit(
     ])
   );
   const icons = await judgeChoices({
-    state: { target: targetAudience, segments },
+    state: {
+      target: targetAudience,
+      segments: segments.map(({ name, description }) => ({ name, description })),
+    },
     questions,
     identity,
   });
