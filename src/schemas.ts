@@ -2723,7 +2723,8 @@ registry.registerPath({
 // --- POST /orgs/audiences/split + /orgs/audiences/split/confirm ---
 // The light, conceptual split of a confirmed target into at most 6 audiences
 // (src/services/audience-split.ts). No Apollo call, no count: one writing call
-// splits the text, one typed judgment picks each card's icon.
+// splits the text (and guesses each segment's size), one typed judgment picks
+// each card's icon.
 
 export const SplitAudiencesRequestSchema = z
   .object({
@@ -2748,6 +2749,10 @@ export const SplitSegmentSchema = z
     }),
     iconConfidence: z.number().min(0).max(1).openapi({
       description: "The judge's own certainty about the icon (decorative: the icon is always set).",
+    }),
+    estimatedLeadCount: z.number().int().positive().nullable().openapi({
+      description:
+        "Approximate number of people (decision-makers matching the segment) it would reach in a large B2B contact database, estimated by the same generation that writes the segments: no search runs, so it is available instantly with the cards. Right order of magnitude only; the real people-search count is measured after confirm. null when no estimate could be made, never 0.",
     }),
   })
   .openapi("SplitSegment");

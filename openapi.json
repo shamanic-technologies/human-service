@@ -3863,13 +3863,21 @@
             "minimum": 0,
             "maximum": 1,
             "description": "The judge's own certainty about the icon (decorative: the icon is always set)."
+          },
+          "estimatedLeadCount": {
+            "type": "integer",
+            "nullable": true,
+            "minimum": 0,
+            "exclusiveMinimum": true,
+            "description": "Approximate number of people (decision-makers matching the segment) it would reach in a large B2B contact database, estimated by the same generation that writes the segments: no search runs, so it is available instantly with the cards. Right order of magnitude only; the real people-search count is measured after confirm. null when no estimate could be made, never 0."
           }
         },
         "required": [
           "name",
           "description",
           "icon",
-          "iconConfidence"
+          "iconConfidence",
+          "estimatedLeadCount"
         ]
       },
       "SplitAudiencesRequest": {
