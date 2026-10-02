@@ -47,6 +47,8 @@ import {
 } from "../lib/billing-outlook.js";
 import { computeAudienceContactability, ensureApolloPointer, needsApolloPointerBuild } from "./audiences.js";
 import { confirmAudienceSplit, proposeAudienceSplit } from "./audience-split.js";
+import { draftAudienceTarget } from "./audience-target.js";
+import { listBrandOffers } from "../lib/brand-offers.js";
 import { completeRun, createRun } from "./runs.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
@@ -155,27 +157,43 @@ export async function loadBrandPools(opts: { brandId?: string } = {}): Promise<B
 }
 
 /**
- * The split request for a refill: the brand's own target, plus every audience
- * it already has, so the proposed segments reach people outside them. The split
- * prompt's invariants (filterable axes, positive values, one population per
- * segment) still apply to this text.
+ * The split request for a refill. The target as written is exhausted (that is
+ * why we are here: measured 2026-10-02, ObraCam's split answered ZERO segments
+ * when asked for "the same target, minus these audiences", correctly, since its
+ * audiences already covered every company size of it). So the split is asked
+ * for the NEXT closest buyers of what the company sells: other roles in the same
+ * kind of companies, or adjacent kinds of companies, in the same places, outside
+ * every audience it already holds. The split prompt's form rules (filterable
+ * axes, positive values, one population per segment) still apply.
  */
-export function buildRefillRequest(
-  target: string,
-  existing: Array<{ name: string; description: string | null }>
-): string {
+export function buildRefillRequest(args: {
+  target: string;
+  offer: { name: string; description?: string | null } | null;
+  existing: Array<{ name: string; description: string | null }>;
+}): string {
+  const sells = args.offer
+    ? `${args.offer.name}${args.offer.description ? `: ${args.offer.description}` : ""}`
+    : "(not stated)";
   return [
-    target,
+    `WHAT THIS COMPANY SELLS: ${sells}`,
+    `ITS TARGET SO FAR: ${args.target}`,
     "",
-    "This company has ALREADY contacted everyone reachable in the audiences listed below.",
-    "Propose segments of the target above that reach people who are NOT in any of these",
-    "audiences: other roles, company sizes, industries or places the target allows but",
-    "these audiences did not cover. Every segment must stay within the target, and must",
-    "not repeat or overlap any audience below.",
+    "Every reachable person in the audiences listed below has already been contacted, and",
+    "the target so far has no one left. Your target for this split is the NEXT closest",
+    "people who would also buy or use what this company sells and who are NOT in any",
+    "audience below: other roles in the same kind of companies (people who decide on, buy",
+    "or use what is sold), or adjacent kinds of companies, in the same places as the target",
+    "so far. Never repeat or overlap an audience below. Return at least one segment.",
     "",
     "Audiences already contacted:",
-    ...existing.map((a) => `- ${a.name}${a.description ? `: ${a.description}` : ""}`),
+    ...args.existing.map((a) => `- ${a.name}${a.description ? `: ${a.description}` : ""}`),
   ].join("\n");
+}
+
+/** The customer target the widened audiences are screened against: the old
+ * target plus every new segment, restated person-level by draftAudienceTarget. */
+export function buildWidenedTarget(target: string, segments: Array<{ description: string }>): string {
+  return [target, "Also:", ...segments.map((s) => `- ${s.description}`)].join("\n");
 }
 
 /** Make each new name unique within the (org, brand, offer) scope. */
@@ -349,12 +367,23 @@ async function refillBrand(
 
   let created: AudienceRow[];
   try {
-    const proposal = await proposeAudienceSplit(buildRefillRequest(target, existing), {
-      orgId: pool.orgId,
-      userId,
-      runId,
-      workflowTracking: tracking,
-    });
+    const identity = { orgId: pool.orgId, userId, runId, workflowTracking: tracking };
+    const offer = (await listBrandOffers(pool.brandId, pool.orgId)).find((o) => o.offerId === offerId) ?? null;
+    const proposal = await proposeAudienceSplit(
+      buildRefillRequest({ target, offer, existing }),
+      identity
+    );
+    // The widened audiences reach people the old target did not name, so the
+    // pre-pay screen must judge them against a target that does: the old one
+    // plus the new segments, restated person-level from what the offer sells.
+    // No offer readable ⟹ the old target verbatim (never a guess).
+    const widened =
+      (await draftAudienceTarget({
+        customerTarget: buildWidenedTarget(target, proposal.segments),
+        brandId: pool.brandId,
+        offerId,
+        identity,
+      })) ?? target;
     // Every name in the (org, brand, offer) scope, deprecated included: the
     // unique index covers them all, so a collision would 409 the confirm.
     const taken = await db
@@ -376,7 +405,7 @@ async function refillBrand(
       userId,
       brandId: pool.brandId,
       offerId,
-      targetAudience: target,
+      targetAudience: widened,
       segments: proposal.segments.map((s, i) => ({ name: names[i], description: s.description })),
       source: AUTO_REFILL_SOURCE,
     });

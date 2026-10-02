@@ -10,6 +10,14 @@ import { db } from "../../src/db/index.js";
 import { audiences, leadServes } from "../../src/db/schema.js";
 import { ensureApolloPointer } from "../../src/services/audiences.js";
 import { loadBrandPools, runAudienceRefillSweep } from "../../src/services/audience-refill.js";
+import { draftAudienceTarget } from "../../src/services/audience-target.js";
+
+// The person-level draft is pinned in tests/unit/audience-target.test.ts.
+const WIDENED = "Owners, managers and site engineers at construction companies in Paraguay.";
+vi.mock("../../src/services/audience-target.js", async (orig) => ({
+  ...(await orig<typeof import("../../src/services/audience-target.js")>()),
+  draftAudienceTarget: vi.fn(),
+}));
 
 // The Apollo build is pinned by its own suites; here it must only be FIRED.
 vi.mock("../../src/services/audiences.js", async (orig) => ({
@@ -51,6 +59,10 @@ function wire() {
       return state ? json(200, { orgId: m[1], state }) : json(404, { error: "none" });
     }
     if (u.endsWith("/v1/runs")) return json(200, { id: "run-1" });
+    const offers = u.match(/\/internal\/brands\/([^/]+)\/offers$/);
+    if (offers) {
+      return json(200, { offers: [{ offerId: OFFER, brandId: offers[1], name: "ObraCam", description: "Cameras for construction sites." }] });
+    }
     if (u.includes("/v1/runs/")) return json(200, {});
     if (u.endsWith("/complete")) {
       return json(200, {
@@ -117,6 +129,10 @@ beforeEach(async () => {
   fetchSpy.mockReset();
   wire();
   vi.mocked(ensureApolloPointer).mockClear();
+  vi.mocked(draftAudienceTarget).mockReset();
+  vi.mocked(draftAudienceTarget).mockResolvedValue(WIDENED);
+  process.env.BRAND_SERVICE_URL = "http://brand:8080";
+  process.env.BRAND_SERVICE_API_KEY = "brand-key";
   process.env.BILLING_SERVICE_URL = "http://billing:8080";
   process.env.BILLING_SERVICE_API_KEY = "billing-key";
   process.env.CHAT_SERVICE_URL = "http://chat:8080";
@@ -181,7 +197,7 @@ describe("refill sweep", () => {
       .where(and(eq(audiences.brandId, BRAND_PAYING), eq(audiences.source, "auto_refill")));
     expect(rows).toHaveLength(2);
     for (const r of rows) {
-      expect(r).toMatchObject({ status: "active", offerId: OFFER, nlPrompt: TARGET, provider: "apollo", orgId: ORG_PAYING, createdByUserId: USER });
+      expect(r).toMatchObject({ status: "active", offerId: OFFER, nlPrompt: WIDENED, provider: "apollo", orgId: ORG_PAYING, createdByUserId: USER });
     }
     expect(rows.map((r) => r.name).sort()[1]).toMatch(/^Up to 50 Employees \w{3} \d{1,2}$/);
 
@@ -195,7 +211,14 @@ describe("refill sweep", () => {
     const completes = fetchSpy.mock.calls.filter(([u]) => String(u).endsWith("/complete"));
     expect(completes).toHaveLength(1);
     const prompt = JSON.parse(completes[0][1].body as string).message as string;
-    expect(prompt).toContain(TARGET);
+    expect(prompt).toContain(`ITS TARGET SO FAR: ${TARGET}`);
+    expect(prompt).toContain("WHAT THIS COMPANY SELLS: ObraCam: Cameras for construction sites.");
+    // The screen target is re-drafted from the old target + the new segments.
+    expect(vi.mocked(draftAudienceTarget).mock.calls[0][0]).toMatchObject({
+      brandId: BRAND_PAYING,
+      offerId: OFFER,
+      customerTarget: expect.stringContaining("- Site engineers at construction companies in Paraguay."),
+    });
     expect(prompt).toContain("- Up to 50 Employees");
 
     // Each new audience's Apollo build is fired, org-billed.
