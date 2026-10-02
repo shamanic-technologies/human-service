@@ -298,6 +298,9 @@ export async function confirmAudienceSplit(args: {
   offerId: string;
   targetAudience: string | null;
   segments: Array<{ name: string; description: string }>;
+  /** Provenance tag. Defaults to `split_proposal` (a human confirmed it); the
+   * automatic refill (audience-refill.ts) stamps `auto_refill`. */
+  source?: string;
 }): Promise<Array<typeof audiences.$inferSelect>> {
   return db.transaction(async (tx) => {
     const lowered = args.segments.map((s) => s.name.toLowerCase());
@@ -329,7 +332,7 @@ export async function confirmAudienceSplit(args: {
           apolloAudienceId: null,
           filters: null,
           status: "active",
-          source: "split_proposal",
+          source: args.source ?? "split_proposal",
           createdByUserId: args.userId,
         }))
       )
