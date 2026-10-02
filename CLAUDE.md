@@ -1350,11 +1350,16 @@ Runs every 6h (first tick 10 min after boot, timers only, never on the boot path
   who cannot be charged). Read BEFORE anything spends. Env: `BILLING_SERVICE_URL`,
   `BILLING_SERVICE_API_KEY`.
 - **New people = new audiences, never an edited one** (an audience is immutable).
-  Same path a human uses: `proposeAudienceSplit` on the brand's target (the
-  `nl_prompt` of its most recent active audience under the dominant offer) plus
-  the list of every audience it already holds under that offer, so segments reach
-  people outside them; then `confirmAudienceSplit` (`source='auto_refill'`, born
-  `active`, same offer + `nl_prompt`, billed under the latest audience creator),
+  Same path a human uses: `proposeAudienceSplit` asked for the NEXT closest
+  buyers of what the offer sells (other roles in the same kind of companies, or
+  adjacent kinds of companies, same places), outside every audience the brand
+  already holds under that offer. Asking for "the same target minus these" made
+  the split answer ZERO segments for ObraCam (prod 2026-10-02): its audiences
+  already covered the whole target. The new rows' `nl_prompt` (screen target) is
+  re-drafted by `draftAudienceTarget` from the old target + the new segments, so
+  the pre-pay screen does not reject the widened people. Then
+  `confirmAudienceSplit` (`source='auto_refill'`, born `active`, same offer,
+  billed under the latest audience creator),
   then `ensureApolloPointer` per row in the background. A colliding name gets a
   date suffix.
 - **Cost**: org-billed, declared where incurred: the split's LLM calls in

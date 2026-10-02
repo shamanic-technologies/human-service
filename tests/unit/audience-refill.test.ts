@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildRefillRequest,
+  buildWidenedTarget,
   dedupeSegmentNames,
   isPoolLow,
   pickOffer,
@@ -67,14 +68,29 @@ describe("refill helpers", () => {
     expect(pickOffer([row(null, 1)])).toBeNull();
   });
 
-  it("gives the split the target and every audience already contacted", () => {
-    const text = buildRefillRequest("Construction managers in Paraguay.", [
-      { name: "Up to 50 Employees PY", description: "Small builders in Paraguay." },
-      { name: "Project Directors", description: null },
-    ]);
-    expect(text.startsWith("Construction managers in Paraguay.")).toBe(true);
+  it("asks the split for the next closest buyers, outside every audience already contacted", () => {
+    const text = buildRefillRequest({
+      target: "Construction managers in Paraguay.",
+      offer: { name: "ObraCam", description: "Cameras for construction sites." },
+      existing: [
+        { name: "Up to 50 Employees PY", description: "Small builders in Paraguay." },
+        { name: "Project Directors", description: null },
+      ],
+    });
+    expect(text).toContain("WHAT THIS COMPANY SELLS: ObraCam: Cameras for construction sites.");
+    expect(text).toContain("ITS TARGET SO FAR: Construction managers in Paraguay.");
+    expect(text).toContain("NEXT closest");
+    expect(text).toContain("Return at least one segment.");
     expect(text).toContain("- Up to 50 Employees PY: Small builders in Paraguay.");
     expect(text).toContain("- Project Directors");
-    expect(text).toContain("NOT in any of these");
+    expect(buildRefillRequest({ target: "t", offer: null, existing: [] })).toContain(
+      "WHAT THIS COMPANY SELLS: (not stated)"
+    );
+  });
+
+  it("screens the widened audiences against the old target plus every new segment", () => {
+    expect(buildWidenedTarget("Old.", [{ description: "A." }, { description: "B." }])).toBe(
+      "Old.\nAlso:\n- A.\n- B."
+    );
   });
 });
