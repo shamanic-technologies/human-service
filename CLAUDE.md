@@ -1443,9 +1443,43 @@ owns the criterion, the harvest, the per-audience no-repeat and the spend.
   (then size = `reachable_count`): unknown is never 0, which consumers read as
   "served out".
 - The email must never mention the engagement (owner rule): it chooses WHO,
-  content-generation-service owns not writing it. Portfolio launch does not
-  create this kind (it needs competitor pages). Tests:
+  content-generation-service owns not writing it. Tests:
   `tests/integration/audiences-linkedin-engagement.test.ts`.
+
+### Competitor-engagement audience, created by us (`src/services/competitor-engagement-audience.ts`)
+
+Owner 2026-10-03: every client brand gets one, NO client input ("c'est à nous de
+gérer nos audiences"). One `linkedin_engagement` audience per (org, brand, offer),
+`source='linkedin_engagement_signal'`, born `active`, name "Engaged with
+competitor posts", window 30 days, `nl_prompt` = the ICP target the brand's other
+audiences use.
+- **Pages**: brand-service `POST /orgs/brands/{id}/competitors/discover`
+  (`src/lib/brand-competitors.ts`; computes once, stored answer free after). Up
+  to 3 distinct `linkedinUrl`s in brand-service order; only pages a competitor's
+  own website links (never invented). 422 or `status:"not_computed"` = "later",
+  never "none".
+- **When**: portfolio launch (background phase, before `ready`; never fails the
+  launch) + `runCompetitorEngagementSweep` every 6h (first tick 15 min after
+  boot, `COMPETITOR_ENGAGEMENT_INTERVAL_MS=0` off) and on demand
+  `POST /internal/competitor-engagement-audiences?dryRun&brandId`: every (org,
+  brand) with an active audience, on its main offer (`pickOffer`), billing gate
+  (`canBeCharged`) before the discovery's model call. That covers existing brands
+  and the not-computed retries.
+- **Outcomes** (logged `competitor_engagement.<outcome>` with reason): `created`,
+  `exists` (any linkedin_engagement row in the scope, any status: never
+  duplicated, never re-created after a client archived it), `no_pages`,
+  `not_computed`, `failed` (both retried by the sweep).
+- **Cost: zero at creation** (owner rule): apollo-service's create persists the
+  criterion only (no count, no harvest, no reveal). Spend happens only when a
+  campaign serves it, teaser screened before the paid reveal. The one paid step
+  upstream is brand-service's discovery (fraction of a cent, once per brand,
+  declared by brand-service, org-billed under a `competitor-engagement-audience`
+  run on the sweep).
+- **Refill**: an unsized engagement audience is left OUT of the pool measure
+  (counts 0) instead of making the brand unmeasurable, else this audience would
+  switch the refill off fleet-wide.
+- Tests: `tests/integration/competitor-engagement-audience.test.ts`,
+  `tests/unit/competitor-engagement-pages.test.ts`.
 
 ### Audience refill — a paying brand never runs dry (`src/services/audience-refill.ts`)
 
@@ -1461,7 +1495,8 @@ Runs every 6h (first tick 10 min after boot, timers only, never on the boot path
   client who stopped campaigns keeps the pace they ran at. No serve in 14 days ⟹
   no pace ⟹ never low. A brand with an active audience still waiting for its
   Apollo build, or a CRM audience (no provider count), is UNMEASURABLE and skipped,
-  never read as empty.
+  never read as empty. An unsized linkedin_engagement audience is left out of the
+  measure (counts 0), never a skip reason unless it is all the brand has active.
 - **Billing gate** (`src/lib/billing-outlook.ts`): billing-service
   `GET /internal/accounts/by-org/{orgId}/payment-outlook`; only `will_charge` /
   `charge_due_now` pass. `idle`, `no_autopay`, `charge_blocked`, `unknown`, a 404
