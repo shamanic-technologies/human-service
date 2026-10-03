@@ -142,19 +142,26 @@ export async function loadBrandPools(opts: { brandId?: string } = {}): Promise<B
       continue;
     }
     // A linkedin_engagement audience has no provider count: its pool is unknown
-    // until serve-next walks it, never "empty".
-    if (active.some((a) => isLinkedinEngagementFilters(a.filters) && a.reachableCount == null)) {
+    // until serve-next walks it, never "empty". It is left OUT of the measure
+    // (counts for nothing), never a reason to skip the brand: every brand now
+    // gets one at launch (competitor-engagement-audience.ts), so skipping would
+    // switch the refill off fleet-wide. Only a brand with nothing else active is
+    // unmeasurable.
+    const measured = active.filter(
+      (a) => !(isLinkedinEngagementFilters(a.filters) && a.reachableCount == null)
+    );
+    if (measured.length === 0) {
       pools.push({ ...base, remaining: 0, low: false, unmeasurable: "linkedin_engagement_unsized" });
       continue;
     }
     // An audience whose Apollo build has not landed has no count yet (it reads
     // 0); that is "not measured yet", never "empty".
-    if (active.some((a) => needsApolloPointerBuild(a))) {
+    if (measured.some((a) => needsApolloPointerBuild(a))) {
       pools.push({ ...base, remaining: 0, low: false, unmeasurable: "pointer_build_pending" });
       continue;
     }
-    const contactability = await computeAudienceContactability(active);
-    const remaining = active.reduce(
+    const contactability = await computeAudienceContactability(measured);
+    const remaining = measured.reduce(
       (sum, a) => sum + (contactability.get(a.id)?.availableToContactCount ?? 0),
       0
     );

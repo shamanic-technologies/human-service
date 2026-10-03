@@ -61,6 +61,7 @@ import {
 } from "../lib/apollo-audiences.js";
 import { chooseAudienceCandidate } from "./audience-chooser.js";
 import { confirmAudienceSplit, proposeAudienceSplit } from "./audience-split.js";
+import { ensureCompetitorEngagementAudience } from "./competitor-engagement-audience.js";
 import { draftAudienceTarget } from "./audience-target.js";
 import { dedupeSegmentNames } from "./audience-refill.js";
 import { ensureApolloPointer } from "./audiences.js";
@@ -297,6 +298,18 @@ async function finishSignals(input: {
       base: await input.icpBase,
       target: input.target,
       args,
+      identity: input.identity,
+    });
+    // The competitor-engagement audience (competitor-engagement-audience.ts):
+    // free to create, built from brand-service's competitor pages. Never fails
+    // the launch: every outcome (none found, not computed yet, failed) is logged
+    // there, and the recurring sweep retries the ones that are not final.
+    await ensureCompetitorEngagementAudience({
+      orgId: args.orgId,
+      userId: args.userId,
+      brandId: args.brandId,
+      offerId: args.offerId,
+      target: input.target ?? portfolio.icpText,
       identity: input.identity,
     });
     await db

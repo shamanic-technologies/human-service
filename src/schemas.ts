@@ -2391,6 +2391,48 @@ registry.registerPath({
   },
 });
 
+// --- Internal: competitor-engagement audience sweep ---
+export const CompetitorEngagementSweepQuerySchema = z.object({
+  dryRun: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({ description: "When 'true', read billing and report WITHOUT creating or spending. Defaults to false." }),
+  brandId: z.string().uuid().optional().openapi({ description: "Only this brand." }),
+});
+
+export const CompetitorEngagementSweepResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    scanned: z.number().int(),
+    created: z.number().int(),
+    entries: z.array(
+      z.object({
+        orgId: z.string(),
+        brandId: z.string(),
+        offerId: z.string().nullable(),
+        action: z.enum(["created", "exists", "no_pages", "not_computed", "failed", "would_ensure", "skipped"]),
+        reason: z.string().nullable(),
+        audienceId: z.string().nullable(),
+        pages: z.array(z.string()),
+      })
+    ),
+  })
+  .openapi("CompetitorEngagementSweepResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/competitor-engagement-audiences",
+  summary:
+    "Run the competitor-engagement sweep now: every brand with an active audience and no linkedin_engagement audience on its main offer, whose billing can charge it, gets one active audience of the people who recently engaged with up to 3 competitor LinkedIn company pages (pages from brand-service). Free to create: no count, no harvest, no reveal. Spend only happens when a campaign serves it. Also runs every 6 hours.",
+  security: [{ apiKey: [] }],
+  request: { query: CompetitorEngagementSweepQuerySchema },
+  responses: {
+    200: { description: "Sweep result", content: { "application/json": { schema: CompetitorEngagementSweepResponseSchema } } },
+    401: { description: "Unauthorized" },
+    409: { description: "Already running or migrations not ready", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 // --- Internal: bulk audience resolver for lead-service (by id and/or email) ---
 //
 // Server-to-server, service-auth, NO browser body cap (dedicated 25 MB parser).

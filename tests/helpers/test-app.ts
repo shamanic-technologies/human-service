@@ -8,6 +8,7 @@ import methodologyRoutes from "../../src/routes/methodology.js";
 import transferBrandRoutes from "../../src/routes/transfer-brand.js";
 import backfillRoutes from "../../src/routes/backfill.js";
 import audienceRefillRoutes from "../../src/routes/audience-refill.js";
+import competitorEngagementRoutes from "../../src/routes/competitor-engagement.js";
 import listsRoutes from "../../src/routes/lists.js";
 import peopleRoutes from "../../src/routes/people.js";
 import audiencesRoutes from "../../src/routes/audiences.js";
@@ -33,6 +34,7 @@ export function createTestApp() {
   app.use(transferBrandRoutes);
   app.use(backfillRoutes);
   app.use(audienceRefillRoutes);
+  app.use(competitorEngagementRoutes);
   app.use(suppressionRecoveryRoutes);
   app.use(listsRoutes);
   app.use(peopleRoutes);
