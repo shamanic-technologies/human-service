@@ -218,6 +218,13 @@
       "when": 1771587967099,
       "tag": "0030_add_audience_preview_companies",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1771587967199,
+      "tag": "0031_add_cross_org_identity_key_indexes",
+      "breakpoints": true
     }
   ]
 }

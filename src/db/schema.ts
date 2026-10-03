@@ -232,6 +232,8 @@ export const leadServes = pgTable(
   (table) => [
     index("idx_lead_serves_org_brand").on(table.orgId, table.brandId),
     index("idx_lead_serves_served_at").on(table.servedAt),
+    // Key-only (cross-org) lookup for the hard-bounce gate (migration 0031).
+    index("idx_lead_serves_provider_person_id").on(table.providerPersonId),
   ]
 );
 
@@ -407,6 +409,11 @@ export const people = pgTable(
     index("idx_people_org_linkedin").on(table.orgId, table.linkedinUrlNorm),
     index("idx_people_org_apollo").on(table.orgId, table.apolloPersonId),
     index("idx_people_org_apify").on(table.orgId, table.apifyPersonId),
+    // Key-only (cross-org) lookups for the hard-bounce gate (migration 0031):
+    // a bounce is fleet-wide, and the org-leading indexes above cannot serve it.
+    index("idx_people_apollo_person_id").on(table.apolloPersonId),
+    index("idx_people_apify_person_id").on(table.apifyPersonId),
+    index("idx_people_linkedin_url_norm").on(table.linkedinUrlNorm),
   ]
 );
 

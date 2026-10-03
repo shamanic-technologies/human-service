@@ -415,6 +415,34 @@ one in `src/services/opt-outs.ts` (`loadServeExclusions`,
   serving suite answers the call through `tests/helpers/won-leads.ts` or a
   `vi.mock` of the client.
 
+### Hard bounces — "our own send to this address bounced" (#73)
+
+A bounce is a fact about the ADDRESS, not a sender's consent, so the gate is
+**fleet-wide**: any org, any brand, with or without a brand on the request,
+permanent. `src/lib/instantly-bounces.ts` is the client, `src/services/bounces.ts`
+the gate (`filterBounced`, `isEmailBounced`).
+
+- **instantly-service OWNS the record** (`POST /internal/bounced-emails`, `{emails}`
+  ≤1000 → `{bounced:[{email, firstBouncedAt}]}`, not org-scoped). It records only
+  PERMANENT failures (temporary delays never promoted / retracted), so every row
+  is treated as a hard bounce. Read live, never stored here.
+- **Resolution is local and CROSS-ORG**: a teaser's apollo person id / linkedin url
+  is looked up in `people` (any org) and `lead_serves.provider_person_id` (any org)
+  to find the address already revealed for it, then the owner is asked. Indexed by
+  migration `0031` (the org-leading indexes cannot serve a key-only lookup). No
+  resolvable address ⟹ no call to the owner. Prod 2026-10-03: 272 of 276
+  served-after-bounce addresses resolved through a `people` apollo id.
+- **Gates, in money order**: apollo teaser filter in `peopleSearch` (a page fully
+  dropped keeps walking the free cursor); serve-next POP-time re-check; apify
+  returned-batch filter only (no push-down: it would need the whole fleet list
+  per call, and apify is not auto-selected); `finalizeResolved` post-reveal,
+  placed AFTER `recordServe` so the bronze row ties the key to the address for the
+  next request; crm branch (`isEmailBounced` per contact).
+- **Fail loud**: `BounceSourceError` / `BounceConfigError` → **502**
+  (`source: "instantly-service"`). Same env vars as opt-outs. Tests:
+  `tests/integration/audiences-bounce.test.ts`, `tests/unit/instantly-bounces.test.ts`;
+  serving suites answer via `tests/helpers/bounces.ts` or `vi.mock` the gate.
+
 ### Suppression recovery — `POST /internal/recover-suppressions`
 
 A serve is recorded the moment the gateway hands a person back with a verified

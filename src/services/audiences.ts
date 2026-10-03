@@ -42,6 +42,7 @@ import {
   loadServeExclusions,
   matchesOptOut,
 } from "./opt-outs.js";
+import { filterBounced, isEmailBounced } from "./bounces.js";
 import {
   dryRun,
   peopleSearch,
@@ -2217,6 +2218,16 @@ async function serveNextCrmContact(
       if (exhausted) return { status: "exhausted", person: null };
       continue;
     }
+    // An address our own send already bounced is unreachable, whoever uploaded
+    // it (fleet-wide, read live from instantly-service, fail loud). crm-service
+    // has burned the contact, which is right: it must never be served anyway.
+    if (await isEmailBounced(identity, person.email)) {
+      console.log(
+        `[human-service] bounce.blocked_crm org=${identity.orgId} audience=${audience.id}`
+      );
+      if (exhausted) return { status: "exhausted", person: null };
+      continue;
+    }
     // served ⇒ usable email (LOCKED consumer contract). A crm contact without a
     // sendable email is not servable via the cold-email funnel; crm-service has
     // already permanently suppressed it, so drop it and ask for the next one.
@@ -2388,6 +2399,20 @@ export async function serveNextPerson(
     ) {
       console.log(
         `[human-service] opt_out.blocked_teaser org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`
+      );
+      continue;
+    }
+
+    // Hard bounce, checked at POP time for the same reason as the opt-out: the
+    // teaser may have been buffered before our send to them bounced. Fleet-wide
+    // (any org, any brand), free (a local key lookup + one read at the owner),
+    // and before the screen and the reveal.
+    const [reachable] = await filterBounced(identity, [
+      { linkedinUrl: teaser.linkedinUrl, providerPersonId: teaser.providerPersonId },
+    ]);
+    if (!reachable) {
+      console.log(
+        `[human-service] bounce.blocked_teaser org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`
       );
       continue;
     }

@@ -29,6 +29,7 @@ import {
   isEmailWonForRequest,
   loadServeExclusions,
 } from "./opt-outs.js";
+import { filterBounced, isEmailBounced } from "./bounces.js";
 
 // apify bills per RETURNED lead (each search hit carries a verified email — there
 // is no free teaser list like apollo's). So the gateway takes the strict minimum
@@ -1023,6 +1024,12 @@ export async function peopleSearch(args: {
 
       let people = data.people.map((p) => normalizeApolloPerson(p));
       people = filterOptedOut(optOuts, people);
+      // Hard bounces — FLEET-wide (any org, any brand): an address our own send
+      // already bounced is dropped here, on the free teaser, before the reveal.
+      // Read live from instantly-service; fail loud (502) when unreadable.
+      const beforeBounce = people.length;
+      people = await filterBounced(args.identity, people);
+      const droppedBounced = people.length < beforeBounce;
       if (brandIds.length > 0) {
         people = await filterSuppressed(args.identity.orgId, brandIds, people);
       }
@@ -1035,9 +1042,13 @@ export async function peopleSearch(args: {
       }
       // Got fresh (non-suppressed, non-opted-out) leads, or nothing is being
       // excluded → return them and let the caller request the next page.
-      if ((brandIds.length === 0 && !hasOptOuts) || people.length > 0) break;
-      // Whole page already served for the brand, or opted out → walk to the next
-      // free page.
+      if (
+        (brandIds.length === 0 && !hasOptOuts && !droppedBounced) ||
+        people.length > 0
+      )
+        break;
+      // Whole page already served for the brand, opted out, or bounced → walk to
+      // the next free page.
     }
 
     return { provider, people: collected, done, total, nextOffset: null };
@@ -1110,7 +1121,17 @@ export async function peopleSearch(args: {
   // depend on the actor honouring it. The serve is still recorded above — apify
   // did emit and bill them, and that history stays true — they are simply never
   // handed back.
-  const apifyServable = filterOptedOut(apifyOptOuts, apifyPeople);
+  //
+  // Hard bounces are filtered here too, but only on the returned batch: apify
+  // has no free teaser stage, and pushing the fleet's whole bounce list down as
+  // an exclude-set would mean reading every bounced address on every call.
+  // apify is no longer auto-selected (APOLLO-ONLY), so the billed lead this does
+  // not avoid is confined to explicitly-apify legacy audiences; what it does
+  // avoid is the EMAIL.
+  const apifyServable = await filterBounced(
+    args.identity,
+    filterOptedOut(apifyOptOuts, apifyPeople)
+  );
   return {
     provider,
     people: apifyServable,
@@ -1174,6 +1195,18 @@ async function finalizeResolved(
       audienceId,
       emailVerdict,
     });
+  }
+  // Hard bounce on one of OUR sends, fleet-wide — the last line, for a person
+  // whose key we had never tied to this address before (so the free-teaser gate
+  // could not match). The credit is spent; what this prevents is the email. It
+  // runs AFTER recordServe on purpose: the recorded serve ties this provider
+  // person id to the address, so the next request — any org — drops them on the
+  // free teaser instead of paying again.
+  if (await isEmailBounced(identity, person.email)) {
+    console.log(
+      `[human-service] bounce.blocked_post_reveal org=${identity.orgId} provider=${provider}`
+    );
+    return { provider, person: null };
   }
   if (!servable) {
     console.log(

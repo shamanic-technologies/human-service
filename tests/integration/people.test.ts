@@ -21,6 +21,12 @@ vi.mock("../../src/lib/lead-won.js", () => ({
   WonLeadsSourceError: class WonLeadsSourceError extends Error {},
   WonLeadsConfigError: class WonLeadsConfigError extends Error {},
 }));
+// The fleet-wide hard-bounce gate has its own suite (bounces.test.ts /
+// audiences-bounce.test.ts); here it is a no-op.
+vi.mock("../../src/services/bounces.js", () => ({
+  filterBounced: vi.fn(async (_identity: unknown, items: unknown[]) => items),
+  isEmailBounced: vi.fn(async () => false),
+}));
 vi.mock("../../src/lib/instantly-optouts.js", () => ({
   listStandingOptOutEmails: vi.fn(async () => []),
   isEmailOptedOut: vi.fn(async () => false),
