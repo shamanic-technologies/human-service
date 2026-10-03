@@ -3541,6 +3541,79 @@
           "outcomes"
         ]
       },
+      "CompetitorEngagementSweepResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "scanned": {
+            "type": "integer"
+          },
+          "created": {
+            "type": "integer"
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "orgId": {
+                  "type": "string"
+                },
+                "brandId": {
+                  "type": "string"
+                },
+                "offerId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "created",
+                    "exists",
+                    "no_pages",
+                    "not_computed",
+                    "failed",
+                    "would_ensure",
+                    "skipped"
+                  ]
+                },
+                "reason": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "audienceId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "pages": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "orgId",
+                "brandId",
+                "offerId",
+                "action",
+                "reason",
+                "audienceId",
+                "pages"
+              ]
+            }
+          }
+        },
+        "required": [
+          "dryRun",
+          "scanned",
+          "created",
+          "entries"
+        ]
+      },
       "ResolveAudiencesResponse": {
         "type": "object",
         "properties": {
@@ -8288,6 +8361,68 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AudienceRefillResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "Already running or migrations not ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/competitor-engagement-audiences": {
+      "post": {
+        "summary": "Run the competitor-engagement sweep now: every brand with an active audience and no linkedin_engagement audience on its main offer, whose billing can charge it, gets one active audience of the people who recently engaged with up to 3 competitor LinkedIn company pages (pages from brand-service). Free to create: no count, no harvest, no reveal. Spend only happens when a campaign serves it. Also runs every 6 hours.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', read billing and report WITHOUT creating or spending. Defaults to false."
+            },
+            "required": false,
+            "description": "When 'true', read billing and report WITHOUT creating or spending. Defaults to false.",
+            "name": "dryRun",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Only this brand."
+            },
+            "required": false,
+            "description": "Only this brand.",
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sweep result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompetitorEngagementSweepResponse"
                 }
               }
             }

@@ -9,6 +9,7 @@ import methodologyRoutes from "./routes/methodology.js";
 import transferBrandRoutes from "./routes/transfer-brand.js";
 import backfillRoutes from "./routes/backfill.js";
 import audienceRefillRoutes from "./routes/audience-refill.js";
+import competitorEngagementRoutes from "./routes/competitor-engagement.js";
 import listsRoutes from "./routes/lists.js";
 import peopleRoutes from "./routes/people.js";
 import audiencesRoutes from "./routes/audiences.js";
@@ -18,6 +19,7 @@ import suppressionBackfillRoutes from "./routes/suppression-backfill.js";
 import { register as runInstrumentation } from "./instrumentation.js";
 import { startOfferAttributionSweep } from "./services/offer-attribution-sweep.js";
 import { startAudienceRefillSweep } from "./services/audience-refill.js";
+import { startCompetitorEngagementSweep } from "./services/competitor-engagement-audience.js";
 
 // Process-level safety net: a single request must NEVER crash-loop the whole
 // service. Before this, an unawaited async rejection (e.g. a bad `uuid` param →
@@ -54,6 +56,7 @@ app.use(methodologyRoutes);
 app.use(transferBrandRoutes);
 app.use(backfillRoutes);
 app.use(audienceRefillRoutes);
+app.use(competitorEngagementRoutes);
 app.use(suppressionRecoveryRoutes);
 app.use(listsRoutes);
 app.use(peopleRoutes);
@@ -95,6 +98,11 @@ if (process.env.NODE_ENV !== "test") {
   // Audience refill (human-service#285): a paying brand running low on people
   // left to contact gets new audiences matching its target. Timers only.
   startAudienceRefillSweep();
+
+  // Competitor-engagement audience for every chargeable brand that has none
+  // yet (existing brands, and brands whose competitors were not computed at
+  // launch). Free to create. Timers only.
+  startCompetitorEngagementSweep();
 }
 
 export default app;
