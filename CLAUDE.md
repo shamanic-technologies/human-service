@@ -1364,7 +1364,7 @@ When a customer pays they have validated ONE thing, the ICP text; campaign-servi
 spends the brand's one daily budget on whichever audience earns best, so the
 launch needs several ACTIVE audiences from that text. Owner (2026-10-03): the
 customer validates only the ICP; we pick the mix. `src/services/audience-portfolio.ts`.
-Body `{brandId, offerId, targetAudience}` → `{portfolioId, replayed, target,
+Body `{brandId, offerId, targetAudience}` → `{portfolioId, status, replayed, target,
 audiences[] (AudienceSchema + kind cold|signal, signal {type, windowDays}|null,
 adopted), signals[] ({type, windowDays, outcome created|below_threshold|failed,
 people, companies, companiesExact, audienceId, reason})}`.
@@ -1388,11 +1388,19 @@ people, companies, companiesExact, audienceId, reason})}`.
   signal's `failed` outcome, logged loud; the cold audiences still ship.
 - **One nl_prompt for all** (the pre-pay screen's target): adopted rows keep
   theirs when they share one, else every row gets one fresh `draftAudienceTarget`.
+- **Answers fast, finishes in the background.** The call returns once the cold
+  audiences exist (`status:"building"`, signals `[]`; ~15s when the split is
+  written, ~1s when adopted). The signal part waits on the ICP exploration
+  (minutes: apollo-service bounds it at 210s, plus the chooser and the coverage
+  walk), so it runs after the response and flips the record to `ready`; the
+  caller reads it by calling again. A disconnecting caller stops nothing.
 - **Idempotent** via `audience_portfolios` (migration `0032`, unique
   `(org_id, brand_id, offer_id)`): `ready` ⟹ a replay returns the recorded set
-  (`replayed:true`), creates nothing; a concurrent call joins the in-flight
-  launch; a crashed `building` launch resumes from its recorded cold ids / ICP
-  pointer. A first call takes minutes (the ICP exploration, ~150s measured).
+  (`replayed:true`), creates nothing; a call while the cold part runs joins it,
+  while the signals run reads the current state; a launch a process restart cut
+  short (`building`, no background in flight) is resumed by the next call from
+  its recorded cold ids / ICP pointer. `settlePortfolioBackground()` awaits the
+  background (tests).
 - **No repeat across the portfolio**: per-brand suppression already excludes a
   person served under one audience from every other one pre-pay, and the
   reveal-side check is now ONE atomic claim (`claimServe` in `suppression.ts`:

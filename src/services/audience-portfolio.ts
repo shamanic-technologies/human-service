@@ -29,10 +29,13 @@
 // (brand_suppressions), so a person served under one audience is excluded,
 // before any reveal is paid, under every other audience of the brand.
 //
-// Idempotent per (org, brand, offer) through `audience_portfolios`: a replay of
-// a finished launch returns the recorded set and creates nothing; a replay
-// while one is in flight in this process joins it; a launch that crashed
-// half-way is resumed from what it recorded (cold set, ICP pointer).
+// The call answers once the COLD audiences exist (status `building`); the
+// signal part (one Apollo exploration of the whole ICP: minutes) finishes in the
+// background and flips the record to `ready`. Idempotent per (org, brand, offer)
+// through `audience_portfolios`: a replay returns the recorded set and creates
+// nothing; a call while one is in flight in this process joins it; a launch
+// that crashed half-way (process restart) is resumed from what it recorded
+// (cold set, ICP pointer) by the next call.
 //
 // Failure split (brief no-gos): a failure of the COLD part fails the call loud;
 // a failure of any SIGNAL read is recorded as that signal's `failed` outcome,
@@ -130,6 +133,9 @@ export interface PortfolioAudience {
 
 export interface PortfolioResult {
   portfolioId: string;
+  /** building = cold audiences live, signal audiences still being measured;
+   * ready = every signal has its outcome. */
+  status: "building" | "ready";
   replayed: boolean;
   target: string | null;
   audiences: PortfolioAudience[];
@@ -145,17 +151,34 @@ export interface LaunchPortfolioArgs {
   identity: Identity;
 }
 
-const inFlight = new Map<string, Promise<PortfolioResult>>();
+type IcpBase = { ok: true; id: string } | { ok: false; reason: string };
+
+// The call answers as soon as the COLD audiences exist (seconds); the signal
+// part waits on one Apollo exploration of the whole ICP (minutes, up to
+// apollo-service's 210s bound plus the chooser and the coverage walk), so it
+// finishes in the background and a replay reads it back. A caller that times
+// out or disconnects changes nothing: both phases run to completion server-side.
+const coldInFlight = new Map<string, Promise<PortfolioResult>>();
+const signalsInFlight = new Map<string, Promise<void>>();
 
 export async function launchAudiencePortfolio(
   args: LaunchPortfolioArgs
 ): Promise<PortfolioResult> {
-  const key = `${args.orgId}:${args.brandId}:${args.offerId}`;
-  const running = inFlight.get(key);
+  const key = scopeKey(args);
+  const running = coldInFlight.get(key);
   if (running) return running.then((r) => ({ ...r, replayed: true }));
-  const launch = runLaunch(args).finally(() => inFlight.delete(key));
-  inFlight.set(key, launch);
+  const launch = runLaunch(args, key).finally(() => coldInFlight.delete(key));
+  coldInFlight.set(key, launch);
   return launch;
+}
+
+/** Resolves once every background signal phase of this process has settled. */
+export async function settlePortfolioBackground(): Promise<void> {
+  await Promise.allSettled([...signalsInFlight.values()]);
+}
+
+function scopeKey(a: { orgId: string; brandId: string; offerId: string }): string {
+  return `${a.orgId}:${a.brandId}:${a.offerId}`;
 }
 
 async function loadPortfolio(args: LaunchPortfolioArgs): Promise<PortfolioRow | undefined> {
@@ -172,9 +195,11 @@ async function loadPortfolio(args: LaunchPortfolioArgs): Promise<PortfolioRow | 
   return row;
 }
 
-async function runLaunch(args: LaunchPortfolioArgs): Promise<PortfolioResult> {
+async function runLaunch(args: LaunchPortfolioArgs, key: string): Promise<PortfolioResult> {
   const existing = await loadPortfolio(args);
   if (existing?.status === "ready") return readPortfolio(existing, true);
+  // Signals still running in this process: report where the launch stands.
+  if (existing?.coldAudienceIds && signalsInFlight.has(key)) return readPortfolio(existing, true);
   if (!existing) {
     await db
       .insert(audiencePortfolios)
@@ -192,7 +217,8 @@ async function runLaunch(args: LaunchPortfolioArgs): Promise<PortfolioResult> {
   const icpText = portfolio.icpText;
 
   // chat-service and apollo-service require an x-run-id: open our own,
-  // org-billed, when the caller sent none.
+  // org-billed, when the caller sent none. It closes when the background
+  // signal phase ends.
   const tracking = { ...(args.identity.workflowTracking ?? {}), brandIds: [args.brandId] };
   let identity: Identity = { ...args.identity, orgId: args.orgId, userId: args.userId, workflowTracking: tracking };
   let ownRunId: string | null = null;
@@ -209,70 +235,84 @@ async function runLaunch(args: LaunchPortfolioArgs): Promise<PortfolioResult> {
     identity = { ...identity, runId: ownRunId };
   }
   const runIdentity = { orgId: args.orgId, userId: args.userId, workflowTracking: tracking };
-  try {
-    const result = await buildPortfolio(portfolio, icpText, args, identity);
-    if (ownRunId) await completeRun(ownRunId, "completed", runIdentity);
-    return result;
-  } catch (err) {
-    if (ownRunId) await completeRun(ownRunId, "failed", runIdentity);
-    throw err;
-  }
-}
+  const closeRun = async (status: "completed" | "failed") => {
+    if (ownRunId) await completeRun(ownRunId, status, runIdentity);
+  };
 
-async function buildPortfolio(
-  portfolio: PortfolioRow,
-  icpText: string,
-  args: LaunchPortfolioArgs,
-  identity: Identity
-): Promise<PortfolioResult> {
   // The ICP's apollo audience only feeds the signals, so it is built alongside
-  // the cold part (it takes minutes; the split takes seconds). Its failure is a
-  // signal failure, never the launch's: settle it into a value right away.
-  const icpBase: Promise<{ ok: true; id: string } | { ok: false; reason: string }> =
-    portfolio.icpApolloAudienceId
-      ? Promise.resolve({ ok: true, id: portfolio.icpApolloAudienceId })
-      : buildIcpApolloAudience(icpText, args.brandId, identity).then(
-          async (id) => {
-            await db
-              .update(audiencePortfolios)
-              .set({ icpApolloAudienceId: id, updatedAt: new Date() })
-              .where(eq(audiencePortfolios.id, portfolio.id));
-            return { ok: true as const, id };
-          },
-          (err) => ({ ok: false as const, reason: errMessage(err) })
-        );
+  // the cold part. Its failure is a signal failure, never the launch's: settle
+  // it into a value right away (no unhandled rejection if the cold part throws).
+  const icpBase: Promise<IcpBase> = portfolio.icpApolloAudienceId
+    ? Promise.resolve({ ok: true, id: portfolio.icpApolloAudienceId })
+    : buildIcpApolloAudience(icpText, args.brandId, identity).then(
+        async (id) => {
+          await db
+            .update(audiencePortfolios)
+            .set({ icpApolloAudienceId: id, updatedAt: new Date() })
+            .where(eq(audiencePortfolios.id, portfolio.id));
+          return { ok: true as const, id };
+        },
+        (err) => ({ ok: false as const, reason: errMessage(err) })
+      );
 
   let coldIds = portfolio.coldAudienceIds;
   let target = portfolio.target;
   if (!coldIds) {
-    const cold = await buildColdAudiences(icpText, args, identity);
-    coldIds = cold.ids;
-    target = cold.target;
+    try {
+      const cold = await buildColdAudiences(icpText, args, identity);
+      coldIds = cold.ids;
+      target = cold.target;
+    } catch (err) {
+      await closeRun("failed");
+      throw err;
+    }
     await db
       .update(audiencePortfolios)
       .set({ coldAudienceIds: coldIds, target, updatedAt: new Date() })
       .where(eq(audiencePortfolios.id, portfolio.id));
   }
 
-  const base = await icpBase;
-  const signals = await buildSignalAudiences({
-    base,
-    target,
-    args,
-    identity,
-    portfolioId: portfolio.id,
-  });
-  const [done] = await db
-    .update(audiencePortfolios)
-    .set({ signals: signals as unknown as Array<Record<string, unknown>>, status: "ready", updatedAt: new Date() })
-    .where(eq(audiencePortfolios.id, portfolio.id))
-    .returning();
-  console.log(
-    `[human-service] audience_portfolio.ready org=${args.orgId} brand=${args.brandId} offer=${args.offerId} cold=${coldIds.length} signals=${signals
-      .map((s) => `${s.type}:${s.outcome}${s.companies !== null ? `(${s.companies}co)` : ""}`)
-      .join(",")}`
-  );
-  return readPortfolio(done, false);
+  const background = finishSignals({ portfolio, icpBase, target, args, identity, closeRun })
+    .catch((err) =>
+      // The row stays `building` with its cold set: the next call resumes.
+      console.error(`[human-service] audience_portfolio.background_failed portfolio=${portfolio.id}`, err)
+    )
+    .finally(() => signalsInFlight.delete(key));
+  signalsInFlight.set(key, background);
+
+  return readPortfolio({ ...portfolio, coldAudienceIds: coldIds, target, status: "building" }, Boolean(existing));
+}
+
+async function finishSignals(input: {
+  portfolio: PortfolioRow;
+  icpBase: Promise<IcpBase>;
+  target: string | null;
+  args: LaunchPortfolioArgs;
+  identity: Identity;
+  closeRun: (status: "completed" | "failed") => Promise<void>;
+}): Promise<void> {
+  const { portfolio, args } = input;
+  try {
+    const signals = await buildSignalAudiences({
+      base: await input.icpBase,
+      target: input.target,
+      args,
+      identity: input.identity,
+    });
+    await db
+      .update(audiencePortfolios)
+      .set({ signals: signals as unknown as Array<Record<string, unknown>>, status: "ready", updatedAt: new Date() })
+      .where(eq(audiencePortfolios.id, portfolio.id));
+    console.log(
+      `[human-service] audience_portfolio.ready org=${args.orgId} brand=${args.brandId} offer=${args.offerId} ms=${Date.now() - portfolio.createdAt.getTime()} signals=${signals
+        .map((s) => `${s.type}:${s.outcome}${s.companies !== null ? `(${s.companies}co)` : ""}`)
+        .join(",")}`
+    );
+    await input.closeRun("completed");
+  } catch (err) {
+    await input.closeRun("failed");
+    throw err;
+  }
 }
 
 /**
@@ -409,7 +449,6 @@ async function buildSignalAudiences(input: {
   target: string | null;
   args: LaunchPortfolioArgs;
   identity: Identity;
-  portfolioId: string;
 }): Promise<SignalOutcome[]> {
   const { base, args, identity } = input;
   const failedAll = (reason: string): SignalOutcome[] => {
@@ -577,7 +616,14 @@ async function readPortfolio(p: PortfolioRow, replayed: boolean): Promise<Portfo
     if (!row) continue;
     out.push({ row, kind: "signal", signal: { type: s.type, windowDays: s.windowDays }, adopted: false });
   }
-  return { portfolioId: p.id, replayed, target: p.target, audiences: out, signals };
+  return {
+    portfolioId: p.id,
+    status: p.status === "ready" ? "ready" : "building",
+    replayed,
+    target: p.target,
+    audiences: out,
+    signals,
+  };
 }
 
 function errMessage(err: unknown): string {

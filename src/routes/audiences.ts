@@ -453,6 +453,7 @@ router.post(
     }
     res.json({
       portfolioId: result.portfolioId,
+      status: result.status,
       brandId: parsed.data.brandId,
       offerId: parsed.data.offerId,
       replayed: result.replayed,
