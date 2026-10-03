@@ -12,6 +12,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { isOptOutUrl, optOutResponse, setOptOutEnv } from "../helpers/opt-outs.js";
+import { bounceResponse, isBounceUrl } from "../helpers/bounces.js";
 import { isWonLeadsUrl, setWonLeadsEnv, wonLeadsResponse } from "../helpers/won-leads.js";
 import { db } from "../../src/db/index.js";
 import { brandSuppressions, people } from "../../src/db/schema.js";
@@ -38,7 +39,11 @@ beforeEach(async () => {
   // The brand's won set (lead-service) is answered ahead of the spy — empty, so
   // this suite stays about opt-outs.
   vi.stubGlobal("fetch", async (url: string, init: { body?: string }) =>
-    isWonLeadsUrl(url) ? ok(wonLeadsResponse(url)) : fetchSpy(url, init)
+    isWonLeadsUrl(url)
+      ? ok(wonLeadsResponse(url))
+      : isBounceUrl(url)
+        ? ok(bounceResponse(init?.body, []))
+        : fetchSpy(url, init)
   );
   fetchSpy.mockReset();
   standingOptOuts = [];

@@ -61,6 +61,7 @@ section — the port binds first).
 | Internal | `POST /internal/recover-suppressions/revert` | apiKey | Undo a recovery: restore every archived suppression row carrying `reason` verbatim + drop the ledger rows. A person re-suppressed by a fresh serve keeps the newer row |
 | Internal | `POST /internal/backfill-sent-suppressions` | apiKey | One-time data repair (the INVERSE of the recovery above): for a caller-supplied set of `{orgId, brandId, email, sentAt}`, create the missing `brand_suppressions` row dated from the REAL send, so people actually EMAILED before per-brand suppression existed (2026-06-15) stop being re-served and re-bought for the remainder of their own window. Idempotent (reversible `suppression_backfills` ledger keyed on `reason`), `?dryRun=true`. Dedicated **25 MB** body parser. NOT a sweep — the set is supplied, never inferred, and never derived from bare serves |
 | Internal | `POST /internal/backfill-sent-suppressions/revert` | apiKey | Undo a backfill: delete exactly the suppression rows that `reason` created + drop the ledger rows. A row re-served since (its `last_served_at` moved) records a real emission and is kept |
+| Internal | `POST /internal/audience-refill` | apiKey | Run the audience refill now (`?dryRun=true` reports who WOULD be refilled, spending nothing; `?brandId=` narrows). See "Audience refill" below |
 | Internal | `POST /internal/audiences/resolve` | apiKey | **Bulk server-to-server audience resolver** for lead-service (#166): body `{orgId, brandId, audienceIds?, emails?}` → `{byAudienceId, byEmail}` maps of `{id,name,avatarUrl}` \| null. Brand-correct + active-preferred (deprecated→canonical), keyed by audienceId AND/OR email (historical coverage). Dedicated **25 MB** body parser (mounts before the global 100 KB json) — NO browser 413 cap. See below. |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
@@ -413,6 +414,34 @@ one in `src/services/opt-outs.ts` (`loadServeExclusions`,
   call time. Tests: `tests/integration/audiences-won-leads.test.ts`; every other
   serving suite answers the call through `tests/helpers/won-leads.ts` or a
   `vi.mock` of the client.
+
+### Hard bounces — "our own send to this address bounced" (#73)
+
+A bounce is a fact about the ADDRESS, not a sender's consent, so the gate is
+**fleet-wide**: any org, any brand, with or without a brand on the request,
+permanent. `src/lib/instantly-bounces.ts` is the client, `src/services/bounces.ts`
+the gate (`filterBounced`, `isEmailBounced`).
+
+- **instantly-service OWNS the record** (`POST /internal/bounced-emails`, `{emails}`
+  ≤1000 → `{bounced:[{email, firstBouncedAt}]}`, not org-scoped). It records only
+  PERMANENT failures (temporary delays never promoted / retracted), so every row
+  is treated as a hard bounce. Read live, never stored here.
+- **Resolution is local and CROSS-ORG**: a teaser's apollo person id / linkedin url
+  is looked up in `people` (any org) and `lead_serves.provider_person_id` (any org)
+  to find the address already revealed for it, then the owner is asked. Indexed by
+  migration `0031` (the org-leading indexes cannot serve a key-only lookup). No
+  resolvable address ⟹ no call to the owner. Prod 2026-10-03: 272 of 276
+  served-after-bounce addresses resolved through a `people` apollo id.
+- **Gates, in money order**: apollo teaser filter in `peopleSearch` (a page fully
+  dropped keeps walking the free cursor); serve-next POP-time re-check; apify
+  returned-batch filter only (no push-down: it would need the whole fleet list
+  per call, and apify is not auto-selected); `finalizeResolved` post-reveal,
+  placed AFTER `recordServe` so the bronze row ties the key to the address for the
+  next request; crm branch (`isEmailBounced` per contact).
+- **Fail loud**: `BounceSourceError` / `BounceConfigError` → **502**
+  (`source: "instantly-service"`). Same env vars as opt-outs. Tests:
+  `tests/integration/audiences-bounce.test.ts`, `tests/unit/instantly-bounces.test.ts`;
+  serving suites answer via `tests/helpers/bounces.ts` or `vi.mock` the gate.
 
 ### Suppression recovery — `POST /internal/recover-suppressions`
 
@@ -1326,6 +1355,51 @@ audiences may coexist for one brand.
   does not let an already-served person come back through another file: a person in
   two files is sendable once for the brand. human-service records no crm
   suppression, unchanged. **No cost** declared here either.
+
+### Audience refill — a paying brand never runs dry (`src/services/audience-refill.ts`)
+
+human-service#285. When a brand whose billing can pay runs low on people left to
+contact, NEW audiences matching its target are created before the pool hits zero.
+Runs every 6h (first tick 10 min after boot, timers only, never on the boot path;
+`AUDIENCE_REFILL_INTERVAL_MS=0` is the off switch) and on demand via
+`POST /internal/audience-refill`.
+
+- **Low pool** = sum of `availableToContactCount` (the list's "Remaining") over the
+  brand's ACTIVE audiences < `RUNWAY_DAYS` (7) x its daily pace. Pace = serves
+  (verdict `valid` or NULL) over the last 14 days / distinct days served, so a
+  client who stopped campaigns keeps the pace they ran at. No serve in 14 days ⟹
+  no pace ⟹ never low. A brand with an active audience still waiting for its
+  Apollo build, or a CRM audience (no provider count), is UNMEASURABLE and skipped,
+  never read as empty.
+- **Billing gate** (`src/lib/billing-outlook.ts`): billing-service
+  `GET /internal/accounts/by-org/{orgId}/payment-outlook`; only `will_charge` /
+  `charge_due_now` pass. `idle`, `no_autopay`, `charge_blocked`, `unknown`, a 404
+  and an unreadable outlook all get nothing (owner rule: never spend for a client
+  who cannot be charged). Read BEFORE anything spends. Env: `BILLING_SERVICE_URL`,
+  `BILLING_SERVICE_API_KEY`.
+- **New people = new audiences, never an edited one** (an audience is immutable).
+  Same path a human uses: `proposeAudienceSplit` asked for the NEXT closest
+  buyers of what the offer sells (other roles in the same kind of companies, or
+  adjacent kinds of companies, same places), outside every audience the brand
+  already holds under that offer. Asking for "the same target minus these" made
+  the split answer ZERO segments for ObraCam (prod 2026-10-02): its audiences
+  already covered the whole target. The new rows' `nl_prompt` (screen target) is
+  re-drafted by `draftAudienceTarget` from the old target + the new segments, so
+  the pre-pay screen does not reject the widened people. Then
+  `confirmAudienceSplit` (`source='auto_refill'`, born `active`, same offer,
+  billed under the latest audience creator),
+  then `ensureApolloPointer` per row in the background. A colliding name gets a
+  date suffix.
+- **Cost**: org-billed, declared where incurred: the split's LLM calls in
+  chat-service under an `audience-refill` run, each Apollo build in apollo-service
+  under its own `audience-pointer-build` run. human-service declares none.
+- **One refill per brand per 3 days** (`REFILL_COOLDOWN_DAYS`, keyed on
+  `auto_refill` rows), so a genuinely dry market is not re-billed every tick.
+- **Never touches a campaign.** Restarting is the client's call.
+- Known limit: a new audience's Remaining is its Apollo count until served, so
+  people it shares with older audiences (already suppressed) read as remaining
+  until serve-next walks past them for free.
+- Tests: `tests/unit/audience-refill.test.ts`, `tests/integration/audience-refill.test.ts`.
 
 ### Avatar — `POST /orgs/audiences/{id}/avatar`
 

@@ -2266,6 +2266,56 @@ registry.registerPath({
   },
 });
 
+// --- Internal: audience refill (human-service#285) ---
+export const AudienceRefillQuerySchema = z.object({
+  dryRun: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({
+      description:
+        "When 'true', measure pools, read billing and report who would be refilled WITHOUT spending or writing. Defaults to false (real run).",
+    }),
+  brandId: z.string().uuid().optional().openapi({ description: "Only this brand." }),
+});
+
+const RefillOutcomeSchema = z.object({
+  orgId: z.string(),
+  brandId: z.string(),
+  remaining: z.number().int(),
+  dailyPace: z.number(),
+  billingState: z.string().nullable(),
+  action: z.enum(["refilled", "would_refill", "skipped"]),
+  reason: z.string().nullable(),
+  detail: z.string().nullable(),
+  created: z.array(
+    z.object({ id: z.string().uuid(), name: z.string(), description: z.string().nullable() })
+  ),
+});
+
+export const AudienceRefillResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    scanned: z.number().int(),
+    low: z.number().int(),
+    refilled: z.number().int(),
+    outcomes: z.array(RefillOutcomeSchema),
+  })
+  .openapi("AudienceRefillResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/audience-refill",
+  summary:
+    "Run the audience refill now: every brand served in the last 14 days whose people left to contact across its active audiences cover less than 7 days of its own pace, and whose billing can charge it (will_charge / charge_due_now), gets NEW active audiences matching its existing target (split + Apollo build, org-billed). Never edits an audience, never starts a campaign. At most once per brand per 3 days.",
+  security: [{ apiKey: [] }],
+  request: { query: AudienceRefillQuerySchema },
+  responses: {
+    200: { description: "Refill result", content: { "application/json": { schema: AudienceRefillResponseSchema } } },
+    401: { description: "Unauthorized" },
+    409: { description: "Already running or migrations not ready", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 // --- Internal: bulk audience resolver for lead-service (by id and/or email) ---
 //
 // Server-to-server, service-auth, NO browser body cap (dedicated 25 MB parser).

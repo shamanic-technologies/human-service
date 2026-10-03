@@ -61,6 +61,10 @@ import {
   WonLeadsConfigError,
   WonLeadsSourceError,
 } from "../lib/lead-won.js";
+import {
+  BounceConfigError,
+  BounceSourceError,
+} from "../lib/instantly-bounces.js";
 
 import { crmListUploads } from "../lib/crm-contacts.js";
 import { getAudiencePreview } from "../services/audience-preview.js";
@@ -136,6 +140,16 @@ function sendProviderError(
     // rather than serving somebody who may have asked us to stop.
     console.error(
       `[human-service] audiences.opt_out_source_error ${err.name}: ${err.message}`
+    );
+    res.status(502).json({ error: err.message, source: "instantly-service" });
+    return;
+  }
+  if (err instanceof BounceConfigError || err instanceof BounceSourceError) {
+    // The serve path could not read the fleet's bounce record. Same posture as
+    // the consent log: never serve through a gate that cannot read its own
+    // input — an empty answer would hand back an address we know is dead.
+    console.error(
+      `[human-service] audiences.bounce_source_error ${err.name}: ${err.message}`
     );
     res.status(502).json({ error: err.message, source: "instantly-service" });
     return;

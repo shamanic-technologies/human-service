@@ -3320,6 +3320,105 @@
           "assignments"
         ]
       },
+      "AudienceRefillResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "scanned": {
+            "type": "integer"
+          },
+          "low": {
+            "type": "integer"
+          },
+          "refilled": {
+            "type": "integer"
+          },
+          "outcomes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "orgId": {
+                  "type": "string"
+                },
+                "brandId": {
+                  "type": "string"
+                },
+                "remaining": {
+                  "type": "integer"
+                },
+                "dailyPace": {
+                  "type": "number"
+                },
+                "billingState": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "refilled",
+                    "would_refill",
+                    "skipped"
+                  ]
+                },
+                "reason": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "detail": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "created": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "name",
+                      "description"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "orgId",
+                "brandId",
+                "remaining",
+                "dailyPace",
+                "billingState",
+                "action",
+                "reason",
+                "detail",
+                "created"
+              ]
+            }
+          }
+        },
+        "required": [
+          "dryRun",
+          "scanned",
+          "low",
+          "refilled",
+          "outcomes"
+        ]
+      },
       "ResolveAudiencesResponse": {
         "type": "object",
         "properties": {
@@ -7721,6 +7820,68 @@
           },
           "502": {
             "description": "brand-service missing config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/audience-refill": {
+      "post": {
+        "summary": "Run the audience refill now: every brand served in the last 14 days whose people left to contact across its active audiences cover less than 7 days of its own pace, and whose billing can charge it (will_charge / charge_due_now), gets NEW active audiences matching its existing target (split + Apollo build, org-billed). Never edits an audience, never starts a campaign. At most once per brand per 3 days.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', measure pools, read billing and report who would be refilled WITHOUT spending or writing. Defaults to false (real run)."
+            },
+            "required": false,
+            "description": "When 'true', measure pools, read billing and report who would be refilled WITHOUT spending or writing. Defaults to false (real run).",
+            "name": "dryRun",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Only this brand."
+            },
+            "required": false,
+            "description": "Only this brand.",
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Refill result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudienceRefillResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "Already running or migrations not ready",
             "content": {
               "application/json": {
                 "schema": {

@@ -8,6 +8,7 @@ import humanRoutes from "./routes/humans.js";
 import methodologyRoutes from "./routes/methodology.js";
 import transferBrandRoutes from "./routes/transfer-brand.js";
 import backfillRoutes from "./routes/backfill.js";
+import audienceRefillRoutes from "./routes/audience-refill.js";
 import listsRoutes from "./routes/lists.js";
 import peopleRoutes from "./routes/people.js";
 import audiencesRoutes from "./routes/audiences.js";
@@ -16,6 +17,7 @@ import suppressionRecoveryRoutes from "./routes/suppression-recovery.js";
 import suppressionBackfillRoutes from "./routes/suppression-backfill.js";
 import { register as runInstrumentation } from "./instrumentation.js";
 import { startOfferAttributionSweep } from "./services/offer-attribution-sweep.js";
+import { startAudienceRefillSweep } from "./services/audience-refill.js";
 
 // Process-level safety net: a single request must NEVER crash-loop the whole
 // service. Before this, an unawaited async rejection (e.g. a bad `uuid` param →
@@ -51,6 +53,7 @@ app.use(humanRoutes);
 app.use(methodologyRoutes);
 app.use(transferBrandRoutes);
 app.use(backfillRoutes);
+app.use(audienceRefillRoutes);
 app.use(suppressionRecoveryRoutes);
 app.use(listsRoutes);
 app.use(peopleRoutes);
@@ -88,6 +91,10 @@ if (process.env.NODE_ENV !== "test") {
   // Arming it only SCHEDULES timers (first tick is delayed, every tick is
   // fire-and-forget), so it never touches the network on the boot path.
   startOfferAttributionSweep();
+
+  // Audience refill (human-service#285): a paying brand running low on people
+  // left to contact gets new audiences matching its target. Timers only.
+  startAudienceRefillSweep();
 }
 
 export default app;
