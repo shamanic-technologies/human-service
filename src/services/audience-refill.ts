@@ -46,6 +46,7 @@ import {
   type PaymentOutlook,
 } from "../lib/billing-outlook.js";
 import { computeAudienceContactability, ensureApolloPointer, needsApolloPointerBuild } from "./audiences.js";
+import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import { confirmAudienceSplit, proposeAudienceSplit } from "./audience-split.js";
 import { draftAudienceTarget } from "./audience-target.js";
 import { listBrandOffers } from "../lib/brand-offers.js";
@@ -88,7 +89,7 @@ export interface BrandPool {
   dailyPace: number;
   low: boolean;
   /** Why the pool could not be measured. Null when it was. */
-  unmeasurable: "pointer_build_pending" | "crm_audience" | "no_active_audience" | null;
+  unmeasurable: "pointer_build_pending" | "crm_audience" | "linkedin_engagement_unsized" | "no_active_audience" | null;
 }
 
 /**
@@ -138,6 +139,12 @@ export async function loadBrandPools(opts: { brandId?: string } = {}): Promise<B
     // the file holds: the pool is unknown, never "empty".
     if (active.some((a) => a.provider === "crm" || a.crmUploadId)) {
       pools.push({ ...base, remaining: 0, low: false, unmeasurable: "crm_audience" });
+      continue;
+    }
+    // A linkedin_engagement audience has no provider count: its pool is unknown
+    // until serve-next walks it, never "empty".
+    if (active.some((a) => isLinkedinEngagementFilters(a.filters) && a.reachableCount == null)) {
+      pools.push({ ...base, remaining: 0, low: false, unmeasurable: "linkedin_engagement_unsized" });
       continue;
     }
     // An audience whose Apollo build has not landed has no count yet (it reads

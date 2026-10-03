@@ -564,3 +564,74 @@ export async function createApolloSignalAudience(args: {
   }
   return { apolloAudienceId: o.apolloAudienceId, filters: filters as ApolloFilters, count: o.count };
 }
+
+// --- linkedin_engagement: competitor LinkedIn post engagers (apollo-service v0.39.29) ---
+// The fourth buying signal is NOT an Apollo search: its people are the people who
+// reacted to / commented on a competitor company page's recent posts. apollo-service
+// owns the criterion, the harvest, the per-audience no-repeat and the spend; its
+// stored filters are exactly `{buying_signal: {type: "linkedin_engagement",
+// window_days, competitor_pages}}`, forwarded verbatim to /search/next like every
+// pointer audience. There is no Apollo count, dry-run or preview for it (a named
+// 400 there), so every count/preview path here must skip such an audience.
+
+export const LINKEDIN_ENGAGEMENT_SIGNAL = "linkedin_engagement" as const;
+
+/** True when an audience's stored (opaque) filters carry the linkedin_engagement signal. */
+export function isLinkedinEngagementFilters(filters: unknown): boolean {
+  if (!filters || typeof filters !== "object" || Array.isArray(filters)) return false;
+  const signal = (filters as Record<string, unknown>).buying_signal;
+  return (
+    !!signal &&
+    typeof signal === "object" &&
+    (signal as Record<string, unknown>).type === LINKEDIN_ENGAGEMENT_SIGNAL
+  );
+}
+
+// POST /audiences/signal with type linkedin_engagement. The base is inline
+// `filters` (normally `{}`): apollo-service refuses Apollo filters beside this
+// signal with a NAMED 400, and validates the competitor pages itself — so both
+// are forwarded verbatim and its 4xx surfaces as a ProviderError the route
+// relays. `count` is null by contract (no Apollo count exists for this kind).
+export async function createApolloLinkedinEngagementAudience(args: {
+  brandId: string;
+  name?: string;
+  windowDays: number;
+  competitorPages: string[];
+  baseFilters: Record<string, unknown>;
+  identity: Identity;
+}): Promise<{ apolloAudienceId: string; name: string; description: string; filters: ApolloFilters }> {
+  const data = await apolloPost(
+    "/audiences/signal",
+    {
+      filters: args.baseFilters,
+      brandId: args.brandId,
+      ...(args.name ? { name: args.name } : {}),
+      signal: {
+        type: LINKEDIN_ENGAGEMENT_SIGNAL,
+        windowDays: args.windowDays,
+        competitorPages: args.competitorPages,
+      },
+    },
+    args.identity
+  );
+  const o = (data ?? {}) as Record<string, unknown>;
+  if (
+    typeof o.apolloAudienceId !== "string" ||
+    o.apolloAudienceId.length === 0 ||
+    typeof o.name !== "string" ||
+    typeof o.description !== "string" ||
+    !isLinkedinEngagementFilters(o.filters)
+  ) {
+    throw new ProviderError(
+      "apollo",
+      502,
+      `apollo-service linkedin_engagement audience returned an unusable body: ${JSON.stringify(o).slice(0, 200)}`
+    );
+  }
+  return {
+    apolloAudienceId: o.apolloAudienceId,
+    name: o.name,
+    description: o.description,
+    filters: o.filters as ApolloFilters,
+  };
+}

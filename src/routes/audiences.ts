@@ -22,7 +22,9 @@ import {
   ConfirmAudienceSplitRequestSchema,
   PreviewCompaniesQuerySchema,
   LaunchAudiencePortfolioRequestSchema,
+  CreateLinkedinEngagementAudienceRequestSchema,
 } from "../schemas.js";
+import { createLinkedinEngagementAudience } from "../services/linkedin-engagement-audience.js";
 import { launchAudiencePortfolio } from "../services/audience-portfolio.js";
 import {
   proposeAudienceSplit,
@@ -469,6 +471,64 @@ router.post(
   }
 );
 
+// --- POST /orgs/audiences/signal (linkedin_engagement) ---
+// apollo-service owns the criterion and validates it; its 4xx (malformed
+// competitor pages, Apollo filters beside the signal) is relayed with its own
+// status and body so the caller sees the producer's named error, not a 502.
+router.post(
+  "/orgs/audiences/signal",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const parsed = CreateLinkedinEngagementAudienceRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+    const orgId = res.locals.orgId as string;
+    let audience;
+    try {
+      audience = await createLinkedinEngagementAudience({
+        orgId,
+        userId: res.locals.userId as string,
+        brandId: parsed.data.brandId,
+        offerId: parsed.data.offerId ?? null,
+        name: parsed.data.name,
+        nlPrompt: parsed.data.nlPrompt,
+        status: parsed.data.status ?? "active",
+        windowDays: parsed.data.signal.windowDays,
+        competitorPages: parsed.data.signal.competitorPages,
+        baseFilters: parsed.data.filters ?? {},
+        identity: { ...buildIdentity(res), brandIds: [parsed.data.brandId] },
+      });
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        res.status(409).json({
+          error: "An audience with this name already exists for this brand and offer.",
+        });
+        return;
+      }
+      if (err instanceof ProviderError && err.status >= 400 && err.status < 500) {
+        let upstream: unknown = err.body;
+        try {
+          upstream = JSON.parse(err.body);
+        } catch {
+          // non-JSON body: relay the text as-is
+        }
+        const named =
+          upstream && typeof upstream === "object" && typeof (upstream as { error?: unknown }).error === "string"
+            ? (upstream as { error: string }).error
+            : err.body;
+        res.status(err.status).json({ error: named, provider: "apollo", upstreamStatus: err.status, upstream });
+        return;
+      }
+      sendProviderError(res, err);
+      return;
+    }
+    res.status(201).json({ audience: serializeAudience(audience) });
+  }
+);
+
 // --- GET /orgs/audiences ---
 router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsedQuery = ListAudiencesQuerySchema.safeParse(req.query);
@@ -523,15 +583,17 @@ router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) 
 
   res.json({
     audiences: rows.map((row) => {
-      const c = contactability.get(row.id);
-      if (!c) {
+      if (!contactability.has(row.id)) {
         // computeAudienceContactability returns an entry for every input row;
         // a miss is an invariant break, not a case to paper over — fail loud.
         throw new Error(
           `[human-service] audience.contactability missing for ${row.id}`
         );
       }
-      return { ...serializeAudience(row), ...c };
+      const c = contactability.get(row.id);
+      // null = pool UNKNOWN (linkedin_engagement before its first exhaustion):
+      // the three figures are omitted, never served as 0 ("served out").
+      return c ? { ...serializeAudience(row), ...c } : serializeAudience(row);
     }),
     total: totalRows[0]?.value ?? 0,
     limit,
