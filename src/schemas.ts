@@ -2942,6 +2942,10 @@ const PortfolioSignalOutcomeSchema = z
 export const LaunchAudiencePortfolioResponseSchema = z
   .object({
     portfolioId: z.string().uuid(),
+    status: z.enum(["building", "ready"]).openapi({
+      description:
+        "building = the cold audiences are live and the buying-signal audiences are still being measured in the background (call again to read them; nothing is re-spent); ready = every signal has its outcome.",
+    }),
     brandId: z.string().uuid(),
     offerId: z.string().uuid(),
     replayed: z.boolean().openapi({
@@ -2949,10 +2953,10 @@ export const LaunchAudiencePortfolioResponseSchema = z
     }),
     target: z.string().nullable().openapi({ description: "The nlPrompt every portfolio audience carries." }),
     audiences: z.array(PortfolioAudienceSchema).openapi({
-      description: "Cold audiences first, then signal audiences. All created/activated ACTIVE.",
+      description: "Cold audiences first, then signal audiences (signal ones appear once status=ready). All created/activated ACTIVE.",
     }),
     signals: z.array(PortfolioSignalOutcomeSchema).openapi({
-      description: "One outcome per buying signal (hiring, job_change, funding).",
+      description: "One outcome per buying signal (hiring, job_change, funding). Empty while status=building.",
     }),
   })
   .openapi("LaunchAudiencePortfolioResponse");
@@ -2963,7 +2967,7 @@ registry.registerPath({
   summary:
     "Launch the ICP audience portfolio for a brand + offer: the cold split (adopted if already confirmed) plus one buying-signal audience per signal reaching 20+ companies, all active. Idempotent per (brand, offer).",
   description:
-    "Takes minutes on a first call (one Apollo exploration of the whole ICP). A replay, or a call while a launch for the same brand + offer is in flight, returns the same set and creates nothing. LLM and Apollo costs are declared by chat-service / apollo-service against the caller's org.",
+    "Answers once the cold audiences exist (seconds; ~15s when the split must be written) with status=building; the buying-signal audiences finish in the background (one Apollo exploration of the whole ICP, minutes). Call again with the same body to read the current state: a replay, or a call while a launch for the same brand + offer is in flight, returns the recorded set and creates nothing. A caller that disconnects does not stop the launch. LLM and Apollo costs are declared by chat-service / apollo-service against the caller's org.",
   security: [{ apiKey: [] }],
   request: {
     headers: peopleHeaders,

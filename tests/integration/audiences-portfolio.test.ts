@@ -12,6 +12,7 @@ import { db } from "../../src/db/index.js";
 import { audiences } from "../../src/db/schema.js";
 import { draftAudienceTarget } from "../../src/services/audience-target.js";
 import { proposeAudienceSplit } from "../../src/services/audience-split.js";
+import { settlePortfolioBackground } from "../../src/services/audience-portfolio.js";
 import {
   createApolloSignalAudience,
   measureSignalCoverage,
@@ -52,6 +53,17 @@ function launch(body: Record<string, unknown> = {}) {
     .post("/orgs/audiences/portfolio")
     .set(getAuthHeaders())
     .send({ brandId: BRAND, offerId: OFFER, targetAudience: ICP, ...body });
+}
+
+// First call (answers with the cold set, status building), wait for the
+// background signal phase, then read the finished portfolio back.
+async function launched(body: Record<string, unknown> = {}) {
+  const first = await launch(body);
+  expect(first.status).toBe(200);
+  await settlePortfolioBackground();
+  const done = await launch(body);
+  expect(done.body.status).toBe("ready");
+  return done;
 }
 
 function coverage(companies: { hiring: number; job_change: number; funding: number }) {
@@ -102,10 +114,24 @@ afterAll(async () => {
 });
 
 describe("POST /orgs/audiences/portfolio", () => {
+  it("answers with the cold set at once (building), then the signals land in the background", async () => {
+    const first = await launch();
+    expect(first.status).toBe(200);
+    expect(first.body.status).toBe("building");
+    expect(first.body.replayed).toBe(false);
+    expect(first.body.audiences.map((a: { kind: string }) => a.kind)).toEqual(["cold", "cold"]);
+    expect(first.body.signals).toEqual([]);
+    for (const a of first.body.audiences) expect(a.status).toBe("active");
+    await settlePortfolioBackground();
+    const done = await launch();
+    expect(done.body.status).toBe("ready");
+    expect(done.body.replayed).toBe(true);
+    expect(done.body.audiences).toHaveLength(4);
+  });
+
   it("creates the cold split + a signal audience per signal reaching 20+ companies, all ACTIVE with ONE nl_prompt", async () => {
-    const res = await launch();
+    const res = await launched();
     expect(res.status).toBe(200);
-    expect(res.body.replayed).toBe(false);
     expect(res.body.target).toBe(DRAFTED);
 
     const kinds = res.body.audiences.map((a: { name: string; kind: string }) => `${a.kind}:${a.name}`);
@@ -141,7 +167,7 @@ describe("POST /orgs/audiences/portfolio", () => {
   });
 
   it("a replay returns the same set and creates nothing new", async () => {
-    const first = await launch();
+    const first = await launched();
     const before = await db.select().from(audiences);
     const second = await launch();
     expect(second.status).toBe(200);
@@ -162,6 +188,7 @@ describe("POST /orgs/audiences/portfolio", () => {
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
     expect(a.body.portfolioId).toBe(b.body.portfolioId);
+    await settlePortfolioBackground();
     expect(proposeAudienceSplit).toHaveBeenCalledTimes(1);
     expect(await db.select().from(audiences)).toHaveLength(4);
   });
@@ -184,7 +211,7 @@ describe("POST /orgs/audiences/portfolio", () => {
         }))
       )
       .returning();
-    const res = await launch();
+    const res = await launched();
     expect(res.status).toBe(200);
     expect(proposeAudienceSplit).not.toHaveBeenCalled();
     expect(draftAudienceTarget).not.toHaveBeenCalled();
@@ -211,14 +238,14 @@ describe("POST /orgs/audiences/portfolio", () => {
         source: "split_proposal",
       }))
     );
-    const res = await launch();
+    const res = await launched();
     expect(res.status).toBe(200);
     for (const a of res.body.audiences) expect(a.nlPrompt).toBe(DRAFTED);
   });
 
   it("a failed coverage read skips every signal (recorded) but the cold audiences still ship", async () => {
     vi.mocked(measureSignalCoverage).mockRejectedValue(new ProviderError("apollo", 500, "boom"));
-    const res = await launch();
+    const res = await launched();
     expect(res.status).toBe(200);
     expect(res.body.audiences.map((a: { kind: string }) => a.kind)).toEqual(["cold", "cold"]);
     expect(res.body.signals.map((s: { outcome: string }) => s.outcome)).toEqual(["failed", "failed", "failed"]);
@@ -227,7 +254,7 @@ describe("POST /orgs/audiences/portfolio", () => {
 
   it("a failed ICP build skips the signals, cold still ships", async () => {
     vi.mocked(suggestApolloAudience).mockRejectedValue(new ProviderError("apollo", 504, "timeout"));
-    const res = await launch();
+    const res = await launched();
     expect(res.status).toBe(200);
     expect(res.body.audiences).toHaveLength(2);
     expect(res.body.signals.every((s: { outcome: string }) => s.outcome === "failed")).toBe(true);
@@ -239,7 +266,7 @@ describe("POST /orgs/audiences/portfolio", () => {
       if (a.type === "hiring") throw new ProviderError("apollo", 400, "conflict");
       return { apolloAudienceId: "22222222-0000-4000-8000-000000000002", filters: { buying_signal: { type: a.type } }, count: 10 };
     });
-    const res = await launch();
+    const res = await launched();
     expect(res.status).toBe(200);
     const outcomes = Object.fromEntries(res.body.signals.map((s: { type: string; outcome: string }) => [s.type, s.outcome]));
     expect(outcomes).toEqual({ hiring: "failed", job_change: "created", funding: "below_threshold" });
@@ -250,7 +277,7 @@ describe("POST /orgs/audiences/portfolio", () => {
     const res = await launch();
     expect(res.status).toBe(502);
     expect(await db.select().from(audiences)).toHaveLength(0);
-    const retry = await launch();
+    const retry = await launched();
     expect(retry.status).toBe(200);
     expect(retry.body.audiences).toHaveLength(4);
   });
@@ -265,7 +292,7 @@ describe("POST /orgs/audiences/portfolio", () => {
       status: "archived",
       source: "auto_refill",
     });
-    const res = await launch();
+    const res = await launched();
     expect(res.status).toBe(200);
     const names = res.body.audiences.map((a: { name: string }) => a.name);
     expect(names[0]).toMatch(/^US SaaS founders \w+ \d+$/);
