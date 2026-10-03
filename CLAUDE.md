@@ -79,6 +79,7 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/split` | apiKey + `x-org-id` + `x-user-id` | Target text → 1-6 non-overlapping segments `{name, description, icon, iconConfidence, estimatedLeadCount}` + `axes`. No provider call, no count, persists nothing |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/split/confirm` | apiKey + `x-org-id` | Kept segments → ACTIVE audiences under brand + offer, all or nothing (409 on a taken name) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/portfolio` | apiKey + `x-org-id` + `x-user-id` | Launch-time ICP portfolio for brand + offer: cold split (adopted if pre-confirmed) + one buying-signal audience per signal reaching 20+ companies, all ACTIVE, one shared nl_prompt. Idempotent per (org, brand, offer) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/signal` | apiKey + `x-org-id` + `x-user-id` | Create a `linkedin_engagement` signal audience (competitor LinkedIn post engagers); apollo-service's 4xx relayed |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider + optional `crmUploadId` source binding + optional `offerId` scope) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` / `offerId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
@@ -1414,6 +1415,37 @@ people, companies, companiesExact, audienceId, reason})}`.
   and the signal size estimate are free teaser searches.
 - Tests: `tests/integration/audiences-portfolio.test.ts`, the cross-audience
   block in `audiences-serve-next.test.ts`, `claimServe` in `suppression.test.ts`.
+
+### linkedin_engagement signal audiences — `POST /orgs/audiences/signal`
+
+Fourth buying signal (apollo-service v0.39.29): people who reacted to / commented
+on 1-3 competitor LinkedIn company pages' posts in a rolling window. apollo-service
+owns the criterion, the harvest, the per-audience no-repeat and the spend.
+`src/services/linkedin-engagement-audience.ts`; `isLinkedinEngagementFilters`
+(`src/lib/apollo-audiences.ts`) is the ONE test for the kind.
+
+- **Create**: body `{brandId, offerId?, name?, nlPrompt, status?: active|paused,
+  signal: {type:"linkedin_engagement", windowDays, competitorPages}, filters?}` →
+  apollo-service `POST /audiences/signal` with base `filters` (default `{}`). Its
+  named 4xx (malformed pages, Apollo filters beside the signal) is RELAYED with
+  its status, not a 502. Row = plain apollo pointer audience,
+  `source='linkedin_engagement_signal'`, `apollo_count` NULL. `nlPrompt` is
+  required: it is the pre-pay screen's target.
+- **Serve**: the normal apollo drain loop, unchanged. Teasers `li:<id>` are Jev-
+  screened before `/enrich`; the reveal's `buyingSignal` carries an additive
+  `engagement` block (only on this kind; the other three keep no such key).
+  serve-next stamps `x-audience-id` = THIS audience on the apollo calls, because
+  apollo-service keys the no-repeat on it. `done` ⟹ exhausted.
+- **No Apollo count / dry-run / preview exists** (named 400 there): refresh-count
+  and the stale refresh skip it, previews answer `provider_not_previewable`,
+  refill treats it as unmeasurable. The list OMITS `sizeCount` /
+  `availableToContactCount` / `availableToContactPct` until the first exhaustion
+  (then size = `reachable_count`): unknown is never 0, which consumers read as
+  "served out".
+- The email must never mention the engagement (owner rule): it chooses WHO,
+  content-generation-service owns not writing it. Portfolio launch does not
+  create this kind (it needs competitor pages). Tests:
+  `tests/integration/audiences-linkedin-engagement.test.ts`.
 
 ### Audience refill — a paying brand never runs dry (`src/services/audience-refill.ts`)
 

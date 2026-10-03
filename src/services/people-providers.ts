@@ -277,13 +277,28 @@ export interface Person {
 }
 
 export interface BuyingSignal {
-  type: "hiring" | "job_change" | "funding";
+  type: "hiring" | "job_change" | "funding" | "linkedin_engagement";
   // YYYY-MM-DD, as the provider recorded it.
   occurredOn: string;
   // One English sentence stating the signal, for the email writer to reference.
   fact: string;
   source: string;
   sourceUrl: string | null;
+  // linkedin_engagement only: the competitor post this person engaged with, as
+  // apollo-service's reveal returned it. The key is ABSENT on the other three
+  // kinds, so their served bytes are unchanged. Evidence for WHO to write to,
+  // never material for the message (owner rule: the email must not mention it).
+  engagement?: LinkedinEngagementEvidence;
+}
+
+export interface LinkedinEngagementEvidence {
+  competitorPage: string;
+  postUrl: string | null;
+  postPublishedOn: string | null;
+  kind: "reaction" | "comment";
+  reactionType: string | null;
+  commentText: string | null;
+  commentedAt: string | null;
 }
 
 export interface PeopleSearchResult {
@@ -732,7 +747,7 @@ function parseEmployees(size: string | null): number | null {
 export function readBuyingSignal(raw: unknown): BuyingSignal | null {
   if (raw === undefined || raw === null) return null;
   const r = raw as Record<string, unknown>;
-  const TYPES = ["hiring", "job_change", "funding"];
+  const TYPES = ["hiring", "job_change", "funding", "linkedin_engagement"];
   if (
     typeof r !== "object" ||
     typeof r.type !== "string" ||
@@ -749,12 +764,50 @@ export function readBuyingSignal(raw: unknown): BuyingSignal | null {
       `apollo returned a malformed buyingSignal: ${JSON.stringify(raw).slice(0, 300)}`
     );
   }
-  return {
+  const signal: BuyingSignal = {
     type: r.type as BuyingSignal["type"],
     occurredOn: r.occurredOn,
     fact: r.fact,
     source: r.source,
     sourceUrl: (r.sourceUrl as string | null | undefined) ?? null,
+  };
+  if (signal.type === "linkedin_engagement") {
+    signal.engagement = readEngagementEvidence(r.engagement, raw);
+  }
+  return signal;
+}
+
+// The additive `engagement` block of a linkedin_engagement signal. Required on
+// that kind: a signal claiming an engagement without saying which post is half
+// a claim, so it fails loud like any malformed signal.
+function readEngagementEvidence(raw: unknown, whole: unknown): LinkedinEngagementEvidence {
+  const e = (raw ?? null) as Record<string, unknown> | null;
+  const strOrNull = (v: unknown) => v === null || v === undefined || typeof v === "string";
+  if (
+    !e ||
+    typeof e !== "object" ||
+    typeof e.competitorPage !== "string" ||
+    (e.kind !== "reaction" && e.kind !== "comment") ||
+    !strOrNull(e.postUrl) ||
+    !strOrNull(e.postPublishedOn) ||
+    !strOrNull(e.reactionType) ||
+    !strOrNull(e.commentText) ||
+    !strOrNull(e.commentedAt)
+  ) {
+    throw new ProviderError(
+      "apollo",
+      502,
+      `apollo returned a malformed linkedin_engagement buyingSignal: ${JSON.stringify(whole).slice(0, 300)}`
+    );
+  }
+  return {
+    competitorPage: e.competitorPage,
+    postUrl: (e.postUrl as string | null | undefined) ?? null,
+    postPublishedOn: (e.postPublishedOn as string | null | undefined) ?? null,
+    kind: e.kind,
+    reactionType: (e.reactionType as string | null | undefined) ?? null,
+    commentText: (e.commentText as string | null | undefined) ?? null,
+    commentedAt: (e.commentedAt as string | null | undefined) ?? null,
   };
 }
 
