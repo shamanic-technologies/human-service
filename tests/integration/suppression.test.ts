@@ -7,6 +7,7 @@ import {
   filterSuppressed,
   getSuppressionSet,
   isEmailSuppressed,
+  claimServe,
   type ServedContact,
 } from "../../src/services/suppression.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
@@ -140,5 +141,39 @@ describe("3-month window", () => {
   it("a serve inside the window DOES suppress", async () => {
     await recordServe(ORG, [BRAND_A], [apolloContact()]);
     expect(await isEmailSuppressed(ORG, [BRAND_A], "sara@casco.com")).toBe(true);
+  });
+});
+
+describe("claimServe — atomic check-and-record on the reveal path", () => {
+  it("two CONCURRENT claims of one person for one brand: exactly one wins, one bronze row", async () => {
+    const results = await Promise.all([
+      claimServe(ORG, [BRAND_A], apolloContact(), { audienceId: undefined }),
+      claimServe(ORG, [BRAND_A], apolloContact({ providerPersonId: "apollo-1" })),
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    const bronze = await db.select().from(leadServes).where(eq(leadServes.brandId, BRAND_A));
+    expect(bronze).toHaveLength(1);
+  });
+
+  it("an in-window serve loses the claim; another brand of the org is independent", async () => {
+    expect(await claimServe(ORG, [BRAND_A], apolloContact())).toBe(true);
+    expect(await claimServe(ORG, [BRAND_A], apolloContact())).toBe(false);
+    expect(await claimServe(ORG, [BRAND_B], apolloContact())).toBe(true);
+  });
+
+  it("a lapsed window is re-claimable (the 3-month re-contact rule is unchanged)", async () => {
+    await claimServe(ORG, [BRAND_A], apolloContact());
+    await db
+      .update(brandSuppressions)
+      .set({ lastServedAt: new Date(Date.now() - 100 * 86_400_000) })
+      .where(eq(brandSuppressions.brandId, BRAND_A));
+    expect(await claimServe(ORG, [BRAND_A], apolloContact())).toBe(true);
+  });
+
+  it("a multi-brand claim that loses on one brand writes nothing for the other", async () => {
+    await claimServe(ORG, [BRAND_B], apolloContact());
+    expect(await claimServe(ORG, [BRAND_A, BRAND_B], apolloContact())).toBe(false);
+    const a = await db.select().from(brandSuppressions).where(eq(brandSuppressions.brandId, BRAND_A));
+    expect(a).toHaveLength(0);
   });
 });

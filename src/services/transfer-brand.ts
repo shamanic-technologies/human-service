@@ -16,6 +16,8 @@ import { sql } from "../db/index.js";
  * Tables and how each one is tied to the brand:
  *  - brand-keyed (org_id + brand_id): `audiences`, `lead_serves`,
  *    `brand_suppressions`, `suppression_recoveries`, `suppression_backfills`,
+ *    `audience_portfolios` (a launch the target already holds for the same
+ *    offer wins: one portfolio per (org, brand, offer)),
  *    `lists` (brand_id nullable; brand-less lists are org-wide, left alone).
  *  - keyed through an audience of the brand: `audience_members`,
  *    `audience_teaser_buffer`, `audience_teaser_screenings`,
@@ -70,6 +72,7 @@ const TABLES = [
   "brand_suppressions",
   "suppression_recoveries",
   "suppression_backfills",
+  "audience_portfolios",
   "lists",
   "list_members",
 ] as const;
@@ -105,6 +108,7 @@ export async function transferBrand(
       add("brand_suppressions", await moveSuppressions(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
       add("suppression_recoveries", await moveLedger(tx, "suppression_recoveries", fromOrg, fromBrand, targetOrgId, targetBrandId));
       add("suppression_backfills", await moveLedger(tx, "suppression_backfills", fromOrg, fromBrand, targetOrgId, targetBrandId));
+      add("audience_portfolios", await movePortfolios(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
       if (await tableExists(tx, "lists")) {
         add("lists", await moveBrandKeyed(tx, "lists", fromOrg, fromBrand, targetOrgId, targetBrandId));
       }
@@ -226,6 +230,24 @@ async function moveLedger(
                  WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`
       : await tx`UPDATE suppression_backfills SET org_id = ${toOrg}, brand_id = ${toBrand}
                  WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`;
+  return dropped.length + moved.length;
+}
+
+async function movePortfolios(
+  tx: Tx,
+  fromOrg: string,
+  fromBrand: string,
+  toOrg: string,
+  toBrand: string
+): Promise<number> {
+  // One launch per (org, brand, offer): the target's own launch is kept.
+  const dropped = await tx`DELETE FROM audience_portfolios s USING audience_portfolios t
+                           WHERE s.org_id = ${fromOrg} AND s.brand_id = ${fromBrand}
+                             AND t.org_id = ${toOrg} AND t.brand_id = ${toBrand}
+                             AND t.offer_id = s.offer_id AND t.id <> s.id
+                           RETURNING s.id`;
+  const moved = await tx`UPDATE audience_portfolios SET org_id = ${toOrg}, brand_id = ${toBrand}, updated_at = now()
+                         WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`;
   return dropped.length + moved.length;
 }
 

@@ -1112,3 +1112,47 @@ describe("serve-next on a split audience whose Apollo filters were never built",
     expect(res.status).toBe(422);
   });
 });
+
+// A launch portfolio holds several audiences of ONE brand that overlap by
+// construction (a buying-signal audience is a subset of the cold ICP). A person
+// served under one of them must never be served under another of the brand.
+describe("serve-next across audiences of one brand — never the same person twice", () => {
+  function wireSamePerson(counter: { enrich: number }, enrichDelayMs = 0) {
+    fetchSpy.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.endsWith("/search/next"))
+        return ok({ people: [apolloTeaser("p1", "linkedin.com/in/p1")], done: true, totalEntries: 1 });
+      if (u.endsWith("/enrich")) {
+        counter.enrich++;
+        if (enrichDelayMs) await new Promise((r) => setTimeout(r, enrichDelayMs));
+        return ok({ person: apolloRevealed("p1", "c@acme.com", "linkedin.com/in/p1") });
+      }
+      throw new Error("unexpected url " + u);
+    });
+  }
+
+  it("served under the cold audience ⟹ dropped pre-pay under the signal audience (no second reveal)", async () => {
+    const counter = { enrich: 0 };
+    wireSamePerson(counter);
+    const cold = await createAudience("apollo", "Cold segment");
+    const signal = await createAudience("apollo", "Hiring now");
+    const first = await serveNext(cold);
+    expect(first.body.status).toBe("served");
+    const second = await serveNext(signal);
+    expect(second.body.status).toBe("exhausted");
+    expect(counter.enrich).toBe(1);
+  });
+
+  it("two CONCURRENT serves of the same person under two audiences: exactly one is served", async () => {
+    const counter = { enrich: 0 };
+    // Both pops pass the pre-pay check before either reveal lands; the atomic
+    // claim at reveal time is what keeps the second one from being served.
+    wireSamePerson(counter, 50);
+    const cold = await createAudience("apollo", "Cold segment");
+    const signal = await createAudience("apollo", "Recently funded");
+    const [a, b] = await Promise.all([serveNext(cold), serveNext(signal)]);
+    const served = [a, b].filter((r) => r.body.status === "served");
+    expect(served).toHaveLength(1);
+    expect(served[0].body.person.email).toBe("c@acme.com");
+  });
+});

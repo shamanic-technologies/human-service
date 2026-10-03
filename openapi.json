@@ -4058,6 +4058,190 @@
           "offerId",
           "segments"
         ]
+      },
+      "LaunchAudiencePortfolioResponse": {
+        "type": "object",
+        "properties": {
+          "portfolioId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "offerId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "replayed": {
+            "type": "boolean",
+            "description": "true when this (brand, offer) portfolio was already launched (or in flight) and the recorded set is returned; nothing new was created."
+          },
+          "target": {
+            "type": "string",
+            "nullable": true,
+            "description": "The nlPrompt every portfolio audience carries."
+          },
+          "audiences": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PortfolioAudience"
+            },
+            "description": "Cold audiences first, then signal audiences. All created/activated ACTIVE."
+          },
+          "signals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PortfolioSignalOutcome"
+            },
+            "description": "One outcome per buying signal (hiring, job_change, funding)."
+          }
+        },
+        "required": [
+          "portfolioId",
+          "brandId",
+          "offerId",
+          "replayed",
+          "target",
+          "audiences",
+          "signals"
+        ]
+      },
+      "PortfolioAudience": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Audience"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "cold",
+                  "signal"
+                ],
+                "description": "cold = a segment of the ICP split; signal = the whole ICP narrowed to one buying signal."
+              },
+              "signal": {
+                "type": "object",
+                "nullable": true,
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "hiring",
+                      "job_change",
+                      "funding"
+                    ]
+                  },
+                  "windowDays": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "type",
+                  "windowDays"
+                ],
+                "description": "The buying signal and its rolling recency window. null on a cold audience."
+              },
+              "adopted": {
+                "type": "boolean",
+                "description": "True for a cold audience that already existed for this brand + offer (confirmed before payment) and was activated rather than re-created."
+              }
+            },
+            "required": [
+              "kind",
+              "signal",
+              "adopted"
+            ]
+          }
+        ]
+      },
+      "PortfolioSignalOutcome": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "hiring",
+              "job_change",
+              "funding"
+            ]
+          },
+          "windowDays": {
+            "type": "integer"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "created",
+              "below_threshold",
+              "failed"
+            ],
+            "description": "created = an active signal audience was added; below_threshold = the signal reaches fewer than 20 distinct companies for this ICP; failed = the coverage read or the creation failed (logged; the cold audiences still shipped)."
+          },
+          "people": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Verified-email people the signal reaches for the ICP. null when not measured."
+          },
+          "companies": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Distinct companies of those people. null when not measured."
+          },
+          "companiesExact": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "false = companies counted over the first 500 people (a floor)."
+          },
+          "audienceId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "type",
+          "windowDays",
+          "outcome",
+          "people",
+          "companies",
+          "companiesExact",
+          "audienceId",
+          "reason"
+        ]
+      },
+      "LaunchAudiencePortfolioRequest": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "offerId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The brand-service offer every portfolio audience belongs to. Stored verbatim, like brandId."
+          },
+          "targetAudience": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The ICP text the customer validated (who they sell to), in their words. Every portfolio audience is derived from it, and every one carries the same person-level restatement of it as its nlPrompt (the target the pre-pay screen judges each teaser against)."
+          }
+        },
+        "required": [
+          "brandId",
+          "offerId",
+          "targetAudience"
+        ],
+        "additionalProperties": false
       }
     },
     "parameters": {}
@@ -8361,6 +8545,106 @@
           },
           "409": {
             "description": "A segment name is already an audience of this brand + offer; nothing created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/portfolio": {
+      "post": {
+        "summary": "Launch the ICP audience portfolio for a brand + offer: the cold split (adopted if already confirmed) plus one buying-signal audience per signal reaching 20+ companies, all active. Idempotent per (brand, offer).",
+        "description": "Takes minutes on a first call (one Apollo exploration of the whole ICP). A replay, or a call while a launch for the same brand + offer is in flight, returns the same set and creates nothing. LLM and Apollo costs are declared by chat-service / apollo-service against the caller's org.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LaunchAudiencePortfolioRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The portfolio (created or replayed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchAudiencePortfolioResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "A cold segment name collided; nothing created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cold split failed (LLM, brand-service or runs-service); nothing created",
             "content": {
               "application/json": {
                 "schema": {

@@ -2891,3 +2891,89 @@ registry.registerPath({
     409: { description: "A segment name is already an audience of this brand + offer; nothing created", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
+
+// --- ICP audience portfolio at launch (POST /orgs/audiences/portfolio) ---
+
+const PORTFOLIO_SIGNAL_TYPES = ["hiring", "job_change", "funding"] as const;
+
+export const LaunchAudiencePortfolioRequestSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    offerId: z.string().uuid().openapi({
+      description: "The brand-service offer every portfolio audience belongs to. Stored verbatim, like brandId.",
+    }),
+    targetAudience: z.string().trim().min(1).openapi({
+      description:
+        "The ICP text the customer validated (who they sell to), in their words. Every portfolio audience is derived from it, and every one carries the same person-level restatement of it as its nlPrompt (the target the pre-pay screen judges each teaser against).",
+    }),
+  })
+  .strict()
+  .openapi("LaunchAudiencePortfolioRequest");
+
+const PortfolioAudienceSchema = AudienceSchema.extend({
+  kind: z.enum(["cold", "signal"]).openapi({
+    description: "cold = a segment of the ICP split; signal = the whole ICP narrowed to one buying signal.",
+  }),
+  signal: z
+    .object({ type: z.enum(PORTFOLIO_SIGNAL_TYPES), windowDays: z.number().int() })
+    .nullable()
+    .openapi({ description: "The buying signal and its rolling recency window. null on a cold audience." }),
+  adopted: z.boolean().openapi({
+    description: "True for a cold audience that already existed for this brand + offer (confirmed before payment) and was activated rather than re-created.",
+  }),
+}).openapi("PortfolioAudience");
+
+const PortfolioSignalOutcomeSchema = z
+  .object({
+    type: z.enum(PORTFOLIO_SIGNAL_TYPES),
+    windowDays: z.number().int(),
+    outcome: z.enum(["created", "below_threshold", "failed"]).openapi({
+      description:
+        "created = an active signal audience was added; below_threshold = the signal reaches fewer than 20 distinct companies for this ICP; failed = the coverage read or the creation failed (logged; the cold audiences still shipped).",
+    }),
+    people: z.number().int().nullable().openapi({ description: "Verified-email people the signal reaches for the ICP. null when not measured." }),
+    companies: z.number().int().nullable().openapi({ description: "Distinct companies of those people. null when not measured." }),
+    companiesExact: z.boolean().nullable().openapi({ description: "false = companies counted over the first 500 people (a floor)." }),
+    audienceId: z.string().uuid().nullable(),
+    reason: z.string().nullable(),
+  })
+  .openapi("PortfolioSignalOutcome");
+
+export const LaunchAudiencePortfolioResponseSchema = z
+  .object({
+    portfolioId: z.string().uuid(),
+    brandId: z.string().uuid(),
+    offerId: z.string().uuid(),
+    replayed: z.boolean().openapi({
+      description: "true when this (brand, offer) portfolio was already launched (or in flight) and the recorded set is returned; nothing new was created.",
+    }),
+    target: z.string().nullable().openapi({ description: "The nlPrompt every portfolio audience carries." }),
+    audiences: z.array(PortfolioAudienceSchema).openapi({
+      description: "Cold audiences first, then signal audiences. All created/activated ACTIVE.",
+    }),
+    signals: z.array(PortfolioSignalOutcomeSchema).openapi({
+      description: "One outcome per buying signal (hiring, job_change, funding).",
+    }),
+  })
+  .openapi("LaunchAudiencePortfolioResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/portfolio",
+  summary:
+    "Launch the ICP audience portfolio for a brand + offer: the cold split (adopted if already confirmed) plus one buying-signal audience per signal reaching 20+ companies, all active. Idempotent per (brand, offer).",
+  description:
+    "Takes minutes on a first call (one Apollo exploration of the whole ICP). A replay, or a call while a launch for the same brand + offer is in flight, returns the same set and creates nothing. LLM and Apollo costs are declared by chat-service / apollo-service against the caller's org.",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: peopleHeaders,
+    body: { content: { "application/json": { schema: LaunchAudiencePortfolioRequestSchema } } },
+  },
+  responses: {
+    200: { description: "The portfolio (created or replayed)", content: { "application/json": { schema: LaunchAudiencePortfolioResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    409: { description: "A cold segment name collided; nothing created", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "The cold split failed (LLM, brand-service or runs-service); nothing created", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});

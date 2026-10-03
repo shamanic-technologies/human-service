@@ -824,3 +824,35 @@ export const audiencePreviewEmailChecks = pgTable(
     ),
   ]
 );
+
+// One ICP audience PORTFOLIO launch per (org, brand, offer): the cold split
+// audiences (adopted or created) plus the buying-signal audiences whose
+// coverage cleared the bar. Makes POST /orgs/audiences/portfolio idempotent: a
+// replay reads the recorded audiences and signal outcomes back instead of
+// re-spending. `status`: 'building' (a launch in flight, or one that crashed
+// and is resumed by the next call) | 'ready'. Carries org + brand ⟹ moved by
+// transfer-brand.
+export const audiencePortfolios = pgTable(
+  "audience_portfolios",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    offerId: uuid("offer_id").notNull(),
+    // The customer's ICP text, verbatim, as the launch received it.
+    icpText: text("icp_text").notNull(),
+    // The shared screen target (nl_prompt) every portfolio audience carries.
+    target: text("target"),
+    status: text("status").notNull().default("building"),
+    coldAudienceIds: jsonb("cold_audience_ids").$type<string[]>(),
+    // One outcome per signal type (created / below_threshold / failed).
+    signals: jsonb("signals").$type<Array<Record<string, unknown>>>(),
+    // The apollo-service audience of the WHOLE ICP the signals were measured on.
+    icpApolloAudienceId: text("icp_apollo_audience_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_audience_portfolios_scope").on(table.orgId, table.brandId, table.offerId),
+  ]
+);
