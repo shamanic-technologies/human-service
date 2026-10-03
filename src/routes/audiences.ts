@@ -21,7 +21,9 @@ import {
   SplitAudiencesRequestSchema,
   ConfirmAudienceSplitRequestSchema,
   PreviewCompaniesQuerySchema,
+  LaunchAudiencePortfolioRequestSchema,
 } from "../schemas.js";
+import { launchAudiencePortfolio } from "../services/audience-portfolio.js";
 import {
   proposeAudienceSplit,
   confirmAudienceSplit,
@@ -406,6 +408,63 @@ router.post(
       );
     }
     res.status(201).json({ audiences: created.map(serializeAudience) });
+  }
+);
+
+// --- POST /orgs/audiences/portfolio ---
+// The launch-time portfolio for a brand + offer, derived from the ICP text the
+// customer validated: the cold split (adopted when a pre-payment flow already
+// confirmed it) plus one buying-signal audience per signal reaching 20+
+// companies, all ACTIVE. Idempotent per (org, brand, offer). Needs x-user-id
+// (chat-service / apollo-service key resolution and the launch's own run).
+router.post(
+  "/orgs/audiences/portfolio",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const parsed = LaunchAudiencePortfolioRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+    const orgId = res.locals.orgId as string;
+    let result;
+    try {
+      result = await launchAudiencePortfolio({
+        orgId,
+        userId: res.locals.userId as string,
+        brandId: parsed.data.brandId,
+        offerId: parsed.data.offerId,
+        icpText: parsed.data.targetAudience,
+        identity: buildIdentity(res),
+      });
+    } catch (err) {
+      if (err instanceof SplitNameConflictError || isUniqueViolation(err)) {
+        res.status(409).json({
+          error:
+            err instanceof SplitNameConflictError
+              ? err.message
+              : "An audience with this name already exists for this brand and offer.",
+        });
+        return;
+      }
+      sendProviderError(res, err);
+      return;
+    }
+    res.json({
+      portfolioId: result.portfolioId,
+      brandId: parsed.data.brandId,
+      offerId: parsed.data.offerId,
+      replayed: result.replayed,
+      target: result.target,
+      audiences: result.audiences.map((a) => ({
+        ...serializeAudience(a.row),
+        kind: a.kind,
+        signal: a.signal,
+        adopted: a.adopted,
+      })),
+      signals: result.signals,
+    });
   }
 );
 

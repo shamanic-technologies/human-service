@@ -225,6 +225,13 @@
       "when": 1771587967199,
       "tag": "0031_add_cross_org_identity_key_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1771587967299,
+      "tag": "0032_add_audience_portfolios",
+      "breakpoints": true
     }
   ]
 }

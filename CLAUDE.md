@@ -78,6 +78,7 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/suggest` | apiKey + `x-org-id` + `x-user-id` | NL → **ONE persisted** candidate audience (never split — the split is deferred to #235), returned as an array of one at status `suggested` (inactive); optional `offerId` scopes it |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/split` | apiKey + `x-org-id` + `x-user-id` | Target text → 1-6 non-overlapping segments `{name, description, icon, iconConfidence, estimatedLeadCount}` + `axes`. No provider call, no count, persists nothing |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/split/confirm` | apiKey + `x-org-id` | Kept segments → ACTIVE audiences under brand + offer, all or nothing (409 on a taken name) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/portfolio` | apiKey + `x-org-id` + `x-user-id` | Launch-time ICP portfolio for brand + offer: cold split (adopted if pre-confirmed) + one buying-signal audience per signal reaching 20+ companies, all ACTIVE, one shared nl_prompt. Idempotent per (org, brand, offer) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider + optional `crmUploadId` source binding + optional `offerId` scope) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` / `offerId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
@@ -569,7 +570,8 @@ when given. `src/services/transfer-brand.ts` owns it.
 
 - **ONE transaction** — a failure moves nothing (500 says so).
 - **Tables**: brand-keyed `audiences`, `lead_serves`, `brand_suppressions`,
-  `suppression_recoveries`, `suppression_backfills`, `lists` (brand lists only;
+  `suppression_recoveries`, `suppression_backfills`, `audience_portfolios`
+  (the target's own launch for the same offer wins), `lists` (brand lists only;
   org-wide `brand_id IS NULL` lists stay); through an audience of the brand
   `audience_members`, `audience_teaser_buffer`, `audience_teaser_screenings`,
   `audience_screened_out`; through a list `list_members`; solo-brand
@@ -1356,6 +1358,55 @@ audiences may coexist for one brand.
   two files is sendable once for the brand. human-service records no crm
   suppression, unchanged. **No cost** declared here either.
 
+### ICP portfolio at launch — `POST /orgs/audiences/portfolio`
+
+When a customer pays they have validated ONE thing, the ICP text; campaign-service
+spends the brand's one daily budget on whichever audience earns best, so the
+launch needs several ACTIVE audiences from that text. Owner (2026-10-03): the
+customer validates only the ICP; we pick the mix. `src/services/audience-portfolio.ts`.
+Body `{brandId, offerId, targetAudience}` → `{portfolioId, replayed, target,
+audiences[] (AudienceSchema + kind cold|signal, signal {type, windowDays}|null,
+adopted), signals[] ({type, windowDays, outcome created|below_threshold|failed,
+people, companies, companiesExact, audienceId, reason})}`.
+
+- **Cold = the existing split.** Rows the dashboard's /get-started flow already
+  confirmed before payment for this (brand, offer) (`source='split_proposal'`,
+  status suggested/active) are ADOPTED and activated, never copied; else
+  `proposeAudienceSplit` + `confirmAudienceSplit` (`source='icp_portfolio'`,
+  every segment kept, colliding names date-suffixed). Background pointer builds
+  as after a confirm. A cold failure fails the call loud (502), nothing recorded.
+- **Signal = whole ICP + one buying signal**, kept only at **≥ 20 distinct
+  companies** (`SIGNAL_MIN_COMPANIES`, owner threshold). The ICP is built ONCE as
+  an apollo-service audience (`suggest-from-segment` on the ICP text + the
+  chooser), in parallel with the cold part; apollo-service
+  `POST /audiences/signal-coverage` (windows 30 + 90) measures, `POST
+  /audiences/signal` persists; the row is a plain apollo audience
+  (`source='icp_portfolio_signal'`, filters carry the relative `buying_signal`
+  forwarded verbatim to `/search/next`). Windows: hiring 30 days (a posting is
+  stale fast), job_change and funding 90. Hiring counts ANY role (naming roles
+  would be a guess). A failed ICP build / coverage read / creation is that
+  signal's `failed` outcome, logged loud; the cold audiences still ship.
+- **One nl_prompt for all** (the pre-pay screen's target): adopted rows keep
+  theirs when they share one, else every row gets one fresh `draftAudienceTarget`.
+- **Idempotent** via `audience_portfolios` (migration `0032`, unique
+  `(org_id, brand_id, offer_id)`): `ready` ⟹ a replay returns the recorded set
+  (`replayed:true`), creates nothing; a concurrent call joins the in-flight
+  launch; a crashed `building` launch resumes from its recorded cold ids / ICP
+  pointer. A first call takes minutes (the ICP exploration, ~150s measured).
+- **No repeat across the portfolio**: per-brand suppression already excludes a
+  person served under one audience from every other one pre-pay, and the
+  reveal-side check is now ONE atomic claim (`claimServe` in `suppression.ts`:
+  conditional upsert `WHERE last_served_at <= cutoff`), so two CONCURRENT
+  serves of one person under two audiences of the brand cannot both win (the
+  old check-then-record let both through). The 3-month re-contact window is
+  unchanged.
+- **Cost**: none declared here. chat-service (split, icons, target, chooser) and
+  apollo-service (exploration) declare theirs, org-billed, under an
+  `audience-portfolio-launch` run when the caller sent no `x-run-id`. Coverage
+  and the signal size estimate are free teaser searches.
+- Tests: `tests/integration/audiences-portfolio.test.ts`, the cross-audience
+  block in `audiences-serve-next.test.ts`, `claimServe` in `suppression.test.ts`.
+
 ### Audience refill — a paying brand never runs dry (`src/services/audience-refill.ts`)
 
 human-service#285. When a brand whose billing can pay runs low on people left to
@@ -1979,6 +2030,9 @@ returns 404, never 403, to avoid leaking existence.
   the API edge.
 - **`audiences.chooser_trace`** is `jsonb` (nullable, no default) — the whole
   `/suggest` decision, audit-only, never read back by this service.
+- **`audience_portfolios`** (launch record): `org_id` / `brand_id` / `offer_id`
+  uuid; `icp_text` / `target` / `status` / `icp_apollo_audience_id` text;
+  `cold_audience_ids` / `signals` jsonb.
 - **`suppression_backfills`** (reversible backfill ledger): `org_id` / `brand_id` /
   `suppression_id` uuid; `reason` / `email_norm` text; `sent_at` timestamptz (the
   real send the row was dated from).

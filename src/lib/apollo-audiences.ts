@@ -459,3 +459,108 @@ export async function getApolloAudienceCompanies(
     creditsCharged: numOrNull(o.creditsCharged) ?? 0,
   };
 }
+
+// --- Buying signals (hiring / job_change / funding) as an audience criterion ---
+// apollo-service owns the signal vocabulary, the Apollo date filters each one
+// becomes, and the rolling window. Both calls below are FREE teaser searches on
+// apollo-service's side (no credit, nothing declared there or here).
+
+export type BuyingSignalType = "hiring" | "job_change" | "funding";
+export const BUYING_SIGNAL_TYPES: readonly BuyingSignalType[] = ["hiring", "job_change", "funding"];
+
+export interface SignalCoverage {
+  type: BuyingSignalType;
+  windowDays: number;
+  /** Verified-email people matching ICP + signal in the window. */
+  count: number;
+  /** Distinct employers of those people (a floor when companiesExact=false). */
+  companies: number;
+  companiesExact: boolean;
+}
+
+// POST /audiences/signal-coverage — people AND distinct companies each signal
+// yields for the ICP (a persisted apollo audience of this org), per window.
+export async function measureSignalCoverage(args: {
+  apolloAudienceId: string;
+  windowDays: number[];
+  identity: Identity;
+}): Promise<{ baseCount: number; signals: SignalCoverage[] }> {
+  const data = await apolloPost(
+    "/audiences/signal-coverage",
+    { apolloAudienceId: args.apolloAudienceId, windowDays: args.windowDays },
+    args.identity
+  );
+  const o = (data ?? {}) as Record<string, unknown>;
+  if (typeof o.baseCount !== "number" || !Array.isArray(o.signals)) {
+    throw new ProviderError(
+      "apollo",
+      502,
+      `apollo-service signal-coverage returned an unexpected body: ${JSON.stringify(o).slice(0, 200)}`
+    );
+  }
+  const signals = o.signals.map((s, i) => {
+    const r = (s ?? {}) as Record<string, unknown>;
+    if (
+      !BUYING_SIGNAL_TYPES.includes(r.type as BuyingSignalType) ||
+      typeof r.windowDays !== "number" ||
+      typeof r.count !== "number" ||
+      typeof r.companies !== "number"
+    ) {
+      // Half a measurement must never decide whether a signal ships.
+      throw new ProviderError(
+        "apollo",
+        502,
+        `apollo-service signal-coverage returned an unusable signal at index ${i}: ${JSON.stringify(r).slice(0, 200)}`
+      );
+    }
+    return {
+      type: r.type as BuyingSignalType,
+      windowDays: r.windowDays,
+      count: r.count,
+      companies: r.companies,
+      companiesExact: r.companiesExact === true,
+    };
+  });
+  return { baseCount: o.baseCount, signals };
+}
+
+// POST /audiences/signal — persist ICP + one buying signal + a recency window
+// on apollo-service's side. Returns the pointer + the filters to cache (ICP
+// filters plus the RELATIVE buying_signal, forwarded verbatim to /search/next so
+// the window keeps rolling) + the free size estimate.
+export async function createApolloSignalAudience(args: {
+  baseApolloAudienceId: string;
+  brandId: string;
+  name: string;
+  type: BuyingSignalType;
+  windowDays: number;
+  identity: Identity;
+}): Promise<{ apolloAudienceId: string; filters: ApolloFilters; count: number }> {
+  const data = await apolloPost(
+    "/audiences/signal",
+    {
+      apolloAudienceId: args.baseApolloAudienceId,
+      brandId: args.brandId,
+      name: args.name,
+      signal: { type: args.type, windowDays: args.windowDays },
+    },
+    args.identity
+  );
+  const o = (data ?? {}) as Record<string, unknown>;
+  const filters = o.filters;
+  if (
+    typeof o.apolloAudienceId !== "string" ||
+    o.apolloAudienceId.length === 0 ||
+    !filters ||
+    typeof filters !== "object" ||
+    Array.isArray(filters) ||
+    typeof o.count !== "number"
+  ) {
+    throw new ProviderError(
+      "apollo",
+      502,
+      `apollo-service signal audience returned an unusable body: ${JSON.stringify(o).slice(0, 200)}`
+    );
+  }
+  return { apolloAudienceId: o.apolloAudienceId, filters: filters as ApolloFilters, count: o.count };
+}
