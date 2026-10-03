@@ -762,9 +762,21 @@ export const NeutralOrganizationSchema = z
   })
   .openapi("NeutralOrganization");
 
+const LinkedinEngagementEvidenceSchema = z
+  .object({
+    competitorPage: z.string().openapi({ description: "The competitor LinkedIn company page whose post the person engaged with." }),
+    postUrl: z.string().nullable(),
+    postPublishedOn: z.string().nullable().openapi({ description: "Approximate day the post was published (YYYY-MM-DD); LinkedIn only gives a relative age." }),
+    kind: z.enum(["reaction", "comment"]),
+    reactionType: z.string().nullable(),
+    commentText: z.string().nullable(),
+    commentedAt: z.string().nullable(),
+  })
+  .openapi("LinkedinEngagementEvidence");
+
 export const BuyingSignalSchema = z
   .object({
-    type: z.enum(["hiring", "job_change", "funding"]),
+    type: z.enum(["hiring", "job_change", "funding", "linkedin_engagement"]),
     occurredOn: z.string().openapi({ description: "Day the signal happened (YYYY-MM-DD), as the provider recorded it.", example: "2026-09-21" }),
     fact: z.string().openapi({
       description: "One English sentence stating the signal, for the email writer to reference.",
@@ -772,6 +784,10 @@ export const BuyingSignalSchema = z
     }),
     source: z.string().openapi({ description: "Where the evidence came from (e.g. 'apollo:job_postings').", example: "apollo:job_postings" }),
     sourceUrl: z.string().nullable().openapi({ description: "The posting or news link when the provider gives one." }),
+    engagement: LinkedinEngagementEvidenceSchema.optional().openapi({
+      description:
+        "linkedin_engagement only (absent on the other kinds): the competitor post this person reacted to or commented on. It explains WHY this person was chosen; it is never material for the message, which must not mention it.",
+    }),
   })
   .openapi("BuyingSignal");
 
@@ -1160,15 +1176,18 @@ export const GetAudienceResponseSchema = z
 // carries these (it's the one the audiences table consumes); the single-audience
 // GET / CRUD responses stay the plain AudienceSchema.
 export const AudienceListItemSchema = AudienceSchema.extend({
-  sizeCount: z.number().int().openapi({
+  // The three figures are OMITTED (never 0) when the pool is unknown: a
+  // linkedin_engagement audience has no provider count, so its pool is known only
+  // once serve-next has walked it to exhaustion.
+  sizeCount: z.number().int().optional().openapi({
     description:
-      "Total contactable audience pool = the committed provider's count snapshot (apollo -> apolloCount, apify -> apifyCount) MINUS the people the pre-pay screen judged off target for this audience. Those people are provably not in the audience, so they leave the pool itself, not only the remaining-to-contact count. 0 for a never-counted audience.",
+      "Total contactable audience pool = the committed provider's count snapshot (apollo -> apolloCount, apify -> apifyCount) MINUS the people the pre-pay screen judged off target for this audience. Those people are provably not in the audience, so they leave the pool itself, not only the remaining-to-contact count. 0 for a never-counted audience. ABSENT (with availableToContactCount / availableToContactPct) for a linkedin_engagement audience whose pool is unknown: no provider count exists for it until serve-next has walked it to exhaustion, after which it is that walked pool.",
   }),
-  availableToContactCount: z.number().int().openapi({
+  availableToContactCount: z.number().int().optional().openapi({
     description:
       "Pool members NOT suppressed within the 3-month re-contact window (never-served, or last served >3 months ago). Computed server-side from the same per-brand cross-provider suppression the serve path enforces.",
   }),
-  availableToContactPct: z.number().int().openapi({
+  availableToContactPct: z.number().int().optional().openapi({
     description:
       "round(availableToContactCount / sizeCount * 100), integer 0..100. 0 when sizeCount is 0. Denominator is exactly sizeCount so Size and Remaining stay coherent.",
   }),
@@ -1373,6 +1392,62 @@ registry.registerPath({
     201: { description: "Audience created", content: { "application/json": { schema: GetAudienceResponseSchema } } },
     400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
+  },
+});
+
+export const CreateLinkedinEngagementAudienceRequestSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    offerId: z.string().uuid().optional().openapi({
+      description: "The brand-service offer this audience belongs to. Stored verbatim, like brandId. Omitted = brand-wide.",
+    }),
+    name: z.string().trim().min(1).max(200).optional().openapi({
+      description: "Audience name (English), unique per (brand, offer). Omitted = apollo-service's label (competitor slugs + window).",
+    }),
+    nlPrompt: z.string().trim().min(1).openapi({
+      description:
+        "Who among the engagers is worth writing to, in plain English (people, not only companies). Stored as the audience target: the pre-pay screen judges every engager teaser (name, title, headline, employer) against it before any email is paid for.",
+    }),
+    status: z.enum(["active", "paused"]).optional().openapi({
+      description: "Initial status. Omitted = active.",
+    }),
+    signal: z
+      .object({
+        type: z.literal("linkedin_engagement"),
+        windowDays: z.number().int().min(1).max(365).openapi({
+          description: "Age of the competitor posts whose engagers are served, in days, counted back from each serve (rolling).",
+        }),
+        competitorPages: z.array(z.string()).openapi({
+          description: "1-3 competitor LinkedIn company page URLs (https://www.linkedin.com/company/<slug>/). Validated by apollo-service, whose named 400 is relayed.",
+        }),
+      })
+      .strict(),
+    filters: z.record(z.string(), z.unknown()).optional().openapi({
+      description:
+        "Apollo base filters. Must be empty: apollo-service refuses Apollo filters beside this signal with a named 400 (relayed), since its people are LinkedIn engagers, not an Apollo search. Omitted = {}.",
+    }),
+  })
+  .strict()
+  .openapi("CreateLinkedinEngagementAudienceRequest");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/signal",
+  summary:
+    "Create a linkedin_engagement signal audience: people who recently reacted to or commented on 1-3 competitor LinkedIn company pages' posts",
+  description:
+    "Persists the criterion on apollo-service and stores a servable apollo pointer audience. No size estimate exists for this kind (no Apollo count): Size / Remaining are omitted from the list until a serve walks the pool. Served by serve-next like any apollo audience (engager teasers screened before the paid reveal). apollo-service's 4xx (malformed competitor pages, Apollo filters beside the signal) is relayed with its status and body.",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: peopleHeaders,
+    body: { content: { "application/json": { schema: CreateLinkedinEngagementAudienceRequestSchema } } },
+  },
+  responses: {
+    201: { description: "Audience created", content: { "application/json": { schema: GetAudienceResponseSchema } } },
+    400: { description: "Invalid request (ours or apollo-service's, relayed)", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    409: { description: "An audience with this name already exists for this brand and offer", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "apollo-service failed", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 

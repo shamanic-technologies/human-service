@@ -1205,7 +1205,8 @@
             "enum": [
               "hiring",
               "job_change",
-              "funding"
+              "funding",
+              "linkedin_engagement"
             ]
           },
           "occurredOn": {
@@ -1227,6 +1228,9 @@
             "type": "string",
             "nullable": true,
             "description": "The posting or news link when the provider gives one."
+          },
+          "engagement": {
+            "$ref": "#/components/schemas/LinkedinEngagementEvidence"
           }
         },
         "required": [
@@ -1237,6 +1241,53 @@
           "sourceUrl"
         ],
         "description": "The buying signal this person's audience matched (the company is hiring, the person just changed jobs, the company just raised), with its date and a one-line fact the email writer can reference. Present only on a revealed person served from a buying-signal audience; null otherwise (free search teasers, apify, crm, and any person the provider holds no dated evidence for). Never defaulted or invented."
+      },
+      "LinkedinEngagementEvidence": {
+        "type": "object",
+        "properties": {
+          "competitorPage": {
+            "type": "string",
+            "description": "The competitor LinkedIn company page whose post the person engaged with."
+          },
+          "postUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "postPublishedOn": {
+            "type": "string",
+            "nullable": true,
+            "description": "Approximate day the post was published (YYYY-MM-DD); LinkedIn only gives a relative age."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "reaction",
+              "comment"
+            ]
+          },
+          "reactionType": {
+            "type": "string",
+            "nullable": true
+          },
+          "commentText": {
+            "type": "string",
+            "nullable": true
+          },
+          "commentedAt": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "competitorPage",
+          "postUrl",
+          "postPublishedOn",
+          "kind",
+          "reactionType",
+          "commentText",
+          "commentedAt"
+        ],
+        "description": "linkedin_engagement only (absent on the other kinds): the competitor post this person reacted to or commented on. It explains WHY this person was chosen; it is never material for the message, which must not mention it."
       },
       "PeopleSearchRequest": {
         "type": "object",
@@ -1889,6 +1940,82 @@
           "brandId"
         ]
       },
+      "CreateLinkedinEngagementAudienceRequest": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "offerId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The brand-service offer this audience belongs to. Stored verbatim, like brandId. Omitted = brand-wide."
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Audience name (English), unique per (brand, offer). Omitted = apollo-service's label (competitor slugs + window)."
+          },
+          "nlPrompt": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Who among the engagers is worth writing to, in plain English (people, not only companies). Stored as the audience target: the pre-pay screen judges every engager teaser (name, title, headline, employer) against it before any email is paid for."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "paused"
+            ],
+            "description": "Initial status. Omitted = active."
+          },
+          "signal": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "linkedin_engagement"
+                ]
+              },
+              "windowDays": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 365,
+                "description": "Age of the competitor posts whose engagers are served, in days, counted back from each serve (rolling)."
+              },
+              "competitorPages": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "1-3 competitor LinkedIn company page URLs (https://www.linkedin.com/company/<slug>/). Validated by apollo-service, whose named 400 is relayed."
+              }
+            },
+            "required": [
+              "type",
+              "windowDays",
+              "competitorPages"
+            ],
+            "additionalProperties": false
+          },
+          "filters": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            },
+            "description": "Apollo base filters. Must be empty: apollo-service refuses Apollo filters beside this signal with a named 400 (relayed), since its people are LinkedIn engagers, not an Apollo search. Omitted = {}."
+          }
+        },
+        "required": [
+          "brandId",
+          "nlPrompt",
+          "signal"
+        ],
+        "additionalProperties": false
+      },
       "ListAudiencesResponse": {
         "type": "object",
         "properties": {
@@ -1925,7 +2052,7 @@
             "properties": {
               "sizeCount": {
                 "type": "integer",
-                "description": "Total contactable audience pool = the committed provider's count snapshot (apollo -> apolloCount, apify -> apifyCount) MINUS the people the pre-pay screen judged off target for this audience. Those people are provably not in the audience, so they leave the pool itself, not only the remaining-to-contact count. 0 for a never-counted audience."
+                "description": "Total contactable audience pool = the committed provider's count snapshot (apollo -> apolloCount, apify -> apifyCount) MINUS the people the pre-pay screen judged off target for this audience. Those people are provably not in the audience, so they leave the pool itself, not only the remaining-to-contact count. 0 for a never-counted audience. ABSENT (with availableToContactCount / availableToContactPct) for a linkedin_engagement audience whose pool is unknown: no provider count exists for it until serve-next has walked it to exhaustion, after which it is that walked pool."
               },
               "availableToContactCount": {
                 "type": "integer",
@@ -1935,12 +2062,7 @@
                 "type": "integer",
                 "description": "round(availableToContactCount / sizeCount * 100), integer 0..100. 0 when sizeCount is 0. Denominator is exactly sizeCount so Size and Remaining stay coherent."
               }
-            },
-            "required": [
-              "sizeCount",
-              "availableToContactCount",
-              "availableToContactPct"
-            ]
+            }
           }
         ]
       },
@@ -6196,6 +6318,106 @@
           },
           "401": {
             "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/orgs/audiences/signal": {
+      "post": {
+        "summary": "Create a linkedin_engagement signal audience: people who recently reacted to or commented on 1-3 competitor LinkedIn company pages' posts",
+        "description": "Persists the criterion on apollo-service and stores a servable apollo pointer audience. No size estimate exists for this kind (no Apollo count): Size / Remaining are omitted from the list until a serve walks the pool. Served by serve-next like any apollo audience (engager teasers screened before the paid reveal). apollo-service's 4xx (malformed competitor pages, Apollo filters beside the signal) is relayed with its status and body.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateLinkedinEngagementAudienceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Audience created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetAudienceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (ours or apollo-service's, relayed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "An audience with this name already exists for this brand and offer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "apollo-service failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }

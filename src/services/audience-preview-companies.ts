@@ -20,6 +20,7 @@ import { audiencePreviewCompanies, audiences } from "../db/schema.js";
 import {
   APOLLO_COMPANIES_MAX,
   getApolloAudienceCompanies,
+  isLinkedinEngagementFilters,
   type ApolloPreviewCompanyRow,
 } from "../lib/apollo-audiences.js";
 import { completeRun, createRun } from "./runs.js";
@@ -288,7 +289,9 @@ export async function getAudiencePreviewCompanies(
   offset: number,
   limit: number
 ): Promise<AudiencePreviewCompanies> {
-  if (audience.provider !== "apollo") return unavailable(audience.id, "provider_not_previewable");
+  if (audience.provider !== "apollo" || isLinkedinEngagementFilters(audience.filters)) {
+    return unavailable(audience.id, "provider_not_previewable");
+  }
   if (!audience.apolloAudienceId) return unavailable(audience.id, "not_built_yet");
 
   const target = Math.min(offset + limit, PREVIEW_COMPANIES_MAX);

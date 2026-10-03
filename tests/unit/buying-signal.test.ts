@@ -254,3 +254,62 @@ describe("buying signal — apollo reveal", () => {
     expect(res.people[0].buyingSignal).toBeNull();
   });
 });
+
+// The fourth kind (apollo-service v0.39.29): competitor LinkedIn post engagers.
+// Its reveal adds an `engagement` block (which post, reaction or comment). It is
+// carried verbatim; the three Apollo kinds keep no `engagement` key at all.
+const ENGAGEMENT_SIGNAL = {
+  type: "linkedin_engagement",
+  occurredOn: "2026-09-28",
+  fact: "Commented on September 28, 2026 on a LinkedIn post by lemlist published around September 27, 2026",
+  source: "linkedin:company/lemlist",
+  sourceUrl: "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+  engagement: {
+    competitorPage: "https://www.linkedin.com/company/lemlist/",
+    postUrl: "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+    postPublishedOn: "2026-09-27",
+    kind: "comment",
+    reactionType: null,
+    commentText: "Great tips",
+    commentedAt: "2026-09-28T10:00:00.000Z",
+  },
+};
+
+describe("buying signal — linkedin_engagement", () => {
+  it("carries the signal and its engagement evidence verbatim", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      ok({ person: RICH_APOLLO_PERSON, buyingSignal: ENGAGEMENT_SIGNAL, emailVerification: {} })
+    );
+    const res = await resolveEmail({ providerPersonId: "li:abc", identity });
+    expect(res.person?.buyingSignal).toEqual(ENGAGEMENT_SIGNAL);
+  });
+
+  it("fails loud when the engagement block is missing or malformed", async () => {
+    const { engagement: _drop, ...noEvidence } = ENGAGEMENT_SIGNAL;
+    fetchSpy.mockResolvedValueOnce(
+      ok({ person: RICH_APOLLO_PERSON, buyingSignal: noEvidence, emailVerification: {} })
+    );
+    await expect(resolveEmail({ providerPersonId: "li:abc", identity })).rejects.toThrow(
+      /malformed linkedin_engagement buyingSignal/
+    );
+    fetchSpy.mockResolvedValueOnce(
+      ok({
+        person: RICH_APOLLO_PERSON,
+        buyingSignal: { ...ENGAGEMENT_SIGNAL, engagement: { ...ENGAGEMENT_SIGNAL.engagement, kind: "share" } },
+        emailVerification: {},
+      })
+    );
+    await expect(resolveEmail({ providerPersonId: "li:abc", identity })).rejects.toThrow(
+      /malformed linkedin_engagement buyingSignal/
+    );
+  });
+
+  it("adds no engagement key to the three Apollo kinds (byte-identical)", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      ok({ person: RICH_APOLLO_PERSON, buyingSignal: SIGNAL, emailVerification: {} })
+    );
+    const res = await resolveEmail({ providerPersonId: "apollo-rich-1", identity });
+    expect(JSON.stringify(res.person?.buyingSignal)).toBe(JSON.stringify(SIGNAL));
+    expect(Object.keys(res.person?.buyingSignal ?? {})).not.toContain("engagement");
+  });
+});

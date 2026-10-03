@@ -15,7 +15,7 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audiences } from "../db/schema.js";
-import { getApolloAudiencePreview } from "../lib/apollo-audiences.js";
+import { getApolloAudiencePreview, isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import type { Identity } from "./people-providers.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
@@ -117,7 +117,9 @@ async function takeAudiencePreview(
   audience: AudienceRow,
   identity: Identity
 ): Promise<StoredAudiencePreview> {
-  if (audience.provider !== "apollo") {
+  // linkedin_engagement is not an Apollo search: apollo-service has no free
+  // sample for it (a named 400), so it is not previewable, like crm / apify.
+  if (audience.provider !== "apollo" || isLinkedinEngagementFilters(audience.filters)) {
     return unavailable(audience.id, "provider_not_previewable");
   }
   if (!audience.apolloAudienceId) {

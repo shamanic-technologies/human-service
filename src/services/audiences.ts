@@ -62,6 +62,7 @@ import {
 import {
   suggestApolloAudience,
   apolloAudienceDryRun,
+  isLinkedinEngagementFilters,
   type ApolloFilters,
 } from "../lib/apollo-audiences.js";
 import { chooseAudienceCandidate, buildChooserTrace } from "./audience-chooser.js";
@@ -219,6 +220,15 @@ export async function refreshAudienceCounts(
   apifyCount: number | null;
   countedAt: Date;
 }> {
+  // linkedin_engagement has no Apollo count (apollo-service 400s the dry-run):
+  // the pool stays unknown until serve-next walks it. Leave the snapshot as is.
+  if (isLinkedinEngagementFilters(audience.filters)) {
+    return {
+      apolloCount: audience.apolloCount,
+      apifyCount: audience.apifyCount,
+      countedAt: audience.countedAt ?? new Date(),
+    };
+  }
   if (audience.apolloAudienceId) {
     const { count } = await apolloAudienceDryRun(
       audience.apolloAudienceId,
@@ -259,6 +269,8 @@ export async function refreshAudienceCountIfStale(
   identity: Identity
 ): Promise<void> {
   if (audience.provider !== "apollo" && audience.provider !== "apify") return;
+  // No Apollo count exists for a linkedin_engagement audience.
+  if (isLinkedinEngagementFilters(audience.filters)) return;
   if (
     audience.countedAt &&
     Date.now() - audience.countedAt.getTime() < COUNT_REFRESH_TTL_MS
@@ -487,10 +499,15 @@ export interface AudienceContactability {
   availableToContactPct: number;
 }
 
+// null = the pool is UNKNOWN (a linkedin_engagement audience never walked to
+// exhaustion: no provider count exists for it). Never read as 0, which every
+// consumer takes for "served out".
+export type AudienceContactabilityEntry = AudienceContactability | null;
+
 export async function computeAudienceContactability(
   rows: Audience[]
-): Promise<Map<string, AudienceContactability>> {
-  const result = new Map<string, AudienceContactability>();
+): Promise<Map<string, AudienceContactabilityEntry>> {
+  const result = new Map<string, AudienceContactabilityEntry>();
   if (rows.length === 0) return result;
 
   const audienceIds = rows.map((r) => r.id);
@@ -569,6 +586,24 @@ export async function computeAudienceContactability(
   );
 
   for (const row of rows) {
+    const suppressedHere = suppressedByAudience.get(row.id) ?? 0;
+    // linkedin_engagement: no provider count exists. Its pool is known only
+    // once serve-next has walked it to exhaustion (reachable_count); before
+    // that it is UNKNOWN, never 0.
+    if (isLinkedinEngagementFilters(row.filters)) {
+      if (row.reachableCount === null || row.reachableCount === undefined) {
+        result.set(row.id, null);
+        continue;
+      }
+      const size = row.reachableCount;
+      const available = Math.max(0, size - suppressedHere);
+      result.set(row.id, {
+        sizeCount: size,
+        availableToContactCount: available,
+        availableToContactPct: size === 0 ? 0 : Math.min(100, Math.round((available / size) * 100)),
+      });
+      continue;
+    }
     // Pool = the committed provider's snapshot. apollo is the default provider,
     // so a neutral (provider null) row reads apolloCount.
     const rawSize =
@@ -2344,6 +2379,17 @@ export async function serveNextPerson(
   // not only at refill. Read live, so a withdrawal is honoured on the next serve
   // with nothing to expire or invalidate.
   const optOuts = await loadServeExclusions(identity);
+
+  // A linkedin_engagement audience's no-repeat lives in apollo-service, keyed on
+  // x-audience-id: stamp THIS audience (the row being served, as the crm path
+  // does), never whatever audience the inbound header named. Other audiences
+  // keep the inbound identity untouched.
+  if (isLinkedinEngagementFilters(storedFilters)) {
+    identity = {
+      ...identity,
+      workflowTracking: { ...(identity.workflowTracking ?? {}), audienceId: audience.id },
+    };
+  }
 
   const apolloSearchParams = audience.apolloAudienceId ? storedFilters : undefined;
   const apolloFilters = audience.apolloAudienceId
