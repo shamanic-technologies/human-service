@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 const supp = vi.hoisted(() => ({
   filterSuppressed: vi.fn(),
   getSuppressionSet: vi.fn(),
-  isEmailSuppressed: vi.fn(),
+  claimServe: vi.fn(),
   recordServe: vi.fn(),
 }));
 vi.mock("../../src/services/suppression.js", () => supp);
@@ -82,7 +82,7 @@ describe("serve gate on the provider's email verification", () => {
     vi.stubGlobal("fetch", fetchSpy);
     process.env.APOLLO_SERVICE_URL = "http://apollo:8080";
     process.env.APOLLO_SERVICE_API_KEY = "apollo-key";
-    supp.isEmailSuppressed.mockResolvedValue(false);
+    supp.claimServe.mockResolvedValue(true);
     supp.recordServe.mockResolvedValue(undefined);
   });
 
@@ -90,7 +90,7 @@ describe("serve gate on the provider's email verification", () => {
     fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com", verdict("valid", true)));
     const r = await resolveEmail({ providerPersonId: "a1", identity });
     expect(r.person?.email).toBe("jane@acme.com");
-    expect(supp.recordServe.mock.calls[0][3]).toMatchObject({ emailVerdict: "valid" });
+    expect(supp.claimServe.mock.calls[0][3]).toMatchObject({ emailVerdict: "valid" });
   });
 
   it.each(["catch_all", "invalid", "unknown", "risky"])(
@@ -99,8 +99,8 @@ describe("serve gate on the provider's email verification", () => {
       fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com", verdict(v, false)));
       const r = await resolveEmail({ providerPersonId: "a1", identity });
       expect(r.person).toBeNull();
-      expect(supp.recordServe).toHaveBeenCalledTimes(1);
-      expect(supp.recordServe.mock.calls[0][3]).toMatchObject({ emailVerdict: v });
+      expect(supp.claimServe).toHaveBeenCalledTimes(1);
+      expect(supp.claimServe.mock.calls[0][3]).toMatchObject({ emailVerdict: v });
     }
   );
 
@@ -109,7 +109,7 @@ describe("serve gate on the provider's email verification", () => {
     await expect(resolveEmail({ providerPersonId: "a1", identity })).rejects.toBeInstanceOf(
       EmailVerificationError
     );
-    expect(supp.recordServe).not.toHaveBeenCalled();
+    expect(supp.claimServe).not.toHaveBeenCalled();
   });
 
   it("a reveal with no address needs no verdict (the caller's no-email drop handles it)", async () => {

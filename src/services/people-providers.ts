@@ -17,7 +17,7 @@ import { workflowTrackingToHeaders } from "../middleware/auth.js";
 import {
   filterSuppressed,
   getSuppressionSet,
-  isEmailSuppressed,
+  claimServe,
   recordServe,
   type ServedContact,
 } from "./suppression.js";
@@ -1175,31 +1175,32 @@ async function finalizeResolved(
     return { provider, person: null };
   }
   const brandIds = identity.brandIds ?? [];
-  if (
-    brandIds.length > 0 &&
-    (await isEmailSuppressed(identity.orgId, brandIds, person.email))
-  ) {
-    return { provider, person: null };
-  }
   // Will this address bounce? The provider verified it at reveal time
   // (apollo-service owns verification + its policy); we act on `deliverable`.
   // A person with no address is left to the caller's own no-email drop.
   const emailVerdict = verification?.verdict;
   const servable = verification === null || verification.deliverable;
-  // A rejected reveal is still recorded as a serve: the credit is spent, and the
-  // suppression row is what stops a later request paying to reveal them again.
-  if (brandIds.length > 0) {
-    await recordServe(identity.orgId, brandIds, [toServedContact(person)], {
+  // Already served for the brand ⟹ never handed back. The check and the record
+  // are ONE atomic claim: two concurrent serves of the same person (e.g. under
+  // two audiences of the brand, which overlap by construction in a launch
+  // portfolio) can never both pass. A rejected reveal is still claimed: the
+  // credit is spent, and the suppression row is what stops a later request
+  // paying to reveal them again.
+  if (
+    brandIds.length > 0 &&
+    !(await claimServe(identity.orgId, brandIds, toServedContact(person), {
       campaignId: identity.campaignId,
       runId: identity.runId,
       audienceId,
       emailVerdict,
-    });
+    }))
+  ) {
+    return { provider, person: null };
   }
   // Hard bounce on one of OUR sends, fleet-wide — the last line, for a person
   // whose key we had never tied to this address before (so the free-teaser gate
   // could not match). The credit is spent; what this prevents is the email. It
-  // runs AFTER recordServe on purpose: the recorded serve ties this provider
+  // runs AFTER claimServe on purpose: the recorded serve ties this provider
   // person id to the address, so the next request — any org — drops them on the
   // free teaser instead of paying again.
   if (await isEmailBounced(identity, person.email)) {

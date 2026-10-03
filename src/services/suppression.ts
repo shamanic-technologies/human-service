@@ -13,6 +13,10 @@
 //                        pushed down so apify never returns/bills a served lead.
 //   isEmailSuppressed  — resolve-email block: cap re-emission for the residual
 //                        no-linkedin cross-provider edge.
+//   claimServe         — the reveal path's ATOMIC check-and-record: claims the
+//                        person for every brand, or reports them already served
+//                        (two concurrent serves of one person, e.g. under two
+//                        audiences of the brand, can never both win).
 //
 // Identity keys: email_norm is canonical (always present when a verified email
 // is served). linkedin_url_norm is the cross-provider key available BEFORE
@@ -254,4 +258,79 @@ export async function isEmailSuppressed(
     .limit(1);
 
   return rows.length > 0;
+}
+
+class AlreadyServedForBrand extends Error {}
+
+/**
+ * Claim a revealed person for every brand of the request, atomically: the
+ * silver upsert only takes a row that is absent or whose window has lapsed
+ * (`WHERE last_served_at <= cutoff`), so of two concurrent serves of the same
+ * person for the same brand (two audiences of a portfolio overlap by
+ * construction) exactly one gets the row back; the other waits on the row lock,
+ * then sees an in-window row and loses. Returns false (nothing written) when the
+ * person is already served for any requested brand within the window, true
+ * after recording bronze + silver exactly like `recordServe`.
+ */
+export async function claimServe(
+  orgId: string,
+  brandIds: string[],
+  contact: ServedContact,
+  ctx: { campaignId?: string; runId?: string; audienceId?: string; emailVerdict?: string } = {}
+): Promise<boolean> {
+  if (brandIds.length === 0) return true;
+  const emailNorm = normalizeEmail(contact.email);
+  if (emailNorm === null) {
+    // No address ⟹ nothing to dedup against (same as recordServe).
+    await recordServe(orgId, brandIds, [contact], ctx);
+    return true;
+  }
+  const linkedinNorm = normalizeLinkedinUrl(contact.linkedinUrl);
+  try {
+    await db.transaction(async (tx) => {
+      for (const brandId of brandIds) {
+        const claimed = await tx
+          .insert(brandSuppressions)
+          .values({
+            orgId,
+            brandId,
+            emailNorm,
+            linkedinUrlNorm: linkedinNorm,
+            providerPersonId: contact.providerPersonId,
+            lastProvider: contact.provider,
+          })
+          .onConflictDoUpdate({
+            target: [brandSuppressions.orgId, brandSuppressions.brandId, brandSuppressions.emailNorm],
+            set: {
+              lastServedAt: sql`now()`,
+              lastProvider: contact.provider,
+              linkedinUrlNorm: sql`coalesce(excluded.linkedin_url_norm, ${brandSuppressions.linkedinUrlNorm})`,
+              providerPersonId: sql`coalesce(excluded.provider_person_id, ${brandSuppressions.providerPersonId})`,
+            },
+            setWhere: sql`${brandSuppressions.lastServedAt} <= ${windowCutoff()}`,
+          })
+          .returning({ id: brandSuppressions.id });
+        if (claimed.length === 0) throw new AlreadyServedForBrand();
+        await tx.insert(leadServes).values({
+          orgId,
+          brandId,
+          provider: contact.provider,
+          providerPersonId: contact.providerPersonId,
+          firstName: contact.firstName,
+          lastName: contact.lastName,
+          email: contact.email,
+          linkedinUrl: contact.linkedinUrl,
+          companyDomain: contact.companyDomain,
+          campaignId: ctx.campaignId ?? null,
+          runId: ctx.runId ?? null,
+          audienceId: ctx.audienceId ?? null,
+          emailVerdict: ctx.emailVerdict ?? null,
+        });
+      }
+    });
+    return true;
+  } catch (err) {
+    if (err instanceof AlreadyServedForBrand) return false;
+    throw err;
+  }
 }

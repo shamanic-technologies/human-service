@@ -13,7 +13,7 @@ vi.mock("../../src/lib/email-verification.js", async (importOriginal) => ({
 const supp = vi.hoisted(() => ({
   filterSuppressed: vi.fn(),
   getSuppressionSet: vi.fn(),
-  isEmailSuppressed: vi.fn(),
+  claimServe: vi.fn(),
   recordServe: vi.fn(),
 }));
 vi.mock("../../src/services/suppression.js", () => supp);
@@ -110,7 +110,7 @@ beforeEach(() => {
   fetchSpy.mockReset();
   supp.filterSuppressed.mockReset().mockImplementation(async (_o, _b, items) => items);
   supp.getSuppressionSet.mockReset().mockResolvedValue({ emails: [], linkedinUrls: [] });
-  supp.isEmailSuppressed.mockReset().mockResolvedValue(false);
+  supp.claimServe.mockReset().mockResolvedValue(true);
   supp.recordServe.mockReset().mockResolvedValue(undefined);
   process.env.APOLLO_SERVICE_URL = "http://apollo:8080";
   process.env.APOLLO_SERVICE_API_KEY = "apollo-key";
@@ -234,17 +234,20 @@ describe("resolve-email — block + record", () => {
     },
   });
 
-  it("not suppressed → records serve + returns person", async () => {
+  it("not suppressed → claims the serve atomically + returns person", async () => {
     fetchSpy.mockResolvedValueOnce(enrichOk);
     const r = await resolveEmail({ providerPersonId: "a1", identity: brandIdentity });
-    expect(supp.isEmailSuppressed).toHaveBeenCalledWith("org-1", ["brand-A"], "jane@acme.com");
-    expect(supp.recordServe).toHaveBeenCalledTimes(1);
+    expect(supp.claimServe).toHaveBeenCalledTimes(1);
+    const [org, brands, contact] = supp.claimServe.mock.calls[0];
+    expect(org).toBe("org-1");
+    expect(brands).toEqual(["brand-A"]);
+    expect(contact.email).toBe("jane@acme.com");
     expect(r.person?.email).toBe("jane@acme.com");
   });
 
-  it("suppressed (residual cross-provider edge) → person:null, NOT recorded", async () => {
+  it("already served for the brand (claim lost) → person:null", async () => {
     fetchSpy.mockResolvedValueOnce(enrichOk);
-    supp.isEmailSuppressed.mockResolvedValue(true);
+    supp.claimServe.mockResolvedValue(false);
     const r = await resolveEmail({ providerPersonId: "a1", identity: brandIdentity });
     expect(r.person).toBeNull();
     expect(supp.recordServe).not.toHaveBeenCalled();
@@ -253,7 +256,7 @@ describe("resolve-email — block + record", () => {
   it("no brandIds → no block, no record (unchanged behavior)", async () => {
     fetchSpy.mockResolvedValueOnce(enrichOk);
     const r = await resolveEmail({ providerPersonId: "a1", identity: baseIdentity });
-    expect(supp.isEmailSuppressed).not.toHaveBeenCalled();
+    expect(supp.claimServe).not.toHaveBeenCalled();
     expect(supp.recordServe).not.toHaveBeenCalled();
     expect(r.person?.email).toBe("jane@acme.com");
   });
