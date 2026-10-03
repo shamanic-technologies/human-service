@@ -12,6 +12,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { isOptOutUrl, optOutResponse, setOptOutEnv } from "../helpers/opt-outs.js";
+import { bounceResponse, isBounceUrl } from "../helpers/bounces.js";
 import { isWonLeadsUrl, setWonLeadsEnv, wonLeadsResponse } from "../helpers/won-leads.js";
 import { db } from "../../src/db/index.js";
 import { brandSuppressions, people } from "../../src/db/schema.js";
@@ -38,7 +39,11 @@ let wonCalls: string[] = [];
 beforeEach(async () => {
   // The consent log answers empty, ahead of the spy: this suite is about won.
   vi.stubGlobal("fetch", async (url: string, init: { body?: string }) =>
-    isOptOutUrl(url) ? ok(optOutResponse(url, [])) : fetchSpy(url, init)
+    isOptOutUrl(url)
+      ? ok(optOutResponse(url, []))
+      : isBounceUrl(url)
+        ? ok(bounceResponse(init?.body, []))
+        : fetchSpy(url, init)
   );
   fetchSpy.mockReset();
   wonByBrand = {};
