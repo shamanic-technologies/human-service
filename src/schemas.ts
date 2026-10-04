@@ -1396,9 +1396,9 @@ export const SuggestAudiencesResponseSchema = z
 // --- POST /orgs/audiences/{id}/serve-next ---
 export const ServeNextResponseSchema = z
   .object({
-    status: z.enum(["served", "exhausted"]).openapi({
+    status: z.enum(["served", "exhausted", "pending"]).openapi({
       description:
-        "'served' ⟹ a fresh person is returned. 'exhausted' ⟹ no new match remains for this audience within the suppression window (person is null).",
+        "'served' ⟹ a fresh person is returned. 'exhausted' ⟹ no new match remains for this audience within the suppression window (person is null). 'pending' ⟹ the per-call walk budget ran out before a person was found (person is null); progress is kept, so call again to continue. 'pending' is NOT exhaustion.",
     }),
     person: PersonSchema.nullable().openapi({
       description:
