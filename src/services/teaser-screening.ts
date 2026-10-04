@@ -37,7 +37,7 @@
 // exist without the evidence that produced it. Keyed on the AUDIENCE, because
 // the verdict is relative to the target that audience defined.
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, like } from "drizzle-orm";
 import { db } from "../db/index.js";
 import {
   audienceScreenedOut,
@@ -184,7 +184,7 @@ async function recordScreening(args: {
   target: { text: string; field: "target_text" | "nl_prompt" };
 }): Promise<void> {
   const { orgId, audienceId, subject, onTarget, yesProbability, model, target } = args;
-  const reason = `P(yes)=${yesProbability.toFixed(3)} threshold>${SCREEN_MIN_YES_PROBABILITY}`;
+  const reason = `P(yes)=${yesProbability.toFixed(3)} ${screenBarTag()}`;
   await db.transaction(async (tx) => {
     await tx.insert(audienceTeaserScreenings).values({
       orgId,
@@ -240,4 +240,82 @@ export async function findScreenedOut(
       )
     );
   return new Set(rows.map((r) => r.providerPersonId));
+}
+
+// --- Screen yield: when an audience has stopped producing people ------------
+//
+// Apollo returns an audience's best matches first. An audience whose filters
+// reach much further than its text (a title list with `include_similar_titles`)
+// walks into a long tail the screen correctly rejects: Shockwavecenters' "US
+// Chiropractic Clinicians" passed 2,200 of its first 2,500 teasers, then ~1-2%
+// for the next 20,000, then ~0.1% (generic "Physician", "Resident Physician")
+// for the last 10,000 — ~38,000 screens on 2026-10-01..04 for ~1,500 passes,
+// the last 9,000 of them for 21 passes. Each screen is a billed Jev judgment and
+// ~0.4s of a serve call; at 0.1% a call never reaches a pass inside its budget,
+// so the campaign got `pending` for hours while the brand's other audiences sat
+// idle.
+//
+// The rule: over the audience's last SCREEN_YIELD_WINDOW verdicts judged under
+// the CURRENT question (same text, same bar, same prompt version), fewer than
+// SCREEN_YIELD_MIN_PASSES passes ⟹ the screen has exhausted the audience.
+// serve-next answers `exhausted` from then on without screening anyone.
+//
+// WHY 1,000 / 3 (measured on every v2 verdict in prod, 2026-10-04, replaying the
+// rule on each audience's own history): under the current bar it trips exactly
+// one audience, Shockwavecenters' chiropractors, 1,088 screens into its current
+// text, sparing the 9,320 screens that followed (21 passes in them). The most
+// selective PRODUCTIVE stretch in the data (that same audience's 1-2% middle,
+// ~12 passes per 1,000) never trips: falling under 3 when 12 are expected is a
+// ~1-in-2,000 event per window. The only other trip in history was "European
+// Union" under the retired 0.80 bar, which revived at 0.50 — why the window is
+// keyed on the bar and the text: a new question starts a new window.
+export const SCREEN_YIELD_WINDOW = 1000;
+export const SCREEN_YIELD_MIN_PASSES = 3;
+
+export interface ScreenYield {
+  /** Verdicts in the window (≤ SCREEN_YIELD_WINDOW). */
+  screens: number;
+  /** Passes among them. */
+  passes: number;
+  /** True once a FULL window holds fewer than SCREEN_YIELD_MIN_PASSES passes. */
+  spent: boolean;
+}
+
+/** The stop rule on its own. A window that is not full yet never trips. */
+export function isScreenYieldSpent(w: { screens: number; passes: number }): boolean {
+  return w.screens >= SCREEN_YIELD_WINDOW && w.passes < SCREEN_YIELD_MIN_PASSES;
+}
+
+/** The bar suffix every v2 bronze `reason` ends with (see recordScreening). */
+export function screenBarTag(): string {
+  return `threshold>${SCREEN_MIN_YES_PROBABILITY}`;
+}
+
+/**
+ * Read the audience's yield under the question the screen would ask NOW. No
+ * text to judge against ⟹ nothing is screened, so nothing is spent: null.
+ */
+export async function readScreenYield(audience: {
+  id: string;
+  nlPrompt: string | null;
+  targetText: string | null;
+}): Promise<ScreenYield | null> {
+  const target = screenTarget(audience);
+  if (!target) return null;
+  const recent = await db
+    .select({ verdict: audienceTeaserScreenings.verdict })
+    .from(audienceTeaserScreenings)
+    .where(
+      and(
+        eq(audienceTeaserScreenings.audienceId, audience.id),
+        eq(audienceTeaserScreenings.promptVersion, SCREEN_PROMPT_VERSION),
+        eq(audienceTeaserScreenings.targetText, target.text),
+        like(audienceTeaserScreenings.reason, `%${screenBarTag()}`)
+      )
+    )
+    .orderBy(desc(audienceTeaserScreenings.createdAt))
+    .limit(SCREEN_YIELD_WINDOW);
+  const screens = recent.length;
+  const passes = recent.filter((r) => r.verdict).length;
+  return { screens, passes, spent: isScreenYieldSpent({ screens, passes }) };
 }

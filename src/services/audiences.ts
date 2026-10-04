@@ -36,7 +36,7 @@ import {
   type ServedContact,
 } from "./suppression.js";
 import { bufferTeasers, popTeaser } from "./teaser-buffer.js";
-import { screenTeaser } from "./teaser-screening.js";
+import { readScreenYield, screenTeaser } from "./teaser-screening.js";
 import {
   loadOptOutExclusions,
   loadServeExclusions,
@@ -2317,6 +2317,49 @@ async function serveNextCrmContact(
 // overrun it by its own latency, and each call always makes progress.
 export const SERVE_NEXT_BUDGET_MS = 120_000;
 
+// How many screens one serve-next call makes between two reads of the screen
+// yield (teaser-screening.ts `readScreenYield`). Also read once before the walk.
+// 100 screens ≈ 40s of a call, so a dead audience stops within one call.
+export const SCREEN_YIELD_CHECK_EVERY = 100;
+
+// Audiences whose screen-yield exhaustion already asked for a refill in this
+// process, so a campaign retrying a dead audience does not re-run the sweep on
+// every call. A restart forgets it; the sweep's own cooldown + low-pool checks
+// make a second ask harmless.
+const yieldRefillAsked = new Set<string>();
+
+// The screen has exhausted this audience: the rest of what Apollo returns for
+// it is people the screen rejects (see teaser-screening.ts "Screen yield").
+// Answer exactly what a walked-out audience answers — `exhausted`, with the
+// reachable ceiling persisted so its Remaining reads what is truly left (~0) and
+// campaign-service picks the brand's next audience — and ask the refill sweep to
+// look at the brand now rather than at its next 6-hourly tick. The sweep keeps
+// every guard it has (billing can pay, pool really low, cooldown). The audience
+// itself is never edited: immutable, and a different population is a NEW one.
+async function exhaustOnScreenYield(
+  identity: Identity,
+  audience: typeof audiences.$inferSelect,
+  stats: { screens: number; passes: number }
+): Promise<ServeNextResult> {
+  console.log(
+    `[human-service] audience.screen_yield_exhausted org=${identity.orgId} brand=${audience.brandId} audience=${audience.id} screens=${stats.screens} passes=${stats.passes}`
+  );
+  await persistReachableCountOnExhaustion(identity.orgId, audience.id);
+  if (!yieldRefillAsked.has(audience.id)) {
+    yieldRefillAsked.add(audience.id);
+    // Imported at call time: audience-refill.ts imports this module.
+    void import("./audience-refill.js")
+      .then(({ runAudienceRefillSweep }) => runAudienceRefillSweep({ brandId: audience.brandId }))
+      .catch((err) =>
+      console.error(
+        `[human-service] audience.screen_yield_refill.failed org=${identity.orgId} brand=${audience.brandId} audience=${audience.id}`,
+        err
+      )
+    );
+  }
+  return { status: "exhausted", person: null };
+}
+
 // Serve the NEXT unserved person of an audience — the per-iteration lead
 // primitive lead-service calls. A thin wrapper over the existing people-gateway
 // machinery: it searches with the audience's STORED canonical filters via its
@@ -2449,7 +2492,14 @@ export async function serveNextPerson(
   // the first reveal. Exhausted ONLY when the buffer is empty AND apollo returns
   // no more fresh teasers — never a fabricated cap (apollo's `done` at totalPages
   // guarantees termination, so the walk is bounded by the real pool).
+  // Screen yield: an audience whose recent verdicts are nearly all rejections
+  // is exhausted for the screen, whatever Apollo still has (see above). Read
+  // before the walk, so a dead audience pops and screens nobody.
+  const yieldAtStart = await readScreenYield(audience);
+  if (yieldAtStart?.spent) return exhaustOnScreenYield(identity, audience, yieldAtStart);
+
   let walked = 0;
+  let screensSinceYieldRead = 0;
   for (;;) {
     // Budget spent and at least one step taken this call → hand back `pending`
     // BEFORE popping, so no teaser is consumed without a verdict.
@@ -2458,6 +2508,13 @@ export async function serveNextPerson(
         `[human-service] audience.serve_next_budget_spent org=${identity.orgId} audience=${audience.id} walked=${walked} budgetMs=${budgetMs}`
       );
       return { status: "pending", person: null };
+    }
+    // Re-read the yield every SCREEN_YIELD_CHECK_EVERY screens, BEFORE popping,
+    // so a dead audience stops mid-call without dropping an unjudged teaser.
+    if (screensSinceYieldRead >= SCREEN_YIELD_CHECK_EVERY) {
+      screensSinceYieldRead = 0;
+      const yieldNow = await readScreenYield(audience);
+      if (yieldNow?.spent) return exhaustOnScreenYield(identity, audience, yieldNow);
     }
     walked += 1;
     const teaser = await popTeaser(identity.orgId, audience.id);
@@ -2528,6 +2585,7 @@ export async function serveNextPerson(
     // + silver exclusion) and we pop the next teaser; the credit is never spent.
     // Fail loud: a chat-service failure propagates (502), because passing the
     // teaser through would spend exactly what the screen protects.
+    screensSinceYieldRead += 1;
     const screen = await screenTeaser({
       orgId: identity.orgId,
       audience,

@@ -21,7 +21,11 @@ vi.mock("../../src/lib/chat-client.js", () => ({
 
 import {
   buildScreenState,
+  isScreenYieldSpent,
+  screenBarTag,
   screenTeaser,
+  SCREEN_YIELD_MIN_PASSES,
+  SCREEN_YIELD_WINDOW,
   toTeaserSnapshot,
   SCREEN_MIN_YES_PROBABILITY,
   SCREEN_PROMPT_VERSION,
@@ -216,5 +220,31 @@ describe("toTeaserSnapshot", () => {
     expect(snap.organizationKeywords?.[0]).toBe("k0");
     expect(snap.organizationName).toBe("Acme");
     expect(snap.organizationEmployees).toBe(3);
+  });
+});
+
+describe("screen yield stop rule", () => {
+  it("is 1,000 verdicts, fewer than 3 passes", () => {
+    expect(SCREEN_YIELD_WINDOW).toBe(1000);
+    expect(SCREEN_YIELD_MIN_PASSES).toBe(3);
+  });
+
+  it("trips the dead tail: Shockwavecenters' chiropractors, 2 passes in their last 1,000 screens", () => {
+    expect(isScreenYieldSpent({ screens: 1000, passes: 2 })).toBe(true);
+    expect(isScreenYieldSpent({ screens: 1000, passes: 0 })).toBe(true);
+  });
+
+  it("never trips a selective but productive audience (1-2% passes, ~12 per 1,000)", () => {
+    expect(isScreenYieldSpent({ screens: 1000, passes: 12 })).toBe(false);
+    expect(isScreenYieldSpent({ screens: 1000, passes: 3 })).toBe(false);
+  });
+
+  it("never trips before a full window: a new audience is not judged on its first rejections", () => {
+    expect(isScreenYieldSpent({ screens: 999, passes: 0 })).toBe(false);
+    expect(isScreenYieldSpent({ screens: 0, passes: 0 })).toBe(false);
+  });
+
+  it("names the bar the same way every bronze reason does", () => {
+    expect(screenBarTag()).toBe(`threshold>${SCREEN_MIN_YES_PROBABILITY}`);
   });
 });
