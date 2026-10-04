@@ -1215,6 +1215,14 @@ apollo credit, the generated email and the send were all spent on them.
 - **It sits at the frontier between free and billed**, between `popTeaser` and
   `resolveEmail`. Apollo's teaser is free; the enrich that reveals the email is
   ~11.8 cents. A rejection costs the screen and nothing else.
+- **Each serve-next walk is BOUNDED in wall clock** (`SERVE_NEXT_BUDGET_MS` =
+  120s, checked between teasers): past it the call answers `status: "pending"`
+  (person null) and the next call resumes from the durable buffer + verdicts.
+  An audience whose filters are far wider than its text rejects nearly
+  everything (Shockwavecenters 2026-10-04: 25 passes in ~10,600 teasers, ~0.4s
+  each), and an unbounded walk outran lead-service's 300s client timeout while
+  this loop kept going and revealed a person nobody received. `pending` is
+  never exhaustion; lead-service maps it to `serve_timed_out`.
 - **ONE Jev `noul` question per person, never a batch** (v2, 2026-09-28):
   chat-service `POST /orgs/judgments` (`judgeYesNo` in `chat-client.ts`) asks
   "does this candidate belong to the target audience the client described?"

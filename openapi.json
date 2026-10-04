@@ -2849,9 +2849,10 @@
             "type": "string",
             "enum": [
               "served",
-              "exhausted"
+              "exhausted",
+              "pending"
             ],
-            "description": "'served' ⟹ a fresh person is returned. 'exhausted' ⟹ no new match remains for this audience within the suppression window (person is null)."
+            "description": "'served' ⟹ a fresh person is returned. 'exhausted' ⟹ no new match remains for this audience within the suppression window (person is null). 'pending' ⟹ the per-call walk budget ran out before a person was found (person is null); progress is kept, so call again to continue. 'pending' is NOT exhaustion."
           },
           "person": {
             "allOf": [
