@@ -193,6 +193,8 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     const members = await request(app).get(`/orgs/audiences/${id}/members`).set(getAuthHeaders());
     expect(members.body.members).toHaveLength(1);
     expect(members.body.members[0].emailNorm).toBe("a@acme.com");
+    // serve-next names the canonical person: the same id the members read returns.
+    expect(res.body.personId).toBe(members.body.members[0].personId);
   });
 
   it("apify: second call pushes the first person's email into the exclude-set, returns a different person", async () => {
@@ -227,6 +229,8 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("exhausted");
     expect(res.body.person).toBeNull();
+    // No person ⟹ no person id: the exhausted body is unchanged.
+    expect(res.body).toEqual({ status: "exhausted", person: null });
   });
 
   it("apollo: enriches a free teaser into a revealed, served person", async () => {
@@ -244,6 +248,12 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     expect(res.body.status).toBe("served");
     expect(res.body.person.email).toBe("c@acme.com");
     expect(res.body.person.provider).toBe("apollo");
+
+    const members = await request(app).get(`/orgs/audiences/${id}/members`).set(getAuthHeaders());
+    expect(members.body.members).toHaveLength(1);
+    expect(res.body.personId).toBe(members.body.members[0].personId);
+    // Never a provider id.
+    expect(res.body.personId).not.toBe("p1");
   });
 
   it("apollo LEGACY (no apollo_audience_id): remaps the stored NEUTRAL filters to apollo params (not forwarded verbatim)", async () => {
@@ -519,6 +529,7 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     const members = await request(app).get(`/orgs/audiences/${id}/members`).set(getAuthHeaders());
     expect(members.body.members).toHaveLength(1);
     expect(members.body.members[0].emailNorm).toBe("one@crm.com");
+    expect(res.body.personId).toBe(members.body.members[0].personId);
   });
 
   it("crm: drains across calls without repeats, then returns exhausted when crm-service signals drained", async () => {
@@ -581,6 +592,7 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("exhausted");
     expect(res.body.person).toBeNull();
+    expect(res.body).not.toHaveProperty("personId");
   });
 
   it("crm: a crm-service non-2xx fails loud (502), never a silent fallback", async () => {

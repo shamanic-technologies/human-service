@@ -1404,6 +1404,10 @@ export const ServeNextResponseSchema = z
       description:
         "The next unserved person (real provider match on the audience's stored filters), recorded as served so the next call returns someone new. null when exhausted.",
     }),
+    personId: z.string().uuid().optional().openapi({
+      description:
+        "human-service's canonical person id for the served person: the same `personId` GET /orgs/audiences/{id}/members returns for them. Durable across providers (never a provider id). Present on every 'served' answer; omitted when 'exhausted'.",
+    }),
   })
   .openapi("ServeNextResponse");
 

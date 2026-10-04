@@ -177,16 +177,19 @@ async function resolvePersonId(
 //
 // The caller MUST have validated that `audienceId` belongs to `orgId` (the route
 // does this before any provider spend) so cross-org tagging is impossible.
+//
+// Returns the canonical `people.id` of each contact, in input order — the same
+// id the audience members read exposes as `personId` (serve-next hands it back).
 export async function tagAudienceServe(
   orgId: string,
   audienceId: string,
   contacts: ServedContact[]
-): Promise<void> {
-  if (contacts.length === 0) return;
-
+): Promise<string[]> {
+  const personIds: string[] = [];
   for (const c of contacts) {
     await db.transaction(async (tx) => {
       const personId = await resolvePersonId(tx, orgId, c);
+      personIds.push(personId);
       await tx
         .insert(audienceMembers)
         .values({
@@ -202,6 +205,7 @@ export async function tagAudienceServe(
         });
     });
   }
+  return personIds;
 }
 
 // Re-snapshot an audience's count via the free dry-run. Fail loud on provider
@@ -2184,6 +2188,25 @@ export class AudienceNotServableError extends Error {
 export interface ServeNextResult {
   status: "served" | "exhausted";
   person: Person | null;
+  // The canonical human-service person (`people.id`) the served person resolved
+  // to at membership tagging — the same id `GET /orgs/audiences/{id}/members`
+  // returns as `personId`. Present on every `served` answer, OMITTED on
+  // `exhausted` (that body stays byte-identical to before).
+  personId?: string;
+}
+
+// Tag the served person as an audience member and answer `served` carrying the
+// canonical person id that tagging resolved. One helper so every provider path
+// returns the identity the same way.
+async function servedWithPersonId(
+  orgId: string,
+  audienceId: string,
+  person: Person
+): Promise<ServeNextResult> {
+  const [personId] = await tagAudienceServe(orgId, audienceId, [
+    toServedContact(person),
+  ]);
+  return { status: "served", person, personId };
 }
 
 // serve-next's LOCKED consumer contract (lead-service): status="served" MUST mean
@@ -2275,10 +2298,7 @@ async function serveNextCrmContact(
       if (exhausted) return { status: "exhausted", person: null };
       continue;
     }
-    await tagAudienceServe(identity.orgId, audience.id, [
-      toServedContact(person),
-    ]);
-    return { status: "served", person };
+    return servedWithPersonId(identity.orgId, audience.id, person);
   }
 }
 
@@ -2359,10 +2379,7 @@ export async function serveNextPerson(
       await persistReachableCountOnExhaustion(identity.orgId, audience.id);
       return { status: "exhausted", person: null };
     }
-    await tagAudienceServe(identity.orgId, audience.id, [
-      toServedContact(person),
-    ]);
-    return { status: "served", person };
+    return servedWithPersonId(identity.orgId, audience.id, person);
   }
 
   // apollo: search is a FREE teaser list. Apollo's /search/next hands back up to
@@ -2510,10 +2527,7 @@ export async function serveNextPerson(
     // no-email reveal is simply dropped and we pop the next teaser (never wasting
     // it on a re-enrich).
     if (revealed.person && hasUsableEmail(revealed.person)) {
-      await tagAudienceServe(identity.orgId, audience.id, [
-        toServedContact(revealed.person),
-      ]);
-      return { status: "served", person: revealed.person };
+      return servedWithPersonId(identity.orgId, audience.id, revealed.person);
     }
     // Reveal yielded no usable email, or was post-pay suppressed → drop, pop the
     // next buffered teaser.

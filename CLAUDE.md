@@ -1009,6 +1009,12 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
   teaser; apify surfaces `exhausted`. Fixed v0.26.2 (the drain loop's `if
   (revealed.person)` check was truthy for a null-email person — the "no email → drop"
   the comment claimed was never actually enforced).
+- **`personId` — which human-service person was served.** Every `served` answer
+  carries top-level `personId` = the canonical `people.id` that membership tagging
+  (`tagAudienceServe`) resolved at serve time, i.e. the same `personId` the
+  `/{id}/members` read returns. Never a provider id. Omitted on `exhausted` (that
+  body is byte-identical to before). lead-service passes it down the email stack
+  as the durable person identity of a send. Tests in `audiences-serve-next.test.ts`.
 - **Exhaustion is explicit**: `{ status: "exhausted", person: null }` — never a
   silent empty. An audience with **no committed provider** fails loud:
   `AudienceNotServableError` → **422**. apollo/apify additionally fail loud on **no
