@@ -3,8 +3,18 @@
 // (shamanic-technologies/human-service#285).
 //
 // When a brand with live billing runs low on people left to contact across its
-// ACTIVE audiences, new audiences matching its existing target are created
-// before the pool hits zero. Nothing new is invented to do it:
+// ACTIVE audiences, new audiences INSIDE the target the client validated are
+// created before the pool hits zero. Owner rule (Kevin, 2026-10-04): finding
+// more people the validated target describes is our job; contacting a
+// population the client never agreed to is the CLIENT's decision. So when
+// nobody new is left inside that target, the refill creates NO active audience:
+// it stores a WIDENING PROPOSAL (audience_widening_proposals: the wider target
+// and the segments it would add) for the client to accept or decline
+// (src/services/audience-widening.ts). Nothing in a proposal is contacted, and
+// no screen target is rewritten until the client accepts. Before this, the
+// refill widened on its own (Shockwavecenters 2026-10-04: chiropractic clinic
+// owners got Athletic Trainers, Massage Therapists, Clinic Managers, served).
+// Nothing new is invented to do it:
 //
 //   - LOW POOL is measured with the numbers the dashboard already shows:
 //     `availableToContactCount` (computeAudienceContactability, the list's
@@ -17,9 +27,10 @@
 //   - NEW PEOPLE = NEW AUDIENCES, never an edited one. An audience is immutable
 //     (its stats key on its id), so the refill runs the same split → confirm →
 //     Apollo pointer build path a human uses (audience-split.ts +
-//     ensureApolloPointer), with the brand's existing target and the audiences
-//     already contacted given to the split, so the segments it proposes reach
-//     people outside them. Rows are born `active` under the brand's offer, tagged
+//     ensureApolloPointer), with the validated target and the audiences already
+//     held given to the split, so the segments it proposes reach people of that
+//     target outside them. Rows are born `active` under the brand's offer with
+//     the validated target as `nl_prompt` (unchanged), tagged
 //     `source='auto_refill'`.
 //   - SPEND is org-billed and declared where it is incurred: the split's two LLM
 //     calls in chat-service (under an `audience-refill` run this job opens for
@@ -38,7 +49,12 @@
 
 import { and, desc, eq, ne, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { audiences, leadServes } from "../db/schema.js";
+import {
+  audiences,
+  audienceWideningProposals,
+  leadServes,
+  type WideningSegment,
+} from "../db/schema.js";
 import { getMigrationState } from "../lib/migration-state.js";
 import {
   canBeCharged,
@@ -62,6 +78,9 @@ export const PACE_WINDOW_DAYS = 14;
 /** At most one refill per brand in this many days. */
 export const REFILL_COOLDOWN_DAYS = 3;
 export const AUTO_REFILL_SOURCE = "auto_refill";
+/** Provenance of the audiences an ACCEPTED widening proposal creates: the
+ * client agreed to their target, so it is a validated one. */
+export const WIDENING_ACCEPTED_SOURCE = "widening_accepted";
 
 const DEFAULT_INITIAL_DELAY_MS = 10 * 60_000;
 const DEFAULT_INTERVAL_MS = 6 * 60 * 60_000;
@@ -171,26 +190,53 @@ export async function loadBrandPools(opts: { brandId?: string } = {}): Promise<B
   return pools;
 }
 
+function describeSells(offer: { name: string; description?: string | null } | null): string {
+  return offer ? `${offer.name}${offer.description ? `: ${offer.description}` : ""}` : "(not stated)";
+}
+
 /**
- * The split request for a refill. The target as written is exhausted (that is
- * why we are here: measured 2026-10-02, ObraCam's split answered ZERO segments
- * when asked for "the same target, minus these audiences", correctly, since its
- * audiences already covered every company size of it). So the split is asked
- * for the NEXT closest buyers of what the company sells: other roles in the same
- * kind of companies, or adjacent kinds of companies, in the same places, outside
- * every audience it already holds. The split prompt's form rules (filterable
- * axes, positive values, one population per segment) still apply.
+ * The FIRST split request of a refill: more people INSIDE the target the client
+ * validated, outside every audience the brand already holds. ZERO segments is a
+ * correct answer (measured 2026-10-02: ObraCam's audiences already covered every
+ * company size of its target, and the split said so), and it is what sends the
+ * refill to a widening PROPOSAL instead of new active audiences.
  */
-export function buildRefillRequest(args: {
+export function buildInTargetRefillRequest(args: {
   target: string;
   offer: { name: string; description?: string | null } | null;
   existing: Array<{ name: string; description: string | null }>;
 }): string {
-  const sells = args.offer
-    ? `${args.offer.name}${args.offer.description ? `: ${args.offer.description}` : ""}`
-    : "(not stated)";
   return [
-    `WHAT THIS COMPANY SELLS: ${sells}`,
+    `WHAT THIS COMPANY SELLS: ${describeSells(args.offer)}`,
+    `THE TARGET THE CLIENT VALIDATED: ${args.target}`,
+    "",
+    "The audiences listed below already exist for this target. Split ONLY people this",
+    "target describes who are NOT in any audience below: the places, company sizes,",
+    "industries or roles the target names or allows that these audiences did not cover.",
+    "Every segment stays inside the target as written: never add a role, a kind of",
+    "company or a place the target does not describe. Never repeat or overlap an audience",
+    "below. If the audiences below already cover the whole target, return ZERO segments",
+    "(an empty segments array): that answer is correct.",
+    "",
+    "Audiences already held:",
+    ...args.existing.map((a) => `- ${a.name}${a.description ? `: ${a.description}` : ""}`),
+  ].join("\n");
+}
+
+/**
+ * The SECOND split request, only once nobody is left inside the validated
+ * target: the NEXT closest buyers of what the company sells (other roles in the
+ * same kind of companies, or adjacent kinds of companies, same places). Its
+ * answer is never created as active audiences: it becomes a widening PROPOSAL
+ * the client accepts or declines.
+ */
+export function buildWideningRequest(args: {
+  target: string;
+  offer: { name: string; description?: string | null } | null;
+  existing: Array<{ name: string; description: string | null }>;
+}): string {
+  return [
+    `WHAT THIS COMPANY SELLS: ${describeSells(args.offer)}`,
     `ITS TARGET SO FAR: ${args.target}`,
     "",
     "Every reachable person in the audiences listed below has already been contacted, and",
@@ -198,11 +244,31 @@ export function buildRefillRequest(args: {
     "people who would also buy or use what this company sells and who are NOT in any",
     "audience below: other roles in the same kind of companies (people who decide on, buy",
     "or use what is sold), or adjacent kinds of companies, in the same places as the target",
-    "so far. Never repeat or overlap an audience below. Return at least one segment.",
+    "so far. Never repeat or overlap an audience below. If nobody close is left, return",
+    "ZERO segments.",
     "",
     "Audiences already contacted:",
     ...args.existing.map((a) => `- ${a.name}${a.description ? `: ${a.description}` : ""}`),
   ].join("\n");
+}
+
+/**
+ * The target the client VALIDATED for an offer: the newest audience the client
+ * (or an accepted widening) created, active first. Rows the refill created are
+ * never a source: before 2026-10-04 they carried a target the refill widened on
+ * its own, which the client never agreed to.
+ */
+export function pickValidatedTarget(
+  rows: Array<Pick<AudienceRow, "nlPrompt" | "source" | "status" | "createdAt">>
+): string | null {
+  const candidates = rows
+    .filter((r) => r.source !== AUTO_REFILL_SOURCE && r.status !== "deprecated" && r.nlPrompt?.trim())
+    .sort(
+      (a, b) =>
+        Number(b.status === "active") - Number(a.status === "active") ||
+        b.createdAt.getTime() - a.createdAt.getTime()
+    );
+  return candidates[0]?.nlPrompt?.trim() ?? null;
 }
 
 /** The customer target the widened audiences are screened against: the old
@@ -259,7 +325,46 @@ export type RefillSkipReason =
   | "no_offer"
   | "no_target"
   | "no_user"
+  /** Nobody new inside the target, and the client already DECLINED widening
+   * this same target: their decision stands, nothing is re-proposed. */
+  | "widening_declined"
+  /** Nobody new inside the target and nobody close outside it either. */
+  | "nothing_left"
   | "failed";
+
+type WideningRow = typeof audienceWideningProposals.$inferSelect;
+
+/** A widening proposal as every consumer reads it (refill answer, GET, accept,
+ * decline). */
+export interface WideningProposalView {
+  id: string;
+  orgId: string;
+  brandId: string;
+  offerId: string;
+  status: "pending" | "accepted" | "declined";
+  baseTarget: string;
+  widenedTarget: string;
+  segments: WideningSegment[];
+  createdAt: string;
+  decidedAt: string | null;
+  createdAudienceIds: string[];
+}
+
+export function toWideningProposalView(row: WideningRow): WideningProposalView {
+  return {
+    id: row.id,
+    orgId: row.orgId,
+    brandId: row.brandId,
+    offerId: row.offerId,
+    status: row.status as WideningProposalView["status"],
+    baseTarget: row.baseTarget,
+    widenedTarget: row.widenedTarget,
+    segments: row.segments,
+    createdAt: row.createdAt.toISOString(),
+    decidedAt: row.decidedAt ? row.decidedAt.toISOString() : null,
+    createdAudienceIds: row.createdAudienceIds ?? [],
+  };
+}
 
 export interface RefillOutcome {
   orgId: string;
@@ -267,10 +372,18 @@ export interface RefillOutcome {
   remaining: number;
   dailyPace: number;
   billingState: PaymentOutlook["state"] | "no_account" | null;
-  action: "refilled" | "would_refill" | "skipped";
+  /**
+   * - `refilled`: new ACTIVE audiences INSIDE the validated target (`created`).
+   * - `widening_proposed`: nobody new inside the target; a widening proposal is
+   *   waiting for the client (`proposal`, status pending). Nothing created.
+   * - `would_refill`: dry run, the brand passes every guard.
+   * - `skipped`: nothing could be done, `reason` / `detail` say why.
+   */
+  action: "refilled" | "widening_proposed" | "would_refill" | "skipped";
   reason: RefillSkipReason | null;
   detail: string | null;
   created: Array<{ id: string; name: string; description: string | null }>;
+  proposal: WideningProposalView | null;
 }
 
 export interface RefillResult {
@@ -278,6 +391,8 @@ export interface RefillResult {
   scanned: number;
   low: number;
   refilled: number;
+  /** Brands whose answer is a pending widening proposal. */
+  proposed: number;
   outcomes: RefillOutcome[];
 }
 
@@ -295,6 +410,7 @@ async function refillBrand(
     reason: null,
     detail: null,
     created: [],
+    proposal: null,
   };
   const skip = (reason: RefillSkipReason, detail: string | null = null) => {
     out.reason = reason;
@@ -304,6 +420,28 @@ async function refillBrand(
 
   if (pool.unmeasurable) return skip("unmeasurable", pool.unmeasurable);
   if (!pool.low) return skip("not_low");
+
+  // A widening proposal already waits for the client: that IS the answer
+  // (nothing left inside the target, the decision is theirs). Free, no spend,
+  // dry run included.
+  const [pending] = await db
+    .select()
+    .from(audienceWideningProposals)
+    .where(
+      and(
+        eq(audienceWideningProposals.orgId, pool.orgId),
+        eq(audienceWideningProposals.brandId, pool.brandId),
+        eq(audienceWideningProposals.status, "pending")
+      )
+    )
+    .orderBy(desc(audienceWideningProposals.createdAt))
+    .limit(1);
+  if (pending) {
+    out.action = "widening_proposed";
+    out.proposal = toWideningProposalView(pending);
+    out.detail = `pending_since=${pending.createdAt.toISOString()}`;
+    return out;
+  }
 
   const [recent] = await db
     .select({ id: audiences.id })
@@ -318,6 +456,20 @@ async function refillBrand(
     )
     .limit(1);
   if (recent) return skip("cooldown");
+  // A proposal produced (and since decided) inside the window counts too: the
+  // splits that produced it were billed.
+  const [recentProposal] = await db
+    .select({ id: audienceWideningProposals.id })
+    .from(audienceWideningProposals)
+    .where(
+      and(
+        eq(audienceWideningProposals.orgId, pool.orgId),
+        eq(audienceWideningProposals.brandId, pool.brandId),
+        sql`${audienceWideningProposals.createdAt} > now() - make_interval(days => ${REFILL_COOLDOWN_DAYS})`
+      )
+    )
+    .limit(1);
+  if (recentProposal) return skip("cooldown", "widening_proposal");
 
   // The billing gate comes BEFORE anything that spends.
   let outlook: PaymentOutlook | null;
@@ -343,7 +495,23 @@ async function refillBrand(
   const offerId = pickOffer(active);
   if (!offerId) return skip("no_offer");
   const inOffer = active.filter((a) => a.offerId === offerId);
-  const target = inOffer.find((a) => a.nlPrompt?.trim())?.nlPrompt?.trim() ?? null;
+  // The validated target, never one the refill wrote: active rows first, then
+  // the brand's paused / archived ones under the same offer.
+  let target = pickValidatedTarget(inOffer);
+  if (!target) {
+    const held = await db
+      .select()
+      .from(audiences)
+      .where(
+        and(
+          eq(audiences.orgId, pool.orgId),
+          eq(audiences.brandId, pool.brandId),
+          eq(audiences.offerId, offerId),
+          ne(audiences.status, "deprecated")
+        )
+      );
+    target = pickValidatedTarget(held);
+  }
   if (!target) return skip("no_target");
   const userId = inOffer.find((a) => a.createdByUserId)?.createdByUserId ?? null;
   if (!userId) return skip("no_user");
@@ -384,21 +552,6 @@ async function refillBrand(
   try {
     const identity = { orgId: pool.orgId, userId, runId, workflowTracking: tracking };
     const offer = (await listBrandOffers(pool.brandId, pool.orgId)).find((o) => o.offerId === offerId) ?? null;
-    const proposal = await proposeAudienceSplit(
-      buildRefillRequest({ target, offer, existing }),
-      identity
-    );
-    // The widened audiences reach people the old target did not name, so the
-    // pre-pay screen must judge them against a target that does: the old one
-    // plus the new segments, restated person-level from what the offer sells.
-    // No offer readable ⟹ the old target verbatim (never a guess).
-    const widened =
-      (await draftAudienceTarget({
-        customerTarget: buildWidenedTarget(target, proposal.segments),
-        brandId: pool.brandId,
-        offerId,
-        identity,
-      })) ?? target;
     // Every name in the (org, brand, offer) scope, deprecated included: the
     // unique index covers them all, so a collision would 409 the confirm.
     const taken = await db
@@ -411,17 +564,31 @@ async function refillBrand(
           eq(audiences.offerId, offerId)
         )
       );
+    const inside = await proposeAudienceSplit(
+      buildInTargetRefillRequest({ target, offer, existing }),
+      identity,
+      { allowEmpty: true }
+    );
+    if (inside.segments.length === 0) {
+      const answer = await proposeWidening({ pool, offerId, offer, target, existing, userId, identity, taken: taken.map((t) => t.name) });
+      await completeRun(runId, "completed", runIdentity);
+      if (answer.kind === "skip") return skip(answer.reason, answer.detail);
+      out.action = "widening_proposed";
+      out.proposal = answer.proposal;
+      return out;
+    }
     const names = dedupeSegmentNames(
-      proposal.segments.map((s) => s.name),
+      inside.segments.map((s) => s.name),
       taken.map((t) => t.name)
     );
+    // Inside the validated target: the screen target is that target, verbatim.
     created = await confirmAudienceSplit({
       orgId: pool.orgId,
       userId,
       brandId: pool.brandId,
       offerId,
-      targetAudience: widened,
-      segments: proposal.segments.map((s, i) => ({ name: names[i], description: s.description })),
+      targetAudience: target,
+      segments: inside.segments.map((s, i) => ({ name: names[i], description: s.description })),
       source: AUTO_REFILL_SOURCE,
     });
     await completeRun(runId, "completed", runIdentity);
@@ -453,6 +620,102 @@ async function refillBrand(
   return out;
 }
 
+/**
+ * Nobody new is left inside the validated target. Ask for the next closest
+ * buyers and STORE them as a pending proposal (never as audiences). A target the
+ * client already declined to widen is not re-proposed.
+ */
+async function proposeWidening(args: {
+  pool: BrandPool;
+  offerId: string;
+  offer: { name: string; description?: string | null } | null;
+  target: string;
+  existing: Array<{ name: string; description: string | null }>;
+  userId: string;
+  identity: { orgId: string; userId: string; runId: string; workflowTracking: { brandIds: string[] } };
+  taken: string[];
+}): Promise<
+  | { kind: "proposed"; proposal: WideningProposalView }
+  | { kind: "skip"; reason: RefillSkipReason; detail: string | null }
+> {
+  const { pool, offerId, target } = args;
+  const [declined] = await db
+    .select({ id: audienceWideningProposals.id })
+    .from(audienceWideningProposals)
+    .where(
+      and(
+        eq(audienceWideningProposals.orgId, pool.orgId),
+        eq(audienceWideningProposals.brandId, pool.brandId),
+        eq(audienceWideningProposals.offerId, offerId),
+        eq(audienceWideningProposals.status, "declined"),
+        eq(audienceWideningProposals.baseTarget, target)
+      )
+    )
+    .limit(1);
+  if (declined) return { kind: "skip", reason: "widening_declined", detail: `proposal=${declined.id}` };
+
+  const wide = await proposeAudienceSplit(
+    buildWideningRequest({ target, offer: args.offer, existing: args.existing }),
+    args.identity,
+    { allowEmpty: true }
+  );
+  if (wide.segments.length === 0) {
+    return { kind: "skip", reason: "nothing_left", detail: "no one new inside the target, no one close outside it" };
+  }
+  // The screen target the accepted audiences would carry: the old one plus the
+  // new segments, restated person-level from what the offer sells. No offer
+  // readable ⟹ the literal old target + segments (never a guess, never the old
+  // target alone, which would reject every widened person).
+  const widenedTarget =
+    (await draftAudienceTarget({
+      customerTarget: buildWidenedTarget(target, wide.segments),
+      brandId: pool.brandId,
+      offerId,
+      identity: args.identity,
+    })) ?? buildWidenedTarget(target, wide.segments);
+  const names = dedupeSegmentNames(
+    wide.segments.map((s) => s.name),
+    args.taken
+  );
+  const [row] = await db
+    .insert(audienceWideningProposals)
+    .values({
+      orgId: pool.orgId,
+      brandId: pool.brandId,
+      offerId,
+      baseTarget: target,
+      widenedTarget,
+      segments: wide.segments.map((s, i) => ({
+        name: names[i],
+        description: s.description,
+        icon: s.icon ?? null,
+        estimatedLeadCount: s.estimatedLeadCount,
+      })),
+      status: "pending",
+      createdByUserId: args.userId,
+    })
+    .onConflictDoNothing()
+    .returning();
+  if (row) return { kind: "proposed", proposal: toWideningProposalView(row) };
+  // A concurrent run stored one first (one pending per scope): that one stands.
+  const [existingPending] = await db
+    .select()
+    .from(audienceWideningProposals)
+    .where(
+      and(
+        eq(audienceWideningProposals.orgId, pool.orgId),
+        eq(audienceWideningProposals.brandId, pool.brandId),
+        eq(audienceWideningProposals.offerId, offerId),
+        eq(audienceWideningProposals.status, "pending")
+      )
+    )
+    .limit(1);
+  if (!existingPending) {
+    return { kind: "skip", reason: "failed", detail: "widening proposal insert conflicted with no pending row" };
+  }
+  return { kind: "proposed", proposal: toWideningProposalView(existingPending) };
+}
+
 let running = false;
 
 /**
@@ -482,7 +745,7 @@ export async function runAudienceRefillSweep(
       outcomes.push(outcome);
       if (outcome.reason !== "not_low") {
         console.log(
-          `[human-service] audience_refill.brand org=${outcome.orgId} brand=${outcome.brandId} remaining=${outcome.remaining} pace=${outcome.dailyPace} billing=${outcome.billingState ?? "n/a"} action=${outcome.action} reason=${outcome.reason ?? "-"} created=${outcome.created.length}${outcome.detail ? ` detail=${JSON.stringify(outcome.detail)}` : ""}`
+          `[human-service] audience_refill.brand org=${outcome.orgId} brand=${outcome.brandId} remaining=${outcome.remaining} pace=${outcome.dailyPace} billing=${outcome.billingState ?? "n/a"} action=${outcome.action} reason=${outcome.reason ?? "-"} created=${outcome.created.length}${outcome.proposal ? ` proposal=${outcome.proposal.id}` : ""}${outcome.detail ? ` detail=${JSON.stringify(outcome.detail)}` : ""}`
         );
       }
     }
@@ -491,10 +754,11 @@ export async function runAudienceRefillSweep(
       scanned: pools.length,
       low: pools.filter((p) => p.low).length,
       refilled: outcomes.filter((o) => o.action === "refilled").length,
+      proposed: outcomes.filter((o) => o.action === "widening_proposed").length,
       outcomes,
     };
     console.log(
-      `[human-service] audience_refill.${dryRun ? "dry_run" : "run"} scanned=${result.scanned} low=${result.low} refilled=${result.refilled}`
+      `[human-service] audience_refill.${dryRun ? "dry_run" : "run"} scanned=${result.scanned} low=${result.low} refilled=${result.refilled} proposed=${result.proposed}`
     );
     return result;
   } finally {

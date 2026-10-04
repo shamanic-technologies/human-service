@@ -1159,7 +1159,7 @@ function isUniqueViolation(err: unknown): boolean {
 
 // Serialize rows WITH their contactability, so every channel size served on any
 // audience response is the same figure the list serves as sizeCount.
-async function serializeAudiences(rows: Array<typeof audiences.$inferSelect>) {
+export async function serializeAudiences(rows: Array<typeof audiences.$inferSelect>) {
   const contactability = await computeAudienceContactability(rows);
   return rows.map((row) => serializeAudience(row, contactability.get(row.id) ?? null));
 }
