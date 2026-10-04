@@ -181,7 +181,7 @@ function parseEstimatedLeadCount(v: unknown): number | null {
   return n > 0 ? n : null;
 }
 
-function parseSplit(obj: Record<string, unknown>): {
+function parseSplit(obj: Record<string, unknown>, allowEmpty = false): {
   axes: SplitAxis[];
   segments: Array<{ name: string; description: string; estimatedLeadCount: number | null }>;
 } {
@@ -199,7 +199,7 @@ function parseSplit(obj: Record<string, unknown>): {
   if (axes.length > 2) {
     throw new ChatServiceError(502, `LLM split crossed ${axes.length} axes (max 2)`);
   }
-  if (rawSegments.length < 1 || rawSegments.length > MAX_SPLIT_SEGMENTS) {
+  if ((rawSegments.length < 1 && !allowEmpty) || rawSegments.length > MAX_SPLIT_SEGMENTS) {
     // Truncating would silently break the partition (the dropped segments'
     // people vanish from the campaign), so an out-of-range answer fails loud.
     throw new ChatServiceError(
@@ -232,7 +232,13 @@ function parseSplit(obj: Record<string, unknown>): {
  */
 export async function proposeAudienceSplit(
   targetAudience: string,
-  identity: ChatIdentity
+  identity: ChatIdentity,
+  opts: {
+    /** ZERO segments is a valid answer (the refill asking for people left
+     * inside a target: "nobody" is the truth when its audiences cover it all).
+     * Default false: a customer split always gets at least one segment. */
+    allowEmpty?: boolean;
+  } = {}
 ): Promise<SplitProposal> {
   const { axes, segments } = parseSplit(
     await completeJson({
@@ -243,8 +249,10 @@ export async function proposeAudienceSplit(
       model: SPLIT_LLM_MODEL,
       responseSchema: SPLIT_RESPONSE_SCHEMA,
       disableThinking: SPLIT_DISABLE_THINKING,
-    })
+    }),
+    opts.allowEmpty ?? false
   );
+  if (segments.length === 0) return { axes: [], segments: [] };
 
   const questions = Object.fromEntries(
     segments.map((s, i) => [
@@ -303,47 +311,56 @@ export async function confirmAudienceSplit(args: {
    * automatic refill (audience-refill.ts) stamps `auto_refill`. */
   source?: string;
 }): Promise<Array<typeof audiences.$inferSelect>> {
-  return db.transaction(async (tx) => {
-    const lowered = args.segments.map((s) => s.name.toLowerCase());
-    const taken = await tx
-      .select({ name: audiences.name })
-      .from(audiences)
-      .where(
-        and(
-          eq(audiences.orgId, args.orgId),
-          eq(audiences.brandId, args.brandId),
-          eq(audiences.offerId, args.offerId),
-          inArray(sql`lower(${audiences.name})`, lowered)
-        )
-      );
-    if (taken.length > 0) {
-      throw new SplitNameConflictError(taken.map((t) => t.name));
-    }
-    return tx
-      .insert(audiences)
-      .values(
-        args.segments.map((s) => ({
-          orgId: args.orgId,
-          brandId: args.brandId,
-          offerId: args.offerId,
-          name: s.name,
-          description: s.description,
-          nlPrompt: args.targetAudience,
-          // One segment = not one of several: the target IS its text. Several:
-          // each gets its own segment target, drafted after the confirm by
-          // ensureTargetText (audience-target-text.ts), before its first serve.
-          ...(args.segments.length === 1
-            ? audienceTargetFields(args.targetAudience)
-            : { targetText: null, targetTextOrigin: null }),
-          provider: "apollo",
-          apolloAudienceId: null,
-          filters: null,
-          status: "active",
-          source: args.source ?? "split_proposal",
-          createdByUserId: args.userId,
-        }))
+  return db.transaction((tx) => insertSplitAudiences(tx, args));
+}
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/** confirmAudienceSplit's body, for a caller that already holds a transaction
+ * (accepting a widening proposal locks the proposal row in the same one). */
+export async function insertSplitAudiences(
+  tx: Tx,
+  args: Parameters<typeof confirmAudienceSplit>[0]
+): Promise<Array<typeof audiences.$inferSelect>> {
+  const lowered = args.segments.map((s) => s.name.toLowerCase());
+  const taken = await tx
+    .select({ name: audiences.name })
+    .from(audiences)
+    .where(
+      and(
+        eq(audiences.orgId, args.orgId),
+        eq(audiences.brandId, args.brandId),
+        eq(audiences.offerId, args.offerId),
+        inArray(sql`lower(${audiences.name})`, lowered)
       )
-      .returning();
-  });
+    );
+  if (taken.length > 0) {
+    throw new SplitNameConflictError(taken.map((t) => t.name));
+  }
+  return tx
+    .insert(audiences)
+    .values(
+      args.segments.map((s) => ({
+        orgId: args.orgId,
+        brandId: args.brandId,
+        offerId: args.offerId,
+        name: s.name,
+        description: s.description,
+        nlPrompt: args.targetAudience,
+        // One segment = not one of several: the target IS its text. Several:
+        // each gets its own segment target, drafted after the confirm by
+        // ensureTargetText (audience-target-text.ts), before its first serve.
+        ...(args.segments.length === 1
+          ? audienceTargetFields(args.targetAudience)
+          : { targetText: null, targetTextOrigin: null }),
+        provider: "apollo",
+        apolloAudienceId: null,
+        filters: null,
+        status: "active",
+        source: args.source ?? "split_proposal",
+        createdByUserId: args.userId,
+      }))
+    )
+    .returning();
 }
 

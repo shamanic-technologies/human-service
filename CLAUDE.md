@@ -62,7 +62,11 @@ section — the port binds first).
 | Internal | `POST /internal/backfill-sent-suppressions` | apiKey | One-time data repair (the INVERSE of the recovery above): for a caller-supplied set of `{orgId, brandId, email, sentAt}`, create the missing `brand_suppressions` row dated from the REAL send, so people actually EMAILED before per-brand suppression existed (2026-06-15) stop being re-served and re-bought for the remainder of their own window. Idempotent (reversible `suppression_backfills` ledger keyed on `reason`), `?dryRun=true`. Dedicated **25 MB** body parser. NOT a sweep — the set is supplied, never inferred, and never derived from bare serves |
 | Internal | `POST /internal/backfill-sent-suppressions/revert` | apiKey | Undo a backfill: delete exactly the suppression rows that `reason` created + drop the ledger rows. A row re-served since (its `last_served_at` moved) records a real emission and is kept |
 | Internal | `POST /internal/backfill-audience-target-texts` | apiKey | One-time data fix: write every pre-0033 audience's own text (`targetText`), by the one rule in "Audience text" below (idempotent, `?dryRun=true`, `?async=true`, `?brandId=`, platform-billed) |
-| Internal | `POST /internal/audience-refill` | apiKey | Run the audience refill now (`?dryRun=true` reports who WOULD be refilled, spending nothing; `?brandId=` narrows). See "Audience refill" below |
+| Internal | `POST /internal/audience-refill` | apiKey | Run the audience refill now (`?dryRun=true` reports who WOULD be refilled, spending nothing; `?brandId=` narrows). Per-brand `action`: `refilled` (inside the validated target) / `widening_proposed` / `would_refill` / `skipped`. See "Audience refill" below |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences/widening-proposals` | apiKey + `x-org-id` | The refill's widening proposals (`?brandId=`, `?status=pending\|accepted\|declined`), newest first |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences/widening-proposals/{id}` | apiKey + `x-org-id` | One proposal (404 for another org's) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/widening-proposals/{id}/accept` | apiKey + `x-org-id` | Client accepts: segments become ACTIVE audiences on the wider target. Idempotent; 409 if declined |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/widening-proposals/{id}/decline` | apiKey + `x-org-id` | Client declines: nothing changes, never re-proposed for that target. Idempotent; 409 if accepted |
 | Internal | `POST /internal/audiences/resolve` | apiKey | **Bulk server-to-server audience resolver** for lead-service (#166): body `{orgId, brandId, audienceIds?, emails?}` → `{byAudienceId, byEmail}` maps of `{id,name,avatarUrl}` \| null. Brand-correct + active-preferred (deprecated→canonical), keyed by audienceId AND/OR email (historical coverage). Dedicated **25 MB** body parser (mounts before the global 100 KB json) — NO browser 413 cap. See below. |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
@@ -1557,7 +1561,7 @@ audiences use.
 ### Audience refill — a paying brand never runs dry (`src/services/audience-refill.ts`)
 
 human-service#285. When a brand whose billing can pay runs low on people left to
-contact, NEW audiences matching its target are created before the pool hits zero.
+contact, NEW audiences inside its validated target are created before the pool hits zero.
 Runs every 6h (first tick 10 min after boot, timers only, never on the boot path;
 `AUDIENCE_REFILL_INTERVAL_MS=0` is the off switch) and on demand via
 `POST /internal/audience-refill`.
@@ -1576,24 +1580,43 @@ Runs every 6h (first tick 10 min after boot, timers only, never on the boot path
   and an unreadable outlook all get nothing (owner rule: never spend for a client
   who cannot be charged). Read BEFORE anything spends. Env: `BILLING_SERVICE_URL`,
   `BILLING_SERVICE_API_KEY`.
+- **Only inside the target the client VALIDATED** (owner rule, Kevin 2026-10-04:
+  finding more people that target describes is our job, contacting a population
+  the client never agreed to is THEIR decision). Before, the refill widened on its
+  own (Shockwavecenters, chiro clinic owners, got Athletic Trainers / Massage
+  Therapists / Clinic Managers active and served). Validated target =
+  `pickValidatedTarget`: newest `nl_prompt` under the offer, active first, NEVER
+  an `auto_refill` row (pre-fix ones carry the self-widened text).
 - **New people = new audiences, never an edited one** (an audience is immutable).
-  Same path a human uses: `proposeAudienceSplit` asked for the NEXT closest
-  buyers of what the offer sells (other roles in the same kind of companies, or
-  adjacent kinds of companies, same places), outside every audience the brand
-  already holds under that offer. Asking for "the same target minus these" made
-  the split answer ZERO segments for ObraCam (prod 2026-10-02): its audiences
-  already covered the whole target. The new rows' `nl_prompt` (screen target) is
-  re-drafted by `draftAudienceTarget` from the old target + the new segments, so
-  the pre-pay screen does not reject the widened people. Then
-  `confirmAudienceSplit` (`source='auto_refill'`, born `active`, same offer,
-  billed under the latest audience creator),
-  then `ensureApolloPointer` per row in the background. A colliding name gets a
-  date suffix.
+  Ask 1, `buildInTargetRefillRequest`: the split (`allowEmpty`) for people the
+  validated target describes outside every audience the brand holds under the
+  offer. Segments ⟹ `confirmAudienceSplit` (`source='auto_refill'`, born
+  `active`, `nl_prompt` = the validated target VERBATIM, billed under the latest
+  audience creator), then `ensureApolloPointer` + `ensureTargetText` per row in
+  the background ⟹ `action: refilled`. A colliding name gets a date suffix.
+- **ZERO segments ⟹ a WIDENING PROPOSAL, never active audiences**
+  (`audience_widening_proposals`, migration `0035`, one pending per
+  (org, brand, offer)). Ask 2, `buildWideningRequest`: the next closest buyers
+  (other roles, adjacent companies, same places); `draftAudienceTarget` restates
+  old target + segments as `widenedTarget`. Stored pending ⟹ `action:
+  widening_proposed` + `proposal`. Nothing in it is contacted, counted, or
+  written into any `nl_prompt`. A pending proposal is answered again for free on
+  every later run (dry run included). A target the client DECLINED is never
+  re-proposed (`skipped/widening_declined`); ask 2 empty ⟹ `skipped/nothing_left`.
+- **Accept / decline** (`src/services/audience-widening.ts`, routes under
+  `/orgs/audiences/widening-proposals`, mounted before `/orgs/audiences/:id`):
+  accept locks the proposal row and inserts the segments (`insertSplitAudiences`,
+  same tx) as ACTIVE, `source='widening_accepted'`, `nl_prompt = widenedTarget`
+  (so the validated target widens for later refills); builds fire in the
+  background under `x-user-id` if a UUID, else the refill's user. Decline flips
+  the status only. Both idempotent; the opposite decision is 409. Existing
+  audiences are never touched (the pre-fix Shockwavecenters refill rows stay
+  until the owner says otherwise).
 - **Cost**: org-billed, declared where incurred: the split's LLM calls in
   chat-service under an `audience-refill` run, each Apollo build in apollo-service
   under its own `audience-pointer-build` run. human-service declares none.
 - **One refill per brand per 3 days** (`REFILL_COOLDOWN_DAYS`, keyed on
-  `auto_refill` rows), so a genuinely dry market is not re-billed every tick.
+  `auto_refill` rows AND proposals created), so a dry market is not re-billed.
 - **Never touches a campaign.** Restarting is the client's call.
 - Known limit: a new audience's Remaining is its Apollo count until served, so
   people it shares with older audiences (already suppressed) read as remaining

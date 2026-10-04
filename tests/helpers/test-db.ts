@@ -9,6 +9,7 @@ import {
   audienceMembers,
   audiences,
   audiencePortfolios,
+  audienceWideningProposals,
   audienceTeaserBuffer,
   audienceTeaserScreenings,
   audienceScreenedOut,
@@ -32,6 +33,7 @@ export async function cleanTestData() {
   await db.delete(audienceScreenedOut);
   await db.delete(audienceMembers);
   await db.delete(audiencePortfolios);
+  await db.delete(audienceWideningProposals);
   await db.delete(audiences);
   await db.delete(people);
 }
