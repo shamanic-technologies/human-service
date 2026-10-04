@@ -190,6 +190,55 @@ function mockFleet(opts: {
   return { enriched, screened, targets };
 }
 
+describe("serve-next walk budget", () => {
+  it("answers pending past the budget, loses no teaser, and the next call resumes the walk", async () => {
+    // Shockwavecenters 2026-10-04: the screen rejected ~99.7% of an audience, one call
+    // walked 700+ teasers and outran lead-service's 300s timeout. Each screen here
+    // "takes" 200s of wall clock, past the 120s budget, so every call stops after one
+    // verdict — and the walk still reaches the on-target teaser two calls later.
+    let offset = 0;
+    const realNow = Date.now.bind(Date);
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    try {
+      const calls = mockFleet({
+        pages: [
+          [
+            { id: "p1", title: "Physician" },
+            { id: "p2", title: "Resident Physician" },
+            { id: "p3", title: "Chiropractor" },
+          ],
+        ],
+        verdicts: { p1: 0.07, p2: 0.03, p3: 0.95 },
+      });
+      const judge = fetchSpy.getMockImplementation()!;
+      fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+        if (String(url).endsWith("/orgs/judgments")) offset += 200_000;
+        return judge(url, init);
+      });
+      const id = await createDescribedAudience("Chiros", "chiropractors who own their practice");
+
+      const first = await serveNext(id);
+      expect(first.status).toBe(200);
+      expect(first.body).toEqual({ status: "pending", person: null });
+      expect(calls.screened).toEqual(["p1"]);
+      expect(calls.enriched).toEqual([]);
+
+      const second = await serveNext(id);
+      expect(second.body).toEqual({ status: "pending", person: null });
+      expect(calls.screened).toEqual(["p1", "p2"]);
+
+      const third = await serveNext(id);
+      expect(third.body.status).toBe("served");
+      expect(third.body.person.email).toBe("p3@acme.com");
+      // Every teaser judged exactly once across the three calls; only the pass paid for.
+      expect(calls.screened).toEqual(["p1", "p2", "p3"]);
+      expect(calls.enriched).toEqual(["p3"]);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+});
+
 describe("pre-pay teaser screening", () => {
   it("passes an on-target teaser through to the billed reveal", async () => {
     const calls = mockFleet({

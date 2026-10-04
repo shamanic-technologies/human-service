@@ -2186,7 +2186,10 @@ export class AudienceNotServableError extends Error {
 }
 
 export interface ServeNextResult {
-  status: "served" | "exhausted";
+  // `pending` ⟹ the per-call walk budget (SERVE_NEXT_BUDGET_MS) ran out before a
+  // person was found. Nothing is lost: every judged teaser is recorded and popped,
+  // so the NEXT call resumes the walk where this one stopped. Not exhaustion.
+  status: "served" | "exhausted" | "pending";
   person: Person | null;
   // The canonical human-service person (`people.id`) the served person resolved
   // to at membership tagging — the same id `GET /orgs/audiences/{id}/members`
@@ -2302,6 +2305,18 @@ async function serveNextCrmContact(
   }
 }
 
+// Wall-clock budget for ONE apollo serve-next walk. The drain loop screens teasers
+// one by one (~0.4s each); an audience whose filters are much wider than its text
+// rejects nearly everything (Shockwavecenters 2026-10-04: 25 passes in ~10,600
+// teasers, one call walking 700+ of them), so an unbounded call outran
+// lead-service's 300s client timeout. The client then gave up while this loop kept
+// going and revealed (paid for) a person nobody received. Past the budget the call
+// answers `pending` instead; the walk's progress is durable (popped buffer +
+// recorded verdicts), so the next call picks up exactly where this one stopped.
+// The budget is checked only BETWEEN teasers, so one in-flight screen / reveal can
+// overrun it by its own latency, and each call always makes progress.
+export const SERVE_NEXT_BUDGET_MS = 120_000;
+
 // Serve the NEXT unserved person of an audience — the per-iteration lead
 // primitive lead-service calls. A thin wrapper over the existing people-gateway
 // machinery: it searches with the audience's STORED canonical filters via its
@@ -2313,8 +2328,10 @@ async function serveNextCrmContact(
 // what drives suppression. The audience is assumed already org-validated.
 export async function serveNextPerson(
   audience: typeof audiences.$inferSelect,
-  identity: Identity
+  identity: Identity,
+  budgetMs: number = SERVE_NEXT_BUDGET_MS
 ): Promise<ServeNextResult> {
+  const deadline = Date.now() + budgetMs;
   const provider = audience.provider;
   const featureSlug = identity.workflowTracking?.featureSlug;
 
@@ -2432,7 +2449,17 @@ export async function serveNextPerson(
   // the first reveal. Exhausted ONLY when the buffer is empty AND apollo returns
   // no more fresh teasers — never a fabricated cap (apollo's `done` at totalPages
   // guarantees termination, so the walk is bounded by the real pool).
+  let walked = 0;
   for (;;) {
+    // Budget spent and at least one step taken this call → hand back `pending`
+    // BEFORE popping, so no teaser is consumed without a verdict.
+    if (walked > 0 && Date.now() >= deadline) {
+      console.log(
+        `[human-service] audience.serve_next_budget_spent org=${identity.orgId} audience=${audience.id} walked=${walked} budgetMs=${budgetMs}`
+      );
+      return { status: "pending", person: null };
+    }
+    walked += 1;
     const teaser = await popTeaser(identity.orgId, audience.id);
     if (!teaser) {
       // Buffer dry → advance apollo's free cursor one fruitful chunk. peopleSearch
