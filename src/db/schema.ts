@@ -871,3 +871,49 @@ export const audiencePortfolios = pgTable(
     uniqueIndex("idx_audience_portfolios_scope").on(table.orgId, table.brandId, table.offerId),
   ]
 );
+
+// --- Audience WIDENING proposals (the refill's "nothing left inside your target") ---
+//
+// When the automatic refill (src/services/audience-refill.ts) finds nobody new
+// inside the target the client validated, it does NOT create audiences outside
+// it. It stores the wider target and the segments it would add here, for the
+// client to accept or decline. Nothing in a pending proposal is contacted or
+// counted as active. Accept = the segments become ACTIVE audiences carrying
+// `widened_target` as their screen target; decline = nothing changes.
+// `status`: 'pending' | 'accepted' | 'declined'. At most ONE pending per
+// (org, brand, offer) (partial unique index).
+export interface WideningSegment {
+  name: string;
+  description: string;
+  icon: string | null;
+  estimatedLeadCount: number | null;
+}
+
+export const audienceWideningProposals = pgTable(
+  "audience_widening_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    offerId: uuid("offer_id").notNull(),
+    // The target the client validated, verbatim (what is exhausted).
+    baseTarget: text("base_target").notNull(),
+    // The wider screen target the accepted audiences would carry as nl_prompt.
+    widenedTarget: text("widened_target").notNull(),
+    segments: jsonb("segments").$type<WideningSegment[]>().notNull(),
+    status: text("status").notNull().default("pending"),
+    // The user the refill ran under (billing identity for the accepted builds).
+    createdByUserId: uuid("created_by_user_id"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decidedByUserId: text("decided_by_user_id"),
+    createdAudienceIds: jsonb("created_audience_ids").$type<string[]>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_audience_widening_proposals_brand").on(table.orgId, table.brandId, table.createdAt),
+    uniqueIndex("idx_audience_widening_proposals_one_pending")
+      .on(table.orgId, table.brandId, table.offerId)
+      .where(sql`status = 'pending'`),
+  ]
+);

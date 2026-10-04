@@ -1,13 +1,15 @@
 // The audience refill end to end against the real DB: low-pool detection on
-// the brand's own numbers, the billing gate read from billing-service, and new
-// ACTIVE audiences created through the split path (never an edited one).
+// the brand's own numbers, the billing gate read from billing-service, new
+// ACTIVE audiences INSIDE the validated target through the split path (never an
+// edited one), and, when nobody is left inside it, a widening PROPOSAL the
+// client accepts or declines (never active audiences outside the target).
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import request from "supertest";
 import { and, eq } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
-import { audiences, leadServes } from "../../src/db/schema.js";
+import { audiences, audienceWideningProposals, leadServes } from "../../src/db/schema.js";
 import { ensureApolloPointer } from "../../src/services/audiences.js";
 import { loadBrandPools, runAudienceRefillSweep } from "../../src/services/audience-refill.js";
 import { draftAudienceTarget } from "../../src/services/audience-target.js";
@@ -51,6 +53,18 @@ const BILLING: Record<string, string> = {
   [ORG_HEALTHY]: "will_charge",
 };
 
+// What the split answers to each of the refill's two asks.
+const INSIDE_SEGMENTS = [
+  { name: "51-200 Employees", description: "Owners and managers at mid-size construction companies in Paraguay.", estimatedLeadCount: 200 },
+  { name: "Up to 50 Employees", description: "Owners at small construction companies in Paraguay.", estimatedLeadCount: 300 },
+];
+const WIDE_SEGMENTS = [
+  { name: "Site Engineers", description: "Site engineers at construction companies in Paraguay.", estimatedLeadCount: 400 },
+  { name: "Architects", description: "Architects at architecture firms in Paraguay.", estimatedLeadCount: 250 },
+];
+let insideAnswer: unknown[] = INSIDE_SEGMENTS;
+let wideAnswer: unknown[] = WIDE_SEGMENTS;
+
 const fetchSpy = vi.fn();
 const fetchBefore = globalThis.fetch;
 
@@ -73,15 +87,9 @@ function wire() {
     }
     if (u.includes("/v1/runs/")) return json(200, {});
     if (u.endsWith("/complete")) {
-      return json(200, {
-        json: {
-          axes: ["seniority_role"],
-          segments: [
-            { name: "Site Engineers", description: "Site engineers at construction companies in Paraguay.", estimatedLeadCount: 400 },
-            { name: "Up to 50 Employees", description: "Owners at small construction companies in Paraguay.", estimatedLeadCount: 300 },
-          ],
-        },
-      });
+      const message = (JSON.parse(init.body ?? "{}") as { message: string }).message;
+      const segments = message.includes("THE TARGET THE CLIENT VALIDATED") ? insideAnswer : wideAnswer;
+      return json(200, { json: { axes: segments.length > 1 ? ["company_size"] : [], segments } });
     }
     if (u.endsWith("/orgs/judgments")) {
       const body = JSON.parse(init.body ?? "{}") as { questions: Record<string, unknown> };
@@ -132,7 +140,17 @@ async function seedBrand(orgId: string, brandId: string, opts: { apolloCount: nu
   return aud;
 }
 
+function completePrompts(): string[] {
+  return fetchSpy.mock.calls
+    .filter(([u]) => String(u).endsWith("/complete"))
+    .map(([, init]) => (JSON.parse(init.body as string) as { message: string }).message);
+}
+
+const orgHeaders = (orgId: string) => ({ ...getAuthHeaders(), "x-org-id": orgId });
+
 beforeEach(async () => {
+  insideAnswer = INSIDE_SEGMENTS;
+  wideAnswer = WIDE_SEGMENTS;
   vi.stubGlobal("fetch", fetchSpy);
   fetchSpy.mockReset();
   wire();
@@ -185,50 +203,49 @@ describe("low-pool detection", () => {
 });
 
 describe("refill sweep", () => {
-  it("refills a low brand whose billing can charge it with NEW active audiences, and never one that cannot", async () => {
+  it("refills a low brand whose billing can charge it with NEW active audiences INSIDE its target, and never one that cannot", async () => {
     const original = await seedBrand(ORG_PAYING, BRAND_PAYING, { apolloCount: 0, served: 23 });
     await seedBrand(ORG_IDLE, BRAND_IDLE, { apolloCount: 0, served: 10 });
 
     const res = await request(app).post("/internal/audience-refill").set(getAuthHeaders());
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ dryRun: false, low: 2, refilled: 1 });
+    expect(res.body).toMatchObject({ dryRun: false, low: 2, refilled: 1, proposed: 0 });
 
     const paying = res.body.outcomes.find((o: { brandId: string }) => o.brandId === BRAND_PAYING);
     const idle = res.body.outcomes.find((o: { brandId: string }) => o.brandId === BRAND_IDLE);
-    expect(paying).toMatchObject({ action: "refilled", billingState: "will_charge" });
+    expect(paying).toMatchObject({ action: "refilled", billingState: "will_charge", proposal: null });
+    expect(paying.created).toHaveLength(2);
     expect(idle).toMatchObject({ action: "skipped", reason: "not_chargeable", billingState: "idle" });
 
-    // New rows: active, same offer + target, tagged auto_refill; a colliding
-    // name is suffixed rather than reusing the existing audience.
+    // New rows: active, same offer, the VALIDATED target verbatim as the screen
+    // target, tagged auto_refill; a colliding name is suffixed.
     const rows = await db
       .select()
       .from(audiences)
       .where(and(eq(audiences.brandId, BRAND_PAYING), eq(audiences.source, "auto_refill")));
     expect(rows).toHaveLength(2);
     for (const r of rows) {
-      expect(r).toMatchObject({ status: "active", offerId: OFFER, nlPrompt: WIDENED, provider: "apollo", orgId: ORG_PAYING, createdByUserId: USER });
+      expect(r).toMatchObject({ status: "active", offerId: OFFER, nlPrompt: TARGET, provider: "apollo", orgId: ORG_PAYING, createdByUserId: USER });
     }
     expect(rows.map((r) => r.name).sort()[1]).toMatch(/^Up to 50 Employees \w{3} \d{1,2}$/);
+    // Nothing was widened: no re-drafted target, no proposal.
+    expect(vi.mocked(draftAudienceTarget)).not.toHaveBeenCalled();
+    expect(await db.select().from(audienceWideningProposals)).toHaveLength(0);
 
     // The original audience is untouched (immutable).
     const [same] = await db.select().from(audiences).where(eq(audiences.id, original.id));
-    expect(same).toMatchObject({ name: original.name, filters: original.filters, status: "active" });
+    expect(same).toMatchObject({ name: original.name, filters: original.filters, status: "active", nlPrompt: TARGET });
 
-    // The idle org got nothing, not even an LLM call.
+    // The idle org got nothing, not even an LLM call. The paying one: ONE ask,
+    // inside its validated target.
     const idleRows = await db.select().from(audiences).where(eq(audiences.brandId, BRAND_IDLE));
     expect(idleRows).toHaveLength(1);
-    const completes = fetchSpy.mock.calls.filter(([u]) => String(u).endsWith("/complete"));
-    expect(completes).toHaveLength(1);
-    const prompt = JSON.parse(completes[0][1].body as string).message as string;
-    expect(prompt).toContain(`ITS TARGET SO FAR: ${TARGET}`);
-    expect(prompt).toContain("WHAT THIS COMPANY SELLS: ObraCam: Cameras for construction sites.");
-    // The screen target is re-drafted from the old target + the new segments.
-    expect(vi.mocked(draftAudienceTarget).mock.calls[0][0]).toMatchObject({
-      brandId: BRAND_PAYING,
-      offerId: OFFER,
-      customerTarget: expect.stringContaining("- Site engineers at construction companies in Paraguay."),
-    });
-    expect(prompt).toContain("- Up to 50 Employees");
+    const prompts = completePrompts();
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain(`THE TARGET THE CLIENT VALIDATED: ${TARGET}`);
+    expect(prompts[0]).toContain("WHAT THIS COMPANY SELLS: ObraCam: Cameras for construction sites.");
+    expect(prompts[0]).toContain("- Up to 50 Employees");
+    expect(prompts[0]).not.toContain("NEXT closest");
 
     // Each new audience's Apollo build is fired, org-billed.
     expect(vi.mocked(ensureApolloPointer)).toHaveBeenCalledTimes(2);
@@ -242,6 +259,199 @@ describe("refill sweep", () => {
     expect(again!.refilled).toBe(0);
   });
 
+  it("reads the VALIDATED target, never the widened one an older refill wrote", async () => {
+    await seedBrand(ORG_PAYING, BRAND_PAYING, { apolloCount: 0, served: 23 });
+    // A pre-2026-10-04 refill row: newer, active, carrying a target the refill
+    // widened on its own. Old enough to be outside the cooldown.
+    await db.insert(audiences).values({
+      orgId: ORG_PAYING,
+      brandId: BRAND_PAYING,
+      offerId: OFFER,
+      name: "Athletic Trainers",
+      description: "Athletic trainers in Paraguay.",
+      nlPrompt: WIDENED,
+      provider: "apollo",
+      apolloAudienceId: "apollo-2",
+      filters: { q: "y" },
+      apolloCount: 0,
+      reachableCount: 0,
+      status: "active",
+      source: "auto_refill",
+      createdByUserId: USER,
+      createdAt: new Date(Date.now() - 5 * 86_400_000),
+    });
+    const r = await runAudienceRefillSweep();
+    expect(r!.outcomes[0]).toMatchObject({ action: "refilled" });
+    expect(completePrompts()[0]).toContain(`THE TARGET THE CLIENT VALIDATED: ${TARGET}`);
+    const fresh = await db
+      .select()
+      .from(audiences)
+      .where(and(eq(audiences.brandId, BRAND_PAYING), eq(audiences.source, "auto_refill")));
+    expect(fresh.filter((a) => a.nlPrompt === TARGET)).toHaveLength(2);
+  });
+});
+
+describe("nobody left inside the target: a widening PROPOSAL, never active audiences", () => {
+  async function propose() {
+    insideAnswer = [];
+    const original = await seedBrand(ORG_PAYING, BRAND_PAYING, { apolloCount: 0, served: 23 });
+    const res = await request(app).post("/internal/audience-refill").set(getAuthHeaders());
+    expect(res.status).toBe(200);
+    return { original, res };
+  }
+
+  it("creates zero audiences and stores a pending proposal a consumer can read", async () => {
+    const { original, res } = await propose();
+    expect(res.body).toMatchObject({ refilled: 0, proposed: 1 });
+    const outcome = res.body.outcomes[0];
+    expect(outcome).toMatchObject({ action: "widening_proposed", reason: null, created: [] });
+    expect(outcome.proposal).toMatchObject({
+      status: "pending",
+      brandId: BRAND_PAYING,
+      offerId: OFFER,
+      baseTarget: TARGET,
+      widenedTarget: WIDENED,
+      createdAudienceIds: [],
+    });
+    expect(outcome.proposal.segments.map((s: { name: string }) => s.name)).toEqual(["Site Engineers", "Architects"]);
+
+    // Nothing created, the existing audience and its screen target untouched.
+    const rows = await db.select().from(audiences).where(eq(audiences.brandId, BRAND_PAYING));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: original.id, nlPrompt: TARGET, status: "active" });
+    expect(vi.mocked(ensureApolloPointer)).not.toHaveBeenCalled();
+
+    // Two asks: inside the target first, then the next closest buyers.
+    const prompts = completePrompts();
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toContain("THE TARGET THE CLIENT VALIDATED");
+    expect(prompts[1]).toContain("NEXT closest");
+
+    // A consumer reads it.
+    const list = await request(app)
+      .get(`/orgs/audiences/widening-proposals?brandId=${BRAND_PAYING}&status=pending`)
+      .set(orgHeaders(ORG_PAYING));
+    expect(list.status).toBe(200);
+    expect(list.body.proposals).toHaveLength(1);
+    expect(list.body.proposals[0].id).toBe(outcome.proposal.id);
+    const one = await request(app)
+      .get(`/orgs/audiences/widening-proposals/${outcome.proposal.id}`)
+      .set(orgHeaders(ORG_PAYING));
+    expect(one.body.proposal).toMatchObject({ id: outcome.proposal.id, status: "pending" });
+    // Another org cannot.
+    const foreign = await request(app)
+      .get(`/orgs/audiences/widening-proposals/${outcome.proposal.id}`)
+      .set(orgHeaders(ORG_IDLE));
+    expect(foreign.status).toBe(404);
+
+    // The next sweep (cooldown aside) answers the same pending proposal, free.
+    fetchSpy.mockClear();
+    const again = await runAudienceRefillSweep({ brandId: BRAND_PAYING });
+    expect(again!.outcomes[0]).toMatchObject({ action: "widening_proposed" });
+    expect(again!.outcomes[0].proposal!.id).toBe(outcome.proposal.id);
+    expect(completePrompts()).toHaveLength(0);
+    // Dry run too.
+    const dry = await runAudienceRefillSweep({ brandId: BRAND_PAYING, dryRun: true });
+    expect(dry!.outcomes[0]).toMatchObject({ action: "widening_proposed" });
+  });
+
+  it("accept creates the proposed audiences ACTIVE on the wider target, idempotently", async () => {
+    const { original, res } = await propose();
+    const id = res.body.outcomes[0].proposal.id as string;
+
+    const a1 = await request(app)
+      .post(`/orgs/audiences/widening-proposals/${id}/accept`)
+      .set({ ...orgHeaders(ORG_PAYING), "x-user-id": USER });
+    expect(a1.status).toBe(200);
+    expect(a1.body.proposal).toMatchObject({ status: "accepted" });
+    expect(a1.body.audiences).toHaveLength(2);
+    expect(a1.body.proposal.createdAudienceIds).toEqual(a1.body.audiences.map((a: { id: string }) => a.id));
+
+    const created = await db
+      .select()
+      .from(audiences)
+      .where(and(eq(audiences.brandId, BRAND_PAYING), eq(audiences.source, "widening_accepted")));
+    expect(created).toHaveLength(2);
+    for (const r of created) {
+      expect(r).toMatchObject({ status: "active", offerId: OFFER, nlPrompt: WIDENED, createdByUserId: USER });
+    }
+    expect(vi.mocked(ensureApolloPointer)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(ensureTargetText)).toHaveBeenCalledTimes(2);
+    const [same] = await db.select().from(audiences).where(eq(audiences.id, original.id));
+    expect(same).toMatchObject({ nlPrompt: TARGET, status: "active" });
+
+    // Repeat: same audiences, nothing new.
+    const a2 = await request(app)
+      .post(`/orgs/audiences/widening-proposals/${id}/accept`)
+      .set(orgHeaders(ORG_PAYING));
+    expect(a2.status).toBe(200);
+    expect(a2.body.audiences.map((a: { id: string }) => a.id)).toEqual(a1.body.audiences.map((a: { id: string }) => a.id));
+    const all = await db.select().from(audiences).where(eq(audiences.brandId, BRAND_PAYING));
+    expect(all).toHaveLength(3);
+
+    // Declining an accepted proposal is a conflict.
+    const d = await request(app)
+      .post(`/orgs/audiences/widening-proposals/${id}/decline`)
+      .set(orgHeaders(ORG_PAYING));
+    expect(d.status).toBe(409);
+  });
+
+  it("decline changes nothing, is idempotent, and is never re-proposed for the same target", async () => {
+    const { res } = await propose();
+    const id = res.body.outcomes[0].proposal.id as string;
+
+    const d1 = await request(app)
+      .post(`/orgs/audiences/widening-proposals/${id}/decline`)
+      .set(orgHeaders(ORG_PAYING));
+    expect(d1.status).toBe(200);
+    expect(d1.body.proposal).toMatchObject({ status: "declined", createdAudienceIds: [] });
+    const d2 = await request(app)
+      .post(`/orgs/audiences/widening-proposals/${id}/decline`)
+      .set(orgHeaders(ORG_PAYING));
+    expect(d2.status).toBe(200);
+    expect(d2.body.proposal.decidedAt).toBe(d1.body.proposal.decidedAt);
+    const acc = await request(app)
+      .post(`/orgs/audiences/widening-proposals/${id}/accept`)
+      .set(orgHeaders(ORG_PAYING));
+    expect(acc.status).toBe(409);
+    expect(await db.select().from(audiences).where(eq(audiences.brandId, BRAND_PAYING))).toHaveLength(1);
+
+    // Inside the cooldown: skipped.
+    const r1 = await runAudienceRefillSweep({ brandId: BRAND_PAYING });
+    expect(r1!.outcomes[0]).toMatchObject({ action: "skipped", reason: "cooldown" });
+    // Past it: still nobody inside, and the client said no to widening.
+    await db
+      .update(audienceWideningProposals)
+      .set({ createdAt: new Date(Date.now() - 5 * 86_400_000) })
+      .where(eq(audienceWideningProposals.id, id));
+    fetchSpy.mockClear();
+    const r2 = await runAudienceRefillSweep({ brandId: BRAND_PAYING });
+    expect(r2!.outcomes[0]).toMatchObject({ action: "skipped", reason: "widening_declined", proposal: null });
+    const prompts = completePrompts();
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("THE TARGET THE CLIENT VALIDATED");
+    expect(await db.select().from(audienceWideningProposals)).toHaveLength(1);
+  });
+
+  it("nobody inside and nobody close outside: skipped nothing_left, nothing stored", async () => {
+    wideAnswer = [];
+    insideAnswer = [];
+    await seedBrand(ORG_PAYING, BRAND_PAYING, { apolloCount: 0, served: 23 });
+    const r = await runAudienceRefillSweep();
+    expect(r!.outcomes[0]).toMatchObject({ action: "skipped", reason: "nothing_left", proposal: null, created: [] });
+    expect(await db.select().from(audienceWideningProposals)).toHaveLength(0);
+    expect(await db.select().from(audiences).where(eq(audiences.brandId, BRAND_PAYING))).toHaveLength(1);
+  });
+
+  it("an unknown proposal id is a 404", async () => {
+    const r = await request(app)
+      .post("/orgs/audiences/widening-proposals/e1000000-0000-4000-8000-000000000001/accept")
+      .set(orgHeaders(ORG_PAYING));
+    expect(r.status).toBe(404);
+  });
+});
+
+describe("refill guards", () => {
   it("dry run reads billing but spends and writes nothing", async () => {
     await seedBrand(ORG_PAYING, BRAND_PAYING, { apolloCount: 0, served: 23 });
     const res = await request(app).post("/internal/audience-refill?dryRun=true").set(getAuthHeaders());

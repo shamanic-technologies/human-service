@@ -3650,6 +3650,10 @@
           "refilled": {
             "type": "integer"
           },
+          "proposed": {
+            "type": "integer",
+            "description": "Brands answered with a pending widening proposal."
+          },
           "outcomes": {
             "type": "array",
             "items": {
@@ -3675,13 +3679,16 @@
                   "type": "string",
                   "enum": [
                     "refilled",
+                    "widening_proposed",
                     "would_refill",
                     "skipped"
-                  ]
+                  ],
+                  "description": "refilled: new ACTIVE audiences INSIDE the target the client validated (`created`, non-empty; screening target unchanged). widening_proposed: nobody new is left inside that target; NOTHING was created and a widening proposal waits for the client (`proposal`, status pending; read / accept / decline under /orgs/audiences/widening-proposals). would_refill: dry run, the brand passes every guard. skipped: nothing could be done, `reason` + `detail` say why."
                 },
                 "reason": {
                   "type": "string",
-                  "nullable": true
+                  "nullable": true,
+                  "description": "Set when skipped: not_low | unmeasurable | cooldown | not_chargeable | billing_unreadable | no_offer | no_target | no_user | widening_declined (nobody new inside the target and the client already declined widening it) | nothing_left (nobody new inside the target, nobody close outside it) | failed."
                 },
                 "detail": {
                   "type": "string",
@@ -3710,6 +3717,9 @@
                       "description"
                     ]
                   }
+                },
+                "proposal": {
+                  "$ref": "#/components/schemas/AudienceWideningProposal"
                 }
               },
               "required": [
@@ -3721,7 +3731,8 @@
                 "action",
                 "reason",
                 "detail",
-                "created"
+                "created",
+                "proposal"
               ]
             }
           }
@@ -3731,7 +3742,147 @@
           "scanned",
           "low",
           "refilled",
+          "proposed",
           "outcomes"
+        ]
+      },
+      "AudienceWideningProposal": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "offerId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "accepted",
+              "declined"
+            ]
+          },
+          "baseTarget": {
+            "type": "string",
+            "description": "The target the client validated, verbatim (the one with nobody new left)."
+          },
+          "widenedTarget": {
+            "type": "string",
+            "description": "The wider target the accepted audiences would be screened against (their nl_prompt)."
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "icon": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "estimatedLeadCount": {
+                  "type": "integer",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "name",
+                "description",
+                "icon",
+                "estimatedLeadCount"
+              ]
+            },
+            "description": "The audiences accepting would create, in order. Nothing in them is contacted while pending."
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "decidedAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAudienceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Audiences created by the accept (empty unless accepted)."
+          }
+        },
+        "required": [
+          "id",
+          "orgId",
+          "brandId",
+          "offerId",
+          "status",
+          "baseTarget",
+          "widenedTarget",
+          "segments",
+          "createdAt",
+          "decidedAt",
+          "createdAudienceIds"
+        ],
+        "description": "The pending widening proposal when action=widening_proposed, else null."
+      },
+      "ListAudienceWideningProposalsResponse": {
+        "type": "object",
+        "properties": {
+          "proposals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AudienceWideningProposal"
+            }
+          }
+        },
+        "required": [
+          "proposals"
+        ]
+      },
+      "AudienceWideningProposalResponse": {
+        "type": "object",
+        "properties": {
+          "proposal": {
+            "$ref": "#/components/schemas/AudienceWideningProposal"
+          }
+        },
+        "required": [
+          "proposal"
+        ]
+      },
+      "AcceptAudienceWideningProposalResponse": {
+        "type": "object",
+        "properties": {
+          "proposal": {
+            "$ref": "#/components/schemas/AudienceWideningProposal"
+          },
+          "audiences": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Audience"
+            },
+            "description": "The ACTIVE audiences the accept created (same ones on a repeated accept), in the proposal's segment order, nl_prompt = widenedTarget, source = widening_accepted. Apollo filters are built in the background."
+          }
+        },
+        "required": [
+          "proposal",
+          "audiences"
         ]
       },
       "CompetitorEngagementSweepResponse": {
@@ -8583,7 +8734,7 @@
     },
     "/internal/audience-refill": {
       "post": {
-        "summary": "Run the audience refill now: every brand served in the last 14 days whose people left to contact across its active audiences cover less than 7 days of its own pace, and whose billing can charge it (will_charge / charge_due_now), gets NEW active audiences matching its existing target (split + Apollo build, org-billed). Never edits an audience, never starts a campaign. At most once per brand per 3 days.",
+        "summary": "Run the audience refill now: every brand served in the last 14 days whose people left to contact across its active audiences cover less than 7 days of its own pace, and whose billing can charge it (will_charge / charge_due_now), gets NEW active audiences INSIDE the target the client validated (split + Apollo build, org-billed; screening target unchanged). When nobody new is left inside that target, it creates NO audience: it stores a widening proposal for the client to accept or decline (action=widening_proposed). Never edits an audience, never starts a campaign. At most once per brand per 3 days.",
         "security": [
           {
             "apiKey": []
@@ -8632,6 +8783,359 @@
           },
           "409": {
             "description": "Already running or migrations not ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/widening-proposals": {
+      "get": {
+        "summary": "List the org's audience widening proposals: when the refill finds nobody new inside the target a client validated, it stores the wider target + the segments it would add here instead of contacting them. Pending ones wait for the client's accept / decline.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Only this brand."
+            },
+            "required": false,
+            "description": "Only this brand.",
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "accepted",
+                "declined"
+              ],
+              "description": "Only this status. Omitted = every status, newest first (max 100)."
+            },
+            "required": false,
+            "description": "Only this status. Omitted = every status, newest first (max 100).",
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — populates created_by/added_by columns when present"
+            },
+            "required": false,
+            "description": "Internal user UUID — populates created_by/added_by columns when present",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — used as parentRunId when creating this service's run"
+            },
+            "required": false,
+            "description": "Caller's run ID — used as parentRunId when creating this service's run",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Proposals, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListAudienceWideningProposalsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/orgs/audiences/widening-proposals/{id}": {
+      "get": {
+        "summary": "Get one audience widening proposal of the org",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — populates created_by/added_by columns when present"
+            },
+            "required": false,
+            "description": "Internal user UUID — populates created_by/added_by columns when present",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — used as parentRunId when creating this service's run"
+            },
+            "required": false,
+            "description": "Caller's run ID — used as parentRunId when creating this service's run",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The proposal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudienceWideningProposalResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "No such proposal for this org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/widening-proposals/{id}/accept": {
+      "post": {
+        "summary": "Accept a widening proposal on the client's behalf: its segments become ACTIVE audiences under the offer (all or nothing), screened against the wider target, so the brand's target widens. Existing audiences are never edited. Idempotent: a repeated accept returns the same audiences. 409 when already declined.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — populates created_by/added_by columns when present"
+            },
+            "required": false,
+            "description": "Internal user UUID — populates created_by/added_by columns when present",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — used as parentRunId when creating this service's run"
+            },
+            "required": false,
+            "description": "Caller's run ID — used as parentRunId when creating this service's run",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptAudienceWideningProposalResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "No such proposal for this org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already declined",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/widening-proposals/{id}/decline": {
+      "post": {
+        "summary": "Decline a widening proposal on the client's behalf: nothing is created and no target changes; the refill never re-proposes widening that same target. Idempotent. 409 when already accepted.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — populates created_by/added_by columns when present"
+            },
+            "required": false,
+            "description": "Internal user UUID — populates created_by/added_by columns when present",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — used as parentRunId when creating this service's run"
+            },
+            "required": false,
+            "description": "Caller's run ID — used as parentRunId when creating this service's run",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Declined",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudienceWideningProposalResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "No such proposal for this org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already accepted",
             "content": {
               "application/json": {
                 "schema": {

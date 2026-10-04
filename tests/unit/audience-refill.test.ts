@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
-  buildRefillRequest,
+  buildInTargetRefillRequest,
+  buildWideningRequest,
   buildWidenedTarget,
+  pickValidatedTarget,
   dedupeSegmentNames,
   isPoolLow,
   pickOffer,
@@ -68,24 +70,53 @@ describe("refill helpers", () => {
     expect(pickOffer([row(null, 1)])).toBeNull();
   });
 
-  it("asks the split for the next closest buyers, outside every audience already contacted", () => {
-    const text = buildRefillRequest({
-      target: "Construction managers in Paraguay.",
-      offer: { name: "ObraCam", description: "Cameras for construction sites." },
-      existing: [
-        { name: "Up to 50 Employees PY", description: "Small builders in Paraguay." },
-        { name: "Project Directors", description: null },
-      ],
-    });
+  const existing = [
+    { name: "Up to 50 Employees PY", description: "Small builders in Paraguay." },
+    { name: "Project Directors", description: null },
+  ];
+  const offer = { name: "ObraCam", description: "Cameras for construction sites." };
+
+  it("first asks for people INSIDE the validated target, zero being a correct answer", () => {
+    const text = buildInTargetRefillRequest({ target: "Construction managers in Paraguay.", offer, existing });
     expect(text).toContain("WHAT THIS COMPANY SELLS: ObraCam: Cameras for construction sites.");
-    expect(text).toContain("ITS TARGET SO FAR: Construction managers in Paraguay.");
-    expect(text).toContain("NEXT closest");
-    expect(text).toContain("Return at least one segment.");
+    expect(text).toContain("THE TARGET THE CLIENT VALIDATED: Construction managers in Paraguay.");
+    expect(text).toContain("Every segment stays inside the target as written");
+    expect(text).toContain("return ZERO segments");
+    expect(text).not.toContain("NEXT closest");
+    expect(text).not.toContain("adjacent");
     expect(text).toContain("- Up to 50 Employees PY: Small builders in Paraguay.");
     expect(text).toContain("- Project Directors");
-    expect(buildRefillRequest({ target: "t", offer: null, existing: [] })).toContain(
+  });
+
+  it("only for a proposal, asks for the next closest buyers outside every audience", () => {
+    const text = buildWideningRequest({ target: "Construction managers in Paraguay.", offer, existing });
+    expect(text).toContain("ITS TARGET SO FAR: Construction managers in Paraguay.");
+    expect(text).toContain("NEXT closest");
+    expect(text).toContain("- Project Directors");
+    expect(buildWideningRequest({ target: "t", offer: null, existing: [] })).toContain(
       "WHAT THIS COMPANY SELLS: (not stated)"
     );
+  });
+
+  it("reads the validated target: newest client-made row, active first, never a refill row", () => {
+    const row = (nlPrompt: string | null, source: string | null, status: string, day: number) => ({
+      nlPrompt,
+      source,
+      status,
+      createdAt: new Date(2026, 9, day),
+    });
+    expect(
+      pickValidatedTarget([
+        row("Validated.", null, "active", 1),
+        row("Widened by the refill.", "auto_refill", "active", 4),
+        row("Old archived.", "split_proposal", "archived", 3),
+      ])
+    ).toBe("Validated.");
+    expect(pickValidatedTarget([row("Accepted wider.", "widening_accepted", "active", 5), row("Validated.", null, "active", 1)])).toBe(
+      "Accepted wider."
+    );
+    expect(pickValidatedTarget([row("Paused one.", null, "paused", 2), row(null, null, "active", 3)])).toBe("Paused one.");
+    expect(pickValidatedTarget([row("x", "auto_refill", "active", 1), row("y", null, "deprecated", 2)])).toBeNull();
   });
 
   it("screens the widened audiences against the old target plus every new segment", () => {

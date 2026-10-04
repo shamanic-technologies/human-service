@@ -2458,18 +2458,56 @@ export const AudienceRefillQuerySchema = z.object({
   brandId: z.string().uuid().optional().openapi({ description: "Only this brand." }),
 });
 
+export const WideningProposalSchema = z
+  .object({
+    id: z.string().uuid(),
+    orgId: z.string(),
+    brandId: z.string().uuid(),
+    offerId: z.string().uuid(),
+    status: z.enum(["pending", "accepted", "declined"]),
+    baseTarget: z.string().openapi({ description: "The target the client validated, verbatim (the one with nobody new left)." }),
+    widenedTarget: z
+      .string()
+      .openapi({ description: "The wider target the accepted audiences would be screened against (their nl_prompt)." }),
+    segments: z
+      .array(
+        z.object({
+          name: z.string(),
+          description: z.string(),
+          icon: z.string().nullable(),
+          estimatedLeadCount: z.number().int().nullable(),
+        })
+      )
+      .openapi({ description: "The audiences accepting would create, in order. Nothing in them is contacted while pending." }),
+    createdAt: z.string(),
+    decidedAt: z.string().nullable(),
+    createdAudienceIds: z
+      .array(z.string().uuid())
+      .openapi({ description: "Audiences created by the accept (empty unless accepted)." }),
+  })
+  .openapi("AudienceWideningProposal");
+
 const RefillOutcomeSchema = z.object({
   orgId: z.string(),
   brandId: z.string(),
   remaining: z.number().int(),
   dailyPace: z.number(),
   billingState: z.string().nullable(),
-  action: z.enum(["refilled", "would_refill", "skipped"]),
-  reason: z.string().nullable(),
+  action: z.enum(["refilled", "widening_proposed", "would_refill", "skipped"]).openapi({
+    description:
+      "refilled: new ACTIVE audiences INSIDE the target the client validated (`created`, non-empty; screening target unchanged). widening_proposed: nobody new is left inside that target; NOTHING was created and a widening proposal waits for the client (`proposal`, status pending; read / accept / decline under /orgs/audiences/widening-proposals). would_refill: dry run, the brand passes every guard. skipped: nothing could be done, `reason` + `detail` say why.",
+  }),
+  reason: z.string().nullable().openapi({
+    description:
+      "Set when skipped: not_low | unmeasurable | cooldown | not_chargeable | billing_unreadable | no_offer | no_target | no_user | widening_declined (nobody new inside the target and the client already declined widening it) | nothing_left (nobody new inside the target, nobody close outside it) | failed.",
+  }),
   detail: z.string().nullable(),
   created: z.array(
     z.object({ id: z.string().uuid(), name: z.string(), description: z.string().nullable() })
   ),
+  proposal: WideningProposalSchema.nullable().openapi({
+    description: "The pending widening proposal when action=widening_proposed, else null.",
+  }),
 });
 
 export const AudienceRefillResponseSchema = z
@@ -2478,6 +2516,7 @@ export const AudienceRefillResponseSchema = z
     scanned: z.number().int(),
     low: z.number().int(),
     refilled: z.number().int(),
+    proposed: z.number().int().openapi({ description: "Brands answered with a pending widening proposal." }),
     outcomes: z.array(RefillOutcomeSchema),
   })
   .openapi("AudienceRefillResponse");
@@ -2486,13 +2525,101 @@ registry.registerPath({
   method: "post",
   path: "/internal/audience-refill",
   summary:
-    "Run the audience refill now: every brand served in the last 14 days whose people left to contact across its active audiences cover less than 7 days of its own pace, and whose billing can charge it (will_charge / charge_due_now), gets NEW active audiences matching its existing target (split + Apollo build, org-billed). Never edits an audience, never starts a campaign. At most once per brand per 3 days.",
+    "Run the audience refill now: every brand served in the last 14 days whose people left to contact across its active audiences cover less than 7 days of its own pace, and whose billing can charge it (will_charge / charge_due_now), gets NEW active audiences INSIDE the target the client validated (split + Apollo build, org-billed; screening target unchanged). When nobody new is left inside that target, it creates NO audience: it stores a widening proposal for the client to accept or decline (action=widening_proposed). Never edits an audience, never starts a campaign. At most once per brand per 3 days.",
   security: [{ apiKey: [] }],
   request: { query: AudienceRefillQuerySchema },
   responses: {
     200: { description: "Refill result", content: { "application/json": { schema: AudienceRefillResponseSchema } } },
     401: { description: "Unauthorized" },
     409: { description: "Already running or migrations not ready", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+// --- Org-scoped: audience widening proposals (the refill's "nothing left inside your target") ---
+export const ListWideningProposalsQuerySchema = z.object({
+  brandId: z.string().uuid().optional().openapi({ description: "Only this brand." }),
+  status: z
+    .enum(["pending", "accepted", "declined"])
+    .optional()
+    .openapi({ description: "Only this status. Omitted = every status, newest first (max 100)." }),
+});
+
+export const WideningProposalIdParamsSchema = z.object({
+  id: z.string().uuid(),
+});
+
+export const ListWideningProposalsResponseSchema = z
+  .object({ proposals: z.array(WideningProposalSchema) })
+  .openapi("ListAudienceWideningProposalsResponse");
+
+export const WideningProposalResponseSchema = z
+  .object({ proposal: WideningProposalSchema })
+  .openapi("AudienceWideningProposalResponse");
+
+export const AcceptWideningProposalResponseSchema = z
+  .object({
+    proposal: WideningProposalSchema,
+    audiences: z.array(AudienceSchema).openapi({
+      description:
+        "The ACTIVE audiences the accept created (same ones on a repeated accept), in the proposal's segment order, nl_prompt = widenedTarget, source = widening_accepted. Apollo filters are built in the background.",
+    }),
+  })
+  .openapi("AcceptAudienceWideningProposalResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/audiences/widening-proposals",
+  summary:
+    "List the org's audience widening proposals: when the refill finds nobody new inside the target a client validated, it stores the wider target + the segments it would add here instead of contacting them. Pending ones wait for the client's accept / decline.",
+  security: [{ apiKey: [] }],
+  request: { headers: orgsListsHeaders, query: ListWideningProposalsQuerySchema },
+  responses: {
+    200: { description: "Proposals, newest first", content: { "application/json": { schema: ListWideningProposalsResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/audiences/widening-proposals/{id}",
+  summary: "Get one audience widening proposal of the org",
+  security: [{ apiKey: [] }],
+  request: { headers: orgsListsHeaders, params: WideningProposalIdParamsSchema },
+  responses: {
+    200: { description: "The proposal", content: { "application/json": { schema: WideningProposalResponseSchema } } },
+    401: { description: "Unauthorized" },
+    404: { description: "No such proposal for this org", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/widening-proposals/{id}/accept",
+  summary:
+    "Accept a widening proposal on the client's behalf: its segments become ACTIVE audiences under the offer (all or nothing), screened against the wider target, so the brand's target widens. Existing audiences are never edited. Idempotent: a repeated accept returns the same audiences. 409 when already declined.",
+  security: [{ apiKey: [] }],
+  request: { headers: orgsListsHeaders, params: WideningProposalIdParamsSchema },
+  responses: {
+    200: { description: "Accepted", content: { "application/json": { schema: AcceptWideningProposalResponseSchema } } },
+    401: { description: "Unauthorized" },
+    404: { description: "No such proposal for this org", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Already declined", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/widening-proposals/{id}/decline",
+  summary:
+    "Decline a widening proposal on the client's behalf: nothing is created and no target changes; the refill never re-proposes widening that same target. Idempotent. 409 when already accepted.",
+  security: [{ apiKey: [] }],
+  request: { headers: orgsListsHeaders, params: WideningProposalIdParamsSchema },
+  responses: {
+    200: { description: "Declined", content: { "application/json": { schema: WideningProposalResponseSchema } } },
+    401: { description: "Unauthorized" },
+    404: { description: "No such proposal for this org", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Already accepted", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
