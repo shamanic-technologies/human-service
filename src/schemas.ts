@@ -1027,6 +1027,47 @@ export const AudienceStatusSchema = z
   .enum(["suggested", "active", "paused", "archived", "deprecated"])
   .openapi("AudienceStatus");
 
+export const AudienceChannelSchema = z
+  .object({
+    channel: z.enum(["cold_email"]).openapi({
+      description: "The outreach channel that uses this list. cold_email is the only channel today.",
+    }),
+    list: z
+      .enum([
+        "apollo_search",
+        "apollo_buying_signal",
+        "linkedin_engagement",
+        "crm_contacts",
+        "apify_search",
+      ])
+      .openapi({
+        description:
+          "What the list is. apollo_search: an Apollo people search. apollo_buying_signal: the same search narrowed to people showing a buying signal (see signal). linkedin_engagement: people who engaged with competitor LinkedIn posts (see signal). crm_contacts: the client's own uploaded contacts. apify_search: legacy search provider.",
+      }),
+    audienceId: z.string().uuid().openapi({
+      description: "The audience row that holds the list (today, always the audience itself).",
+    }),
+    signal: z
+      .object({
+        type: z.string(),
+        windowDays: z.number().int().nullable(),
+      })
+      .nullable()
+      .openapi({ description: "The buying signal that narrows the list, with its rolling window. null for a plain list." }),
+    size: z.number().int().nullable().openapi({
+      description:
+        "How many people the list holds. On the audiences LIST it is the same figure as the row's sizeCount. null ⟹ see sizeUnknownReason.",
+    }),
+    sizeUnknownReason: z
+      .enum(["not_built_yet", "unknown_until_walked", "not_counted"])
+      .nullable()
+      .openapi({
+        description:
+          "Why size is null. not_built_yet: the list's Apollo filters are still being built. unknown_until_walked: no provider count exists for this kind (linkedin_engagement) until serving walks the whole list. not_counted: a CRM list, whose size the provider does not report here.",
+      }),
+  })
+  .openapi("AudienceChannel");
+
 export const AudienceSchema = z
   .object({
     id: z.string().uuid(),
@@ -1077,6 +1118,22 @@ export const AudienceSchema = z
     createdByUserId: z.string().uuid().nullable(),
     createdAt: z.string(),
     updatedAt: z.string(),
+    targetText: z.string().nullable().openapi({
+      description:
+        "THE text of this audience: who the customer wants for THIS audience, in plain language. It is the text to show as the audience AND the text the pre-pay screen (Jev) judges every lead of every list below against, before any paid reveal. Distinct from nlPrompt, which a split shares across all its sibling audiences. null ⟹ see targetTextMissingReason.",
+    }),
+    targetTextOrigin: z.enum(["segment_target", "audience_target"]).nullable().openapi({
+      description:
+        "How targetText was written. segment_target: this audience is one of several split from one shared target, and the text was drafted for this audience alone from that target + its own segment. audience_target: the audience is not one of several, so its nlPrompt IS its text. null when targetText is null.",
+    }),
+    targetTextMissingReason: z.enum(["no_customer_text", "not_written_yet"]).nullable().openapi({
+      description:
+        "Why targetText is null. no_customer_text: the audience holds no customer text at all (no nlPrompt), so there is nothing to judge leads against. not_written_yet: the text is being drafted (it is written before the audience's first serve; until then the screen judges against nlPrompt and records that it did). null when targetText is set.",
+    }),
+    channels: z.array(AudienceChannelSchema).openapi({
+      description:
+        "The lists derived from this audience's text that a channel uses to find people, each with its own size. Every lead from every list is screened against targetText before it is used. Today every audience holds at most one list (empty for an audience with no committed provider).",
+    }),
   })
   .openapi("Audience");
 
@@ -1896,6 +1953,50 @@ export const RemapAudienceFiltersResponseSchema = z
       .openapi({ description: "Per-audience before/after preview (capped)." }),
   })
   .openapi("RemapAudienceFiltersResponse");
+
+// --- Internal: one-time backfill of per-audience target texts (pre-0033 rows) ---
+export const BackfillAudienceTargetTextsQuerySchema = z.object({
+  dryRun: z.enum(["true", "false"]).optional().openapi({
+    description: "When 'true', classify every audience without a text and write/draft nothing. Defaults to false.",
+  }),
+  async: z.enum(["true", "false"]).optional().openapi({
+    description: "When 'true', answer 202 at once and run the sweep in the background (each segment target is one LLM call).",
+  }),
+  brandId: z.string().uuid().optional().openapi({ description: "Narrow the sweep to one brand." }),
+});
+
+export const BackfillAudienceTargetTextsResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    scanned: z.number().int(),
+    audienceTarget: z.number().int().openapi({ description: "Audiences not one of several: their nlPrompt copied as their text." }),
+    segmentTarget: z.number().int().openapi({ description: "Audiences one of several sharing an nlPrompt: a text drafted for each (0 written on a dry-run)." }),
+    noCustomerText: z.number().int().openapi({ description: "Audiences with no nlPrompt: no text exists, served as null with reason no_customer_text." }),
+    failed: z.array(z.object({ audienceId: z.string(), error: z.string() })),
+    sample: z.array(
+      z.object({
+        audienceId: z.string(),
+        name: z.string(),
+        origin: z.enum(["segment_target", "audience_target"]),
+        targetText: z.string().nullable(),
+      })
+    ),
+  })
+  .openapi("BackfillAudienceTargetTextsResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/backfill-audience-target-texts",
+  summary:
+    "One-time data fix: write every pre-existing audience's own text (targetText): its nlPrompt when it is not one of several, else a segment target drafted from the shared nlPrompt + its own segment (idempotent, dry-runnable)",
+  security: [{ apiKey: [] }],
+  request: { query: BackfillAudienceTargetTextsQuerySchema },
+  responses: {
+    200: { description: "Backfill result", content: { "application/json": { schema: BackfillAudienceTargetTextsResponseSchema } } },
+    202: { description: "Accepted (async=true): the sweep runs in the background and logs its result" },
+    401: { description: "Unauthorized" },
+  },
+});
 
 // --- Internal: one-time backfill of per-audience descriptions (pre-#82 rows) ---
 export const BackfillAudienceDescriptionsQuerySchema = z.object({

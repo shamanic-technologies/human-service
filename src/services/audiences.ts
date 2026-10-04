@@ -68,6 +68,7 @@ import {
 import { chooseAudienceCandidate, buildChooserTrace } from "./audience-chooser.js";
 import { createRun, completeRun } from "./runs.js";
 import { crmServeNext, normalizeCrmContact } from "../lib/crm-contacts.js";
+import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
 
 // The transaction handle drizzle passes to the `db.transaction` callback.
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -1425,6 +1426,7 @@ async function persistSuggestedAudience(args: {
             degraded: args.degraded,
             chooserTrace: args.chooserTrace,
             nlPrompt: args.nlPrompt,
+            ...audienceTargetFields(args.nlPrompt),
             description: args.segment.description,
             updatedAt: new Date(),
           })
@@ -1441,6 +1443,7 @@ async function persistSuggestedAudience(args: {
         offerId: args.offerId,
         name: args.segment.name,
         nlPrompt: args.nlPrompt,
+        ...audienceTargetFields(args.nlPrompt),
         description: args.segment.description,
         provider: "apollo",
         apolloAudienceId: args.apolloAudienceId,
@@ -1833,6 +1836,8 @@ export async function migrateApifyAudienceToApollo(
         brandId: row.brandId,
         name: row.name,
         nlPrompt: row.nlPrompt,
+        targetText: row.targetText,
+        targetTextOrigin: row.targetTextOrigin,
         description: row.description,
         provider: "apollo",
         apolloAudienceId: built.apolloAudienceId,
@@ -2379,6 +2384,14 @@ export async function serveNextPerson(
   // not only at refill. Read live, so a withdrawal is honoured on the next serve
   // with nothing to expire or invalidate.
   const optOuts = await loadServeExclusions(identity);
+
+  // The audience's own text, the one the screen below judges against. A segment
+  // whose text has not landed yet (confirm's background draft still running or
+  // failed, or a row the backfill has not reached) gets it now, before any
+  // teaser is judged against the text its siblings share. Fail loud.
+  if (!audience.targetText) {
+    audience = { ...audience, targetText: await ensureTargetText(audience, identity) };
+  }
 
   // A linkedin_engagement audience's no-repeat lives in apollo-service, keyed on
   // x-audience-id: stamp THIS audience (the row being served, as the crm path

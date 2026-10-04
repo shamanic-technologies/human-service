@@ -434,6 +434,12 @@ export const audiences = pgTable(
     // Populated from the layer-1 segment description at /suggest time. Nullable —
     // null for rows that predate this column (dashboard hides "Described as").
     description: text("description"),
+    // THE text of this audience: who the customer wants for THIS audience. Shown
+    // as "the audience" and judged against by the pre-pay screen. Distinct from
+    // nlPrompt, which a split shares across every sibling. See migration 0033.
+    targetText: text("target_text"),
+    // 'segment_target' | 'audience_target'; null = not written (see 0033).
+    targetTextOrigin: text("target_text_origin"),
     // The provider this audience commits to ("apollo" | "apify"); null = neutral.
     // Set when a provider-specific candidate from /suggest is selected.
     provider: text("provider"),
@@ -717,6 +723,10 @@ export const audienceTeaserScreenings = pgTable(
     // Jev's probability that the person belongs to the audience (prompt v2+).
     // NULL on v1 rows, which were a bare boolean with no confidence.
     yesProbability: doublePrecision("yes_probability"),
+    // The exact text the verdict was judged against + the field it came from
+    // ('target_text' | 'nl_prompt'). Null on rows judged before 0033.
+    targetText: text("target_text"),
+    targetField: text("target_field"),
     // The model's own one-sentence justification. Prose for humans — nothing in
     // this service reads it back to decide anything.
     reason: text("reason"),

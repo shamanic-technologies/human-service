@@ -11,6 +11,7 @@ import { audiences, leadServes } from "../../src/db/schema.js";
 import { ensureApolloPointer } from "../../src/services/audiences.js";
 import { loadBrandPools, runAudienceRefillSweep } from "../../src/services/audience-refill.js";
 import { draftAudienceTarget } from "../../src/services/audience-target.js";
+import { ensureTargetText } from "../../src/services/audience-target-text.js";
 
 // The person-level draft is pinned in tests/unit/audience-target.test.ts.
 const WIDENED = "Owners, managers and site engineers at construction companies in Paraguay.";
@@ -23,6 +24,13 @@ vi.mock("../../src/services/audience-target.js", async (orig) => ({
 vi.mock("../../src/services/audiences.js", async (orig) => ({
   ...(await orig<typeof import("../../src/services/audiences.js")>()),
   ensureApolloPointer: vi.fn(async (row: unknown) => row),
+}));
+
+// Each new audience's own text is drafted in the background; pinned by its own
+// suite (audience-target-text), here it must only be FIRED.
+vi.mock("../../src/services/audience-target-text.js", async (orig) => ({
+  ...(await orig<typeof import("../../src/services/audience-target-text.js")>()),
+  ensureTargetText: vi.fn(async () => null),
 }));
 
 const app = createTestApp();
@@ -129,6 +137,7 @@ beforeEach(async () => {
   fetchSpy.mockReset();
   wire();
   vi.mocked(ensureApolloPointer).mockClear();
+  vi.mocked(ensureTargetText).mockClear();
   vi.mocked(draftAudienceTarget).mockReset();
   vi.mocked(draftAudienceTarget).mockResolvedValue(WIDENED);
   process.env.BRAND_SERVICE_URL = "http://brand:8080";
@@ -224,6 +233,9 @@ describe("refill sweep", () => {
     // Each new audience's Apollo build is fired, org-billed.
     expect(vi.mocked(ensureApolloPointer)).toHaveBeenCalledTimes(2);
     expect(vi.mocked(ensureApolloPointer).mock.calls[0][1]).toEqual({ orgId: ORG_PAYING, userId: USER });
+    // ... and so is each one's own text (two segments share one nl_prompt).
+    expect(vi.mocked(ensureTargetText)).toHaveBeenCalledTimes(2);
+    for (const r of rows) expect(r.targetText).toBeNull();
 
     // Cooldown: a second sweep does not refill the same brand again.
     const again = await runAudienceRefillSweep();
