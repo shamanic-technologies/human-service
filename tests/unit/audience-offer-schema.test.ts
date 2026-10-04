@@ -123,6 +123,10 @@ describe("AudienceSchema — offerId is always present on a read", () => {
     createdByUserId: null,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
+    targetText: null,
+    targetTextOrigin: null,
+    targetTextMissingReason: "no_customer_text" as const,
+    channels: [],
   };
 
   it("accepts null (an offer-less audience) and a uuid", () => {

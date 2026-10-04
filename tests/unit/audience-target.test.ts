@@ -20,6 +20,8 @@ import { completeJson } from "../../src/lib/chat-client.js";
 import {
   AudienceTargetOfferNotFoundError,
   buildTargetMessage,
+  buildSegmentTargetMessage,
+  buildSegmentTargetSystemPrompt,
   buildTargetSystemPrompt,
   draftAudienceTarget,
 } from "../../src/services/audience-target.js";
@@ -161,5 +163,45 @@ describe("draftAudienceTarget", () => {
     await expect(
       draftAudienceTarget({ customerTarget: "t", brandId: BRAND, offerId: OFFER, identity })
     ).rejects.toThrow("no audience target");
+  });
+});
+
+/** Pins the segment target's invariants, not its prose. */
+describe("segment target prompt", () => {
+  const prompt = buildSegmentTargetSystemPrompt();
+  const lower = prompt.toLowerCase();
+
+  it("keeps every rule of the audience target (people, entourage, out, restate)", () => {
+    expect(prompt).toContain("THE TARGET NAMES PEOPLE, NOT ONLY COMPANIES");
+    expect(prompt).toContain("RESTATE, NEVER REDEFINE THE COMPANIES");
+    expect(prompt).toContain("FORM:");
+  });
+
+  it("narrows to THIS segment, excludes the siblings, and drops search mechanics", () => {
+    expect(prompt).toContain("THIS AUDIENCE IS ONE SEGMENT OF THAT TARGET");
+    expect(lower).toContain("belongs only to another segment");
+    expect(lower).toContain("how a search tool found people");
+  });
+
+  it("covers a role under its common titles", () => {
+    expect(lower).toContain("held under many titles");
+  });
+
+  it("names no function or industry of its own", () => {
+    for (const w of ["managing partner", "chiropract", "attorney", "founder"]) {
+      expect(lower).not.toContain(w);
+    }
+  });
+
+  it("the message carries the shared target, THIS segment and what is sold", () => {
+    const msg = buildSegmentTargetMessage({
+      sharedTarget: "SHARED",
+      segment: { name: "Managing Partners", description: "Managing Partners at firms." },
+      offers,
+    });
+    expect(msg).toContain("SHARED");
+    expect(msg).toContain("Managing Partners: Managing Partners at firms.");
+    expect(msg).toContain("- Perpetual Futures: The buyer can trade perpetual futures contracts.");
+    expect(buildSegmentTargetMessage({ sharedTarget: "S", segment: { name: "n", description: "d" }, offers: [] })).toContain("(not known)");
   });
 });

@@ -62,12 +62,16 @@ const NL_PROMPT =
   "Everyone working in Swiss shops that sell natural health products: Drogerien, Reformhäuser, Bioläden.";
 const identity = { orgId: "00000000-0000-4000-8000-000000000001" };
 
-function screen(yesProbability: number | Error, nlPrompt: string | null = NL_PROMPT) {
+function screen(
+  yesProbability: number | Error,
+  nlPrompt: string | null = NL_PROMPT,
+  targetText: string | null = null
+) {
   if (yesProbability instanceof Error) judgeYesNo.mockRejectedValueOnce(yesProbability);
   else judgeYesNo.mockResolvedValueOnce({ yesProbability, model: "jev-1.13.0" });
   return screenTeaser({
     orgId: identity.orgId,
-    audience: { id: "aud-1", nlPrompt },
+    audience: { id: "aud-1", nlPrompt, targetText },
     subject: {
       providerPersonId: "p1",
       linkedinUrl: null,
@@ -115,6 +119,19 @@ describe("screenTeaser — Jev yes-probability against the customer's own words"
     expect(inserted[1].table).toBe(audienceScreenedOut);
   });
 
+  it("judges against the audience's OWN text when written, and records it on the bronze row", async () => {
+    const own = "Managing Partners at US immigration law firms, plus their executive assistants.";
+    await screen(0.9, NL_PROMPT, own);
+    const call = judgeYesNo.mock.calls[0][0] as { state: { targetAudience: string } };
+    expect(call.state.targetAudience).toBe(own);
+    expect(inserted[0].values).toMatchObject({ targetText: own, targetField: "target_text" });
+  });
+
+  it("before its own text is written, judges against nl_prompt and SAYS so on the bronze row", async () => {
+    await screen(0.9);
+    expect(inserted[0].values).toMatchObject({ targetText: NL_PROMPT, targetField: "nl_prompt" });
+  });
+
   it("judges against nl_prompt verbatim, with ONE yes/no question", async () => {
     await screen(0.9);
     expect(judgeYesNo).toHaveBeenCalledTimes(1);
@@ -127,15 +144,15 @@ describe("screenTeaser — Jev yes-probability against the customer's own words"
     expect(call.instructions).toBe(SCREEN_QUESTION);
   });
 
-  it("no nl_prompt ⟹ skipped with a named reason, Jev never called, nothing written", async () => {
+  it("no text at all ⟹ skipped with a named reason, Jev never called, nothing written", async () => {
     for (const nl of [null, "   "]) {
       const out = await screenTeaser({
         orgId: identity.orgId,
-        audience: { id: "aud-1", nlPrompt: nl },
+        audience: { id: "aud-1", nlPrompt: nl, targetText: null },
         subject: { providerPersonId: "p1", linkedinUrl: null, teaser: toTeaserSnapshot(person()) },
         identity,
       });
-      expect(out).toEqual({ screened: false, skipReason: "no_nl_prompt" });
+      expect(out).toEqual({ screened: false, skipReason: "no_target_text" });
     }
     expect(judgeYesNo).not.toHaveBeenCalled();
     expect(inserted).toEqual([]);

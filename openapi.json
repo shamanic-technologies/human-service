@@ -1850,6 +1850,38 @@
           },
           "updatedAt": {
             "type": "string"
+          },
+          "targetText": {
+            "type": "string",
+            "nullable": true,
+            "description": "THE text of this audience: who the customer wants for THIS audience, in plain language. It is the text to show as the audience AND the text the pre-pay screen (Jev) judges every lead of every list below against, before any paid reveal. Distinct from nlPrompt, which a split shares across all its sibling audiences. null ⟹ see targetTextMissingReason."
+          },
+          "targetTextOrigin": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "segment_target",
+              "audience_target",
+              null
+            ],
+            "description": "How targetText was written. segment_target: this audience is one of several split from one shared target, and the text was drafted for this audience alone from that target + its own segment. audience_target: the audience is not one of several, so its nlPrompt IS its text. null when targetText is null."
+          },
+          "targetTextMissingReason": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "no_customer_text",
+              "not_written_yet",
+              null
+            ],
+            "description": "Why targetText is null. no_customer_text: the audience holds no customer text at all (no nlPrompt), so there is nothing to judge leads against. not_written_yet: the text is being drafted (it is written before the audience's first serve; until then the screen judges against nlPrompt and records that it did). null when targetText is set."
+          },
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AudienceChannel"
+            },
+            "description": "The lists derived from this audience's text that a channel uses to find people, each with its own size. Every lead from every list is screened against targetText before it is used. Today every audience holds at most one list (empty for an audience with no committed provider)."
           }
         },
         "required": [
@@ -1874,7 +1906,81 @@
           "degraded",
           "createdByUserId",
           "createdAt",
-          "updatedAt"
+          "updatedAt",
+          "targetText",
+          "targetTextOrigin",
+          "targetTextMissingReason",
+          "channels"
+        ]
+      },
+      "AudienceChannel": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "enum": [
+              "cold_email"
+            ],
+            "description": "The outreach channel that uses this list. cold_email is the only channel today."
+          },
+          "list": {
+            "type": "string",
+            "enum": [
+              "apollo_search",
+              "apollo_buying_signal",
+              "linkedin_engagement",
+              "crm_contacts",
+              "apify_search"
+            ],
+            "description": "What the list is. apollo_search: an Apollo people search. apollo_buying_signal: the same search narrowed to people showing a buying signal (see signal). linkedin_engagement: people who engaged with competitor LinkedIn posts (see signal). crm_contacts: the client's own uploaded contacts. apify_search: legacy search provider."
+          },
+          "audienceId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The audience row that holds the list (today, always the audience itself)."
+          },
+          "signal": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "windowDays": {
+                "type": "integer",
+                "nullable": true
+              }
+            },
+            "required": [
+              "type",
+              "windowDays"
+            ],
+            "description": "The buying signal that narrows the list, with its rolling window. null for a plain list."
+          },
+          "size": {
+            "type": "integer",
+            "nullable": true,
+            "description": "How many people the list holds. On the audiences LIST it is the same figure as the row's sizeCount. null ⟹ see sizeUnknownReason."
+          },
+          "sizeUnknownReason": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "not_built_yet",
+              "unknown_until_walked",
+              "not_counted",
+              null
+            ],
+            "description": "Why size is null. not_built_yet: the list's Apollo filters are still being built. unknown_until_walked: no provider count exists for this kind (linkedin_engagement) until serving walks the whole list. not_counted: a CRM list, whose size the provider does not report here."
+          }
+        },
+        "required": [
+          "channel",
+          "list",
+          "audienceId",
+          "signal",
+          "size",
+          "sizeUnknownReason"
         ]
       },
       "CreateAudienceRequest": {
@@ -2858,6 +2964,87 @@
           "confidence",
           "joinedAt",
           "lastServedAt"
+        ]
+      },
+      "BackfillAudienceTargetTextsResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "scanned": {
+            "type": "integer"
+          },
+          "audienceTarget": {
+            "type": "integer",
+            "description": "Audiences not one of several: their nlPrompt copied as their text."
+          },
+          "segmentTarget": {
+            "type": "integer",
+            "description": "Audiences one of several sharing an nlPrompt: a text drafted for each (0 written on a dry-run)."
+          },
+          "noCustomerText": {
+            "type": "integer",
+            "description": "Audiences with no nlPrompt: no text exists, served as null with reason no_customer_text."
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string"
+                },
+                "error": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "audienceId",
+                "error"
+              ]
+            }
+          },
+          "sample": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "origin": {
+                  "type": "string",
+                  "enum": [
+                    "segment_target",
+                    "audience_target"
+                  ]
+                },
+                "targetText": {
+                  "type": "string",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "audienceId",
+                "name",
+                "origin",
+                "targetText"
+              ]
+            }
+          }
+        },
+        "required": [
+          "dryRun",
+          "scanned",
+          "audienceTarget",
+          "segmentTarget",
+          "noCustomerText",
+          "failed",
+          "sample"
         ]
       },
       "BackfillAudienceDescriptionsResponse": {
@@ -7906,6 +8093,75 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/internal/backfill-audience-target-texts": {
+      "post": {
+        "summary": "One-time data fix: write every pre-existing audience's own text (targetText): its nlPrompt when it is not one of several, else a segment target drafted from the shared nlPrompt + its own segment (idempotent, dry-runnable)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', classify every audience without a text and write/draft nothing. Defaults to false."
+            },
+            "required": false,
+            "description": "When 'true', classify every audience without a text and write/draft nothing. Defaults to false.",
+            "name": "dryRun",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', answer 202 at once and run the sweep in the background (each segment target is one LLM call)."
+            },
+            "required": false,
+            "description": "When 'true', answer 202 at once and run the sweep in the background (each segment target is one LLM call).",
+            "name": "async",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Narrow the sweep to one brand."
+            },
+            "required": false,
+            "description": "Narrow the sweep to one brand.",
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Backfill result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillAudienceTargetTextsResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted (async=true): the sweep runs in the background and logs its result"
+          },
+          "401": {
+            "description": "Unauthorized"
           }
         }
       }

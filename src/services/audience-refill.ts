@@ -51,6 +51,7 @@ import { confirmAudienceSplit, proposeAudienceSplit } from "./audience-split.js"
 import { draftAudienceTarget } from "./audience-target.js";
 import { listBrandOffers } from "../lib/brand-offers.js";
 import { completeRun, createRun } from "./runs.js";
+import { ensureTargetText } from "./audience-target-text.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
 
@@ -433,6 +434,12 @@ async function refillBrand(
   // each under its own run (same as a human split confirm). serve-next builds
   // inline if one has not landed, so a refilled audience is never unservable.
   for (const row of created) {
+    void ensureTargetText(row, { orgId: pool.orgId, userId }).catch((err) =>
+      console.error(
+        `[human-service] audience_refill.target_text.failed org=${pool.orgId} audience=${row.id}`,
+        err
+      )
+    );
     void ensureApolloPointer(row, { orgId: pool.orgId, userId }).catch((err) =>
       console.error(
         `[human-service] audience_refill.pointer_build.failed org=${pool.orgId} audience=${row.id}`,

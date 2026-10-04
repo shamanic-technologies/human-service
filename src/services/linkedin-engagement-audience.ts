@@ -13,6 +13,7 @@ import { db } from "../db/index.js";
 import { audiences, type Audience } from "../db/schema.js";
 import { createApolloLinkedinEngagementAudience } from "../lib/apollo-audiences.js";
 import type { Identity } from "./people-providers.js";
+import { audienceTargetFields } from "./audience-target-text.js";
 
 export const LINKEDIN_ENGAGEMENT_SOURCE = "linkedin_engagement_signal";
 
@@ -47,6 +48,9 @@ export async function createLinkedinEngagementAudience(args: {
       description: apollo.description,
       // The pre-pay screen's target: who among the engagers is worth writing to.
       nlPrompt: args.nlPrompt,
+      // The engagers are screened against the WHOLE target: the signal says how
+      // the list is built, not who is wanted.
+      ...audienceTargetFields(args.nlPrompt),
       provider: "apollo",
       apolloAudienceId: apollo.apolloAudienceId,
       filters: apollo.filters,

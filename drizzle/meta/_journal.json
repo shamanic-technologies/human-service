@@ -232,6 +232,13 @@
       "when": 1771587967299,
       "tag": "0032_add_audience_portfolios",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1771587968299,
+      "tag": "0033_add_audience_target_text",
+      "breakpoints": true
     }
   ]
 }
