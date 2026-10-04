@@ -1,6 +1,11 @@
 import { Router } from "express";
 import { EmailVerificationError } from "../lib/email-verification.js";
-import { and, asc, count, desc, eq, isNotNull, ne } from "drizzle-orm";
+import { and, asc, count, desc, eq, isNotNull, ne, sql } from "drizzle-orm";
+import {
+  audienceTargetFields,
+  ensureTargetText,
+  targetTextMissingReason,
+} from "../services/audience-target-text.js";
 import { db } from "../db/index.js";
 import { audienceMembers, audiences, people } from "../db/schema.js";
 import {
@@ -25,6 +30,7 @@ import {
   CreateLinkedinEngagementAudienceRequestSchema,
 } from "../schemas.js";
 import { createLinkedinEngagementAudience } from "../services/linkedin-engagement-audience.js";
+import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import { launchAudiencePortfolio } from "../services/audience-portfolio.js";
 import {
   proposeAudienceSplit,
@@ -39,6 +45,7 @@ import { BrandConfigError, BrandServiceError } from "../lib/brand-offers.js";
 import {
   computeStats,
   computeAudienceContactability,
+  type AudienceContactabilityEntry,
   getAudienceInOrg,
   refreshAudienceCounts,
   refreshAudienceCountIfStale,
@@ -243,6 +250,7 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
         // validated above only because it decides who a serve may reach).
         offerId: parsed.data.offerId ?? null,
         nlPrompt: parsed.data.nlPrompt ?? null,
+        ...audienceTargetFields(parsed.data.nlPrompt),
         filters: parsed.data.filters ?? null,
         apolloCount: parsed.data.apolloCount ?? null,
         apifyCount: parsed.data.apifyCount ?? null,
@@ -268,7 +276,7 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
     `[human-service] audience.create org=${orgId} audience=${audience.id} brand=${audience.brandId}`
   );
 
-  res.status(201).json({ audience: serializeAudience(audience) });
+  res.status(201).json({ audience: (await serializeAudiences([audience]))[0] });
 });
 
 // --- POST /orgs/audiences/suggest ---
@@ -408,8 +416,16 @@ router.post(
           err
         )
       );
+      // Each segment's own text (several segments share one nl_prompt), drafted
+      // now in the background; serve-next drafts it inline if it has not landed.
+      void ensureTargetText(row, buildIdentityForSplit).catch((err) =>
+        console.error(
+          `[human-service] audience.target_text.failed org=${orgId} audience=${row.id}`,
+          err
+        )
+      );
     }
-    res.status(201).json({ audiences: created.map(serializeAudience) });
+    res.status(201).json({ audiences: await serializeAudiences(created) });
   }
 );
 
@@ -453,6 +469,7 @@ router.post(
       sendProviderError(res, err);
       return;
     }
+    const serialized = await serializeAudiences(result.audiences.map((a) => a.row));
     res.json({
       portfolioId: result.portfolioId,
       status: result.status,
@@ -460,8 +477,8 @@ router.post(
       offerId: parsed.data.offerId,
       replayed: result.replayed,
       target: result.target,
-      audiences: result.audiences.map((a) => ({
-        ...serializeAudience(a.row),
+      audiences: result.audiences.map((a, i) => ({
+        ...serialized[i],
         kind: a.kind,
         signal: a.signal,
         adopted: a.adopted,
@@ -525,7 +542,7 @@ router.post(
       sendProviderError(res, err);
       return;
     }
-    res.status(201).json({ audience: serializeAudience(audience) });
+    res.status(201).json({ audience: (await serializeAudiences([audience]))[0] });
   }
 );
 
@@ -593,7 +610,7 @@ router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) 
       const c = contactability.get(row.id);
       // null = pool UNKNOWN (linkedin_engagement before its first exhaustion):
       // the three figures are omitted, never served as 0 ("served out").
-      return c ? { ...serializeAudience(row), ...c } : serializeAudience(row);
+      return c ? { ...serializeAudience(row, c), ...c } : serializeAudience(row, null);
     }),
     total: totalRows[0]?.value ?? 0,
     limit,
@@ -630,7 +647,7 @@ router.get("/orgs/audiences/:id", requireApiKey, requireOrgIdOnly, async (req, r
     res.status(404).json({ error: "Audience not found" });
     return;
   }
-  res.json({ audience: serializeAudience(audience) });
+  res.json({ audience: (await serializeAudiences([audience]))[0] });
 });
 
 // --- PATCH /orgs/audiences/:id ---
@@ -648,7 +665,15 @@ router.patch("/orgs/audiences/:id", requireApiKey, requireOrgIdOnly, async (req,
   const orgId = res.locals.orgId as string;
   const updates: Record<string, unknown> = { updatedAt: new Date() };
   if (parsed.data.name !== undefined) updates.name = parsed.data.name;
-  if (parsed.data.nlPrompt !== undefined) updates.nlPrompt = parsed.data.nlPrompt;
+  if (parsed.data.nlPrompt !== undefined) {
+    updates.nlPrompt = parsed.data.nlPrompt;
+    // An audience that is not one of several has its nl_prompt AS its text, so
+    // the text follows the edit. A segment target was drafted for this audience
+    // alone and stays as written.
+    const fields = audienceTargetFields(parsed.data.nlPrompt);
+    updates.targetText = sql`case when ${audiences.targetTextOrigin} = 'segment_target' then ${audiences.targetText} else ${fields.targetText} end`;
+    updates.targetTextOrigin = sql`case when ${audiences.targetTextOrigin} = 'segment_target' then ${audiences.targetTextOrigin} else ${fields.targetTextOrigin} end`;
+  }
 
   let updated;
   try {
@@ -672,7 +697,7 @@ router.patch("/orgs/audiences/:id", requireApiKey, requireOrgIdOnly, async (req,
     return;
   }
 
-  res.json({ audience: serializeAudience(updated) });
+  res.json({ audience: (await serializeAudiences([updated]))[0] });
 });
 
 // --- PATCH /orgs/audiences/:id/status (mutates ONLY status) ---
@@ -716,7 +741,7 @@ router.patch(
       `[human-service] audience.status org=${orgId} audience=${updated.id} status=${updated.status}`
     );
     // Respond FIRST — the avatar must never block or fail the status flip.
-    res.json({ audience: serializeAudience(updated) });
+    res.json({ audience: (await serializeAudiences([updated]))[0] });
 
     // On any transition to `active`, auto-generate the avatar IF the audience
     // has none yet — this route is the single chokepoint every activation
@@ -788,7 +813,7 @@ router.post(
         })
         .where(and(eq(audiences.id, req.params.id), eq(audiences.orgId, orgId)))
         .returning();
-      res.json({ audience: serializeAudience(updated) });
+      res.json({ audience: (await serializeAudiences([updated]))[0] });
     } catch (err) {
       sendProviderError(res, err);
     }
@@ -1042,7 +1067,7 @@ router.post(
       console.log(
         `[human-service] audience.avatar org=${orgId} audience=${audience.id}`
       );
-      res.json({ audience: serializeAudience(updated) });
+      res.json({ audience: (await serializeAudiences([updated]))[0] });
     } catch (err) {
       sendProviderError(res, err);
     }
@@ -1132,7 +1157,52 @@ function isUniqueViolation(err: unknown): boolean {
   );
 }
 
-function serializeAudience(row: typeof audiences.$inferSelect) {
+// Serialize rows WITH their contactability, so every channel size served on any
+// audience response is the same figure the list serves as sizeCount.
+async function serializeAudiences(rows: Array<typeof audiences.$inferSelect>) {
+  const contactability = await computeAudienceContactability(rows);
+  return rows.map((row) => serializeAudience(row, contactability.get(row.id) ?? null));
+}
+
+// The lists derived from the audience's text, each with its size. Today one row
+// holds at most one list; the shape is a list so a text can carry several.
+function describeChannels(
+  row: typeof audiences.$inferSelect,
+  contact: AudienceContactabilityEntry
+) {
+  if (!row.provider) return [];
+  const base = { channel: "cold_email" as const, audienceId: row.id };
+  if (row.provider === "crm") {
+    return [{ ...base, list: "crm_contacts" as const, signal: null, size: null, sizeUnknownReason: "not_counted" as const }];
+  }
+  const signal = readSignal(row.filters);
+  if (row.provider === "apify") {
+    return [{ ...base, list: "apify_search" as const, signal: null, size: contact?.sizeCount ?? null, sizeUnknownReason: contact ? null : ("not_counted" as const) }];
+  }
+  if (isLinkedinEngagementFilters(row.filters)) {
+    return [{ ...base, list: "linkedin_engagement" as const, signal, size: contact?.sizeCount ?? null, sizeUnknownReason: contact ? null : ("unknown_until_walked" as const) }];
+  }
+  const built = !!row.apolloAudienceId || (!!row.filters && Object.keys(row.filters).length > 0);
+  const list = signal ? ("apollo_buying_signal" as const) : ("apollo_search" as const);
+  if (!built) {
+    return [{ ...base, list, signal, size: null, sizeUnknownReason: "not_built_yet" as const }];
+  }
+  return [{ ...base, list, signal, size: contact?.sizeCount ?? null, sizeUnknownReason: contact ? null : ("not_counted" as const) }];
+}
+
+function readSignal(filters: unknown): { type: string; windowDays: number | null } | null {
+  if (!filters || typeof filters !== "object" || Array.isArray(filters)) return null;
+  const s = (filters as Record<string, unknown>).buying_signal;
+  if (!s || typeof s !== "object" || Array.isArray(s)) return null;
+  const o = s as Record<string, unknown>;
+  if (typeof o.type !== "string") return null;
+  return { type: o.type, windowDays: typeof o.window_days === "number" ? o.window_days : null };
+}
+
+function serializeAudience(
+  row: typeof audiences.$inferSelect,
+  contact: AudienceContactabilityEntry
+) {
   return {
     id: row.id,
     orgId: row.orgId,
@@ -1156,6 +1226,10 @@ function serializeAudience(row: typeof audiences.$inferSelect) {
     createdByUserId: row.createdByUserId,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    targetText: row.targetText,
+    targetTextOrigin: row.targetTextOrigin as "segment_target" | "audience_target" | null,
+    targetTextMissingReason: targetTextMissingReason(row),
+    channels: describeChannels(row, contact),
   };
 }
 

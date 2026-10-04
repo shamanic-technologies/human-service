@@ -35,6 +35,7 @@ import { listBrandOffers, type BrandOffer } from "../lib/brand-offers.js";
 import {
   ChatServiceError,
   completeJson,
+  platformCompleteJson,
   type ChatIdentity,
 } from "../lib/chat-client.js";
 import { completeRun, createRun } from "./runs.js";
@@ -152,48 +153,178 @@ export async function draftAudienceTarget(args: {
   if (offers.length === 0) return null;
 
   const message = buildTargetMessage(args.customerTarget, offers);
-  // chat-service REQUIRES x-run-id, and a split confirm often arrives without
-  // one (the pointer build handles the same gap the same way): open our OWN run
-  // under the caller's org, so the call is still org-billed and traced. No run
-  // ⟹ fail loud, never an unattributed LLM call.
-  if (args.identity.runId) return writeTarget(message, args.identity);
-  if (!args.identity.userId) {
+  return withTargetRun(args.brandId, args.identity, (identity) =>
+    writeTarget(message, buildTargetSystemPrompt(), identity)
+  );
+}
+
+// chat-service REQUIRES x-run-id, and a split confirm often arrives without
+// one (the pointer build handles the same gap the same way): open our OWN run
+// under the caller's org, so the call is still org-billed and traced. No run
+// ⟹ fail loud, never an unattributed LLM call.
+async function withTargetRun<T>(
+  brandId: string,
+  identity: ChatIdentity,
+  fn: (identity: ChatIdentity) => Promise<T>
+): Promise<T> {
+  if (identity.runId) return fn(identity);
+  if (!identity.userId) {
     throw new ChatServiceError(
       502,
       "no x-run-id and no user to open a run for the audience target draft"
     );
   }
-  const tracking = { ...(args.identity.workflowTracking ?? {}), brandIds: [args.brandId] };
+  const tracking = { ...(identity.workflowTracking ?? {}), brandIds: [brandId] };
   const runId = await createRun({
-    orgId: args.identity.orgId,
-    userId: args.identity.userId,
+    orgId: identity.orgId,
+    userId: identity.userId,
     taskName: "audience-target-draft",
     workflowTracking: tracking,
   });
   if (!runId) {
     throw new ChatServiceError(502, "runs-service did not open a run for the audience target draft");
   }
-  const runIdentity = { orgId: args.identity.orgId, userId: args.identity.userId, workflowTracking: tracking };
+  const runIdentity = { orgId: identity.orgId, userId: identity.userId, workflowTracking: tracking };
   try {
-    const target = await writeTarget(message, { ...args.identity, runId, workflowTracking: tracking });
+    const out = await fn({ ...identity, runId, workflowTracking: tracking });
     await completeRun(runId, "completed", runIdentity);
-    return target;
+    return out;
   } catch (err) {
     await completeRun(runId, "failed", runIdentity);
     throw err;
   }
 }
 
-async function writeTarget(message: string, identity: ChatIdentity): Promise<string> {
+// --- Segment target: the text of ONE audience among several ----------------
+//
+// A split stores the SAME nl_prompt on every sibling (the whole target), so the
+// screen could not tell "Managing Partners" from "Solo Practitioners" at the
+// same firms: both were judged against "Managing Partners, Solo Practitioners
+// and Legal Administrators at ...". The segment target restates the shared
+// target narrowed to what THIS audience's own segment sentence covers, in the
+// same three-part person-level form. It is what the dashboard shows as the
+// audience and what the screen judges against (audiences.target_text).
+//
+// The segment sentence is an INPUT, never the output: on older rows it can
+// describe how a search tool found people ("found by matching terms against
+// company tags"), which is exactly the text the v1 screen failed on. The model
+// keeps WHO from it and drops the mechanics.
+
+const SEGMENT_TARGET_BLOCK = [
+  "",
+  "THIS AUDIENCE IS ONE SEGMENT OF THAT TARGET:",
+  "  - The customer's target was split into several audiences. You write the",
+  "    target of ONE of them: the segment given below.",
+  "  - Keep only the part of the customer's target this segment covers. If the",
+  "    segment names roles, part 1 is those roles only. If it narrows the",
+  "    companies (place, size, kind), keep that narrowing. Everything else the",
+  "    customer stated still applies.",
+  "  - Someone who belongs only to another segment of the same target is not",
+  "    in this one.",
+  "  - A role is held under many titles, and the title depends on the size of",
+  "    the company. Name the role by what the person does there, then the",
+  "    titles that commonly mean it at companies of this kind and size, so a",
+  "    reviewer reading a profile recognises everyone who holds it.",
+  "  - The segment sentence may say how a search tool found people. Ignore",
+  "    that and keep only WHO they are.",
+  "",
+].join("\n");
+
+/** Exported for the unit test that pins the segment target's invariants. */
+export function buildSegmentTargetSystemPrompt(): string {
+  const base = buildTargetSystemPrompt();
+  const cut = base.indexOf("\nFORM:");
+  return `${base.slice(0, cut)}${SEGMENT_TARGET_BLOCK}\n${base.slice(cut + 1)}`;
+}
+
+export function buildSegmentTargetMessage(args: {
+  sharedTarget: string;
+  segment: { name: string; description: string };
+  offers: BrandOffer[];
+}): string {
+  return [
+    "WHO THE CUSTOMER SAYS IT SELLS TO (the whole target):",
+    args.sharedTarget,
+    "",
+    "THIS AUDIENCE'S SEGMENT:",
+    `${args.segment.name}: ${args.segment.description}`,
+    "",
+    "WHAT THE COMPANY SELLS:",
+    args.offers.length > 0 ? describeWhatIsSold(args.offers) : "(not known)",
+  ].join("\n");
+}
+
+/**
+ * The offers a segment target is read against: THE offer when the row carries
+ * one the brand still holds, else every offer of the brand. None at all is not
+ * an error here (unlike draftAudienceTarget): the shared target already names
+ * who is wanted and the segment only narrows it.
+ */
+export async function offersForSegment(
+  brandId: string,
+  orgId: string,
+  offerId: string | null
+): Promise<BrandOffer[]> {
+  const all = await listBrandOffers(brandId, orgId);
+  const own = offerId ? all.filter((o) => o.offerId === offerId) : [];
+  return own.length > 0 ? own : all;
+}
+
+/** Draft ONE segment's target, org-billed with the caller's identity. */
+export async function draftSegmentTarget(args: {
+  sharedTarget: string;
+  segment: { name: string; description: string };
+  brandId: string;
+  offerId: string | null;
+  identity: ChatIdentity;
+}): Promise<string> {
+  const offers = await offersForSegment(args.brandId, args.identity.orgId, args.offerId);
+  const message = buildSegmentTargetMessage({ ...args, offers });
+  return withTargetRun(args.brandId, args.identity, (identity) =>
+    writeTarget(message, buildSegmentTargetSystemPrompt(), identity)
+  );
+}
+
+/**
+ * Same draft on chat-service's ORG-LESS platform path, for the one-time
+ * backfill of rows that predate target_text: a text we owe existing audiences
+ * must not retroactively bill their orgs (same rule as the description
+ * backfill). chat-service owns the cost.
+ */
+export async function draftSegmentTargetOnPlatform(args: {
+  sharedTarget: string;
+  segment: { name: string; description: string };
+  offers: BrandOffer[];
+}): Promise<string> {
+  const out = await platformCompleteJson({
+    message: buildSegmentTargetMessage(args),
+    systemPrompt: buildSegmentTargetSystemPrompt(),
+    provider: TARGET_LLM_PROVIDER,
+    model: TARGET_LLM_MODEL,
+    responseSchema: TARGET_RESPONSE_SCHEMA,
+    disableThinking: true,
+  });
+  return readTarget(out);
+}
+
+async function writeTarget(
+  message: string,
+  systemPrompt: string,
+  identity: ChatIdentity
+): Promise<string> {
   const out = await completeJson({
     message,
-    systemPrompt: buildTargetSystemPrompt(),
+    systemPrompt,
     identity,
     provider: TARGET_LLM_PROVIDER,
     model: TARGET_LLM_MODEL,
     responseSchema: TARGET_RESPONSE_SCHEMA,
     disableThinking: true,
   });
+  return readTarget(out);
+}
+
+function readTarget(out: Record<string, unknown>): string {
   const target = typeof out.target === "string" ? out.target.trim() : "";
   if (!target) {
     throw new ChatServiceError(502, "LLM returned no audience target");

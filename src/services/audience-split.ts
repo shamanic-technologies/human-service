@@ -39,6 +39,7 @@ import {
   SPLIT_ICONS,
   type SplitAxis,
 } from "../lib/audience-split-vocab.js";
+import { audienceTargetFields } from "./audience-target-text.js";
 
 export { SPLIT_AXES, SPLIT_ICONS, type SplitAxis };
 
@@ -328,6 +329,12 @@ export async function confirmAudienceSplit(args: {
           name: s.name,
           description: s.description,
           nlPrompt: args.targetAudience,
+          // One segment = not one of several: the target IS its text. Several:
+          // each gets its own segment target, drafted after the confirm by
+          // ensureTargetText (audience-target-text.ts), before its first serve.
+          ...(args.segments.length === 1
+            ? audienceTargetFields(args.targetAudience)
+            : { targetText: null, targetTextOrigin: null }),
           provider: "apollo",
           apolloAudienceId: null,
           filters: null,

@@ -67,6 +67,7 @@ import { dedupeSegmentNames } from "./audience-refill.js";
 import { ensureApolloPointer } from "./audiences.js";
 import type { Identity } from "./people-providers.js";
 import { completeRun, createRun } from "./runs.js";
+import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
 type PortfolioRow = typeof audiencePortfolios.$inferSelect;
@@ -374,9 +375,20 @@ async function buildColdAudiences(
     console.log(
       `[human-service] audience_portfolio.cold_adopted org=${args.orgId} brand=${args.brandId} offer=${args.offerId} adopted=${ids.length} target=${shared ? "kept" : "redrafted"}`
     );
+    // An adopted audience that is not one of several has the target AS its
+    // text, so the text follows a redrafted target; a segment target stays.
+    if (!shared) {
+      await db
+        .update(audiences)
+        .set(audienceTargetFields(target))
+        .where(and(inArray(audiences.id, ids), eq(audiences.targetTextOrigin, "audience_target")));
+    }
     for (const row of adoptable) {
       void ensureApolloPointer(row, buildIdentity).catch((err) =>
         console.error(`[human-service] audience_portfolio.pointer_build.failed audience=${row.id}`, err)
+      );
+      void ensureTargetText({ ...row, nlPrompt: target }, buildIdentity).catch((err) =>
+        console.error(`[human-service] audience_portfolio.target_text.failed audience=${row.id}`, err)
       );
     }
     return { ids, target };
@@ -423,6 +435,9 @@ async function buildColdAudiences(
   for (const row of created) {
     void ensureApolloPointer(row, buildIdentity).catch((err) =>
       console.error(`[human-service] audience_portfolio.pointer_build.failed audience=${row.id}`, err)
+    );
+    void ensureTargetText(row, buildIdentity).catch((err) =>
+      console.error(`[human-service] audience_portfolio.target_text.failed audience=${row.id}`, err)
     );
   }
   return { ids: created.map((r) => r.id), target };
@@ -592,6 +607,7 @@ async function createSignalAudienceRow(input: {
       name,
       description: signalDescription(input.type, input.windowDays),
       nlPrompt: input.target,
+      ...audienceTargetFields(input.target),
       provider: "apollo",
       apolloAudienceId: apollo.apolloAudienceId,
       filters: apollo.filters,

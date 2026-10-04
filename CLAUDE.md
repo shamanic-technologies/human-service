@@ -61,6 +61,7 @@ section — the port binds first).
 | Internal | `POST /internal/recover-suppressions/revert` | apiKey | Undo a recovery: restore every archived suppression row carrying `reason` verbatim + drop the ledger rows. A person re-suppressed by a fresh serve keeps the newer row |
 | Internal | `POST /internal/backfill-sent-suppressions` | apiKey | One-time data repair (the INVERSE of the recovery above): for a caller-supplied set of `{orgId, brandId, email, sentAt}`, create the missing `brand_suppressions` row dated from the REAL send, so people actually EMAILED before per-brand suppression existed (2026-06-15) stop being re-served and re-bought for the remainder of their own window. Idempotent (reversible `suppression_backfills` ledger keyed on `reason`), `?dryRun=true`. Dedicated **25 MB** body parser. NOT a sweep — the set is supplied, never inferred, and never derived from bare serves |
 | Internal | `POST /internal/backfill-sent-suppressions/revert` | apiKey | Undo a backfill: delete exactly the suppression rows that `reason` created + drop the ledger rows. A row re-served since (its `last_served_at` moved) records a real emission and is kept |
+| Internal | `POST /internal/backfill-audience-target-texts` | apiKey | One-time data fix: write every pre-0033 audience's own text (`targetText`), by the one rule in "Audience text" below (idempotent, `?dryRun=true`, `?async=true`, `?brandId=`, platform-billed) |
 | Internal | `POST /internal/audience-refill` | apiKey | Run the audience refill now (`?dryRun=true` reports who WOULD be refilled, spending nothing; `?brandId=` narrows). See "Audience refill" below |
 | Internal | `POST /internal/audiences/resolve` | apiKey | **Bulk server-to-server audience resolver** for lead-service (#166): body `{orgId, brandId, audienceIds?, emails?}` → `{byAudienceId, byEmail}` maps of `{id,name,avatarUrl}` \| null. Brand-correct + active-preferred (deprecated→canonical), keyed by audienceId AND/OR email (historical coverage). Dedicated **25 MB** body parser (mounts before the global 100 KB json) — NO browser 413 cap. See below. |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
@@ -1221,12 +1222,13 @@ apollo credit, the generated email and the send were all spent on them.
   each bronze row's `reason` names the bar it was judged under. No "borderline = yes"
   guidance anywhere: the threshold IS that decision. Jev bills input tokens only
   and chat-service owns the cost (org-billed with serve-next's identity).
-- **The target is `audiences.nl_prompt` — NEVER `description`.** `description`
-  is an LLM rewrite that describes the Apollo filter mechanics ("found by
-  matching terms against company tags"), not who the customer wants. No
-  `nl_prompt` ⟹ skip with `no_nl_prompt`, logged; never a fallback to
-  `description`. A split audience's `nl_prompt` is the whole target it was split
-  from, not the segment sentence.
+- **The target is THIS audience's text, `audiences.target_text` — NEVER
+  `description`** (see "Audience text" below). Until it is written, `nl_prompt`;
+  the bronze row records the exact text judged (`target_text`) and its field
+  (`target_field` = `target_text` | `nl_prompt`, migration `0033`). No text at
+  all ⟹ skip with `no_target_text`, logged. `description` can describe the
+  Apollo filter mechanics ("found by matching terms against company tags"),
+  never who the customer wants.
 - **`nl_prompt` names PEOPLE, not only companies** (see "Audience target"
   below). A customer's company-only words ("crypto market making firms") let
   every employee of such a firm pass: Olive's campaign emailed an HR manager,
@@ -1270,6 +1272,44 @@ apollo credit, the generated email and the send were all spent on them.
   using serve-next's own identity headers, so human-service's "declares no cost"
   invariant holds.
 - **Size shrinks by the rejections** — see "List contactability" above.
+
+### Audience text — ONE text per audience (`src/services/audience-target-text.ts`)
+
+`audiences.target_text` (migration `0033`) is who the customer wants for THIS
+audience: what the dashboard shows as the audience AND what Jev screens every
+lead of every list against. Why not `nl_prompt`: a split stores the SAME one on
+every sibling, so "Managing Partners" / "Solo Practitioners" / "Legal
+Administrators" at the same firms were judged against one text naming all three.
+
+- **One rule** (write, serve, backfill): an audience sharing its `nl_prompt` with
+  another non-deprecated audience of its (org, brand), with its own
+  `description`, and not a buying-signal / linkedin_engagement row ⟹
+  `segment_target`: drafted from the shared target + its segment sentence
+  (`draftSegmentTarget`, same 3-part person form, narrowed to the segment,
+  siblings out, a role named with its common titles, search mechanics dropped).
+  Everything else ⟹ `audience_target`: `nl_prompt` copied (signal and engagement
+  audiences reach the WHOLE target through another list). No `nl_prompt` ⟹ null,
+  `targetTextMissingReason: no_customer_text`.
+- **When**: one-segment confirm, `/suggest`, signal, engagement, staff create
+  write it at insert. A multi-segment confirm (split / portfolio / refill) drafts
+  each in the background (`ensureTargetText`, deduped in-flight), and serve-next
+  drafts it INLINE before screening if missing (fail loud). PATCH `nlPrompt`
+  carries an `audience_target` text along, never a segment one.
+- **Backfill**: `POST /internal/backfill-audience-target-texts` (platform path:
+  a text we owe never bills an org). Rows never re-drafted (`target_text IS NULL`
+  only).
+- **Read**: every audience response carries `targetText`, `targetTextOrigin`,
+  `targetTextMissingReason`, `channels[]` = `{channel: cold_email, list:
+  apollo_search|apollo_buying_signal|linkedin_engagement|crm_contacts|
+  apify_search, audienceId, signal {type, windowDays}|null, size,
+  sizeUnknownReason}`. `size` is the list's `sizeCount` (same figure, every
+  response computes contactability). Today one row = at most one list.
+- **Measured before ship (prod teasers, Jev replayed, 2026-10-04)**: immigration
+  "Managing Partners" (100 teasers): shared text passed 81, its own text 87 (+6
+  founders/owners, 0 lost), "Legal Administrators" text 0 ⟹ siblings separated.
+  Chiro "Chiropractic Sales & Growth" (70): 21 ⟹ 9, the 13 dropped are vendors,
+  insurers, universities, not clinic staff. "Chiropractors US" (70): 21 ⟹ 13
+  (agency owner, coach, LMT, franchise; ~3 debatable chiropractors).
 
 ### Audience target — who is worth writing to (`src/services/audience-target.ts`)
 

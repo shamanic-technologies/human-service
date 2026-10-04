@@ -6,6 +6,7 @@ import { requireApiKey } from "../middleware/auth.js";
 import {
   RemapAudienceFiltersQuerySchema,
   BackfillAudienceDescriptionsQuerySchema,
+  BackfillAudienceTargetTextsQuerySchema,
   MigrateApifyAudiencesQuerySchema,
   BackfillAudienceAvatarsQuerySchema,
   BackfillCanonicalLinksQuerySchema,
@@ -34,6 +35,7 @@ import {
 } from "../services/audiences.js";
 import { ChatConfigError, ChatServiceError } from "../lib/chat-client.js";
 import { ProviderConfigError } from "../services/people-providers.js";
+import { backfillTargetTexts } from "../services/audience-target-text.js";
 
 const router = Router();
 
@@ -44,6 +46,34 @@ const REMAP_SAMPLE_LIMIT = 10;
 
 // How many {id,name,description} previews the description backfill returns.
 const DESC_SAMPLE_LIMIT = 10;
+
+// POST /internal/backfill-audience-target-texts?dryRun&async&brandId
+//
+// One-time DATA fix for rows that predate audiences.target_text (0033): each
+// gets its own text, by the one rule in audience-target-text.ts. Idempotent
+// (target_text IS NULL only), dry-runnable, platform-billed (a text we owe
+// existing audiences never bills their orgs). A row the sweep misses is still
+// written inline on its next serve. NOT on boot.
+router.post(
+  "/internal/backfill-audience-target-texts",
+  requireApiKey,
+  async (req, res) => {
+    const parsed = BackfillAudienceTargetTextsQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+    const opts = { dryRun: parsed.data.dryRun === "true", brandId: parsed.data.brandId };
+    if (parsed.data.async === "true") {
+      void backfillTargetTexts(opts).catch((err) =>
+        console.error("[human-service] audience.target_text_backfill.crashed", err)
+      );
+      res.status(202).json({ accepted: true, dryRun: opts.dryRun });
+      return;
+    }
+    res.json(await backfillTargetTexts(opts));
+  }
+);
 
 // POST /internal/backfill-audience-descriptions?dryRun=true|false
 //

@@ -1,5 +1,6 @@
 // Pre-pay teaser screening — judge an apollo free teaser against the audience
-// the customer asked for, in their OWN words (`audiences.nl_prompt`), BEFORE
+// the customer asked for, in THIS audience's own text (`audiences.target_text`,
+// see audience-target-text.ts; `nl_prompt` until it is written), BEFORE
 // spending the credit that reveals its email.
 //
 // WHY THIS EXISTS. An apollo audience is a pointer to a faithful Apollo filter
@@ -45,6 +46,7 @@ import {
 } from "../db/schema.js";
 import { judgeYesNo, type ChatIdentity } from "../lib/chat-client.js";
 import type { Person } from "./people-providers.js";
+import { screenTarget } from "./audience-target-text.js";
 
 // A teaser is paid for only when Jev's probability that it belongs to the
 // audience is ABOVE this. Strict: exactly 0.50 rejects.
@@ -108,7 +110,7 @@ export type ScreenOutcome =
   // Skipped for a stated reason — no target in the customer's words, or no
   // snapshot to judge. Both are honest absences, counted and logged, never a
   // quiet pass dressed up as a verdict.
-  | { screened: false; skipReason: "no_nl_prompt" | "no_snapshot" };
+  | { screened: false; skipReason: "no_target_text" | "no_snapshot" };
 
 export interface ScreenSubject {
   providerPersonId: string;
@@ -125,20 +127,20 @@ export interface ScreenSubject {
 // the screen exists to protect.
 export async function screenTeaser(args: {
   orgId: string;
-  audience: { id: string; nlPrompt: string | null };
+  audience: { id: string; nlPrompt: string | null; targetText: string | null };
   subject: ScreenSubject;
   identity: ChatIdentity;
 }): Promise<ScreenOutcome> {
   const { orgId, audience, subject, identity } = args;
 
-  // The customer's own words, never the LLM-written `description` — that one
-  // describes how the Apollo filters were built, not who the customer wants.
-  const target = audience.nlPrompt?.trim();
+  // THIS audience's text, never the LLM-written `description` — that one can
+  // describe how the Apollo filters were built, not who the customer wants.
+  const target = screenTarget(audience);
   if (!target) {
     console.log(
-      `[human-service] teaser_screen.skipped org=${orgId} audience=${audience.id} reason=no_nl_prompt`
+      `[human-service] teaser_screen.skipped org=${orgId} audience=${audience.id} reason=no_target_text`
     );
-    return { screened: false, skipReason: "no_nl_prompt" };
+    return { screened: false, skipReason: "no_target_text" };
   }
   if (!subject.teaser) {
     // Buffered before the screen shipped, so there is no snapshot to judge and
@@ -150,7 +152,7 @@ export async function screenTeaser(args: {
   }
 
   const judgment = await judgeYesNo({
-    state: buildScreenState(target, subject.teaser),
+    state: buildScreenState(target.text, subject.teaser),
     instructions: SCREEN_QUESTION,
     identity,
   });
@@ -163,6 +165,7 @@ export async function screenTeaser(args: {
     onTarget,
     yesProbability: judgment.yesProbability,
     model: `typesafe/${judgment.model}`,
+    target,
   });
 
   return { screened: true, onTarget, yesProbability: judgment.yesProbability };
@@ -178,8 +181,9 @@ async function recordScreening(args: {
   onTarget: boolean;
   yesProbability: number;
   model: string;
+  target: { text: string; field: "target_text" | "nl_prompt" };
 }): Promise<void> {
-  const { orgId, audienceId, subject, onTarget, yesProbability, model } = args;
+  const { orgId, audienceId, subject, onTarget, yesProbability, model, target } = args;
   const reason = `P(yes)=${yesProbability.toFixed(3)} threshold>${SCREEN_MIN_YES_PROBABILITY}`;
   await db.transaction(async (tx) => {
     await tx.insert(audienceTeaserScreenings).values({
@@ -193,6 +197,8 @@ async function recordScreening(args: {
       reason,
       model,
       promptVersion: SCREEN_PROMPT_VERSION,
+      targetText: target.text,
+      targetField: target.field,
     });
     if (onTarget) return;
     await tx
