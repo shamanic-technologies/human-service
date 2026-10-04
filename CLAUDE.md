@@ -1223,6 +1223,25 @@ apollo credit, the generated email and the send were all spent on them.
   each), and an unbounded walk outran lead-service's 300s client timeout while
   this loop kept going and revealed a person nobody received. `pending` is
   never exhaustion; lead-service maps it to `serve_timed_out`.
+- **Screen yield: an audience the screen has exhausted answers `exhausted`**
+  (`readScreenYield` in `teaser-screening.ts`, read before each apollo walk and
+  every `SCREEN_YIELD_CHECK_EVERY` = 100 screens, before popping). Rule: the
+  audience's last **1,000** verdicts judged under the CURRENT question (same
+  `target_text`, same bar suffix in `reason`, same `prompt_version`) hold fewer
+  than **3** passes. Then serve-next screens and reveals nobody, persists
+  `reachable_count` exactly like a walked-out audience (so Remaining reads ~0
+  and campaign-service picks the brand's next audience), logs
+  `audience.screen_yield_exhausted`, and asks the refill sweep for that brand
+  once per process (it keeps its billing / low-pool / cooldown guards). The
+  audience is never edited. Why: Apollo returns best matches first, so a title
+  list with `include_similar_titles` ends in a long tail the screen rejects
+  (Shockwavecenters "US Chiropractic Clinicians", 2026-10-01..04: ~38k screens,
+  the last ~9k for 21 passes, generic "Physician"). Thresholds replayed on every
+  v2 verdict in prod: under the current bar only that audience trips; its 1-2%
+  middle (~12 passes per 1,000) never does. A new text / bar / prompt starts a
+  new window ("European Union" was dead at 0.80, productive at 0.50). Index
+  `(audience_id, created_at DESC)` (migration `0034`) keeps the read cheap.
+  Tests: `tests/integration/audiences-screen-yield.test.ts`.
 - **ONE Jev `noul` question per person, never a batch** (v2, 2026-09-28):
   chat-service `POST /orgs/judgments` (`judgeYesNo` in `chat-client.ts`) asks
   "does this candidate belong to the target audience the client described?"

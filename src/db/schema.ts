@@ -741,6 +741,11 @@ export const audienceTeaserScreenings = pgTable(
       table.audienceId,
       table.providerPersonId
     ),
+    // The screen-yield read: an audience's most recent verdicts (0034).
+    index("idx_audience_teaser_screenings_recent").on(
+      table.audienceId,
+      table.createdAt.desc()
+    ),
   ]
 );
 
