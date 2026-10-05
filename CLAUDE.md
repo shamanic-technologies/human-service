@@ -68,6 +68,7 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/widening-proposals/{id}/accept` | apiKey + `x-org-id` | Client accepts: segments become ACTIVE audiences on the wider target. Idempotent; 409 if declined |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/widening-proposals/{id}/decline` | apiKey + `x-org-id` | Client declines: nothing changes, never re-proposed for that target. Idempotent; 409 if accepted |
 | Internal | `POST /internal/audiences/resolve` | apiKey | **Bulk server-to-server audience resolver** for lead-service (#166): body `{orgId, brandId, audienceIds?, emails?}` → `{byAudienceId, byEmail}` maps of `{id,name,avatarUrl}` \| null. Brand-correct + active-preferred (deprecated→canonical), keyed by audienceId AND/OR email (historical coverage). Dedicated **25 MB** body parser (mounts before the global 100 KB json) — NO browser 413 cap. See below. |
+| Internal (staff) | `GET /internal/brands/{brandId}/audience-snapshot` (+ `/people`, `/companies`) | apiKey | What a brand HOLDS per list: people + companies stored (revealed / screened / waiting) and how many its target accepted; paginated people and company lists with source lists + accepting audiences. Pure DB read. See "Staff audience snapshot" |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
 | Org-scoped (CRM v1) | `GET /orgs/lists/{id}` | apiKey + `x-org-id` | Get a CRM list |
@@ -783,6 +784,30 @@ CRUD responses stay the plain `AudienceSchema`.
   up behind itself. The EXISTS form is linear (227 ms on that brand, identical
   counts). Measured 2026-09-24; guarded by the linkedin-only and other-brand
   cases in `tests/integration/audiences.test.ts`.
+
+### Staff audience snapshot — `GET /internal/brands/{brandId}/audience-snapshot`
+
+Staff-only (the api-service gateway gates it) view of what a brand already
+holds, for the dashboard v2 staff Audience page. `src/services/audience-snapshot.ts`
+owns the one SQL relation all three reads aggregate, so they cannot disagree.
+Optional `?orgId=` narrows; omitted = every org holding the brand.
+
+- **Held** = revealed members (`audience_members` -> `people`) + screened
+  teasers (latest verdict per audience+person) + teasers waiting in the buffer.
+  Person key = provider person id (apollo id on both teaser and `people`), so a
+  screened-then-revealed person counts once; a revealed person with no provider
+  id keys on `person:<people.id>`.
+- **Accepted** = that audience's LATEST verdict passes TODAY's bar
+  (`yes_probability > SCREEN_MIN_YES_PROBABILITY`; a 0.80-era 0.65 counts as
+  accepted); v1 rows (no probability) keep their boolean. Never screened =
+  neither accepted nor rejected.
+- **Company key**: revealed `people` carry the domain but no name (prod:
+  `company_name` NULL), teasers the name but no domain; a screened-then-revealed
+  person bridges name -> domain for the brand, so `domain:<d>` when known, else
+  `name:<lower name>`, else no company.
+- Measured 2026-10-05: ~1.1-1.4s on the two biggest brands (42.7k screenings /
+  17.9k members). No provider call, no spend, no state. Tests:
+  `tests/integration/audience-snapshot.test.ts`.
 
 ### Internal bulk audience resolver — `POST /internal/audiences/resolve`
 
