@@ -1617,6 +1617,7 @@ Runs every 6h (first tick 10 min after boot, timers only, never on the boot path
   under its own `audience-pointer-build` run. human-service declares none.
 - **One refill per brand per 3 days** (`REFILL_COOLDOWN_DAYS`, keyed on
   `auto_refill` rows AND proposals created), so a dry market is not re-billed.
+  An `auto_refill` row archived or deprecated (a REJECTED refill) does not count.
 - **Never touches a campaign.** Restarting is the client's call.
 - Known limit: a new audience's Remaining is its Apollo count until served, so
   people it shares with older audiences (already suppressed) read as remaining

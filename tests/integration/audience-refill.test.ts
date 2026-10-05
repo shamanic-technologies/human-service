@@ -259,6 +259,35 @@ describe("refill sweep", () => {
     expect(again!.refilled).toBe(0);
   });
 
+  it("a refill whose audiences were all archived or deprecated does not hold the cooldown; a paused one does", async () => {
+    await seedBrand(ORG_PAYING, BRAND_PAYING, { apolloCount: 0, served: 23 });
+    const rejected = (status: string, name: string) => ({
+      orgId: ORG_PAYING,
+      brandId: BRAND_PAYING,
+      offerId: OFFER,
+      name,
+      description: "Athletic trainers in Paraguay.",
+      nlPrompt: WIDENED,
+      provider: "apollo",
+      apolloAudienceId: `apollo-${name}`,
+      filters: { q: name },
+      apolloCount: 0,
+      reachableCount: 0,
+      status,
+      source: "auto_refill",
+      createdByUserId: USER,
+      createdAt: new Date(Date.now() - 86_400_000),
+    });
+    await db.insert(audiences).values([rejected("archived", "Rejected A"), rejected("deprecated", "Rejected B")]);
+    const r1 = await runAudienceRefillSweep({ brandId: BRAND_PAYING, dryRun: true });
+    expect(r1!.outcomes[0]).toMatchObject({ action: "would_refill" });
+
+    const [paused] = await db.insert(audiences).values(rejected("paused", "Paused C")).returning();
+    const r2 = await runAudienceRefillSweep({ brandId: BRAND_PAYING, dryRun: true });
+    expect(r2!.outcomes[0]).toMatchObject({ action: "skipped", reason: "cooldown" });
+    expect(paused.status).toBe("paused");
+  });
+
   it("reads the VALIDATED target, never the widened one an older refill wrote", async () => {
     await seedBrand(ORG_PAYING, BRAND_PAYING, { apolloCount: 0, served: 23 });
     // A pre-2026-10-04 refill row: newer, active, carrying a target the refill
