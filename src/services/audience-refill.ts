@@ -47,7 +47,7 @@
 // Boot safety: NOTHING here is awaited before `app.listen()` (same pattern as
 // offer-attribution-sweep.ts).
 
-import { and, desc, eq, ne, sql } from "drizzle-orm";
+import { and, desc, eq, ne, notInArray, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import {
   audiences,
@@ -451,6 +451,12 @@ async function refillBrand(
         eq(audiences.orgId, pool.orgId),
         eq(audiences.brandId, pool.brandId),
         eq(audiences.source, AUTO_REFILL_SOURCE),
+        // A refill the client / staff REJECTED (its audiences archived or
+        // deprecated) used no slot: counting it would block the very refill
+        // that replaces it (Shockwavecenters 2026-10-05: the 4 out-of-target
+        // audiences of the old logic were archived, the brand had 0 left and
+        // still answered cooldown). Paused rows still count (not a rejection).
+        notInArray(audiences.status, ["archived", "deprecated"]),
         sql`${audiences.createdAt} > now() - make_interval(days => ${REFILL_COOLDOWN_DAYS})`
       )
     )
