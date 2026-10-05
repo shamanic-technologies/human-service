@@ -1027,20 +1027,21 @@ export const AudienceStatusSchema = z
   .enum(["suggested", "active", "paused", "archived", "deprecated"])
   .openapi("AudienceStatus");
 
+export const AUDIENCE_LIST_KINDS = [
+  "apollo_search",
+  "apollo_buying_signal",
+  "linkedin_engagement",
+  "crm_contacts",
+  "apify_search",
+] as const;
+export const AudienceListKindSchema = z.enum(AUDIENCE_LIST_KINDS);
+
 export const AudienceChannelSchema = z
   .object({
     channel: z.enum(["cold_email"]).openapi({
       description: "The outreach channel that uses this list. cold_email is the only channel today.",
     }),
-    list: z
-      .enum([
-        "apollo_search",
-        "apollo_buying_signal",
-        "linkedin_engagement",
-        "crm_contacts",
-        "apify_search",
-      ])
-      .openapi({
+    list: AudienceListKindSchema.openapi({
         description:
           "What the list is. apollo_search: an Apollo people search. apollo_buying_signal: the same search narrowed to people showing a buying signal (see signal). linkedin_engagement: people who engaged with competitor LinkedIn posts (see signal). crm_contacts: the client's own uploaded contacts. apify_search: legacy search provider.",
       }),
@@ -3328,5 +3329,168 @@ registry.registerPath({
     401: { description: "Unauthorized" },
     409: { description: "A cold segment name collided; nothing created", content: { "application/json": { schema: ErrorSchema } } },
     502: { description: "The cold split failed (LLM, brand-service or runs-service); nothing created", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+// --- Internal (staff): what a brand HOLDS in its audiences ---------------------
+//
+// The dashboard's staff Audience page, through the api-service gateway (staff
+// gated there). Pure DB read: no provider call, no spend. Semantics in
+// src/services/audience-snapshot.ts.
+
+export const BrandSnapshotParamsSchema = z.object({
+  brandId: z.string().uuid(),
+});
+
+export const BrandSnapshotQuerySchema = z.object({
+  orgId: z.string().regex(LAX_UUID_REGEX).optional().openapi({
+    description: "Only this org's audiences of the brand. Omitted ⟹ every org holding the brand.",
+  }),
+});
+
+export const BrandSnapshotPageQuerySchema = BrandSnapshotQuerySchema.extend({
+  limit: z.coerce.number().int().min(1).max(500).optional().openapi({ description: "Page size, default 50, max 500." }),
+  offset: z.coerce.number().int().min(0).optional().openapi({ description: "Rows to skip, default 0." }),
+  acceptedOnly: z.enum(["true", "false"]).optional().openapi({
+    description: "'true' ⟹ only rows at least one target audience accepted.",
+  }),
+});
+
+const SnapshotAudienceRefSchema = z.object({
+  audienceId: z.string().uuid(),
+  name: z.string().nullable(),
+  status: AudienceStatusSchema.nullable(),
+  list: AudienceListKindSchema.nullable().openapi({
+    description: "What list this audience holds (same vocabulary as Audience.channels[].list). null ⟹ no committed provider.",
+  }),
+});
+
+const SnapshotCountsSchema = z.object({
+  people: z.object({
+    held: z.number().int().openapi({ description: "Distinct people we hold: revealed + screened + waiting in the teaser buffer." }),
+    revealed: z.number().int().openapi({ description: "Served: email bought, a member of the audience." }),
+    screened: z.number().int().openapi({ description: "Judged by the pre-pay screen (free teaser)." }),
+    accepted: z.number().int().openapi({ description: "Latest screen verdict passes today's bar (yes-probability > acceptanceBar; v1 rows: their verdict)." }),
+    rejected: z.number().int().openapi({ description: "Screened and not accepted." }),
+    waiting: z.number().int().openapi({ description: "In the teaser buffer, not judged nor revealed yet." }),
+  }),
+  companies: z.object({
+    held: z.number().int().openapi({ description: "Distinct companies of the people held." }),
+    revealed: z.number().int().openapi({ description: "Distinct companies of the revealed people." }),
+    accepted: z.number().int().openapi({ description: "Distinct companies with at least one accepted person." }),
+  }),
+});
+
+export const BrandAudienceSnapshotResponseSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    acceptanceBar: z.number().openapi({ description: "The screen's current yes-probability bar (strict >)." }),
+    totals: SnapshotCountsSchema.openapi({ description: "Brand-wide: a person or company held by several lists counts once." }),
+    audiences: z.array(
+      SnapshotAudienceRefSchema.extend({
+        orgId: z.string(),
+        offerId: z.string().uuid().nullable(),
+        targetText: z.string().nullable().openapi({ description: "The text the screen judges this audience's leads against." }),
+      }).merge(SnapshotCountsSchema)
+    ),
+  })
+  .openapi("BrandAudienceSnapshot");
+
+const SnapshotCompanyRefSchema = z.object({
+  companyKey: z.string().openapi({ description: "'domain:<domain>' when the domain is known, else 'name:<lowercased name>'." }),
+  name: z.string().nullable(),
+  domain: z.string().nullable(),
+});
+
+export const BrandHeldPeopleResponseSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    acceptanceBar: z.number(),
+    total: z.number().int(),
+    limit: z.number().int(),
+    offset: z.number().int(),
+    people: z.array(
+      z.object({
+        personKey: z.string().openapi({ description: "Stable key: the provider person id, or 'person:<personId>' for a revealed person with none." }),
+        personId: z.string().uuid().nullable().openapi({ description: "human-service people.id once revealed (same id serve-next returns). null for a teaser only." }),
+        providerPersonId: z.string().nullable(),
+        name: z.string().nullable(),
+        title: z.string().nullable(),
+        company: SnapshotCompanyRefSchema.nullable(),
+        revealed: z.boolean(),
+        sources: z.array(
+          SnapshotAudienceRefSchema.extend({
+            stage: z.enum(["revealed", "screened", "buffered"]),
+            verdict: z.enum(["accepted", "rejected"]).nullable(),
+            yesProbability: z.number().nullable(),
+          })
+        ).openapi({ description: "Every list that brought this person in, with how far they went and that audience's verdict." }),
+        acceptedBy: z.array(SnapshotAudienceRefSchema.extend({ yesProbability: z.number().nullable() })).openapi({
+          description: "Target audiences whose screen accepts this person (0..n).",
+        }),
+      })
+    ),
+  })
+  .openapi("BrandHeldPeople");
+
+export const BrandHeldCompaniesResponseSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    acceptanceBar: z.number(),
+    total: z.number().int(),
+    limit: z.number().int(),
+    offset: z.number().int(),
+    companies: z.array(
+      SnapshotCompanyRefSchema.extend({
+        people: z.object({ held: z.number().int(), revealed: z.number().int(), accepted: z.number().int() }),
+        sources: z.array(SnapshotAudienceRefSchema.extend({ people: z.number().int(), accepted: z.number().int() })),
+        acceptedBy: z.array(SnapshotAudienceRefSchema.extend({ acceptedPeople: z.number().int() })).openapi({
+          description: "Target audiences that accepted at least one person at this company (0..n).",
+        }),
+      })
+    ),
+  })
+  .openapi("BrandHeldCompanies");
+
+const snapshotErrors = {
+  400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+  401: { description: "Unauthorized" },
+};
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/audience-snapshot",
+  summary: "Staff: per audience (list) of a brand, the people and companies we hold and how many its target accepted. Pure DB read, no spend.",
+  security: [{ apiKey: [] }],
+  request: { params: BrandSnapshotParamsSchema, query: BrandSnapshotQuerySchema },
+  responses: {
+    200: { description: "Snapshot", content: { "application/json": { schema: BrandAudienceSnapshotResponseSchema } } },
+    ...snapshotErrors,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/audience-snapshot/people",
+  summary: "Staff: the people a brand holds across its audiences, each with its source lists and the target audiences that accepted it. Paginated, no spend.",
+  description: "Ordered by number of accepting audiences, then revealed first, then name.",
+  security: [{ apiKey: [] }],
+  request: { params: BrandSnapshotParamsSchema, query: BrandSnapshotPageQuerySchema },
+  responses: {
+    200: { description: "A page of people", content: { "application/json": { schema: BrandHeldPeopleResponseSchema } } },
+    ...snapshotErrors,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/audience-snapshot/companies",
+  summary: "Staff: the companies a brand holds people at, with people counts, source lists and accepting target audiences. Paginated, no spend.",
+  description: "Ordered by accepted people, then people held, then name.",
+  security: [{ apiKey: [] }],
+  request: { params: BrandSnapshotParamsSchema, query: BrandSnapshotPageQuerySchema },
+  responses: {
+    200: { description: "A page of companies", content: { "application/json": { schema: BrandHeldCompaniesResponseSchema } } },
+    ...snapshotErrors,
   },
 });

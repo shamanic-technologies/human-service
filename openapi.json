@@ -4790,6 +4790,612 @@
           "targetAudience"
         ],
         "additionalProperties": false
+      },
+      "BrandAudienceSnapshot": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "acceptanceBar": {
+            "type": "number",
+            "description": "The screen's current yes-probability bar (strict >)."
+          },
+          "totals": {
+            "type": "object",
+            "properties": {
+              "people": {
+                "type": "object",
+                "properties": {
+                  "held": {
+                    "type": "integer",
+                    "description": "Distinct people we hold: revealed + screened + waiting in the teaser buffer."
+                  },
+                  "revealed": {
+                    "type": "integer",
+                    "description": "Served: email bought, a member of the audience."
+                  },
+                  "screened": {
+                    "type": "integer",
+                    "description": "Judged by the pre-pay screen (free teaser)."
+                  },
+                  "accepted": {
+                    "type": "integer",
+                    "description": "Latest screen verdict passes today's bar (yes-probability > acceptanceBar; v1 rows: their verdict)."
+                  },
+                  "rejected": {
+                    "type": "integer",
+                    "description": "Screened and not accepted."
+                  },
+                  "waiting": {
+                    "type": "integer",
+                    "description": "In the teaser buffer, not judged nor revealed yet."
+                  }
+                },
+                "required": [
+                  "held",
+                  "revealed",
+                  "screened",
+                  "accepted",
+                  "rejected",
+                  "waiting"
+                ]
+              },
+              "companies": {
+                "type": "object",
+                "properties": {
+                  "held": {
+                    "type": "integer",
+                    "description": "Distinct companies of the people held."
+                  },
+                  "revealed": {
+                    "type": "integer",
+                    "description": "Distinct companies of the revealed people."
+                  },
+                  "accepted": {
+                    "type": "integer",
+                    "description": "Distinct companies with at least one accepted person."
+                  }
+                },
+                "required": [
+                  "held",
+                  "revealed",
+                  "accepted"
+                ]
+              }
+            },
+            "required": [
+              "people",
+              "companies"
+            ],
+            "description": "Brand-wide: a person or company held by several lists counts once."
+          },
+          "audiences": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "name": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "status": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/AudienceStatus"
+                    },
+                    {
+                      "nullable": true
+                    }
+                  ]
+                },
+                "list": {
+                  "type": "string",
+                  "nullable": true,
+                  "enum": [
+                    "apollo_search",
+                    "apollo_buying_signal",
+                    "linkedin_engagement",
+                    "crm_contacts",
+                    "apify_search",
+                    null
+                  ],
+                  "description": "What list this audience holds (same vocabulary as Audience.channels[].list). null ⟹ no committed provider."
+                },
+                "orgId": {
+                  "type": "string"
+                },
+                "offerId": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "uuid"
+                },
+                "targetText": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "The text the screen judges this audience's leads against."
+                },
+                "people": {
+                  "type": "object",
+                  "properties": {
+                    "held": {
+                      "type": "integer",
+                      "description": "Distinct people we hold: revealed + screened + waiting in the teaser buffer."
+                    },
+                    "revealed": {
+                      "type": "integer",
+                      "description": "Served: email bought, a member of the audience."
+                    },
+                    "screened": {
+                      "type": "integer",
+                      "description": "Judged by the pre-pay screen (free teaser)."
+                    },
+                    "accepted": {
+                      "type": "integer",
+                      "description": "Latest screen verdict passes today's bar (yes-probability > acceptanceBar; v1 rows: their verdict)."
+                    },
+                    "rejected": {
+                      "type": "integer",
+                      "description": "Screened and not accepted."
+                    },
+                    "waiting": {
+                      "type": "integer",
+                      "description": "In the teaser buffer, not judged nor revealed yet."
+                    }
+                  },
+                  "required": [
+                    "held",
+                    "revealed",
+                    "screened",
+                    "accepted",
+                    "rejected",
+                    "waiting"
+                  ]
+                },
+                "companies": {
+                  "type": "object",
+                  "properties": {
+                    "held": {
+                      "type": "integer",
+                      "description": "Distinct companies of the people held."
+                    },
+                    "revealed": {
+                      "type": "integer",
+                      "description": "Distinct companies of the revealed people."
+                    },
+                    "accepted": {
+                      "type": "integer",
+                      "description": "Distinct companies with at least one accepted person."
+                    }
+                  },
+                  "required": [
+                    "held",
+                    "revealed",
+                    "accepted"
+                  ]
+                }
+              },
+              "required": [
+                "audienceId",
+                "name",
+                "status",
+                "list",
+                "orgId",
+                "offerId",
+                "targetText",
+                "people",
+                "companies"
+              ]
+            }
+          }
+        },
+        "required": [
+          "brandId",
+          "acceptanceBar",
+          "totals",
+          "audiences"
+        ]
+      },
+      "BrandHeldPeople": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "acceptanceBar": {
+            "type": "number"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "personKey": {
+                  "type": "string",
+                  "description": "Stable key: the provider person id, or 'person:<personId>' for a revealed person with none."
+                },
+                "personId": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "uuid",
+                  "description": "human-service people.id once revealed (same id serve-next returns). null for a teaser only."
+                },
+                "providerPersonId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "name": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "title": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "company": {
+                  "type": "object",
+                  "nullable": true,
+                  "properties": {
+                    "companyKey": {
+                      "type": "string",
+                      "description": "'domain:<domain>' when the domain is known, else 'name:<lowercased name>'."
+                    },
+                    "name": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "domain": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "companyKey",
+                    "name",
+                    "domain"
+                  ]
+                },
+                "revealed": {
+                  "type": "boolean"
+                },
+                "sources": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "audienceId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "name": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "status": {
+                        "allOf": [
+                          {
+                            "$ref": "#/components/schemas/AudienceStatus"
+                          },
+                          {
+                            "nullable": true
+                          }
+                        ]
+                      },
+                      "list": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "apollo_search",
+                          "apollo_buying_signal",
+                          "linkedin_engagement",
+                          "crm_contacts",
+                          "apify_search",
+                          null
+                        ],
+                        "description": "What list this audience holds (same vocabulary as Audience.channels[].list). null ⟹ no committed provider."
+                      },
+                      "stage": {
+                        "type": "string",
+                        "enum": [
+                          "revealed",
+                          "screened",
+                          "buffered"
+                        ]
+                      },
+                      "verdict": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "accepted",
+                          "rejected",
+                          null
+                        ]
+                      },
+                      "yesProbability": {
+                        "type": "number",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "audienceId",
+                      "name",
+                      "status",
+                      "list",
+                      "stage",
+                      "verdict",
+                      "yesProbability"
+                    ]
+                  },
+                  "description": "Every list that brought this person in, with how far they went and that audience's verdict."
+                },
+                "acceptedBy": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "audienceId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "name": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "status": {
+                        "allOf": [
+                          {
+                            "$ref": "#/components/schemas/AudienceStatus"
+                          },
+                          {
+                            "nullable": true
+                          }
+                        ]
+                      },
+                      "list": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "apollo_search",
+                          "apollo_buying_signal",
+                          "linkedin_engagement",
+                          "crm_contacts",
+                          "apify_search",
+                          null
+                        ],
+                        "description": "What list this audience holds (same vocabulary as Audience.channels[].list). null ⟹ no committed provider."
+                      },
+                      "yesProbability": {
+                        "type": "number",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "audienceId",
+                      "name",
+                      "status",
+                      "list",
+                      "yesProbability"
+                    ]
+                  },
+                  "description": "Target audiences whose screen accepts this person (0..n)."
+                }
+              },
+              "required": [
+                "personKey",
+                "personId",
+                "providerPersonId",
+                "name",
+                "title",
+                "company",
+                "revealed",
+                "sources",
+                "acceptedBy"
+              ]
+            }
+          }
+        },
+        "required": [
+          "brandId",
+          "acceptanceBar",
+          "total",
+          "limit",
+          "offset",
+          "people"
+        ]
+      },
+      "BrandHeldCompanies": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "acceptanceBar": {
+            "type": "number"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "companies": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "companyKey": {
+                  "type": "string",
+                  "description": "'domain:<domain>' when the domain is known, else 'name:<lowercased name>'."
+                },
+                "name": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "domain": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "people": {
+                  "type": "object",
+                  "properties": {
+                    "held": {
+                      "type": "integer"
+                    },
+                    "revealed": {
+                      "type": "integer"
+                    },
+                    "accepted": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "held",
+                    "revealed",
+                    "accepted"
+                  ]
+                },
+                "sources": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "audienceId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "name": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "status": {
+                        "allOf": [
+                          {
+                            "$ref": "#/components/schemas/AudienceStatus"
+                          },
+                          {
+                            "nullable": true
+                          }
+                        ]
+                      },
+                      "list": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "apollo_search",
+                          "apollo_buying_signal",
+                          "linkedin_engagement",
+                          "crm_contacts",
+                          "apify_search",
+                          null
+                        ],
+                        "description": "What list this audience holds (same vocabulary as Audience.channels[].list). null ⟹ no committed provider."
+                      },
+                      "people": {
+                        "type": "integer"
+                      },
+                      "accepted": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "audienceId",
+                      "name",
+                      "status",
+                      "list",
+                      "people",
+                      "accepted"
+                    ]
+                  }
+                },
+                "acceptedBy": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "audienceId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "name": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "status": {
+                        "allOf": [
+                          {
+                            "$ref": "#/components/schemas/AudienceStatus"
+                          },
+                          {
+                            "nullable": true
+                          }
+                        ]
+                      },
+                      "list": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "apollo_search",
+                          "apollo_buying_signal",
+                          "linkedin_engagement",
+                          "crm_contacts",
+                          "apify_search",
+                          null
+                        ],
+                        "description": "What list this audience holds (same vocabulary as Audience.channels[].list). null ⟹ no committed provider."
+                      },
+                      "acceptedPeople": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "audienceId",
+                      "name",
+                      "status",
+                      "list",
+                      "acceptedPeople"
+                    ]
+                  },
+                  "description": "Target audiences that accepted at least one person at this company (0..n)."
+                }
+              },
+              "required": [
+                "companyKey",
+                "name",
+                "domain",
+                "people",
+                "sources",
+                "acceptedBy"
+              ]
+            }
+          }
+        },
+        "required": [
+          "brandId",
+          "acceptanceBar",
+          "total",
+          "limit",
+          "offset",
+          "companies"
+        ]
       }
     },
     "parameters": {}
@@ -9784,6 +10390,255 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/audience-snapshot": {
+      "get": {
+        "summary": "Staff: per audience (list) of a brand, the people and companies we hold and how many its target accepted. Pure DB read, no spend.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "description": "Only this org's audiences of the brand. Omitted ⟹ every org holding the brand."
+            },
+            "required": false,
+            "description": "Only this org's audiences of the brand. Omitted ⟹ every org holding the brand.",
+            "name": "orgId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandAudienceSnapshot"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/audience-snapshot/people": {
+      "get": {
+        "summary": "Staff: the people a brand holds across its audiences, each with its source lists and the target audiences that accepted it. Paginated, no spend.",
+        "description": "Ordered by number of accepting audiences, then revealed first, then name.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "description": "Only this org's audiences of the brand. Omitted ⟹ every org holding the brand."
+            },
+            "required": false,
+            "description": "Only this org's audiences of the brand. Omitted ⟹ every org holding the brand.",
+            "name": "orgId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "description": "Page size, default 50, max 500."
+            },
+            "required": false,
+            "description": "Page size, default 50, max 500.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "nullable": true,
+              "minimum": 0,
+              "description": "Rows to skip, default 0."
+            },
+            "required": false,
+            "description": "Rows to skip, default 0.",
+            "name": "offset",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "'true' ⟹ only rows at least one target audience accepted."
+            },
+            "required": false,
+            "description": "'true' ⟹ only rows at least one target audience accepted.",
+            "name": "acceptedOnly",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of people",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandHeldPeople"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/audience-snapshot/companies": {
+      "get": {
+        "summary": "Staff: the companies a brand holds people at, with people counts, source lists and accepting target audiences. Paginated, no spend.",
+        "description": "Ordered by accepted people, then people held, then name.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "description": "Only this org's audiences of the brand. Omitted ⟹ every org holding the brand."
+            },
+            "required": false,
+            "description": "Only this org's audiences of the brand. Omitted ⟹ every org holding the brand.",
+            "name": "orgId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "description": "Page size, default 50, max 500."
+            },
+            "required": false,
+            "description": "Page size, default 50, max 500.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "nullable": true,
+              "minimum": 0,
+              "description": "Rows to skip, default 0."
+            },
+            "required": false,
+            "description": "Rows to skip, default 0.",
+            "name": "offset",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "'true' ⟹ only rows at least one target audience accepted."
+            },
+            "required": false,
+            "description": "'true' ⟹ only rows at least one target audience accepted.",
+            "name": "acceptedOnly",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of companies",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandHeldCompanies"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
           }
         }
       }
