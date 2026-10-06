@@ -43,6 +43,7 @@ import {
   matchesOptOut,
 } from "./opt-outs.js";
 import { filterBounced, isEmailBounced } from "./bounces.js";
+import { isOwnCompany, isOwnCompanyPerson, loadOwnCompany } from "./own-company.js";
 import {
   dryRun,
   peopleSearch,
@@ -2260,6 +2261,8 @@ async function serveNextCrmContact(
   // they do for a bought lead — the person told the sender to stop, and the
   // sender is the org, whichever list their address happens to sit in.
   const optOuts = await loadOptOutExclusions(identity);
+  // The brand's own staff are never prospects, even in a list the client uploaded.
+  const ownCompany = await loadOwnCompany(identity.orgId, [audience.brandId]);
 
   for (;;) {
     const { contacts, exhausted } = await crmServeNext(
@@ -2280,6 +2283,13 @@ async function serveNextCrmContact(
     if (matchesOptOut(optOuts, { email: person.email })) {
       console.log(
         `[human-service] opt_out.blocked_crm org=${identity.orgId} audience=${audience.id}`
+      );
+      if (exhausted) return { status: "exhausted", person: null };
+      continue;
+    }
+    if (isOwnCompanyPerson(ownCompany, person)) {
+      console.log(
+        `[human-service] own_company.blocked_crm org=${identity.orgId} audience=${audience.id}`
       );
       if (exhausted) return { status: "exhausted", person: null };
       continue;
@@ -2461,6 +2471,9 @@ export async function serveNextPerson(
   // not only at refill. Read live, so a withdrawal is honoured on the next serve
   // with nothing to expire or invalidate.
   const optOuts = await loadServeExclusions(identity);
+  // The brand's own company, checked at POP time too: a teaser buffered before
+  // this rule existed must not reach the screen or the reveal.
+  const ownCompany = await loadOwnCompany(identity.orgId, [audience.brandId]);
 
   // The audience's own text, the one the screen below judges against. A segment
   // whose text has not landed yet (confirm's background draft still running or
@@ -2559,6 +2572,13 @@ export async function serveNextPerson(
     ) {
       console.log(
         `[human-service] opt_out.blocked_teaser org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`
+      );
+      continue;
+    }
+
+    if (isOwnCompany(ownCompany, { name: teaser.teaser?.organizationName ?? null })) {
+      console.log(
+        `[human-service] own_company.blocked_teaser org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`
       );
       continue;
     }
