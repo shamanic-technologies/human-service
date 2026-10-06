@@ -30,6 +30,7 @@ import {
   loadServeExclusions,
 } from "./opt-outs.js";
 import { filterBounced, isEmailBounced } from "./bounces.js";
+import { isOwnCompanyPerson, loadOwnCompany } from "./own-company.js";
 
 // apify bills per RETURNED lead (each search hit carries a verified email — there
 // is no free teaser list like apollo's). So the gateway takes the strict minimum
@@ -1052,6 +1053,9 @@ export async function peopleSearch(args: {
       optOuts.emails.size > 0 ||
       optOuts.linkedinUrls.size > 0 ||
       optOuts.personIds.size > 0;
+    // The brand's OWN company is never a prospect (src/services/own-company.ts):
+    // dropped here, on the free teaser, by employer name/domain.
+    const ownCompany = await loadOwnCompany(args.identity.orgId, brandIds);
 
     // No brandIds → nothing to suppress against → single page, the caller drives
     // pagination exactly as before. With brandIds → keep paging the FREE teaser
@@ -1077,6 +1081,7 @@ export async function peopleSearch(args: {
 
       let people = data.people.map((p) => normalizeApolloPerson(p));
       people = filterOptedOut(optOuts, people);
+      people = people.filter((p) => !isOwnCompanyPerson(ownCompany, p));
       // Hard bounces — FLEET-wide (any org, any brand): an address our own send
       // already bounced is dropped here, on the free teaser, before the reveal.
       // Read live from instantly-service; fail loud (502) when unreadable.
@@ -1181,9 +1186,12 @@ export async function peopleSearch(args: {
   // apify is no longer auto-selected (APOLLO-ONLY), so the billed lead this does
   // not avoid is confined to explicitly-apify legacy audiences; what it does
   // avoid is the EMAIL.
+  const apifyOwnCompany = await loadOwnCompany(args.identity.orgId, brandIds);
   const apifyServable = await filterBounced(
     args.identity,
-    filterOptedOut(apifyOptOuts, apifyPeople)
+    filterOptedOut(apifyOptOuts, apifyPeople).filter(
+      (p) => !isOwnCompanyPerson(apifyOwnCompany, p)
+    )
   );
   return {
     provider,
@@ -1248,6 +1256,19 @@ async function finalizeResolved(
       emailVerdict,
     }))
   ) {
+    return { provider, person: null };
+  }
+  // The brand's OWN company — the last line, now that the reveal carries the
+  // work email and the employer's domain (the teaser had the name only). After
+  // claimServe on purpose: the recorded serve stops a later request paying to
+  // reveal this person again. The credit is spent; what this prevents is the email.
+  if (
+    brandIds.length > 0 &&
+    isOwnCompanyPerson(await loadOwnCompany(identity.orgId, brandIds), person)
+  ) {
+    console.log(
+      `[human-service] own_company.blocked_post_reveal org=${identity.orgId} provider=${provider}`
+    );
     return { provider, person: null };
   }
   // Hard bounce on one of OUR sends, fleet-wide — the last line, for a person

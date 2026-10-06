@@ -452,6 +452,36 @@ the gate (`filterBounced`, `isEmailBounced`).
   `tests/integration/audiences-bounce.test.ts`, `tests/unit/instantly-bounces.test.ts`;
   serving suites answer via `tests/helpers/bounces.ts` or `vi.mock` the gate.
 
+### Own company — "a brand never prospects its own staff"
+
+A brand whose target resembles itself (labs selling to labs, agencies to
+agencies) used to get its own staff back: the home.cern preview listed
+"Director of Research and Computing · CERN (home.cern)". Owner (2026-10-06):
+« we should not send to people at the company itself ».
+`src/services/own-company.ts` is the gate, `src/lib/brand-identity.ts` the
+client (brand-service `GET /internal/brands/{id}`, `x-org-id` for the rep).
+
+- **The company** = the brand's website domain + its sales-rep email domain
+  (work addresses only, never free mail), compared on the REGISTRABLE domain
+  (`tldts`, private suffixes on, so subdomains match both ways and `co.uk` is
+  never a company), plus the brand NAME matched exactly after normalization
+  (the free teaser carries only the employer name). Hosting platforms
+  (facebook.com, linktr.ee, ...) and URL-as-name brands contribute nothing.
+- **Gates**: apollo teaser filter in `peopleSearch` (free); serve-next POP time
+  (employer name of buffered teasers); `finalizeResolved` after `claimServe`
+  (work email + employer domain, credit spent, email prevented); apify batch;
+  crm branch; `/preview` sample (companies + people, by name, on every read);
+  `/preview/companies` (never stored, legacy rows hidden on read, email check
+  404). Refills/portfolio serve through serve-next, so they are covered.
+- **Not covered**: provider COUNTS (Size, split estimate, `matchCount`) still
+  include the brand's staff; excluding them there needs apollo-service to push
+  an organization exclusion down.
+- Union over the request's brands; cached 10 min per (org, brand); a failed read
+  is not cached. **Fail loud**: `BrandServiceError` / `BrandConfigError` → 502
+  (`source: "brand-service"`). Tests mock the client globally in
+  `tests/setup.ts` (no-op brand); `tests/integration/audiences-own-company.test.ts`
+  and `tests/unit/own-company.test.ts` own the behaviour.
+
 ### Suppression recovery — `POST /internal/recover-suppressions`
 
 A serve is recorded the moment the gateway hands a person back with a verified

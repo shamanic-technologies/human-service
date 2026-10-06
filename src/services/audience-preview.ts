@@ -17,6 +17,7 @@ import { db } from "../db/index.js";
 import { audiences } from "../db/schema.js";
 import { getApolloAudiencePreview, isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import type { Identity } from "./people-providers.js";
+import { isOwnCompany, loadOwnCompany, type OwnCompany } from "./own-company.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
 
@@ -85,17 +86,36 @@ function toPublic(stored: StoredAudiencePreview, audienceId: string): AudiencePr
   };
 }
 
+// The brand's own company is never shown as a company or a person the audience
+// reaches (src/services/own-company.ts). Applied on every read, so a sample
+// stored before the rule existed is cleaned too. The sample only carries
+// employer NAMES, so the match is on the name.
+function withoutOwnCompany(stored: StoredAudiencePreview, own: OwnCompany): StoredAudiencePreview {
+  return {
+    ...stored,
+    companies: stored.companies.filter((c) => !isOwnCompany(own, { name: c.name })),
+    people: stored.people.filter((p) => !isOwnCompany(own, { name: p.company })),
+  };
+}
+
+async function ownCompanyOfAudience(audience: AudienceRow): Promise<OwnCompany> {
+  return loadOwnCompany(audience.orgId, [audience.brandId]);
+}
+
 export async function getAudiencePreview(
   audience: AudienceRow,
   identity: Identity
 ): Promise<AudiencePreview> {
   if (audience.preview) {
-    return toPublic(audience.preview as unknown as StoredAudiencePreview, audience.id);
+    const own = await ownCompanyOfAudience(audience);
+    return toPublic(
+      withoutOwnCompany(audience.preview as unknown as StoredAudiencePreview, own),
+      audience.id
+    );
   }
   const taken = await takeAudiencePreview(audience, identity);
-  return taken.status === "unavailable"
-    ? (taken as AudiencePreview)
-    : toPublic(taken, audience.id);
+  if (taken.status === "unavailable") return taken as AudiencePreview;
+  return toPublic(withoutOwnCompany(taken, await ownCompanyOfAudience(audience)), audience.id);
 }
 
 // The stored sample WITH reveal handles, for the email check. A sample stored
@@ -107,10 +127,12 @@ export async function getRevealablePreview(
   identity: Identity
 ): Promise<StoredAudiencePreview> {
   const stored = audience.preview as unknown as StoredAudiencePreview | null;
+  const own = await ownCompanyOfAudience(audience);
   if (stored && stored.people.every((p) => typeof p.providerPersonId === "string")) {
-    return { ...stored, audienceId: audience.id };
+    return withoutOwnCompany({ ...stored, audienceId: audience.id }, own);
   }
-  return takeAudiencePreview(audience, identity);
+  const taken = await takeAudiencePreview(audience, identity);
+  return taken.status === "unavailable" ? taken : withoutOwnCompany(taken, own);
 }
 
 async function takeAudiencePreview(

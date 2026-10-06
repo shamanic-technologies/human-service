@@ -26,6 +26,7 @@ import {
 import { completeRun, createRun } from "./runs.js";
 import { ProviderError, type Identity } from "./people-providers.js";
 import type { AudiencePreviewReason } from "./audience-preview.js";
+import { isOwnCompany, loadOwnCompany, type OwnCompany } from "./own-company.js";
 import {
   claimEmailCheck,
   loadCompanyRowChecks,
@@ -135,7 +136,19 @@ async function storedCount(audienceId: string, tx: typeof db = db): Promise<numb
 // Serialized per audience by a transaction-scoped advisory lock, so two
 // concurrent callers never pay for the same chunk: the second waits, then finds
 // the rows already there.
-async function ensureBuilt(audience: AudienceRow, identity: Identity, target: number): Promise<void> {
+// The brand's own company is never listed as a company to write to
+// (src/services/own-company.ts).
+function isOwnRow(own: OwnCompany, company: unknown): boolean {
+  const c = company as Partial<ApolloPreviewCompanyRow["company"]>;
+  return isOwnCompany(own, { name: c.name ?? null, domain: c.domain ?? null, website: c.website ?? null });
+}
+
+async function ensureBuilt(
+  audience: AudienceRow,
+  identity: Identity,
+  target: number,
+  own: OwnCompany
+): Promise<void> {
   await db.transaction(async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${"preview-companies:" + audience.id}))`);
 
@@ -176,6 +189,12 @@ async function ensureBuilt(audience: AudienceRow, identity: Identity, target: nu
         const k = companyKey(r.company);
         if (seen.has(k)) continue;
         seen.add(k);
+        if (isOwnRow(own, r.company)) {
+          console.log(
+            `[human-service] own_company.blocked_preview_company audience=${audience.id} brand=${audience.brandId}`
+          );
+          continue;
+        }
         fresh.push(r);
       }
       const toInsert = fresh.slice(0, PREVIEW_COMPANIES_MAX - stored);
@@ -294,10 +313,11 @@ export async function getAudiencePreviewCompanies(
   }
   if (!audience.apolloAudienceId) return unavailable(audience.id, "not_built_yet");
 
+  const own = await loadOwnCompany(audience.orgId, [audience.brandId]);
   const target = Math.min(offset + limit, PREVIEW_COMPANIES_MAX);
   const current = readState(audience.previewCompaniesState);
   if (!current?.done && (await storedCount(audience.id)) < target) {
-    await withRun(audience, identity, (runIdentity) => ensureBuilt(audience, runIdentity, target));
+    await withRun(audience, identity, (runIdentity) => ensureBuilt(audience, runIdentity, target, own));
   }
 
   const [stateRow] = await db
@@ -305,8 +325,16 @@ export async function getAudiencePreviewCompanies(
     .from(audiences)
     .where(eq(audiences.id, audience.id));
   const state = readState(stateRow?.state);
-  const total = await storedCount(audience.id);
-  const done = state?.done === true || total >= PREVIEW_COMPANIES_MAX;
+  const storedTotal = await storedCount(audience.id);
+  const done = state?.done === true || storedTotal >= PREVIEW_COMPANIES_MAX;
+  // Rows stored before the own-company rule are hidden on read, never served.
+  const ownStored = (
+    await db
+      .select({ company: audiencePreviewCompanies.company })
+      .from(audiencePreviewCompanies)
+      .where(eq(audiencePreviewCompanies.audienceId, audience.id))
+  ).filter((r) => isOwnRow(own, r.company)).length;
+  const total = storedTotal - ownStored;
 
   const rows = await db
     .select()
@@ -320,7 +348,7 @@ export async function getAudiencePreviewCompanies(
     )
     .orderBy(asc(audiencePreviewCompanies.idx));
 
-  const end = done ? total : PREVIEW_COMPANIES_MAX;
+  const end = done ? storedTotal : PREVIEW_COMPANIES_MAX;
   const nextOffset = offset + limit < end ? offset + limit : null;
   const empty = done && total === 0;
 
@@ -328,7 +356,7 @@ export async function getAudiencePreviewCompanies(
     audienceId: audience.id,
     status: empty ? "empty" : "ready",
     reason: empty ? "no_match" : null,
-    rows: rows.map((r) => ({
+    rows: rows.filter((r) => !isOwnRow(own, r.company)).map((r) => ({
       index: r.idx,
       company: toPublicCompany(r.company),
       person: toPublicPerson(r.person),
@@ -382,12 +410,15 @@ export async function getCompanyRowEmailChecks(
       )
     )
     .orderBy(asc(audiencePreviewCompanies.idx));
+  const own = await loadOwnCompany(audience.orgId, [audience.brandId]);
   const checks = await loadCompanyRowChecks(audience.id);
   const byIndex = new Map(checks.map((c) => [c.personIndex, c]));
   return {
     audienceId: audience.id,
     maxCheckable: PREVIEW_COMPANIES_EMAIL_CHECK_MAX,
-    checks: rows.map((r) => toCompanyRowCheck(r.idx, handleOf(r.person), byIndex.get(r.idx))),
+    checks: rows
+      .filter((r) => !isOwnRow(own, r.company))
+      .map((r) => toCompanyRowCheck(r.idx, handleOf(r.person), byIndex.get(r.idx))),
   };
 }
 
@@ -407,6 +438,9 @@ export async function checkCompanyRowEmail(
   const row = await loadRow(audience.id, index);
   if (!row) {
     throw new PreviewCompanyRowError(404, `Company row ${index} is not built yet: page /preview/companies first`);
+  }
+  if (isOwnRow(await loadOwnCompany(audience.orgId, [audience.brandId]), row.company)) {
+    throw new PreviewCompanyRowError(404, `Company row ${index} is the brand's own company`);
   }
   const handle = handleOf(row.person);
   if (!handle) {
