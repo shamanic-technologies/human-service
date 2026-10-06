@@ -1,3 +1,4 @@
+import { BrandConfigError, BrandServiceError } from "../lib/brand-offers.js";
 import { Router } from "express";
 import { EmailVerificationError } from "../lib/email-verification.js";
 import { requireApiKey, requireOrgAndUser, getWorkflowTracking } from "../middleware/auth.js";
@@ -83,6 +84,15 @@ function sendProviderError(
       `[human-service] people.bounce_source_error ${err.name}: ${err.message}`
     );
     res.status(502).json({ error: err.message, source: "instantly-service" });
+    return;
+  }
+  if (err instanceof BrandConfigError || err instanceof BrandServiceError) {
+    // The brand's own company could not be read, so the serve cannot tell its
+    // staff apart from prospects. Never serve through that gate blind.
+    console.error(
+      `[human-service] people.brand_source_error ${err.name}: ${err.message}`
+    );
+    res.status(502).json({ error: err.message, source: "brand-service" });
     return;
   }
   if (err instanceof WonLeadsConfigError || err instanceof WonLeadsSourceError) {
