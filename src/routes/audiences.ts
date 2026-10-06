@@ -25,6 +25,7 @@ import {
   GenerateAudienceAvatarRequestSchema,
   SplitAudiencesRequestSchema,
   ConfirmAudienceSplitRequestSchema,
+  EstimateSplitSegmentsRequestSchema,
   PreviewCompaniesQuerySchema,
   LaunchAudiencePortfolioRequestSchema,
   CreateLinkedinEngagementAudienceRequestSchema,
@@ -32,6 +33,7 @@ import {
 import { createLinkedinEngagementAudience } from "../services/linkedin-engagement-audience.js";
 import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import { launchAudiencePortfolio } from "../services/audience-portfolio.js";
+import { estimateSplitSegments } from "../services/audience-split-estimate.js";
 import {
   proposeAudienceSplit,
   confirmAudienceSplit,
@@ -333,6 +335,38 @@ router.post(
         `[human-service] audience.split org=${res.locals.orgId} brand=${parsed.data.brandId} segments=${proposal.segments.length} axes=${proposal.axes.join("+") || "none"} ms=${Date.now() - startedAt}`
       );
       res.json(proposal);
+    } catch (err) {
+      sendProviderError(res, err);
+    }
+  }
+);
+
+// --- POST /orgs/audiences/split/estimate ---
+// Proposed segments -> one approximate people count each, so the signed-out
+// cards can show a size before the visitor picks. One cheap filter draft for
+// the whole list + free verified-email counts; creates no audience. Needs
+// x-user-id (apollo key resolution + chat-service).
+router.post(
+  "/orgs/audiences/split/estimate",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const parsed = EstimateSplitSegmentsRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+    const startedAt = Date.now();
+    try {
+      const estimates = await estimateSplitSegments(
+        parsed.data.brandId,
+        parsed.data.segments.map((s) => ({ name: s.name, description: s.description })),
+        buildIdentity(res)
+      );
+      console.log(
+        `[human-service] audience.split_estimate org=${res.locals.orgId} brand=${parsed.data.brandId} offer=${parsed.data.offerId ?? "none"} segments=${estimates.length} unavailable=${estimates.filter((e) => e.estimatedPeople === null).length} ms=${Date.now() - startedAt}`
+      );
+      res.json({ estimates });
     } catch (err) {
       sendProviderError(res, err);
     }

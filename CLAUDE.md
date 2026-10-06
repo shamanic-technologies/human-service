@@ -83,6 +83,7 @@ section — the port binds first).
 | Org-scoped (People v1) | `GET /orgs/people/filters-prompt` | apiKey + `x-org-id` + `x-user-id` | LLM filter-shape prompt (apollo only in v1) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/suggest` | apiKey + `x-org-id` + `x-user-id` | NL → **ONE persisted** candidate audience (never split — the split is deferred to #235), returned as an array of one at status `suggested` (inactive); optional `offerId` scopes it |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/split` | apiKey + `x-org-id` + `x-user-id` | Target text → 1-6 non-overlapping segments `{name, description, icon, iconConfidence, estimatedLeadCount}` + `axes`. No provider call, no count, persists nothing |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/split/estimate` | apiKey + `x-org-id` + `x-user-id` | Proposed segments (1-8, name + description) -> approximate verified-email people count each. One cheap filter draft + free dry-runs, creates no audience |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/split/confirm` | apiKey + `x-org-id` | Kept segments → ACTIVE audiences under brand + offer, all or nothing (409 on a taken name) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/portfolio` | apiKey + `x-org-id` + `x-user-id` | Launch-time ICP portfolio for brand + offer: cold split (adopted if pre-confirmed) + one buying-signal audience per signal reaching 20+ companies, all ACTIVE, one shared nl_prompt. Idempotent per (org, brand, offer) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/signal` | apiKey + `x-org-id` + `x-user-id` | Create a `linkedin_engagement` signal audience (competitor LinkedIn post engagers); apollo-service's 4xx relayed |
@@ -1885,6 +1886,29 @@ them as OpenAPI enums).
   `/internal/backfill-apollo-audience-pointers`), so Olive's four split
   audiences sat active with no filters and campaign 583a4e74 failed ~1/min for
   12h. A name taken in the same (org, brand, offer) scope ⟹ 409, nothing written.
+
+### Split estimate — `POST /orgs/audiences/split/estimate`
+
+The signed-out /get-started cards need a size ("~41,000 people") BEFORE the
+visitor picks one. Confirming every segment just to read its count cost ~$2.25
+per visitor (32 confirms, $51.75 over 14 days, all LLM). This route sizes the
+whole list without creating anything. `src/services/audience-split-estimate.ts`.
+
+- **ONE Gemini `flash-pro` `/complete`** (minimal thinking, schemaless JSON)
+  drafts Apollo filters for every segment at once, from apollo-service's own
+  `GET /search/filters-prompt` (its documented single source for caller LLMs;
+  cached 1h). Then one FREE `POST /search/dry-run` per segment, in parallel.
+  Segments refused (400) or at 0 get ONE repair call for those only.
+- **The number** = people with a verified email (apollo-service forces it)
+  matching that quick draft, `include_similar_titles` FORCED false (similar
+  titles inflate ~10x), `buying_signal` stripped, rounded to 2 significant
+  figures. An order of magnitude, not the confirmed audience's own count.
+- `estimatedPeople: null` only with `unavailableReason`
+  (`no_filters_drafted` / `filters_rejected`), never an invented number. A
+  provider or chat failure is a 502.
+- Cost: chat-service bills the caller's org (opens an `audience-split-estimate`
+  run when no `x-run-id`). Persists nothing. Tests:
+  `tests/integration/audiences-split-estimate.test.ts`.
 
 ### Audience suggestion (onboarding) — `POST /orgs/audiences/suggest`
 
