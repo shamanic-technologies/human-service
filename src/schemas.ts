@@ -3170,6 +3170,52 @@ export const SplitAudiencesResponseSchema = z
   })
   .openapi("SplitAudiencesResponse");
 
+const ESTIMATE_MEANING =
+  "Approximate number of people with a verified email in Apollo who match a quick draft of Apollo People Search filters written from the segment sentence (one cheap LLM call for the whole list, then one free count per segment). Similar-title matching is switched off, so title-based segments are not inflated (~10x) by Apollo's similar titles. Rounded to 2 significant figures. An order of magnitude to show on a card, NOT the audience's final count: the confirmed audience runs its own full build, whose count can differ.";
+
+export const EstimateSplitSegmentsRequestSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    offerId: z.string().uuid().optional().openapi({
+      description: "The offer the segments were proposed for. Accepted for attribution in logs; it does not change the estimate.",
+    }),
+    segments: z
+      .array(
+        z
+          .object({
+            name: z.string().trim().min(1),
+            description: z.string().trim().min(1),
+          })
+          .passthrough()
+      )
+      .min(1)
+      .max(8)
+      .openapi({
+        description:
+          "The proposed segments as returned by /orgs/audiences/split (or /orgs/audiences/suggest): name + description each, 1 to 8. Extra fields (icon, estimatedLeadCount) are accepted and ignored.",
+      }),
+  })
+  .openapi("EstimateSplitSegmentsRequest");
+
+export const SegmentEstimateSchema = z
+  .object({
+    name: z.string().openapi({ description: "The segment name, as sent." }),
+    estimatedPeople: z.number().int().nonnegative().nullable().openapi({ description: ESTIMATE_MEANING + " null only when unavailableReason is set." }),
+    unavailableReason: z.enum(["no_filters_drafted", "filters_rejected"]).nullable().openapi({
+      description:
+        "Why no number could be measured for this segment (null when estimatedPeople is set): no_filters_drafted = the model wrote no filters for it, twice; filters_rejected = the search refused its filters, twice.",
+    }),
+  })
+  .openapi("SegmentEstimate");
+
+export const EstimateSplitSegmentsResponseSchema = z
+  .object({
+    estimates: z.array(SegmentEstimateSchema).openapi({
+      description: "One entry per requested segment, in request order. Nothing is persisted, no audience is created.",
+    }),
+  })
+  .openapi("EstimateSplitSegmentsResponse");
+
 export const ConfirmAudienceSplitRequestSchema = z
   .object({
     brandId: z.string().uuid(),
@@ -3222,6 +3268,27 @@ registry.registerPath({
     400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
     502: { description: "LLM / judgment error", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/split/estimate",
+  summary: "Approximate people count per proposed segment, without creating any audience",
+  description:
+    "For proposed segments (the cards a visitor picks from), returns one approximate people count each. " +
+    ESTIMATE_MEANING +
+    " Cost: one LLM call via chat-service for the whole list (plus one repair call only for segments whose draft was refused or matched nobody), billed to the caller's org; the counts are free. Typical latency under 20s. Persists nothing.",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: peopleHeaders,
+    body: { content: { "application/json": { schema: EstimateSplitSegmentsRequestSchema } } },
+  },
+  responses: {
+    200: { description: "One estimate per segment", content: { "application/json": { schema: EstimateSplitSegmentsResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "LLM or people-search provider error", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
 
