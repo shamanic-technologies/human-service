@@ -1113,6 +1113,24 @@ describe("serve-next on a split audience whose Apollo filters were never built",
     });
   });
 
+  it("the build is labelled with the list's sourcing origin, whatever channel the serve carries", async () => {
+    const buildSlugs: string[] = [];
+    fetchSpy.mockImplementation(async (url: string, init: { headers?: Record<string, string> }) => {
+      const u = String(url);
+      if (u.endsWith("/audiences/suggest-from-segment")) {
+        buildSlugs.push(init.headers?.["x-feature-slug"] ?? "<none>");
+        return ok({ apolloAudienceId: "apollo-ptr-lbl", filters: { q_keywords: "x" }, count: 10 });
+      }
+      if (u.endsWith("/search/next")) return ok({ people: [], done: true, totalEntries: 0 });
+      throw new Error("unexpected url " + u);
+    });
+    const id = await confirmSplitSegment("Labelled Builders");
+    const res = await serveNextForFeature(id, "sales-cold-email-outreach");
+    expect(res.status).toBe(200);
+    expect(buildSlugs.length).toBeGreaterThan(0);
+    expect(new Set(buildSlugs)).toEqual(new Set(["sourcing-apollo-cold-filters"]));
+  });
+
   it("still fails loud (422) when the build yields no usable filters", async () => {
     fetchSpy.mockImplementation(async (url: string) => {
       if (String(url).endsWith("/audiences/suggest-from-segment"))
@@ -1166,5 +1184,125 @@ describe("serve-next across audiences of one brand — never the same person twi
     const served = [a, b].filter((r) => r.body.status === "served");
     expect(served).toHaveLength(1);
     expect(served[0].body.person.email).toBe("c@acme.com");
+  });
+});
+
+// ── Sourcing-origin label (SOURCING-SPLIT) ─────────────────────────────────────
+// lead-service reads GET /orgs/audiences/:id/sourcing-origin (sending the outreach
+// channel slug it sends today) and forwards the returned ORIGIN slug as
+// x-feature-slug on serve-next. Whichever label arrives, serve-next serves the
+// same person from the same source.
+describe("serve-next under the sourcing-origin label", () => {
+  function originOf(id: string, featureSlug?: string) {
+    return request(app)
+      .get(`/orgs/audiences/${id}/sourcing-origin`)
+      .set({ ...getAuthHeaders(), ...(featureSlug ? { "x-feature-slug": featureSlug } : {}) });
+  }
+
+  function apolloServes(email: string) {
+    let crmCalls = 0;
+    fetchSpy.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        crmCalls++;
+        return ok({ contacts: [], served: 0, exhausted: true });
+      }
+      if (u.endsWith("/search/next"))
+        return ok({ people: [apolloTeaser("p1", "linkedin.com/in/p1")], done: true, totalEntries: 1 });
+      if (u.endsWith("/enrich")) return ok({ person: apolloRevealed("p1", email, "linkedin.com/in/p1") });
+      if (u.endsWith("/search/dry-run")) return ok({ total: 0 });
+      throw new Error("unexpected url " + u);
+    });
+    return () => crmCalls;
+  }
+
+  function crmServes(email: string) {
+    let searchCalls = 0;
+    fetchSpy.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.endsWith("/orgs/contacts/serve-next"))
+        return ok({ contacts: [crmContact("crm1", email)], served: 1, exhausted: false });
+      if (u.endsWith("/search/dry-run") || u.endsWith("/search/count")) return ok({ total: 0 });
+      if (u.endsWith("/search/next") || u.endsWith("/enrich") || u.endsWith("/search")) {
+        searchCalls++;
+        return ok({});
+      }
+      throw new Error("unexpected url " + u);
+    });
+    return () => searchCalls;
+  }
+
+  it("apollo audience: the origin is Apollo cold filters, and serve-next serves the same person under it", async () => {
+    const id = await createAudience("apollo", "Origin apollo");
+    const origin = await originOf(id, "sales-cold-email-outreach");
+    expect(origin.status).toBe(200);
+    expect(origin.body).toEqual({ audienceId: id, list: "apollo_search", sourcingFeatureSlug: "sourcing-apollo-cold-filters" });
+
+    const crmCallsA = apolloServes("same@acme.com");
+    const viaOutreach = await serveNextForFeature(id, "sales-cold-email-outreach");
+    expect(viaOutreach.body.person.email).toBe("same@acme.com");
+    expect(crmCallsA()).toBe(0);
+
+    await cleanTestData();
+    const id2 = await createAudience("apollo", "Origin apollo");
+    const crmCallsB = apolloServes("same@acme.com");
+    const viaOrigin = await serveNextForFeature(id2, origin.body.sourcingFeatureSlug);
+    expect(viaOrigin.status).toBe(200);
+    expect(viaOrigin.body.status).toBe("served");
+    expect(viaOrigin.body.person.email).toBe("same@acme.com");
+    expect(viaOrigin.body.person.provider).toBe("apollo");
+    expect(crmCallsB()).toBe(0);
+  });
+
+  it("crm audience: the origin is CRM contacts under any channel, and serve-next serves from crm-service under it", async () => {
+    const id = await createCrmAudience("Origin crm");
+    for (const slug of ["sales-cold-email-outreach", "sales-crm-email-outreach", undefined]) {
+      const origin = await originOf(id, slug);
+      expect(origin.body).toEqual({ audienceId: id, list: "crm_contacts", sourcingFeatureSlug: "sourcing-crm-contacts" });
+    }
+    const searchCalls = crmServes("crm@crm.com");
+    const res = await serveNextForFeature(id, "sourcing-crm-contacts");
+    expect(res.status).toBe(200);
+    expect(res.body.person.email).toBe("crm@crm.com");
+    expect(res.body.person.provider).toBe("crm");
+    expect(searchCalls()).toBe(0);
+  });
+
+  it("apollo audience under the CRM outreach channel: origin is CRM contacts, and serve-next under it still serves from crm-service", async () => {
+    const id = await createAudience("apollo", "Apollo under CRM channel");
+    const origin = await originOf(id, "sales-crm-email-outreach");
+    expect(origin.body.sourcingFeatureSlug).toBe("sourcing-crm-contacts");
+    expect(origin.body.list).toBe("crm_contacts");
+
+    const searchCalls = crmServes("from-crm@crm.com");
+    const res = await serveNextForFeature(id, origin.body.sourcingFeatureSlug);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.email).toBe("from-crm@crm.com");
+    expect(res.body.person.provider).toBe("crm");
+    expect(searchCalls()).toBe(0);
+  });
+
+  it("apify audience: origin is Apify search", async () => {
+    const id = await createAudience("apify", "Origin apify");
+    const origin = await originOf(id, "sales-cold-email-outreach");
+    expect(origin.body.sourcingFeatureSlug).toBe("sourcing-apify-search");
+  });
+
+  it("404 for another org's / unknown audience", async () => {
+    const res = await originOf("00000000-0000-4000-8000-0000000000ff");
+    expect(res.status).toBe(404);
+  });
+
+  it("502 naming features-service when the catalogue cannot be read (never a fallback label)", async () => {
+    const id = await createAudience("apollo", "Origin unreadable");
+    const { fetchSourcingOriginsByList, SourcingOriginError } = await import("../../src/lib/features-sourcing.js");
+    const { resetSourcingOriginCache } = await import("../../src/services/sourcing-origin.js");
+    resetSourcingOriginCache();
+    vi.mocked(fetchSourcingOriginsByList).mockRejectedValueOnce(new SourcingOriginError("features-service down"));
+    const res = await originOf(id, "sales-cold-email-outreach");
+    expect(res.status).toBe(502);
+    expect(res.body.source).toBe("features-service");
+    resetSourcingOriginCache();
   });
 });

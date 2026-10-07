@@ -68,6 +68,7 @@ import {
 } from "../lib/apollo-audiences.js";
 import { chooseAudienceCandidate, buildChooserTrace } from "./audience-chooser.js";
 import { createRun, completeRun } from "./runs.js";
+import { audienceSourcingOriginSlug, isCrmSourcedFeature, withSourcingOrigin } from "./sourcing-origin.js";
 import { crmServeNext, normalizeCrmContact } from "../lib/crm-contacts.js";
 import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
 
@@ -1897,10 +1898,12 @@ export async function backfillApolloAudiencePointer(
   // sweep) ⟹ the row's own org + creator, i.e. still ORG-billed.
   identityOverride?: Identity
 ): Promise<ApolloPointerBackfillResult | null> {
-  const base: Identity = identityOverride ?? {
-    orgId: row.orgId,
-    userId: row.createdByUserId ?? undefined,
-  };
+  // The build is list building: it and every call under it carry the origin of
+  // the list it builds (unresolvable ⟹ throws before anything is spent).
+  const base: Identity = withSourcingOrigin(
+    identityOverride ?? { orgId: row.orgId, userId: row.createdByUserId ?? undefined },
+    await audienceSourcingOriginSlug(row)
+  );
   // apollo-service (and chat-service) require an x-run-id. A build fired off a
   // request that carries none (the split confirm, the manual backfill) opens
   // its OWN run under the row's org, so it is still org-billed and traced.
@@ -2173,11 +2176,9 @@ export async function getAudienceInOrg(
 // Thrown when an audience cannot serve people because it lacks the stored state
 // serve-next needs (a committed provider, or a non-empty filter set). Fail loud
 // (route → 422) rather than silently returning an empty / wrong result.
-// The features-service catalogue slug for the "Sales CRM Email Outreach" feature.
-// A serve-next request carrying this feature identity (x-feature-slug, forwarded by
-// lead-service) sources from crm-service instead of a search provider — see
-// serveNextPerson. Byte-equal to features-service `src/seed/features.ts`.
-export const CRM_OUTREACH_FEATURE_SLUG = "sales-crm-email-outreach";
+// The CRM-outreach channel slug (and its sourcing twin `sourcing-crm-contacts`)
+// live in sourcing-origin.ts; re-exported for existing importers.
+export { CRM_OUTREACH_FEATURE_SLUG } from "./sourcing-origin.js";
 
 export class AudienceNotServableError extends Error {
   constructor(message: string) {
@@ -2406,7 +2407,13 @@ export async function serveNextPerson(
   // suppression here. It returns an empty batch + exhausted for a brand with no
   // uploaded contacts (i.e. no CRM connection), so this path is FAIL-SOFT by
   // construction: no connection / drained list → {status:"exhausted"}, never a 500.
-  if (featureSlug === CRM_OUTREACH_FEATURE_SLUG || provider === "crm") {
+  //
+  // The feature identity arrives as either label: the outreach channel
+  // (`sales-crm-email-outreach`) or the sourcing origin lead-service reads from
+  // GET /orgs/audiences/{id}/sourcing-origin (`sourcing-crm-contacts`). Both
+  // route here; any other origin slug leaves the audience's provider in charge,
+  // exactly as the cold outreach channel does.
+  if (isCrmSourcedFeature(featureSlug) || provider === "crm") {
     return serveNextCrmContact(audience, identity);
   }
 
