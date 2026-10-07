@@ -13,6 +13,7 @@ import {
   audienceTeaserBuffer,
   audienceTeaserScreenings,
   audienceScreenedOut,
+  audienceCandidates,
   people,
   suppressionRecoveries,
   suppressionBackfills,
@@ -31,6 +32,7 @@ export async function cleanTestData() {
   await db.delete(audienceTeaserBuffer);
   await db.delete(audienceTeaserScreenings);
   await db.delete(audienceScreenedOut);
+  await db.delete(audienceCandidates);
   await db.delete(audienceMembers);
   await db.delete(audiencePortfolios);
   await db.delete(audienceWideningProposals);

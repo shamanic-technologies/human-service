@@ -253,6 +253,13 @@
       "when": 1771587970299,
       "tag": "0035_add_audience_widening_proposals",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1771587971299,
+      "tag": "0036_add_audience_candidates",
+      "breakpoints": true
     }
   ]
 }

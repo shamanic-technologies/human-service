@@ -21,7 +21,7 @@ import { sql } from "../db/index.js";
  *    `lists` (brand_id nullable; brand-less lists are org-wide, left alone).
  *  - keyed through an audience of the brand: `audience_members`,
  *    `audience_teaser_buffer`, `audience_teaser_screenings`,
- *    `audience_screened_out`.
+ *    `audience_screened_out`, `audience_candidates`.
  *  - keyed through a list of the brand: `list_members`.
  *  - `human_methodologies` (solo-brand rows only, `brand_ids = [brand]`) and
  *    the `humans` row each one belongs to (1:1).
@@ -67,6 +67,7 @@ const TABLES = [
   "audience_teaser_buffer",
   "audience_teaser_screenings",
   "audience_screened_out",
+  "audience_candidates",
   "people",
   "lead_serves",
   "brand_suppressions",
@@ -120,6 +121,7 @@ export async function transferBrand(
       "audience_teaser_buffer",
       "audience_teaser_screenings",
       "audience_screened_out",
+      "audience_candidates",
     ] as const) {
       add(child, await moveAudienceChildren(tx, child, sourceOrgId, targetOrgId, targetBrandId));
     }
@@ -253,7 +255,11 @@ async function movePortfolios(
 
 async function moveAudienceChildren(
   tx: Tx,
-  table: "audience_teaser_buffer" | "audience_teaser_screenings" | "audience_screened_out",
+  table:
+    | "audience_teaser_buffer"
+    | "audience_teaser_screenings"
+    | "audience_screened_out"
+    | "audience_candidates",
   sourceOrgId: string,
   toOrg: string,
   toBrand: string
@@ -267,9 +273,13 @@ async function moveAudienceChildren(
         ? await tx`UPDATE audience_teaser_screenings c SET org_id = ${toOrg} FROM audiences a
                    WHERE c.audience_id = a.id AND c.org_id = ${sourceOrgId}
                      AND a.org_id = ${toOrg} AND a.brand_id = ${toBrand} RETURNING c.id`
-        : await tx`UPDATE audience_screened_out c SET org_id = ${toOrg} FROM audiences a
-                   WHERE c.audience_id = a.id AND c.org_id = ${sourceOrgId}
-                     AND a.org_id = ${toOrg} AND a.brand_id = ${toBrand} RETURNING c.id`;
+        : table === "audience_screened_out"
+          ? await tx`UPDATE audience_screened_out c SET org_id = ${toOrg} FROM audiences a
+                     WHERE c.audience_id = a.id AND c.org_id = ${sourceOrgId}
+                       AND a.org_id = ${toOrg} AND a.brand_id = ${toBrand} RETURNING c.id`
+          : await tx`UPDATE audience_candidates c SET org_id = ${toOrg} FROM audiences a
+                     WHERE c.audience_id = a.id AND c.org_id = ${sourceOrgId}
+                       AND a.org_id = ${toOrg} AND a.brand_id = ${toBrand} RETURNING c.id`;
   return rows.length;
 }
 
