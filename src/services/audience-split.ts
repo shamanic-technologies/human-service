@@ -16,7 +16,7 @@
 //     segment, provider `apollo` with NO pointer and NO filters: turning the
 //     description into faithful Apollo filters is the existing pointer build
 //     (`backfillApolloAudiencePointer`). The confirm route fires it in the
-//     background for every created row, and serve-next runs it inline if it has
+//     background for every created row, and candidates/next runs it inline if it has
 //     not landed (`ensureApolloPointer`), so an active split audience is never
 //     unservable. Nothing here re-implements it.
 //

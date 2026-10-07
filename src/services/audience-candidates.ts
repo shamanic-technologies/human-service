@@ -4,17 +4,17 @@
 // owns whether a lead MEETS a business condition (the client's criteria AND the
 // "does this person belong to the audience" screen, which is qualification). So
 // lead-service must see a candidate — who it is and its company — BEFORE the
-// paid reveal, and decide. serve-next does teaser + screen + reveal in one call,
-// which leaves the caller no moment to look or to decline.
+// paid reveal, and decide. serve-next used to do teaser + screen + reveal in one
+// call, which left the caller no moment to look or to decline.
 //
 // THE FLOW (apollo audiences only — the one provider with a free teaser and a
 // separate billed reveal):
 //   next    → pop the next buffered free teaser, apply every FREE check
-//             serve-next applies (brand suppression, opt-outs + won people, the
+//             serve-next used to apply (brand suppression, opt-outs + won people, the
 //             brand's own company, hard bounces, people already rejected for
 //             this audience), and hand it out as an `offered` candidate. No
 //             screen, no reveal, no spend.
-//   reveal  → the billed reveal, recorded as served exactly as serve-next does
+//   reveal  → the billed reveal, recorded as served exactly as serve-next did
 //             (finalizeResolved + membership), same `{status, person, personId}`
 //             shape. Claimed atomically before the spend: billed once.
 //   decline → written to `audience_screened_out`, the SAME exclusion set the
@@ -22,9 +22,9 @@
 //             and the audience's Size drops by one, exactly like a screen
 //             rejection.
 //
-// serve-next is UNTOUCHED: it keeps its own screen until lead-service's screen is
-// live in prod and no longer calls it. Both paths pop the same buffer (a popped
-// teaser is gone from it), so one person is never offered by both.
+// This is the ONLY serve path for an apollo audience: since 2026-10-07 serve-next
+// answers 422 for one (its own screen was removed), so no apollo lead is ever
+// served without the caller's screen.
 //
 // YIELD. The screen's "this audience has stopped producing people" rule
 // (teaser-screening.ts) is re-applied HERE from the declines lead-service sends:
@@ -32,7 +32,7 @@
 // of the question the caller's qualification asks — a new basis starts a new
 // window, like a new target text / bar does for the screen), fewer than
 // SCREEN_YIELD_MIN_PASSES reveals ⟹ `exhausted`, with the reachable ceiling
-// persisted and the refill asked, exactly as serve-next does. Computed here, not
+// persisted and the refill asked (exhaustOnScreenYield). Computed here, not
 // stated by the caller, because the CONSEQUENCES (Remaining, refill) are ours.
 
 import { and, asc, desc, eq, isNotNull, lt, or, sql } from "drizzle-orm";
@@ -179,7 +179,7 @@ function assertCandidateProvider(audience: AudienceRow, identity: Identity): voi
 }
 
 // linkedin_engagement no-repeat lives in apollo-service keyed on x-audience-id:
-// stamp THIS audience on the apollo calls, as serve-next does.
+// stamp THIS audience on the apollo calls (the crm serve-next path does the same).
 function apolloIdentity(audience: AudienceRow, identity: Identity): Identity {
   if (!isLinkedinEngagementFilters(audience.filters)) return identity;
   return {
@@ -246,7 +246,7 @@ async function retakeLapsedOffer(
   return row ?? null;
 }
 
-// The free checks serve-next runs at POP time, minus the screen. Each one is
+// The free checks run at POP time (the screen is the caller's). Each one is
 // read live, so a teaser buffered before a person opted out / bounced / was
 // served under another audience never reaches the caller.
 async function passesFreeChecks(
@@ -313,7 +313,7 @@ export async function nextCandidate(
     throw new AudienceNotServableError("Audience has no stored filters — cannot serve people.");
   }
   // The text the caller's screen judges against: written now if a segment's
-  // background draft has not landed, exactly as serve-next does before screening.
+  // background draft has not landed.
   if (!audience.targetText) {
     audience = { ...audience, targetText: await ensureTargetText(audience, identityIn) };
   }
@@ -405,7 +405,7 @@ async function loadCandidate(
 }
 
 export interface RevealCandidateResult {
-  // `served` ⟹ the same served person serve-next returns. `not_served` ⟹ the
+  // `served` ⟹ the served person, same shape as serve-next. `not_served` ⟹ the
   // reveal ran (and was billed) but yielded nobody servable: no usable email,
   // not deliverable, or blocked post-pay (suppressed / opted out / won /
   // bounced / own company). Ask for the next candidate.
@@ -424,8 +424,8 @@ export interface RevealCandidateResult {
 }
 
 /**
- * The billed reveal of an offered candidate, recorded as served exactly as
- * serve-next records it. Claimed before the spend, so a concurrent or repeated
+ * The billed reveal of an offered candidate, recorded as served
+ * (finalizeResolved + membership). Claimed before the spend, so a concurrent or repeated
  * call never pays twice: a decided reveal replays its stored answer.
  */
 export async function revealCandidate(

@@ -10,6 +10,7 @@ vi.mock("../../src/lib/email-verification.js", async (importOriginal) => ({
 import request from "supertest";
 import { and, eq, sql } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
+import { serveApollo } from "../helpers/serve-apollo.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { isOptOutUrl, optOutResponse, setOptOutEnv } from "../helpers/opt-outs.js";
 import { bounceResponse, isBounceUrl } from "../helpers/bounces.js";
@@ -164,14 +165,14 @@ async function knownPerson(id: string) {
   });
 }
 
-describe("a won person on the apollo serve path", () => {
+describe("a won person on the apollo serve path (candidate API: next → reveal)", () => {
   it("drops the teaser BEFORE the reveal — the credit is never spent", async () => {
     await knownPerson("client");
     wonByBrand = { [BRAND_A]: ["client@acme.com"] };
     const calls = mockApollo([["client", "prospect"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("served");
     expect(res.body.person.email).toBe("prospect@acme.com");
@@ -203,7 +204,7 @@ describe("a won person on the apollo serve path", () => {
     const calls = mockApollo([["client", "prospect"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.body.person.email).toBe("prospect@acme.com");
     expect(calls.enriched).toEqual(["prospect"]);
   });
@@ -215,7 +216,7 @@ describe("a won person on the apollo serve path", () => {
     const calls = mockApollo([["client", "prospect"]]);
     const id = await createAudience("apollo", "B", BRAND_B);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.body.person.email).toBe("client@acme.com");
     expect(calls.enriched).toEqual(["client"]);
   });
@@ -227,7 +228,7 @@ describe("a won person on the apollo serve path", () => {
     const calls = mockApollo([["client", "prospect"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.body.person.email).toBe("client@acme.com");
     expect(calls.enriched).toEqual(["client"]);
   });
@@ -239,7 +240,7 @@ describe("a won person on the apollo serve path", () => {
     const calls = mockApollo([["ghost", "prospect"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(200);
     expect(res.body.person.email).toBe("prospect@acme.com");
     expect(calls.enriched).toEqual(["ghost", "prospect"]);
@@ -251,7 +252,7 @@ describe("a won person on the apollo serve path", () => {
     const calls = mockApollo([["prospect"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(502);
     expect(res.body.source).toBe("lead-service");
     expect(calls.enriched).toEqual([]);
@@ -262,7 +263,7 @@ describe("a won person on the apollo serve path", () => {
     const calls = mockApollo([["prospect"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(502);
     expect(calls.enriched).toEqual([]);
   });

@@ -19,14 +19,13 @@ import type { Person } from "./people-providers.js";
 
 // A buffered teaser carries what the pop path needs and cannot re-derive: the
 // apollo person id (enrich handle), the raw linkedin url (pre-pay suppression
-// re-check) and the snapshot the pre-pay screen judges. The snapshot is stored
+// re-check) and the snapshot lead-service's screen judges (candidate API). The snapshot is stored
 // rather than re-fetched because the Person object is in hand HERE and apollo's
 // cursor has moved on by the time the teaser is popped.
 export interface BufferedTeaser {
   providerPersonId: string;
   linkedinUrl: string | null;
-  // NULL on rows buffered before screening shipped — there is nothing to judge,
-  // so those serve unscreened (counted + logged in screenTeaser).
+  // NULL on rows buffered before snapshots were stored — nothing to judge.
   teaser: TeaserSnapshot | null;
   // Employer web domain as the provider served it (null when none). Not part of
   // the screened snapshot; read by the candidate API only.

@@ -94,11 +94,11 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}/status` | apiKey + `x-org-id` | Change status (active / paused / archived) — mutates only status |
 | Org-scoped (Audiences v1) | `DELETE /orgs/audiences/{id}` | apiKey + `x-org-id` | Hard delete (cascades members) — archive is a soft state, not delete |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/refresh-count` | apiKey + `x-org-id` + `x-user-id` | Re-snapshot apollo + apify counts via free dry-run |
-| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/serve-next` | apiKey + `x-org-id` + `x-user-id` | Serve the NEXT unserved person of the audience (real provider match on its stored filters; records served; never repeats; clean exhausted signal) |
-| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/next` | apiKey + `x-org-id` + `x-user-id` | Next FREE candidate of an apollo audience (who + company incl. domain, every free gate applied, no screen, no reveal) for lead-service's pre-pay qualification. See "Candidate API" |
-| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/{candidateId}/reveal` | apiKey + `x-org-id` + `x-user-id` | Billed reveal of an offered candidate, recorded as served exactly like serve-next; billed once (replay) |
-| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/{candidateId}/decline` | apiKey + `x-org-id` | Decline: never offered/served again for that audience, Size drops by one (same exclusion set as the screen) |
-| Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/screenings` | apiKey + `x-org-id` | Past pre-pay screen verdicts (bronze), oldest first, `limit`/`offset`/`providerPersonId` |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/serve-next` | apiKey + `x-org-id` + `x-user-id` | Serve the NEXT unserved person of a **crm / apify** audience (records served; never repeats; clean exhausted signal). An **apollo** audience → 422 naming `candidates/next` (no provider call) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/next` | apiKey + `x-org-id` + `x-user-id` | Next FREE candidate of an apollo audience (who + company incl. domain, every free gate applied, no screen, no reveal) for lead-service's pre-pay qualification. The ONLY apollo serve path. See "Candidate API" |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/{candidateId}/reveal` | apiKey + `x-org-id` + `x-user-id` | Billed reveal of an offered candidate, recorded as served (serve-next's `{status, person, personId}` tail); billed once (replay) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/{candidateId}/decline` | apiKey + `x-org-id` | Decline: never offered/served again for that audience, Size drops by one (same exclusion set the retired screen wrote) |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/screenings` | apiKey + `x-org-id` | Past pre-pay screen verdicts (bronze history, the screen retired here 2026-10-07), oldest first, `limit`/`offset`/`providerPersonId` |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/sourcing-origin` | apiKey + `x-org-id` (+ `x-feature-slug`) | `{audienceId, list, sourcingFeatureSlug}`: the features-service sourcing origin a serve-next of it draws from (lead-service labels its serve run with it). See "Sourcing origin label" |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview` | apiKey + `x-org-id` + `x-user-id` | Free sample of who the audience reaches: ~10 real companies + ~20 real people (no email/phone), taken once and stored on the row |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview/email-checks` | apiKey + `x-org-id` + `x-user-id` | Free read: for the preview's first 5 people, pending / found (verdict, finder) / not found. Never an address |
@@ -249,8 +249,8 @@ confusing downstream 502.
   opaque `buying_signal` key forwarded verbatim, so SERVING needs nothing here.
   apollo-service's reveal (`/enrich`, `/match`) returns `buyingSignal: {type,
   occurredOn, fact, source, sourceUrl} | null` BESIDE `person`; `readBuyingSignal`
-  carries it verbatim onto the neutral `Person.buyingSignal`, so serve-next's
-  `served` person holds it. **null** on a free search teaser (only the reveal
+  carries it verbatim onto the neutral `Person.buyingSignal`, so the candidate
+  reveal's `served` person holds it. **null** on a free search teaser (only the reveal
   carries it), for apify / crm, and whenever apollo returns none — never
   defaulted or inferred. A PRESENT but malformed signal fails loud (502): half a
   claim must not reach a cold email. No storage, no cost here (apollo-service
@@ -301,7 +301,7 @@ confusing downstream 502.
     gateway keeps paging the free teaser cursor until a page yields a fresh lead
     OR Apollo reports true pool exhaustion (`data.done`). There is **NO
     artificial page cap**: the upward `done` is HONEST (real depletion only), so
-    serve-next never false-exhausts on a region the brand already contacted. (A
+    the serve path never false-exhausts on a region the brand already contacted. (A
     fixed 5-page `APOLLO_MAX_SATURATION_PAGES` budget previously fabricated `done`
     here and auto-stopped live campaigns with leads still left in the pool —
     removed. Apollo's cursor guarantees termination at `totalPages`; the walk is
@@ -362,7 +362,7 @@ honours it before anyone pays. `src/lib/instantly-optouts.ts` is the client;
   own. That is identity resolution, not inference.
 - **Four gates, in the order the money is spent**: the apollo teaser filter in
   `peopleSearch` (free, so an opted-out teaser never reaches the reveal); the
-  re-check at POP time in serve-next's drain loop (a teaser may have been
+  re-check at POP time in candidates/next (a teaser may have been
   buffered BEFORE the person asked us to stop, so buffering time is not the
   check); the apify exclude push-down, which rides the same `excludeEmails` /
   `excludeLinkedinUrls` as the brand exclude-set so the billing actor never
@@ -414,7 +414,7 @@ one in `src/services/opt-outs.ts` (`loadServeExclusions`,
   else is untouched.
 - **Same gates as the opt-out**, because `loadServeExclusions` merges the brand's
   won addresses into the opt-out exclusion set (resolved to pre-pay keys through
-  our own `people` rows): the apollo teaser filter in `peopleSearch`, serve-next's
+  our own `people` rows): the apollo teaser filter in `peopleSearch`, candidates/next's
   POP-time check, and the apify exclude push-down + returned-batch filter. Plus a
   narrowed `?email=` read in `finalizeResolved` after the reveal, for a won person
   with no `people` row (no pre-pay key to match on).
@@ -447,7 +447,7 @@ the gate (`filterBounced`, `isEmailBounced`).
   resolvable address ⟹ no call to the owner. Prod 2026-10-03: 272 of 276
   served-after-bounce addresses resolved through a `people` apollo id.
 - **Gates, in money order**: apollo teaser filter in `peopleSearch` (a page fully
-  dropped keeps walking the free cursor); serve-next POP-time re-check; apify
+  dropped keeps walking the free cursor); candidates/next POP-time re-check; apify
   returned-batch filter only (no push-down: it would need the whole fleet list
   per call, and apify is not auto-selected); `finalizeResolved` post-reveal,
   placed AFTER `recordServe` so the bronze row ties the key to the address for the
@@ -472,12 +472,12 @@ client (brand-service `GET /internal/brands/{id}`, `x-org-id` for the rep).
   never a company), plus the brand NAME matched exactly after normalization
   (the free teaser carries only the employer name). Hosting platforms
   (facebook.com, linktr.ee, ...) and URL-as-name brands contribute nothing.
-- **Gates**: apollo teaser filter in `peopleSearch` (free); serve-next POP time
+- **Gates**: apollo teaser filter in `peopleSearch` (free); candidates/next POP time
   (employer name of buffered teasers); `finalizeResolved` after `claimServe`
   (work email + employer domain, credit spent, email prevented); apify batch;
   crm branch; `/preview` sample (companies + people, by name, on every read);
   `/preview/companies` (never stored, legacy rows hidden on read, email check
-  404). Refills/portfolio serve through serve-next, so they are covered.
+  404). Refills/portfolio serve through the same paths, so they are covered.
 - **Not covered**: provider COUNTS (Size, split estimate, `matchCount`) still
   include the brand's staff; excluding them there needs apollo-service to push
   an organization exclusion down.
@@ -651,7 +651,7 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
   which runs the NL→faithful-Apollo-filters agentic refine loop internally and owns
   its filter shape + count. The `filters` jsonb column is KEPT but, for apollo rows,
   now **caches the OPAQUE faithful Apollo filter object** (verbatim from
-  apollo-service) — so serve-next forwards it to apollo `/search` with NO
+  apollo-service) — so candidates/next forwards it to apollo `/search` with NO
   neutral→apollo remap, and there is zero Apollo filter-building code here. The
   in-human-service Layer-2 loop + apolloDslToNeutral mapper (the interim v0.20.8
   approach) are DELETED. human-service stays the NEUTRAL cross-provider layer: its
@@ -687,7 +687,7 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
   OPPORTUNISTICALLY when an audience is exercised (a serve happens) and its
   `counted_at` is older than **1 hour** — so Size tracks the provider adding /
   removing matching people over time WITHOUT hammering the count every serve. The
-  serve-next route fires `refreshAudienceCountIfStale(audience, identity)`
+  candidates/next route (and serve-next, for apify) fires `refreshAudienceCountIfStale(audience, identity)`
   **fire-and-forget + best-effort** (`.catch(console.error)`): the serve does NOT
   read the count (only the list's Size / Remaining does), so a refresh failure must
   never fail the serve (lead-service crash-loops on a bad serve). Gated by the same
@@ -778,7 +778,7 @@ CRUD responses stay the plain `AudienceSchema`.
   provider Size counts ALL demographic matches, not only people with a verified
   email, so it can over-state the reachable pool (prod chiropractor case: Size
   1349, only ~503 reachable, all 503 served → without the clamp Remaining phantoms
-  to 846). Once serve-next has EXHAUSTED the audience we know the TRUE reachable
+  to 846). Once the serve path has EXHAUSTED the audience we know the TRUE reachable
   ceiling — `audiences.reachable_count` (migration `0018`), persisted at exhaustion
   = the count of DISTINCT materialized members (every member carries a usable email,
   since `tagAudienceServe` only tags reveals that passed `hasUsableEmail`). So
@@ -787,16 +787,17 @@ CRUD responses stay the plain `AudienceSchema`.
   3-month window they become re-contactable up to `reachable_count` (NOT the
   inflated Size). `reachable_count IS NULL` (never exhausted) ⟹ ceiling unknown ⟹
   no clamp. This is the "persist-at-write the value the writer already held" rule:
-  serve-next holds the reachable truth at exhaustion, the read side cannot re-derive
+  the serve path holds the reachable truth at exhaustion, the read side cannot re-derive
   it (can't tell "exhausted" from "still serving"). Self-correcting — if the provider
-  pool later grows, the next serve-next serves the new people and re-exhausts,
+  pool later grows, the next serve serves the new people and re-exhausts,
   bumping `reachable_count` up. This clamp makes Remaining truthful even before the
   parallel apollo-service verified-email-only count lands (independently correct).
-- **Minus the people the pre-pay screen disqualified** (see "Pre-pay teaser
-  screening" below). A screened-out person is not a member of the audience — the
-  screen established that before anyone paid to reveal them — so they leave the
-  POOL, not only the remaining-to-contact count: an audience Apollo sizes at
-  7,000 whose screen has rejected one person is an audience of **6,999**.
+- **Minus the people judged off target** (`audience_screened_out`: the retired
+  screen's rejections + lead-service's candidate declines, see "Pre-pay teaser
+  screening" below). Such a person is not a member of the audience, established
+  before anyone paid to reveal them, so they leave the POOL, not only the
+  remaining-to-contact count: an audience Apollo sizes at 7,000 with one person
+  rejected is an audience of **6,999**.
   Subtracting them from Remaining alone would leave Size claiming a pool that
   provably contains people we will never serve, which is two surfaces
   contradicting each other on the same row. No double-count with the suppression
@@ -984,12 +985,21 @@ audience reaches, with firmographics, and the ONE person to write to at each.
 
 ### Serve-next (lead primitive) — `POST /orgs/audiences/{id}/serve-next`
 
-The per-iteration lead primitive the new runtime calls: lead-service asks
-features-service for the most-relevant audienceId for a brand, then asks
-human-service here for the NEXT person of that audience. `requireOrgAndUser`
-(`x-user-id` needed for apollo/apify key resolution). `serveNextPerson` in
+The per-iteration lead primitive for audiences WITHOUT a free teaser (crm,
+apify): lead-service asks for the NEXT person of an audience. `requireOrgAndUser`
+(`x-user-id` for apify key resolution). `serveNextPerson` in
 `src/services/audiences.ts` owns it; `src/routes/audiences.ts` is the thin layer.
 
+- **An apollo audience is NOT served here (2026-10-07).** The pre-pay screen is
+  qualification and moved to lead-service, which serves every apollo audience
+  through the Candidate API (next → its own screen → reveal | decline). A
+  serve-next on an apollo audience (outside the CRM-outreach feature, which still
+  routes to crm first) answers **422** (`AudienceNotServableError`, message names
+  `POST /orgs/audiences/{id}/candidates/next`) with **no provider call** (not
+  even the Size refresh): keeping an apollo path here would let a stray call
+  serve an UNSCREENED lead. lead-service calls serve-next only when
+  candidates/next answers 422. The response's `pending` status is gone with the
+  apollo walk.
 - **Provider selection: FEATURE IDENTITY first, then the audience's committed
   provider.** lead-service forwards `x-feature-slug` and does NOT know/care which
   provider serves the request — the routing decision is human-service's. When the
@@ -1000,7 +1010,7 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
   `provider`** — feature identity wins over `audience.provider`, so even an audience
   built on a search provider is served from CRM for that feature. Any other feature
   (cold outreach, PR, etc.) falls through to the audience's committed provider
-  (apollo/apify/crm) exactly as before. Parsed into the tracking block
+  (apify/crm; apollo → 422). Parsed into the tracking block
   (`x-feature-slug` → `WorkflowTrackingHeaders.featureSlug`, so it also auto-forwards
   downstream); `serveNextPerson` reads `identity.workflowTracking?.featureSlug`. The
   CRM branch runs BEFORE the filters guard (a crm serve has no stored filters), and
@@ -1009,18 +1019,13 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
   a CRM-feature serve for a connection-less org returns `{status:"exhausted"}` (200),
   never a 500 (a 500 crashes lead-service's buffer instead of ending it cleanly as
   `found:false`). Only a genuine crm-service non-2xx / network error / missing env
-  stays fail-loud (502), same as apollo/apify.
+  stays fail-loud (502), same as apify.
 - **It's a thin WRAPPER over the existing people-gateway, not new matching.** It
-  loads the audience (404 if missing/foreign), searches with the audience's
+  loads the audience (404 if missing/foreign), serves with the audience's
   **STORED `filters` via its committed `provider`**, brand-scoped to
   **`audience.brandId`** (the route forces `identity.brandIds = [audience.brandId]`
   — never a header), records the serve, tags `audience_members`, and returns
-  `{ status, person }`. For an **apollo** audience the stored filters are ALREADY
-  Apollo's faithful shape (sourced from apollo-service), so they are forwarded
-  **VERBATIM** as the apollo search params (`peopleSearch({ apolloSearchParams })`,
-  no neutral→apollo remap); for an **apify** audience the stored neutral filters are
-  mapped to apify as before. The suppression / reveal / saturation machinery is
-  UNCHANGED and still operates on the neutral `Person` output.
+  `{ status, person }`. apify's stored neutral filters are mapped to apify.
 - **No-repeat = the EXISTING per-brand cross-provider suppression**, reused, not a
   new per-audience exclusion table. Once served for the brand (under ANY audience),
   a person is excluded brand-wide within the 3-month window — a strictly stronger
@@ -1028,30 +1033,14 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
   only. (The 3-mo window lapsing is the existing designed semantic; not a new
   forever-exclusion.)
 - **Per provider**: apify → `peopleSearch(limit 1)` (exclude-set pushed down, hit
-  is billed + recorded by the gateway) → that hit, or exhausted. apollo → drain a
-  **buffered teaser page** ONE per call (migration `0017` `audience_teaser_buffer`,
-  `src/services/teaser-buffer.ts`): each apollo `/search/next` returns up to 100
-  free teasers AND advances apollo's forward-only cursor a whole page, but
-  serve-next reveals only ONE lead per call — so a fetched page is BUFFERED and
-  popped one teaser per call (`popTeaser`, atomic `DELETE … RETURNING` +
-  `FOR UPDATE SKIP LOCKED`), and apollo's cursor only RE-advances when the buffer
-  is empty (`peopleSearch` refill). Without this the other ~99 teasers/page were
-  discarded and the cursor moved on for good, capping an apollo audience at
-  **~1 served lead per page (~1% of its verified pool)** — fixed v0.25.0. Each
-  popped teaser is re-checked against suppression PRE-PAY (it may have been served
-  under another audience for the brand since buffering), then enriched one at a
-  time (`resolveEmail` by `providerPersonId`, billed, recorded in
-  `finalizeResolved`) until one reveals a non-suppressed person, then stop.
-  Exhausted ONLY when the buffer is empty AND apollo returns no fresh teasers —
-  no fabricated cap (apollo's honest `done` at totalPages bounds the walk; the
-  2026-06-29 no-saturation-cap fix is preserved). **crm** (a client's uploaded
+  is billed + recorded by the gateway) → that hit, or exhausted. **crm** (a client's uploaded
   contact list — `provider='crm'`, sibling of apollo/apify) → an **ask-and-trust**
   wrapper over crm-service `POST /orgs/contacts/serve-next` (`src/lib/crm-contacts.ts`
   `crmServeNext`): `serveNextCrmContact` asks for the NEXT contact **by brand**
   (`{brandId, limit:1}`) and returns it as a neutral `Person`
   (`normalizeCrmContact`). A crm audience serves by BRAND and has **NO stored
   filters** — the crm branch runs BEFORE the filters guard, so a filterless crm
-  audience is servable (apollo/apify still 422 on no-filters). **crm-service OWNS
+  audience is servable (apify still 422s on no-filters). **crm-service OWNS
   the no-re-serve**: it atomically marks each returned contact served, permanently,
   per-`(brand, contact)` — so human-service records NO suppression for crm (no
   `recordServe` / no `brand_suppressions` write / no exclude-set push) and just
@@ -1067,32 +1056,31 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
   lead (won't push an uncontactable person into the cold-email funnel) and a bad
   serve crash-loops the campaign. A reveal can produce a person record with NO email
   (apollo `/enrich` returns `email:null` when it's locked / not-found / unverifiable;
-  an apify hit could carry a blank string), so BOTH provider paths gate on
-  `hasUsableEmail(person)` (non-empty trimmed string) before returning `served`. A
-  no-email reveal is DROPPED (credit already spent + serve suppression-recorded in
-  `finalizeResolved`, so never re-enriched) and the apollo drain loop pops the next
-  teaser; apify surfaces `exhausted`. Fixed v0.26.2 (the drain loop's `if
-  (revealed.person)` check was truthy for a null-email person — the "no email → drop"
-  the comment claimed was never actually enforced).
+  an apify hit could carry a blank string), so every path gates on
+  `hasUsableEmail(person)` (non-empty trimmed string) before returning `served`:
+  apify surfaces `exhausted`, crm asks for the next contact, the candidate reveal
+  answers `not_served` (credit spent + serve recorded, never re-enriched). Fixed
+  v0.26.2 (a null-email person was truthy and got served).
 - **`personId` — which human-service person was served.** Every `served` answer
   carries top-level `personId` = the canonical `people.id` that membership tagging
   (`tagAudienceServe`) resolved at serve time, i.e. the same `personId` the
   `/{id}/members` read returns. Never a provider id. Omitted on `exhausted` (that
   body is byte-identical to before). lead-service passes it down the email stack
-  as the durable person identity of a send. Tests in `audiences-serve-next.test.ts`.
+  as the durable person identity of a send. The candidate reveal carries the
+  same id. Tests in `audiences-serve-next.test.ts`.
 - **Exhaustion is explicit**: `{ status: "exhausted", person: null }` — never a
   silent empty. An audience with **no committed provider** fails loud:
-  `AudienceNotServableError` → **422**. apollo/apify additionally fail loud on **no
-  stored filters** (422); crm has no filters by design and is exempt (served by
+  `AudienceNotServableError` → **422**, as does an apollo audience (above). apify
+  additionally fails loud on **no stored filters** (422); crm has no filters by design and is exempt (served by
   brand). Env vars for crm: `CRM_SERVICE_URL`, `CRM_SERVICE_API_KEY` (read at call
   time; missing ⟹ `ProviderConfigError` → 502).
-- **Exhaustion persists the reachable ceiling**: at every apollo/apify `exhausted`
-  return, `persistReachableCountOnExhaustion` writes `audiences.reachable_count` =
+- **Exhaustion persists the reachable ceiling**: at every apify `exhausted` (and
+  candidate-path apollo `exhausted`) return, `persistReachableCountOnExhaustion` writes `audiences.reachable_count` =
   the count of DISTINCT materialized members — the TRUE reachable pool, since we
   just walked the whole thing. That is what the list's "Remaining" clamps to (see
   the contactability section). crm is exempt (no provider count concept). Cheap
   (one COUNT + one UPDATE, only on the infrequent exhaustion path).
-- **No cost declared here** — apollo/apify own the billed reveal; crm-service owns
+- **No cost declared here** — apify owns the billed hit; crm-service owns
   its serve; the gateway only forwards `x-run-id` for downstream tracing.
 
 ### An audience belongs to ONE offer, not to a whole brand
@@ -1266,134 +1254,77 @@ human-service only ACTS on the answer, in `finalizeResolved`
   `tests/unit/serve-email-verdict.test.ts` (the gate). Every other serve-path
   suite mocks `readEmailVerification` to deliverable.
 
-### Pre-pay teaser screening — is this person actually in the audience?
+### Pre-pay teaser screening — moved to lead-service (2026-10-07)
 
 An apollo audience is a POINTER to a faithful Apollo filter set, and Apollo's
-vocabulary cannot express every constraint an audience states in plain English:
-"chiropractors who **own** their practice", "German-speaking Switzerland",
-"shops that stock the product" have no field. So a teaser can satisfy every
-filter and still be the wrong person — and we used to learn that only after the
-apollo credit, the generated email and the send were all spent on them.
-`src/services/teaser-screening.ts` owns the judge; the drain loop in
-`serveNextPerson` calls it.
+vocabulary cannot express every constraint an audience states in plain English
+("chiropractors who **own** their practice", "German-speaking Switzerland"). So
+a teaser can match every filter and still be the wrong person. From 2026-09-17
+to 2026-10-07 serve-next judged every popped teaser (one Jev `noul` question
+against THIS audience's `target_text`, paid only when **P(yes) > 0.50**) before
+the ~11.8-cent reveal. **Owner decision 2026-10-07: that judgement is
+QUALIFICATION and belongs to lead-service**, which now takes each candidate from
+the Candidate API, screens it, and reveals or declines. human-service asks no
+question any more (`screenTeaser`, `judgeYesNo`, `readScreenYield` are deleted).
+What stays here, and why:
 
-- **It sits at the frontier between free and billed**, between `popTeaser` and
-  `resolveEmail`. Apollo's teaser is free; the enrich that reveals the email is
-  ~11.8 cents. A rejection costs the screen and nothing else.
-- **Each serve-next walk is BOUNDED in wall clock** (`SERVE_NEXT_BUDGET_MS` =
-  120s, checked between teasers): past it the call answers `status: "pending"`
-  (person null) and the next call resumes from the durable buffer + verdicts.
-  An audience whose filters are far wider than its text rejects nearly
-  everything (Shockwavecenters 2026-10-04: 25 passes in ~10,600 teasers, ~0.4s
-  each), and an unbounded walk outran lead-service's 300s client timeout while
-  this loop kept going and revealed a person nobody received. `pending` is
-  never exhaustion; lead-service maps it to `serve_timed_out`.
-- **Screen yield: an audience the screen has exhausted answers `exhausted`**
-  (`readScreenYield` in `teaser-screening.ts`, read before each apollo walk and
-  every `SCREEN_YIELD_CHECK_EVERY` = 100 screens, before popping). Rule: the
-  audience's last **1,000** verdicts judged under the CURRENT question (same
-  `target_text`, same bar suffix in `reason`, same `prompt_version`) hold fewer
-  than **3** passes. Then serve-next screens and reveals nobody, persists
-  `reachable_count` exactly like a walked-out audience (so Remaining reads ~0
-  and campaign-service picks the brand's next audience), logs
-  `audience.screen_yield_exhausted`, and asks the refill sweep for that brand
-  once per process (it keeps its billing / low-pool / cooldown guards). The
-  audience is never edited. Why: Apollo returns best matches first, so a title
-  list with `include_similar_titles` ends in a long tail the screen rejects
-  (Shockwavecenters "US Chiropractic Clinicians", 2026-10-01..04: ~38k screens,
-  the last ~9k for 21 passes, generic "Physician"). Thresholds replayed on every
-  v2 verdict in prod: under the current bar only that audience trips; its 1-2%
-  middle (~12 passes per 1,000) never does. A new text / bar / prompt starts a
-  new window ("European Union" was dead at 0.80, productive at 0.50). Index
-  `(audience_id, created_at DESC)` (migration `0034`) keeps the read cheap.
-  Tests: `tests/integration/audiences-screen-yield.test.ts`.
-- **ONE Jev `noul` question per person, never a batch** (v2, 2026-09-28):
-  chat-service `POST /orgs/judgments` (`judgeYesNo` in `chat-client.ts`) asks
-  "does this candidate belong to the target audience the client described?"
-  with state `{targetAudience: nl_prompt, candidate: snapshot}`. Jev returns
-  P(yes); the teaser is paid for ONLY when **P(yes) > 0.50**
-  (`SCREEN_MIN_YES_PROBABILITY`, strict — 0.50 rejects). The bar was 0.80
-  until 2026-09-29: on v2 bronze it passed 1-2.5% of teasers (3 of 817 for a
-  construction audience) while real targets sat at 0.5-0.78 and campaigns
-  stalled on `audience_exhausted`; owner moved it to 0.50 for every org.
-  Rejections taken under 0.80 stay in `audience_screened_out` (no re-screen);
-  each bronze row's `reason` names the bar it was judged under. No "borderline = yes"
-  guidance anywhere: the threshold IS that decision. Jev bills input tokens only
-  and chat-service owns the cost (org-billed with serve-next's identity).
-- **The target is THIS audience's text, `audiences.target_text` — NEVER
-  `description`** (see "Audience text" below). Until it is written, `nl_prompt`;
-  the bronze row records the exact text judged (`target_text`) and its field
-  (`target_field` = `target_text` | `nl_prompt`, migration `0033`). No text at
-  all ⟹ skip with `no_target_text`, logged. `description` can describe the
-  Apollo filter mechanics ("found by matching terms against company tags"),
-  never who the customer wants.
-- **`nl_prompt` names PEOPLE, not only companies** (see "Audience target"
-  below). A customer's company-only words ("crypto market making firms") let
-  every employee of such a firm pass: Olive's campaign emailed an HR manager,
-  an employer-branding specialist and a compliance officer about a Solana
-  derivatives exchange, and "decision makers only" still passed a Head of HR.
-- **v1 history (2026-09-17 → 09-28)**: glm-flash `/complete` returning a bare
-  boolean, judged against `description`, prompt said "borderline cases are a
-  yes". On LivingVital "Swiss Health Shop Employees" it passed 199/285 teasers,
-  ~51 of them Galenica HQ staff (Group CFO, HR, recruiters, engineers). v1 bronze
-  rows and silver exclusions stay as they are (no re-screen).
-- **Layering (B/S/G)** — 🥉 bronze `audience_teaser_screenings` (migration
-  `0025`, append-only) records EVERY verdict, passes included, with the snapshot
-  it was judged on plus `yes_probability` (migration `0027`, NULL on v1 rows) +
-  `model` (`typesafe/<served release>`) + `prompt_version`; a re-screen under a new
-  prompt APPENDS, so a prompt change is measurable against the history instead of
-  erasing it. 🥈 silver `audience_screened_out` is the exclusion set the serve
-  path reads, canonical per `(audience_id, provider_person_id)`, promoted in the
-  SAME transaction — a person can never sit in the exclusion set without the
-  evidence that put them there. Same shape as `lead_serves` →
-  `brand_suppressions`, one grain over.
-- **Keyed on the AUDIENCE, not the brand.** The verdict is relative to the target
-  THAT audience defined, so a person rejected here may be exactly right for
-  another audience of the same brand. Brand-wide no-repeat stays
-  `brand_suppressions`' job, untouched. (The collective-scoring / atomic-exclusion
-  rule, pointed at relevance rather than at contact.)
-- **The judgeable snapshot is persisted at BUFFER time** on
-  `audience_teaser_buffer.teaser` (jsonb), because the `Person` object is in hand
-  there and the pop path holds only an enrich handle — re-deriving it would mean
-  paying apollo for what we already had. `toTeaserSnapshot` carries the fields
-  verbatim (title, headline, seniority, geography, employer name/industry/size/
-  geography, keywords capped at 20); nothing is derived or defaulted, so an absent
-  field reads as absent to the judge. NULL on rows buffered before this shipped ⟹
-  no screen, counted + logged.
-- **Rejected people are dropped at REFILL**, so a person apollo re-surfaces on a
-  later page is never re-buffered and never re-screened (one query per page).
-- **Fail loud**: a chat-service failure propagates → **502**. Passing the teaser
-  through on a screening outage would spend exactly what the screen protects. A
-  Jev answer without a yes-probability in 0..1 (or without the serving model)
-  throws for the same reason — never defaulted, never clamped.
-- **No cost declared here** — chat-service owns the LLM cost and bills the org
-  using serve-next's own identity headers, so human-service's "declares no cost"
-  invariant holds.
-- **Size shrinks by the rejections** — see "List contactability" above.
+- **Bronze history** `audience_teaser_screenings` (migration `0025`, append-only:
+  snapshot, `yes_probability` (`0027`, NULL on v1 rows), `model`,
+  `prompt_version`, `target_text` / `target_field` (`0033`), bar in `reason`)
+  is kept and readable via `GET /orgs/audiences/{id}/screenings`, so lead-service
+  never re-judges or re-buys what was judged. No new rows are written here.
+- **Silver exclusion set** `audience_screened_out`, canonical per
+  `(audience_id, provider_person_id)`: every rejection the screen bought plus
+  every lead-service decline. Dropped at buffer time (`findScreenedOut`) and at
+  candidate pop time, so nobody rejected is offered again. Keyed on the
+  AUDIENCE, not the brand: a person off-target here may fit another audience.
+- **Size shrinks by them** (see "List contactability").
+- **The staff snapshot's acceptance bar** reads historical verdicts against
+  `SCREEN_MIN_YES_PROBABILITY` (0.50; it was 0.80 until 2026-09-29, each bronze
+  `reason` names its bar).
+- **The judgeable snapshot** (`toTeaserSnapshot`: title, headline, seniority,
+  geography, employer name/industry/size/geography, keywords capped at 20,
+  verbatim, never derived) is still persisted at BUFFER time on
+  `audience_teaser_buffer.teaser` and handed to lead-service as the candidate.
+- **The yield stop rule** (`isScreenYieldSpent`: last **1,000** decisions, fewer
+  than **3** passes ⟹ exhausted; measured on Shockwavecenters' chiropractor tail,
+  2026-10-04, where a 1-2% productive middle never trips) now runs on
+  lead-service's decisions in the candidate path (below).
+- **Lessons the new owner inherits**: judge THIS audience's text, never the
+  LLM-written `description` (it can describe Apollo mechanics); `nl_prompt` must
+  name PEOPLE, not only companies (Olive's campaign emailed HR about a derivatives
+  exchange); no "borderline = yes" guidance (v1 passed 199/285 LivingVital
+  teasers, ~51 of them Galenica HQ staff); fail loud on a judge outage.
 
 ### Candidate API — lead-service qualifies BEFORE the paid reveal (`src/services/audience-candidates.ts`)
 
 Owner 2026-10-07: human-service = WHO a person is; lead-service = whether a lead
 MEETS a business condition, the pre-pay audience screen included. So the free
-teaser, the decision and the billed reveal are split into calls. **ADDITIVE:
-serve-next keeps its own screen, byte-identical, until lead-service's screen is
-live in prod and it stops calling serve-next (relayed by lead-service session
-"apia"); only then is the screen dropped here.**
+teaser, the decision and the billed reveal are split into calls. **This is the
+ONLY serve path for an apollo audience** (serve-next 422s it since the screen
+was dropped here, 2026-10-07): no apollo lead is served without the caller's
+screen.
 
 - **next** (`POST …/candidates/next`, apollo audiences only; crm / apify / the
-  CRM-outreach feature 422 → keep serve-next): pops the shared teaser buffer and
-  applies every FREE gate serve-next applies (brand suppression, opt-outs + won,
-  own company, bounces, `audience_screened_out`), no screen, no spend. Answers
+  CRM-outreach feature 422 → serve-next): drains the teaser buffer
+  (`audience_teaser_buffer`, migration `0017`: a `/search/next` page of up to
+  100 free teasers is buffered and popped one at a time, apollo's cursor
+  re-advancing only when the buffer is dry, never a fabricated cap), builds a
+  split audience's Apollo pointer inline if missing, remaps a legacy neutral
+  blob, and applies every FREE gate (brand suppression, opt-outs + won, own
+  company, bounces, `audience_screened_out`), no screen, no spend. Walk bounded
+  by `SERVE_NEXT_BUDGET_MS` (120s) ⟹ `pending`. Answers
   `{status: candidate|exhausted|pending, candidate, reason?, target}`;
   `candidate.company.domain` = the provider's teaser domain
   (`audience_teaser_buffer.organization_domain`, kept OUT of the judged snapshot
-  so the screen's input never moved; null when apollo serves none). `target` =
-  `screenTarget` (the text the screen judges). One row per (audience, person) in
+  null when apollo serves none). `target` = `screenTarget` (the audience's own
+  text, what the caller screens against). One row per (audience, person) in
   `audience_candidates` (migration `0036`); an offer undecided for 15 min is
   re-offered (a crash never loses a teaser).
 - **reveal**: atomic claim `offered → revealing` BEFORE `/enrich` (a dead claim
-  is re-takeable after 5 min), then `resolveEmail` + `servedWithPersonId`, the
-  serve-next tail verbatim: `{status: served|not_served, person, personId?,
+  is re-takeable after 5 min), then `resolveEmail` (every post-pay gate in
+  `finalizeResolved`: won / opt-out / bounce / own company, email verification,
+  atomic `claimServe`) + `servedWithPersonId`: `{status: served|not_served, person, personId?,
   replayed}`. The answer is stored (`reveal_result`), so a repeat replays, never
   re-bills. A provider failure hands the candidate back (`offered`). Every
   `not_served` names its `reason` (from `ResolveEmailResult.blocked`, internal:
@@ -1406,19 +1337,21 @@ live in prod and it stops calling serve-next (relayed by lead-service session
   the deliverability gate, not the candidate path.
 - **decline** `{reason, basis?}`: one transaction writes the decision + an
   `audience_screened_out` row (`reason = "declined: …"`), the SAME silver set the
-  screen writes, so the person is never re-buffered / offered / served (by
-  either path) for that audience and leaves Size like a screen rejection.
+  retired screen wrote, so the person is never re-buffered / offered / served
+  for that audience and leaves Size like a screen rejection.
 - **Yield is computed HERE from the decisions** (the consequences, Remaining +
   refill, are ours): the screen's rule (`isScreenYieldSpent`, 1,000 / 3) over
   the latest `basis` the caller sent on reveal/decline (a new basis = a new
   window, like a new target text for the screen) ⟹ `exhausted /
-  yield_exhausted` via `exhaustOnScreenYield`. The legacy screen's own yield is
-  NOT carried into this window.
+  yield_exhausted` via `exhaustOnScreenYield` (persists Remaining, asks the
+  refill once per process). The retired screen's verdicts are NOT in this window.
 - **History**: `GET …/screenings` reads bronze `audience_teaser_screenings`;
   every rejection the screen already bought stays in `audience_screened_out`,
   which this path honours, so nothing judged is re-judged or re-bought.
 - No cost declared (apollo-service bills the reveal). Tests:
-  `tests/integration/audiences-candidates.test.ts`.
+  `tests/integration/audiences-candidates.test.ts`, `audiences-screen-yield.test.ts`,
+  and every apollo serve suite through `tests/helpers/serve-apollo.ts` (next →
+  reveal, as lead-service does).
 
 ### Audience text — ONE text per audience (`src/services/audience-target-text.ts`)
 
@@ -1439,8 +1372,8 @@ Administrators" at the same firms were judged against one text naming all three.
   `targetTextMissingReason: no_customer_text`.
 - **When**: one-segment confirm, `/suggest`, signal, engagement, staff create
   write it at insert. A multi-segment confirm (split / portfolio / refill) drafts
-  each in the background (`ensureTargetText`, deduped in-flight), and serve-next
-  drafts it INLINE before screening if missing (fail loud). PATCH `nlPrompt`
+  each in the background (`ensureTargetText`, deduped in-flight), and candidates/next
+  drafts it INLINE before offering if missing (fail loud). PATCH `nlPrompt`
   carries an `audience_target` text along, never a segment one.
 - **Backfill**: `POST /internal/backfill-audience-target-texts` (platform path:
   a text we owe never bills an org). Rows never re-drafted (`target_text IS NULL`
@@ -1574,7 +1507,7 @@ people, companies, companiesExact, audienceId, reason})}`.
   stale fast), job_change and funding 90. Hiring counts ANY role (naming roles
   would be a guess). A failed ICP build / coverage read / creation is that
   signal's `failed` outcome, logged loud; the cold audiences still ship.
-- **One nl_prompt for all** (the pre-pay screen's target): adopted rows keep
+- **One nl_prompt for all** (the target text lead-service's screen judges): adopted rows keep
   theirs when they share one, else every row gets one fresh `draftAudienceTarget`.
 - **Answers fast, finishes in the background.** The call returns once the cold
   audiences exist (`status:"building"`, signals `[]`; ~15s when the split is
@@ -1617,11 +1550,11 @@ owns the criterion, the harvest, the per-audience no-repeat and the spend.
   named 4xx (malformed pages, Apollo filters beside the signal) is RELAYED with
   its status, not a 502. Row = plain apollo pointer audience,
   `source='linkedin_engagement_signal'`, `apollo_count` NULL. `nlPrompt` is
-  required: it is the pre-pay screen's target.
-- **Serve**: the normal apollo drain loop, unchanged. Teasers `li:<id>` are Jev-
-  screened before `/enrich`; the reveal's `buyingSignal` carries an additive
+  required: it is the target lead-service's screen judges.
+- **Serve**: the Candidate API like any apollo audience. Teasers `li:<id>` are
+  offered free and screened by lead-service before the reveal; the reveal's `buyingSignal` carries an additive
   `engagement` block (only on this kind; the other three keep no such key).
-  serve-next stamps `x-audience-id` = THIS audience on the apollo calls, because
+  next and reveal stamp `x-audience-id` = THIS audience on the apollo calls, because
   apollo-service keys the no-repeat on it. `done` ⟹ exhausted.
 - **No Apollo count / dry-run / preview exists** (named 400 there): refresh-count
   and the stale refresh skip it, previews answer `provider_not_previewable`,
@@ -1658,7 +1591,7 @@ audiences use.
   `not_computed`, `failed` (both retried by the sweep).
 - **Cost: zero at creation** (owner rule): apollo-service's create persists the
   criterion only (no count, no harvest, no reveal). Spend happens only when a
-  campaign serves it, teaser screened before the paid reveal. The one paid step
+  campaign serves it, teaser screened by lead-service before the paid reveal. The one paid step
   upstream is brand-service's discovery (fraction of a cent, once per brand,
   declared by brand-service, org-billed under a `competitor-engagement-audience`
   run on the sweep).
@@ -1731,7 +1664,7 @@ Runs every 6h (first tick 10 min after boot, timers only, never on the boot path
 - **Never touches a campaign.** Restarting is the client's call.
 - Known limit: a new audience's Remaining is its Apollo count until served, so
   people it shares with older audiences (already suppressed) read as remaining
-  until serve-next walks past them for free.
+  until candidates/next walks past them for free.
 - Tests: `tests/unit/audience-refill.test.ts`, `tests/integration/audience-refill.test.ts`.
 
 ### Avatar — `POST /orgs/audiences/{id}/avatar`
@@ -1954,7 +1887,7 @@ them as OpenAPI enums).
   (`backfillApolloAudiencePointer`), triggered TWICE and deduped through one
   in-flight promise per audience (`ensureApolloPointer`): in the background right
   after the confirm (org-billed with the confirm's identity), and INLINE on
-  serve-next if it has not landed (org-billed with the serve's identity). So an
+  candidates/next if it has not landed (org-billed with the serve's identity). So an
   active split audience is never unservable, at worst its first serve waits ~2-3
   min on the build. A build yielding no usable filters still 422s at serve.
   **The pointer build runs THE CHOOSER whenever apollo-service returns more than
@@ -2344,15 +2277,15 @@ returns 404, never 403, to avoid leaking existence.
 - **`suppression_recoveries`** (reversible recovery ledger): `org_id` /
   `brand_id` / `suppression_id` uuid; `reason` / `email_norm` /
   `linkedin_url_norm` / `provider_person_id` / `last_provider` text.
-- **`audience_teaser_buffer`** (serve-next apollo drain buffer): `org_id` uuid
+- **`audience_teaser_buffer`** (candidate-path apollo drain buffer): `org_id` uuid
   (new-table convention); `audience_id` uuid FK → `audiences` (ON DELETE CASCADE);
-  `provider_person_id` / `linkedin_url` text. `teaser` jsonb (the snapshot the
-  pre-pay screen judges; nullable — rows buffered before screening shipped).
-- **`audience_teaser_screenings`** (bronze, pre-pay screen): `org_id` uuid,
+  `provider_person_id` / `linkedin_url` text. `teaser` jsonb (the snapshot
+  handed to lead-service's screen; nullable — rows buffered before 2026-09-17).
+- **`audience_teaser_screenings`** (bronze, retired pre-pay screen, history only): `org_id` uuid,
   `audience_id` uuid FK → `audiences` (ON DELETE CASCADE); `provider_person_id` /
   `linkedin_url` / `reason` / `model` / `prompt_version` text; `teaser` jsonb;
   `verdict` boolean; `yes_probability` double precision (nullable, v1 rows). No unique key — append-only by design.
-- **`audience_screened_out`** (silver, pre-pay screen): same id typing, unique on
+- **`audience_screened_out`** (silver, screen rejections + candidate declines): same id typing, unique on
   `(audience_id, provider_person_id)`.
 
 The same request can hit both column families because the value passed in

@@ -613,7 +613,7 @@ async function refillBrand(
   }
 
   // Build each new audience's Apollo filters in the background, org-billed,
-  // each under its own run (same as a human split confirm). serve-next builds
+  // each under its own run (same as a human split confirm). candidates/next builds
   // inline if one has not landed, so a refilled audience is never unservable.
   for (const row of created) {
     void ensureTargetText(row, { orgId: pool.orgId, userId }).catch((err) =>

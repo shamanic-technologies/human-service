@@ -1239,7 +1239,7 @@ export const AudienceListItemSchema = AudienceSchema.extend({
   // once serve-next has walked it to exhaustion.
   sizeCount: z.number().int().optional().openapi({
     description:
-      "Total contactable audience pool = the committed provider's count snapshot (apollo -> apolloCount, apify -> apifyCount) MINUS the people the pre-pay screen judged off target for this audience. Those people are provably not in the audience, so they leave the pool itself, not only the remaining-to-contact count. 0 for a never-counted audience. ABSENT (with availableToContactCount / availableToContactPct) for a linkedin_engagement audience whose pool is unknown: no provider count exists for it until serve-next has walked it to exhaustion, after which it is that walked pool.",
+      "Total contactable audience pool = the committed provider's count snapshot (apollo -> apolloCount, apify -> apifyCount) MINUS the people judged off target for this audience (screen rejections and candidate declines). Those people are provably not in the audience, so they leave the pool itself, not only the remaining-to-contact count. 0 for a never-counted audience. ABSENT (with availableToContactCount / availableToContactPct) for a linkedin_engagement audience whose pool is unknown: no provider count exists for it until serve-next has walked it to exhaustion, after which it is that walked pool.",
   }),
   availableToContactCount: z.number().int().optional().openapi({
     description:
@@ -1397,9 +1397,9 @@ export const SuggestAudiencesResponseSchema = z
 // --- POST /orgs/audiences/{id}/serve-next ---
 export const ServeNextResponseSchema = z
   .object({
-    status: z.enum(["served", "exhausted", "pending"]).openapi({
+    status: z.enum(["served", "exhausted"]).openapi({
       description:
-        "'served' ⟹ a fresh person is returned. 'exhausted' ⟹ no new match remains for this audience within the suppression window (person is null). 'pending' ⟹ the per-call walk budget ran out before a person was found (person is null); progress is kept, so call again to continue. 'pending' is NOT exhaustion.",
+        "'served' ⟹ a fresh person is returned. 'exhausted' ⟹ no new match remains for this audience (person is null).",
     }),
     person: PersonSchema.nullable().openapi({
       description:
@@ -1655,7 +1655,7 @@ registry.registerPath({
   summary:
     "Create a linkedin_engagement signal audience: people who recently reacted to or commented on 1-3 competitor LinkedIn company pages' posts",
   description:
-    "Persists the criterion on apollo-service and stores a servable apollo pointer audience. No size estimate exists for this kind (no Apollo count): Size / Remaining are omitted from the list until a serve walks the pool. Served by serve-next like any apollo audience (engager teasers screened before the paid reveal). apollo-service's 4xx (malformed competitor pages, Apollo filters beside the signal) is relayed with its status and body.",
+    "Persists the criterion on apollo-service and stores a servable apollo pointer audience. No size estimate exists for this kind (no Apollo count): Size / Remaining are omitted from the list until a serve walks the pool. Served through the candidate API like any apollo audience (the caller screens engager teasers before the paid reveal). apollo-service's 4xx (malformed competitor pages, Apollo filters beside the signal) is relayed with its status and body.",
   security: [{ apiKey: [] }],
   request: {
     headers: peopleHeaders,
@@ -2027,13 +2027,15 @@ registry.registerPath({
   method: "post",
   path: "/orgs/audiences/{id}/serve-next",
   summary:
-    "Serve the next unserved person of an audience (real provider match on its stored filters; records the serve; never repeats)",
+    "Serve the next unserved person of a crm or apify audience (records the serve; never repeats). Apollo audiences: use the candidate API.",
+  description:
+    "crm: served from crm-service (also for ANY audience when x-feature-slug names the CRM outreach channel or the CRM sourcing origin). apify: one billed hit on the stored filters. An apollo audience answers 422 with no provider call: since 2026-10-07 it is served only through POST /orgs/audiences/{id}/candidates/next then /reveal or /decline, where the caller screens each candidate before the paid reveal.",
   security: [{ apiKey: [] }],
   request: { headers: peopleHeaders, params: z.object({ id: z.string().uuid() }) },
   responses: {
     200: { description: "Next person, or an exhausted signal", content: { "application/json": { schema: ServeNextResponseSchema } } },
     404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
-    422: { description: "Audience not servable (no provider / no filters)", content: { "application/json": { schema: ErrorSchema } } },
+    422: { description: "Audience not servable here: an apollo audience (use POST /orgs/audiences/{id}/candidates/next), or no provider / no stored filters", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
     502: { description: "Provider error", content: { "application/json": { schema: ErrorSchema } } },
   },
@@ -2045,7 +2047,7 @@ registry.registerPath({
   summary:
     "Next FREE candidate of an apollo audience (who + company, every free check applied), before any reveal is bought",
   description:
-    "For lead-service's pre-pay qualification. Nothing is screened and nothing is billed. Each person is offered once per audience; an offer not decided within 15 minutes is offered again. serve-next is unchanged.",
+    "For lead-service's pre-pay qualification. Nothing is screened and nothing is billed. Each person is offered once per audience; an offer not decided within 15 minutes is offered again. The ONLY serve path for an apollo audience (serve-next answers 422 for it).",
   security: [{ apiKey: [] }],
   request: { headers: peopleHeaders, params: z.object({ id: z.string().uuid() }) },
   responses: {

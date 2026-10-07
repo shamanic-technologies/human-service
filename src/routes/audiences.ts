@@ -45,7 +45,7 @@ import { createLinkedinEngagementAudience } from "../services/linkedin-engagemen
 import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import { launchAudiencePortfolio } from "../services/audience-portfolio.js";
 import { estimateSplitSegments } from "../services/audience-split-estimate.js";
-import { serveListKind, sourcingOriginSlug, SourcingOriginError } from "../services/sourcing-origin.js";
+import { isCrmSourcedFeature, serveListKind, sourcingOriginSlug, SourcingOriginError } from "../services/sourcing-origin.js";
 import {
   proposeAudienceSplit,
   confirmAudienceSplit,
@@ -388,7 +388,7 @@ router.post(
 // --- POST /orgs/audiences/split/confirm ---
 // The segments the customer kept -> ACTIVE audiences under (brand, offer), all
 // or nothing. Apollo filters are built right after, in the background (and
-// inline on the first serve-next if the background build has not landed).
+// inline on the first candidates/next if the background build has not landed).
 router.post(
   "/orgs/audiences/split/confirm",
   requireApiKey,
@@ -452,7 +452,7 @@ router.post(
       `[human-service] audience.split_confirm org=${orgId} brand=${parsed.data.brandId} offer=${parsed.data.offerId} created=${created.length}`
     );
     // Build each segment's Apollo filters now, in the background (org-billed
-    // with this request's identity). serve-next builds inline if one has not
+    // with this request's identity). candidates/next builds inline if one has not
     // landed yet, so a confirmed segment is never active AND unservable.
     const buildIdentityForSplit = buildIdentity(res);
     for (const row of created) {
@@ -463,7 +463,7 @@ router.post(
         )
       );
       // Each segment's own text (several segments share one nl_prompt), drafted
-      // now in the background; serve-next drafts it inline if it has not landed.
+      // now in the background; candidates/next drafts it inline if it has not landed.
       void ensureTargetText(row, buildIdentityForSplit).catch((err) =>
         console.error(
           `[human-service] audience.target_text.failed org=${orgId} audience=${row.id}`,
@@ -1024,11 +1024,13 @@ router.post(
 );
 
 // --- POST /orgs/audiences/:id/serve-next ---
-// The per-iteration lead primitive: return the NEXT unserved person of the
-// audience (real provider match on its STORED canonical filters + provider),
-// record it served (per-brand cross-provider suppression → never repeats), and
-// signal exhaustion cleanly. Needs x-user-id (apollo/apify key resolution), so
-// requireOrgAndUser. The audience's brand drives suppression — NOT a header.
+// The per-iteration lead primitive for crm / apify audiences: return the NEXT
+// unserved person, record it served (never repeats), and signal exhaustion
+// cleanly. An apollo audience (outside the CRM-outreach feature) answers 422
+// with no provider call: it is served only through the candidate API below,
+// where the caller screens before the paid reveal. Needs x-user-id (apify key
+// resolution), so requireOrgAndUser. The audience's brand drives suppression —
+// NOT a header.
 router.post(
   "/orgs/audiences/:id/serve-next",
   requireApiKey,
@@ -1054,9 +1056,13 @@ router.post(
     // this is fire-and-forget + best-effort: a refresh failure must never fail the
     // serve (lead-service crash-loops on a bad serve). The re-count is free (dry-
     // run, no credits).
-    // Skipped while the Apollo pointer is not built yet: serve-next builds it
-    // (and its count) below, and a legacy dry-run on no filters means nothing.
-    if (!needsApolloPointerBuild(audience)) void refreshAudienceCountIfStale(audience, identity).catch((err) =>
+    // Skipped while the Apollo pointer is not built yet (a legacy dry-run on no
+    // filters means nothing), and for an apollo audience serve-next refuses
+    // (it must make NO provider call; candidates/next refreshes it instead).
+    const refusedApollo =
+      audience.provider === "apollo" &&
+      !isCrmSourcedFeature(identity.workflowTracking?.featureSlug);
+    if (!refusedApollo && !needsApolloPointerBuild(audience)) void refreshAudienceCountIfStale(audience, identity).catch((err) =>
       console.error(
         `[human-service] audience.count_refresh_failed org=${orgId} audience=${audience.id}`,
         err
@@ -1080,9 +1086,9 @@ router.post(
 );
 
 // --- Candidate API: lead-service qualifies BEFORE the paid reveal ---
-// next (free, no screen) → reveal (billed, served exactly like serve-next) or
-// decline (never offered again; leaves the pool like a screen rejection). See
-// src/services/audience-candidates.ts. serve-next above is untouched.
+// next (free, no screen) → reveal (billed, recorded as served) or decline (never
+// offered again; leaves the pool like a screen rejection). The ONLY serve path
+// for an apollo audience. See src/services/audience-candidates.ts.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 router.post(

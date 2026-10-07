@@ -10,6 +10,7 @@ vi.mock("../../src/lib/email-verification.js", async (importOriginal) => ({
 import request from "supertest";
 import { and, eq, sql } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
+import { serveApollo } from "../helpers/serve-apollo.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { isOptOutUrl, optOutResponse, setOptOutEnv } from "../helpers/opt-outs.js";
 import { bounceResponse, isBounceUrl } from "../helpers/bounces.js";
@@ -162,14 +163,14 @@ async function knownPerson(id: string) {
   });
 }
 
-describe("a standing opt-out on the apollo serve path", () => {
+describe("a standing opt-out on the apollo serve path (candidate API: next → reveal)", () => {
   it("drops the teaser BEFORE the reveal — the credit is never spent", async () => {
     await knownPerson("stopper");
     standingOptOuts = ["stopper@acme.com"];
     const calls = mockApollo([["stopper", "willing"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("served");
     expect(res.body.person.email).toBe("willing@acme.com");
@@ -184,7 +185,7 @@ describe("a standing opt-out on the apollo serve path", () => {
     // The opt-out was never scoped to a brand, and this audience is another one.
     const id = await createAudience("apollo", "B", BRAND_B);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.body.person.email).toBe("willing@acme.com");
     expect(calls.enriched).toEqual(["willing"]);
   });
@@ -214,7 +215,7 @@ describe("a standing opt-out on the apollo serve path", () => {
     const calls = mockApollo([["stopper", "willing"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.body.person.email).toBe("willing@acme.com");
     expect(calls.enriched).toEqual(["willing"]);
   });
@@ -227,7 +228,7 @@ describe("a standing opt-out on the apollo serve path", () => {
     const calls = mockApollo([["stopper", "willing"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.body.person.email).toBe("stopper@acme.com");
     expect(calls.enriched).toEqual(["stopper"]);
   });
@@ -240,7 +241,7 @@ describe("a standing opt-out on the apollo serve path", () => {
     const calls = mockApollo([["ghost"], []]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("exhausted");
     expect(res.body.person).toBeNull();
@@ -252,7 +253,7 @@ describe("a standing opt-out on the apollo serve path", () => {
     const calls = mockApollo([["willing"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(502);
     expect(res.body.source).toBe("instantly-service");
     // A gate that cannot read its own input serves nobody, and pays for nobody.

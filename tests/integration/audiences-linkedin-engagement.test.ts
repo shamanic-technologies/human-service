@@ -10,6 +10,7 @@ vi.mock("../../src/lib/email-verification.js", async (importOriginal) => ({
 import request from "supertest";
 import { eq } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
+import { serveApollo } from "../helpers/serve-apollo.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import {
@@ -44,10 +45,11 @@ vi.mock("../../src/lib/instantly-optouts.js", () => ({
 
 
 // A linkedin_engagement signal audience (apollo-service v0.39.29): created
-// through POST /orgs/audiences/signal, served by serve-next exactly like any
-// apollo pointer audience. The engager teasers (li:<profileId>) are screened by
-// Jev BEFORE the paid reveal, the reveal's buyingSignal + engagement evidence
-// reach the served person, and apollo's `done` reads as exhausted.
+// through POST /orgs/audiences/signal, served through the candidate API exactly
+// like any apollo pointer audience. The engager teasers (li:<profileId>) are
+// offered free so the caller can screen them BEFORE the paid reveal, the
+// reveal's buyingSignal + engagement evidence reach the served person, and
+// apollo's `done` reads as exhausted.
 
 const app = createTestApp();
 const BRAND = "00000000-0000-4000-8000-0000000000b1";
@@ -153,15 +155,14 @@ const EVIDENCE = {
   },
 };
 
-function mockServe(opts: { pages: { id: string; title: string }[][]; verdicts: Record<string, number> }) {
-  const titleToId = new Map<string, string>();
-  for (const p of opts.pages) for (const t of p) titleToId.set(t.title, t.id);
+function mockServe(opts: { pages: { id: string; title: string }[][] }) {
   let page = 0;
   const calls = {
     enriched: [] as string[],
-    screened: [] as string[],
+    judged: 0,
     searchBodies: [] as unknown[],
     searchAudienceHeaders: [] as (string | undefined)[],
+    enrichAudienceHeaders: [] as (string | undefined)[],
     dryRuns: 0,
   };
   fetchSpy.mockImplementation(async (url: string, init: { body?: string; headers?: Record<string, string> }) => {
@@ -174,17 +175,14 @@ function mockServe(opts: { pages: { id: string; title: string }[][]; verdicts: R
       return ok({ people, done: page >= opts.pages.length && people.length === 0, totalEntries: 3, source: "linkedin_engagement" });
     }
     if (u.endsWith("/orgs/judgments")) {
-      const body = JSON.parse(init.body ?? "{}") as { state: { candidate: { title: string; headline: string; name: string } } };
-      const id = titleToId.get(body.state.candidate.title)!;
-      // The engager's name, title, headline and employer are what the judge sees.
-      expect(body.state.candidate.name).toBe("Ana Silva");
-      expect(body.state.candidate.headline).toContain("at Acme");
-      calls.screened.push(id);
-      return ok({ model: "jev-1.13.0", answers: { answer: { type: "noul", noul: opts.verdicts[id] } } });
+      // The screen is lead-service's since 2026-10-07: human-service never asks.
+      calls.judged += 1;
+      throw new Error("human-service must never screen");
     }
     if (u.endsWith("/enrich")) {
       const id = (JSON.parse(init.body ?? "{}") as { apolloPersonId: string }).apolloPersonId;
       calls.enriched.push(id);
+      calls.enrichAudienceHeaders.push(init.headers?.["x-audience-id"]);
       return ok({
         person: { ...engager(id, "Head of Sales"), email: `${id.slice(3)}@acme.com`, emailStatus: "verified" },
         emailVerification: { verdict: "valid", deliverable: true },
@@ -294,37 +292,67 @@ describe("POST /orgs/audiences/signal (linkedin_engagement)", () => {
   });
 });
 
-describe("serve-next on a linkedin_engagement audience", () => {
-  it("screens each engager teaser with Jev before the paid reveal and serves the signal", async () => {
+describe("a linkedin_engagement audience is served through the candidate API", () => {
+  it("offers each engager free, the caller declines one and reveals the other: the signal is served under THIS audience's id", async () => {
     const audience = await createAudience();
     const calls = mockServe({
       pages: [[{ id: "li:off", title: "Recruiter" }, { id: "li:on", title: "Head of Sales" }]],
-      verdicts: { "li:off": 0.1, "li:on": 0.9 },
     });
-    const res = await request(app).post(`/orgs/audiences/${audience.id}/serve-next`).set(getAuthHeaders());
+    // A stale inbound x-audience-id must not win over the served audience.
+    const headers = { ...getAuthHeaders(), "x-audience-id": "00000000-0000-4000-8000-0000000000ee" };
+    const first = await request(app).post(`/orgs/audiences/${audience.id}/candidates/next`).set(headers);
+    expect(first.body.status).toBe("candidate");
+    expect(first.body.candidate.providerPersonId).toBe("li:off");
+    // The engager's name, title, headline and employer are what the caller screens.
+    expect(first.body.candidate.person).toMatchObject({ name: "Ana Silva", title: "Recruiter" });
+    expect(first.body.candidate.person.headline).toContain("at Acme");
+    const declined = await request(app)
+      .post(`/orgs/audiences/${audience.id}/candidates/${first.body.candidate.candidateId}/decline`)
+      .set(headers)
+      .send({ reason: "not a buyer" });
+    expect(declined.status).toBe(200);
+
+    const second = await request(app).post(`/orgs/audiences/${audience.id}/candidates/next`).set(headers);
+    expect(second.body.candidate.providerPersonId).toBe("li:on");
+    const res = await request(app)
+      .post(`/orgs/audiences/${audience.id}/candidates/${second.body.candidate.candidateId}/reveal`)
+      .set(headers)
+      .send({});
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("served");
-    // The rejected teaser was screened and NEVER revealed.
-    expect(calls.screened).toEqual(["li:off", "li:on"]);
+    // The declined engager was NEVER revealed, and nothing was screened here.
     expect(calls.enriched).toEqual(["li:on"]);
+    expect(calls.judged).toBe(0);
     expect(res.body.person.email).toBe("on@acme.com");
     expect(res.body.person.buyingSignal).toEqual(EVIDENCE);
     expect(res.body.person.buyingSignal.type).toBe("linkedin_engagement");
-    // The stored criterion is forwarded verbatim, under THIS audience's id
-    // (apollo-service keys its no-repeat on x-audience-id).
+    // The stored criterion is forwarded verbatim, under THIS audience's id on
+    // both the free search and the paid reveal (apollo-service keys its
+    // no-repeat on x-audience-id).
     expect(calls.searchBodies[0]).toEqual({ searchParams: STORED_FILTERS });
     expect(calls.searchAudienceHeaders[0]).toBe(audience.id);
+    expect(calls.enrichAudienceHeaders).toEqual([audience.id]);
     // No Apollo count exists for this kind: the stale-count refresh never asks.
     await new Promise((r) => setTimeout(r, 20));
     expect(calls.dryRuns).toBe(0);
   });
 
+  it("serve-next refuses it (422) without calling apollo-service", async () => {
+    const audience = await createAudience();
+    const calls = mockServe({ pages: [[{ id: "li:on", title: "Head of Sales" }]] });
+    const res = await request(app).post(`/orgs/audiences/${audience.id}/serve-next`).set(getAuthHeaders());
+    expect(res.status).toBe(422);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls.searchBodies).toHaveLength(0);
+    expect(calls.enriched).toEqual([]);
+  });
+
   it("reads exhausted when apollo says done, and the walked pool becomes its size", async () => {
     const audience = await createAudience();
-    mockServe({ pages: [[{ id: "li:on", title: "Head of Sales" }], []], verdicts: { "li:on": 0.9 } });
-    const first = await request(app).post(`/orgs/audiences/${audience.id}/serve-next`).set(getAuthHeaders());
+    mockServe({ pages: [[{ id: "li:on", title: "Head of Sales" }], []] });
+    const first = await serveApollo(app, audience.id);
     expect(first.body.status).toBe("served");
-    const second = await request(app).post(`/orgs/audiences/${audience.id}/serve-next`).set(getAuthHeaders());
+    const second = await serveApollo(app, audience.id);
     expect(second.status).toBe(200);
     expect(second.body).toEqual({ status: "exhausted", person: null });
 

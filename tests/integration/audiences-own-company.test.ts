@@ -13,6 +13,7 @@ vi.mock("../../src/lib/brand-identity.js", () => ({
 }));
 import request from "supertest";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
+import { serveApollo } from "../helpers/serve-apollo.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { isOptOutUrl, optOutResponse, setOptOutEnv } from "../helpers/opt-outs.js";
 import { bounceResponse, isBounceUrl } from "../helpers/bounces.js";
@@ -133,10 +134,7 @@ function mockApollo(
   return { enriched };
 }
 
-const serveNext = (id: string) =>
-  request(app).post(`/orgs/audiences/${id}/serve-next`).set(getAuthHeaders());
-
-describe("serve-next never serves the brand's own staff", () => {
+describe("the apollo serve path (candidate API) never serves the brand's own staff", () => {
   it("drops a CERN teaser BEFORE the reveal (employer name) and serves the prospect", async () => {
     const calls = mockApollo(
       { cern1: { name: "CERN", domain: null }, infn1: { name: "INFN", domain: "infn.it" } },
@@ -144,7 +142,7 @@ describe("serve-next never serves the brand's own staff", () => {
     );
     const id = await createAudience("Physics directors");
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("served");
     expect(res.body.person.email).toBe("r@infn.it");
@@ -158,7 +156,7 @@ describe("serve-next never serves the brand's own staff", () => {
       { cern2: "a@home.cern", infn1: "r@infn.it" }
     );
     const id = await createAudience("Physics directors 2");
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.body.person.email).toBe("r@infn.it");
     expect(calls.enriched).toEqual(["infn1"]);
   });
@@ -170,7 +168,7 @@ describe("serve-next never serves the brand's own staff", () => {
       { hidden: "x@cern.ch", infn1: "r@infn.it" }
     );
     const id = await createAudience("Physics directors 3");
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.body.status).toBe("served");
     expect(res.body.person.email).toBe("r@infn.it");
     expect(calls.enriched).toEqual(["hidden", "infn1"]);
@@ -179,7 +177,7 @@ describe("serve-next never serves the brand's own staff", () => {
   it("only CERN staff in the pool ⟹ exhausted, nobody served", async () => {
     mockApollo({ cern1: { name: "CERN", domain: "home.cern" } }, { cern1: "s@home.cern" });
     const id = await createAudience("Only CERN");
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.body).toEqual({ status: "exhausted", person: null });
   });
 
@@ -187,7 +185,7 @@ describe("serve-next never serves the brand's own staff", () => {
     brandIdentity.mockRejectedValue(new BrandServiceError(500, "boom"));
     mockApollo({ infn1: { name: "INFN", domain: "infn.it" } }, { infn1: "r@infn.it" });
     const id = await createAudience("Brand down");
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(502);
     expect(res.body.source).toBe("brand-service");
   });

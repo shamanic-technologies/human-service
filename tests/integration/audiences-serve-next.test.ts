@@ -13,6 +13,7 @@ import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { isOptOutUrl, optOutResponse, setOptOutEnv } from "../helpers/opt-outs.js";
 import { bounceResponse, isBounceUrl } from "../helpers/bounces.js";
 import { isWonLeadsUrl, setWonLeadsEnv, wonLeadsResponse } from "../helpers/won-leads.js";
+import { serveApollo } from "../helpers/serve-apollo.js";
 
 const app = createTestApp();
 const BRAND = "00000000-0000-4000-8000-0000000000b1";
@@ -233,7 +234,7 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     expect(res.body).toEqual({ status: "exhausted", person: null });
   });
 
-  it("apollo: enriches a free teaser into a revealed, served person", async () => {
+  it("apollo (candidate API): enriches a free teaser into a revealed, served person", async () => {
     fetchSpy.mockImplementation(async (url: string) => {
       const u = String(url);
       if (u.endsWith("/search/next"))
@@ -243,7 +244,7 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
       throw new Error("unexpected url " + u);
     });
     const id = await createAudience("apollo", "Apollo A");
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("served");
     expect(res.body.person.email).toBe("c@acme.com");
@@ -256,7 +257,7 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     expect(res.body.personId).not.toBe("p1");
   });
 
-  it("apollo LEGACY (no apollo_audience_id): remaps the stored NEUTRAL filters to apollo params (not forwarded verbatim)", async () => {
+  it("apollo LEGACY (candidate API) (no apollo_audience_id): remaps the stored NEUTRAL filters to apollo params (not forwarded verbatim)", async () => {
     // A pre-Wave-2 apollo audience holds the old NEUTRAL blob ({titles:[...]}) and
     // has no pointer. serve-next MUST remap it via toApolloSearchParams (so apollo
     // gets personTitles), NOT forward the neutral keys verbatim — else apollo sees
@@ -274,7 +275,7 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
       throw new Error("unexpected url " + u);
     });
     const id = await createAudience("apollo", "Legacy Apollo");
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.body.status).toBe("served");
     // Remapped: neutral `titles` → apollo `personTitles`; no raw `titles` key leaks.
     const sp = (searchBody as unknown as { searchParams?: Record<string, unknown> })?.searchParams ?? {};
@@ -282,7 +283,7 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     expect(sp.titles).toBeUndefined();
   });
 
-  it("apollo: second call drops the already-served teaser pre-pay and returns exhausted (no enrich)", async () => {
+  it("apollo (candidate API): second call drops the already-served teaser pre-pay and returns exhausted (no enrich)", async () => {
     let enrichCalls = 0;
     fetchSpy.mockImplementation(async (url: string) => {
       const u = String(url);
@@ -295,15 +296,15 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
       throw new Error("unexpected url " + u);
     });
     const id = await createAudience("apollo", "Apollo B");
-    const first = await serveNext(id);
+    const first = await serveApollo(app, id);
     expect(first.body.status).toBe("served");
-    const second = await serveNext(id);
+    const second = await serveApollo(app, id);
     expect(second.body.status).toBe("exhausted");
     expect(second.body.person).toBeNull();
     expect(enrichCalls).toBe(1); // never paid to re-enrich the suppressed teaser
   });
 
-  it("apollo: drains a full teaser page across calls — serves every teaser, advancing apollo's cursor only ONCE per page", async () => {
+  it("apollo (candidate API): drains a full teaser page across calls — serves every teaser, advancing apollo's cursor only ONCE per page", async () => {
     // THE FIX. One /search/next page of 3 teasers must serve 3 people over 3
     // calls, hitting /search/next exactly twice (once to fill the buffer, once to
     // confirm exhaustion) — NOT 3 times (which discarded ~99/page and capped the
@@ -345,12 +346,12 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     const id = await createAudience("apollo", "Apollo Drain");
     const served: string[] = [];
     for (let i = 0; i < 3; i++) {
-      const res = await serveNext(id);
+      const res = await serveApollo(app, id);
       expect(res.body.status).toBe("served");
       served.push(res.body.person.email);
     }
     // 4th call: buffer empty → one more /search/next → empty+done → exhausted.
-    const last = await serveNext(id);
+    const last = await serveApollo(app, id);
     expect(last.body.status).toBe("exhausted");
     expect(last.body.person).toBeNull();
 
@@ -367,7 +368,7 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     expect(members.body.members).toHaveLength(3);
   });
 
-  it("apollo: a buffered teaser suppressed after buffering is dropped AT POP (pre-pay), not re-enriched", async () => {
+  it("apollo (candidate API): a buffered teaser suppressed after buffering is dropped AT POP (pre-pay), not re-enriched", async () => {
     // Two teasers buffered together share a linkedin url (same person, two apollo
     // ids — a real dedup case). Serving the first suppresses that linkedin; the
     // second is caught by the pop-time suppression re-check (it was fresh when
@@ -398,16 +399,16 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     });
 
     const id = await createAudience("apollo", "Apollo Pop Suppress");
-    const first = await serveNext(id);
+    const first = await serveApollo(app, id);
     expect(first.body.status).toBe("served");
-    const second = await serveNext(id);
+    const second = await serveApollo(app, id);
     expect(second.body.status).toBe("exhausted");
     expect(second.body.person).toBeNull();
     // Only ONE teaser was ever enriched; the linkedin-twin was dropped at pop.
     expect(enrichCalls).toBe(1);
   });
 
-  it("apollo: a reveal with NO email is skipped (never served) — advances to the next contactable teaser", async () => {
+  it("apollo (candidate API): a reveal with NO email is skipped (never served) — advances to the next contactable teaser", async () => {
     // THE BUG: apollo /enrich can return a person record whose `email` is null
     // (locked / not-found). serve-next must NOT commit that as served (the
     // consumer rejects a no-email lead and crash-loops). p1 reveals with a null
@@ -439,7 +440,7 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     });
 
     const id = await createAudience("apollo", "Apollo NoEmail Skip");
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("served");
     expect(res.body.person.email).toBe("p2@acme.com");
@@ -453,7 +454,7 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     expect(members.body.members[0].emailNorm).toBe("p2@acme.com");
   });
 
-  it("apollo: when every remaining reveal has NO email, returns exhausted (never served)", async () => {
+  it("apollo (candidate API): when every remaining reveal has NO email, returns exhausted (never served)", async () => {
     let searchNextCalls = 0;
     fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
       const u = String(url);
@@ -468,7 +469,7 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
       throw new Error("unexpected url " + u);
     });
     const id = await createAudience("apollo", "Apollo All NoEmail");
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("exhausted");
     expect(res.body.person).toBeNull();
@@ -659,29 +660,28 @@ describe("POST /orgs/audiences/:id/serve-next", () => {
     expect(members.body.members[0].emailNorm).toBe("from-crm@crm.com");
   });
 
-  it("cold feature: keeps using the search provider (apollo) — unchanged", async () => {
-    let crmCalls = 0;
+  it("apollo audience: serve-next answers 422 naming the candidate API and makes NO provider call (cold feature or none)", async () => {
+    // Since 2026-10-07 the pre-pay screen lives in lead-service, and an apollo
+    // audience is served only through candidates/next → reveal. A stray
+    // serve-next must never hand back an unscreened apollo lead.
+    const calls: string[] = [];
     fetchSpy.mockImplementation(async (url: string) => {
-      const u = String(url);
-      if (u.endsWith("/orgs/contacts/serve-next")) {
-        crmCalls++;
-        return ok({ contacts: [], served: 0, exhausted: true });
-      }
-      if (u.endsWith("/search/next"))
-        return ok({ people: [apolloTeaser("p1", "linkedin.com/in/p1")], done: true, totalEntries: 1 });
-      if (u.endsWith("/enrich"))
-        return ok({ person: apolloRevealed("p1", "cold@acme.com", "linkedin.com/in/p1") });
-      throw new Error("unexpected url " + u);
+      calls.push(String(url));
+      return ok({});
     });
     const id = await createAudience("apollo", "Apollo cold feature");
-    const res = await serveNextForFeature(id, "sales-cold-email-outreach");
-    expect(res.status).toBe(200);
-    expect(res.body.status).toBe("served");
-    expect(res.body.person.email).toBe("cold@acme.com");
-    expect(res.body.person.provider).toBe("apollo");
-    expect(crmCalls).toBe(0); // never routed to crm
+    for (const res of [
+      await serveNextForFeature(id, "sales-cold-email-outreach"),
+      await serveNextForFeature(id, "sourcing-apollo-cold-filters"),
+      await serveNext(id),
+    ]) {
+      expect(res.status).toBe(422);
+      expect(res.body.error).toContain(`/orgs/audiences/${id}/candidates/next`);
+    }
+    // Not even the free Size refresh, and never crm.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls).toEqual([]);
   });
-
   it("crm feature, no CRM connection: fail-soft exhausted (200), never a 500", async () => {
     // An org with no CRM connection / no uploaded contacts for the brand: crm-service
     // returns an empty batch + exhausted:true (the brand is trivially drained). The
@@ -978,7 +978,7 @@ describe("serve-next carries businessLanguages", () => {
       throw new Error("unexpected url " + u);
     });
     const id = await createAudience("apollo", name);
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.body.status).toBe("served");
     return res.body.person.businessLanguages as string[];
   }
@@ -1042,7 +1042,7 @@ describe("serve-next on a split audience whose Apollo filters were never built",
     });
 
     const id = await confirmSplitSegment("Crypto Market Makers");
-    const [a, b] = await Promise.all([serveNext(id), serveNext(id)]);
+    const [a, b] = await Promise.all([serveApollo(app, id), serveApollo(app, id)]);
     for (const res of [a, b]) {
       expect(res.status).toBe(200);
       expect(res.body.status).toBe("exhausted");
@@ -1101,7 +1101,7 @@ describe("serve-next on a split audience whose Apollo filters were never built",
       throw new Error("unexpected url " + u);
     });
     const id = await confirmSplitSegment("Large Market Makers");
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(200);
     expect(chooserMessage).toContain("Decision makers at Large Market Makers.");
     const got = await request(app).get(`/orgs/audiences/${id}`).set(getAuthHeaders());
@@ -1125,7 +1125,7 @@ describe("serve-next on a split audience whose Apollo filters were never built",
       throw new Error("unexpected url " + u);
     });
     const id = await confirmSplitSegment("Labelled Builders");
-    const res = await serveNextForFeature(id, "sales-cold-email-outreach");
+    const res = await serveApollo(app, id, { ...getAuthHeaders(), "x-feature-slug": "sales-cold-email-outreach" });
     expect(res.status).toBe(200);
     expect(buildSlugs.length).toBeGreaterThan(0);
     expect(new Set(buildSlugs)).toEqual(new Set(["sourcing-apollo-cold-filters"]));
@@ -1138,7 +1138,7 @@ describe("serve-next on a split audience whose Apollo filters were never built",
       throw new Error("unexpected url " + url);
     });
     const id = await confirmSplitSegment("Nobody");
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(422);
   });
 });
@@ -1166,9 +1166,9 @@ describe("serve-next across audiences of one brand — never the same person twi
     wireSamePerson(counter);
     const cold = await createAudience("apollo", "Cold segment");
     const signal = await createAudience("apollo", "Hiring now");
-    const first = await serveNext(cold);
+    const first = await serveApollo(app, cold);
     expect(first.body.status).toBe("served");
-    const second = await serveNext(signal);
+    const second = await serveApollo(app, signal);
     expect(second.body.status).toBe("exhausted");
     expect(counter.enrich).toBe(1);
   });
@@ -1180,7 +1180,7 @@ describe("serve-next across audiences of one brand — never the same person twi
     wireSamePerson(counter, 50);
     const cold = await createAudience("apollo", "Cold segment");
     const signal = await createAudience("apollo", "Recently funded");
-    const [a, b] = await Promise.all([serveNext(cold), serveNext(signal)]);
+    const [a, b] = await Promise.all([serveApollo(app, cold), serveApollo(app, signal)]);
     const served = [a, b].filter((r) => r.body.status === "served");
     expect(served).toHaveLength(1);
     expect(served[0].body.person.email).toBe("c@acme.com");
@@ -1232,21 +1232,21 @@ describe("serve-next under the sourcing-origin label", () => {
     return () => searchCalls;
   }
 
-  it("apollo audience: the origin is Apollo cold filters, and serve-next serves the same person under it", async () => {
+  it("apollo audience: the origin is Apollo cold filters, and the candidate API serves the same person under it", async () => {
     const id = await createAudience("apollo", "Origin apollo");
     const origin = await originOf(id, "sales-cold-email-outreach");
     expect(origin.status).toBe(200);
     expect(origin.body).toEqual({ audienceId: id, list: "apollo_search", sourcingFeatureSlug: "sourcing-apollo-cold-filters" });
 
     const crmCallsA = apolloServes("same@acme.com");
-    const viaOutreach = await serveNextForFeature(id, "sales-cold-email-outreach");
+    const viaOutreach = await serveApollo(app, id, { ...getAuthHeaders(), "x-feature-slug": "sales-cold-email-outreach" });
     expect(viaOutreach.body.person.email).toBe("same@acme.com");
     expect(crmCallsA()).toBe(0);
 
     await cleanTestData();
     const id2 = await createAudience("apollo", "Origin apollo");
     const crmCallsB = apolloServes("same@acme.com");
-    const viaOrigin = await serveNextForFeature(id2, origin.body.sourcingFeatureSlug);
+    const viaOrigin = await serveApollo(app, id2, { ...getAuthHeaders(), "x-feature-slug": origin.body.sourcingFeatureSlug });
     expect(viaOrigin.status).toBe(200);
     expect(viaOrigin.body.status).toBe("served");
     expect(viaOrigin.body.person.email).toBe("same@acme.com");
