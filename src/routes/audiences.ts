@@ -29,7 +29,18 @@ import {
   PreviewCompaniesQuerySchema,
   LaunchAudiencePortfolioRequestSchema,
   CreateLinkedinEngagementAudienceRequestSchema,
+  RevealCandidateRequestSchema,
+  DeclineCandidateRequestSchema,
+  ListScreeningsQuerySchema,
 } from "../schemas.js";
+import {
+  CandidateNotFoundError,
+  CandidateStateError,
+  declineCandidate,
+  listScreenings,
+  nextCandidate,
+  revealCandidate,
+} from "../services/audience-candidates.js";
 import { createLinkedinEngagementAudience } from "../services/linkedin-engagement-audience.js";
 import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import { launchAudiencePortfolio } from "../services/audience-portfolio.js";
@@ -1064,6 +1075,156 @@ router.post(
       }
       sendProviderError(res, err);
     }
+  }
+);
+
+// --- Candidate API: lead-service qualifies BEFORE the paid reveal ---
+// next (free, no screen) → reveal (billed, served exactly like serve-next) or
+// decline (never offered again; leaves the pool like a screen rejection). See
+// src/services/audience-candidates.ts. serve-next above is untouched.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+router.post(
+  "/orgs/audiences/:id/candidates/next",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const orgId = res.locals.orgId as string;
+    const audience = await getAudienceInOrg(orgId, req.params.id);
+    if (!audience) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
+    const identity: Identity = { ...buildIdentity(res), brandIds: [audience.brandId] };
+    if (!needsApolloPointerBuild(audience)) void refreshAudienceCountIfStale(audience, identity).catch((err) =>
+      console.error(
+        `[human-service] audience.count_refresh_failed org=${orgId} audience=${audience.id}`,
+        err
+      )
+    );
+    try {
+      const result = await nextCandidate(audience, identity);
+      console.log(
+        `[human-service] audience.candidate_next org=${orgId} audience=${audience.id} status=${result.status}`
+      );
+      res.json(result);
+    } catch (err) {
+      if (err instanceof AudienceNotServableError) {
+        res.status(422).json({ error: err.message });
+        return;
+      }
+      sendProviderError(res, err);
+    }
+  }
+);
+
+router.post(
+  "/orgs/audiences/:id/candidates/:candidateId/reveal",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const parsed = RevealCandidateRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+    const orgId = res.locals.orgId as string;
+    const audience = await getAudienceInOrg(orgId, req.params.id);
+    if (!audience || !UUID_RE.test(req.params.candidateId)) {
+      res.status(404).json({ error: audience ? "Candidate not found" : "Audience not found" });
+      return;
+    }
+    const identity: Identity = { ...buildIdentity(res), brandIds: [audience.brandId] };
+    try {
+      res.json(
+        await revealCandidate(audience, identity, req.params.candidateId, parsed.data.basis ?? null)
+      );
+    } catch (err) {
+      if (err instanceof CandidateNotFoundError) {
+        res.status(404).json({ error: err.message });
+        return;
+      }
+      if (err instanceof CandidateStateError) {
+        res.status(409).json({ error: err.message, status: err.currentStatus });
+        return;
+      }
+      if (err instanceof AudienceNotServableError) {
+        res.status(422).json({ error: err.message });
+        return;
+      }
+      sendProviderError(res, err);
+    }
+  }
+);
+
+router.post(
+  "/orgs/audiences/:id/candidates/:candidateId/decline",
+  requireApiKey,
+  requireOrgIdOnly,
+  async (req, res) => {
+    const parsed = DeclineCandidateRequestSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+    const orgId = res.locals.orgId as string;
+    const audience = await getAudienceInOrg(orgId, req.params.id);
+    if (!audience || !UUID_RE.test(req.params.candidateId)) {
+      res.status(404).json({ error: audience ? "Candidate not found" : "Audience not found" });
+      return;
+    }
+    try {
+      res.json(
+        await declineCandidate(
+          audience,
+          orgId,
+          req.params.candidateId,
+          parsed.data.reason,
+          parsed.data.basis ?? null
+        )
+      );
+    } catch (err) {
+      if (err instanceof CandidateNotFoundError) {
+        res.status(404).json({ error: err.message });
+        return;
+      }
+      if (err instanceof CandidateStateError) {
+        res.status(409).json({ error: err.message, status: err.currentStatus });
+        return;
+      }
+      throw err;
+    }
+  }
+);
+
+// --- GET /orgs/audiences/:id/screenings ---
+// The pre-pay screen's past verdicts (bronze, every verdict incl. passes),
+// oldest first, so lead-service holds the history of what was already judged.
+router.get(
+  "/orgs/audiences/:id/screenings",
+  requireApiKey,
+  requireOrgIdOnly,
+  async (req, res) => {
+    const parsed = ListScreeningsQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+    const orgId = res.locals.orgId as string;
+    const audience = await getAudienceInOrg(orgId, req.params.id);
+    if (!audience) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
+    res.json(
+      await listScreenings({
+        orgId,
+        audienceId: audience.id,
+        limit: parsed.data.limit ?? 100,
+        offset: parsed.data.offset ?? 0,
+        providerPersonId: parsed.data.providerPersonId,
+      })
+    );
   }
 );
 

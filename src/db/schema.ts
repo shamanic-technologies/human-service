@@ -653,6 +653,11 @@ export const audienceTeaserBuffer = pgTable(
     // mean paying apollo for what we already had. NULL on rows buffered before
     // the screen shipped: nothing to judge, so those serve unscreened.
     teaser: jsonb("teaser").$type<TeaserSnapshot>(),
+    // The employer's web domain as the provider served it on the free teaser
+    // (null when it served none). Kept OUT of the snapshot on purpose: the
+    // snapshot is what the pre-pay screen judges, and that input must not move.
+    // Read by the candidate API (lead-service qualifies the company on it).
+    organizationDomain: text("organization_domain"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -779,6 +784,43 @@ export const audienceScreenedOut = pgTable(
     ),
   ]
 );
+
+// The candidate API's decision ledger (src/services/audience-candidates.ts).
+// A free teaser handed to lead-service BEFORE any reveal is bought: it is
+// `offered`, then `revealing` → `revealed` (paid, served like serve-next) or
+// `declined` (also written to audience_screened_out, so it never comes back and
+// leaves the pool). One row per (audience, apollo person). `basis` names the
+// question the caller's qualification asked; the candidate path's yield window
+// is keyed on it. `reveal_result` replays a reveal without paying twice.
+export type AudienceCandidateStatus = "offered" | "revealing" | "revealed" | "declined";
+export const audienceCandidates = pgTable(
+  "audience_candidates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    providerPersonId: text("provider_person_id").notNull(),
+    linkedinUrl: text("linkedin_url"),
+    teaser: jsonb("teaser").$type<TeaserSnapshot>(),
+    organizationDomain: text("organization_domain"),
+    status: text("status").$type<AudienceCandidateStatus>().notNull().default("offered"),
+    declineReason: text("decline_reason"),
+    basis: text("basis"),
+    revealResult: jsonb("reveal_result"),
+    offeredAt: timestamp("offered_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_audience_candidates_unique").on(table.audienceId, table.providerPersonId),
+    index("idx_audience_candidates_open").on(table.audienceId, table.status, table.offeredAt),
+    index("idx_audience_candidates_decided").on(table.audienceId, table.decidedAt),
+  ]
+);
+
+export type AudienceCandidate = typeof audienceCandidates.$inferSelect;
 
 export type AudienceScreenedOut = typeof audienceScreenedOut.$inferSelect;
 export type NewAudienceScreenedOut = typeof audienceScreenedOut.$inferInsert;
