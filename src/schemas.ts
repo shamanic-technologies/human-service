@@ -1412,6 +1412,140 @@ export const ServeNextResponseSchema = z
   })
   .openapi("ServeNextResponse");
 
+// --- Candidate API (lead-service qualifies before the paid reveal) ---
+const ScreenTargetSchema = z
+  .object({
+    text: z.string(),
+    field: z.enum(["target_text", "nl_prompt"]),
+  })
+  .nullable()
+  .openapi({
+    description:
+      "The audience's own text: who the client wants for THIS audience, the text the pre-pay screen judges every candidate against (`targetText`, else the shared `nlPrompt`). null when the audience has neither.",
+  });
+
+export const AudienceCandidateViewSchema = z
+  .object({
+    candidateId: z.string().uuid().openapi({ description: "Handle for reveal / decline." }),
+    audienceId: z.string().uuid(),
+    providerPersonId: z.string().openapi({ description: "Apollo person id (the reveal handle)." }),
+    linkedinUrl: z.string().nullable(),
+    offeredAt: z.string().openapi({ description: "ISO time the candidate was (last) offered. An undecided offer is offered again after 15 minutes." }),
+    person: z.object({
+      name: z.string().nullable(),
+      title: z.string().nullable(),
+      headline: z.string().nullable(),
+      seniority: z.string().nullable(),
+      city: z.string().nullable(),
+      state: z.string().nullable(),
+      country: z.string().nullable(),
+    }),
+    company: z.object({
+      name: z.string().nullable(),
+      domain: z.string().nullable().openapi({
+        description:
+          "Employer web domain as the provider served it on the free teaser. null when the provider served none (never guessed).",
+      }),
+      industry: z.string().nullable(),
+      employees: z.number().nullable(),
+      city: z.string().nullable(),
+      state: z.string().nullable(),
+      country: z.string().nullable(),
+      keywords: z.array(z.string()).nullable(),
+    }),
+  })
+  .openapi("AudienceCandidateView");
+
+export const NextCandidateResponseSchema = z
+  .object({
+    status: z.enum(["candidate", "exhausted", "pending"]).openapi({
+      description:
+        "'candidate' ⟹ a free candidate, every free check applied (brand suppression, opt-outs, won people, own company, hard bounces, people already rejected for this audience); nothing billed. 'exhausted' ⟹ none left (`reason`). 'pending' ⟹ the per-call walk budget ran out; call again.",
+    }),
+    candidate: AudienceCandidateViewSchema.nullable(),
+    reason: z.enum(["pool_exhausted", "yield_exhausted"]).optional().openapi({
+      description:
+        "On 'exhausted' only. pool_exhausted = the provider has nobody new. yield_exhausted = over the last 1,000 decisions under the latest `basis`, fewer than 3 were reveals.",
+    }),
+    target: ScreenTargetSchema,
+  })
+  .openapi("NextCandidateResponse");
+
+export const RevealCandidateRequestSchema = z
+  .object({
+    basis: z.string().min(1).max(200).optional().openapi({
+      description:
+        "Name of the question your qualification asked (e.g. a criteria version). The yield window is keyed on the latest basis: a new basis starts a new window.",
+    }),
+  })
+  .strict()
+  .openapi("RevealCandidateRequest");
+
+export const RevealCandidateResponseSchema = z
+  .object({
+    status: z.enum(["served", "not_served"]).openapi({
+      description:
+        "'served' ⟹ the same served person serve-next returns, recorded as served. 'not_served' ⟹ the reveal ran (billed) but nobody servable came out (no usable / deliverable email, or blocked after the reveal); ask for the next candidate.",
+    }),
+    person: PersonSchema.nullable(),
+    personId: z.string().uuid().optional().openapi({
+      description: "Canonical human-service person id, present on 'served' (same as serve-next).",
+    }),
+    replayed: z.boolean().openapi({
+      description: "true ⟹ this candidate was already revealed; the stored answer is returned and nothing is billed again.",
+    }),
+  })
+  .openapi("RevealCandidateResponse");
+
+export const DeclineCandidateRequestSchema = z
+  .object({
+    reason: z.string().min(1).max(2000).openapi({
+      description: "Why the candidate was declined (prose, stored for audit).",
+    }),
+    basis: z.string().min(1).max(200).optional().openapi({
+      description: "Same as on reveal.",
+    }),
+  })
+  .strict()
+  .openapi("DeclineCandidateRequest");
+
+export const DeclineCandidateResponseSchema = z
+  .object({
+    declined: z.literal(true),
+    replayed: z.boolean(),
+  })
+  .openapi("DeclineCandidateResponse");
+
+export const ListScreeningsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(1000).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+  providerPersonId: z.string().min(1).optional(),
+});
+
+export const ListScreeningsResponseSchema = z
+  .object({
+    screenings: z.array(
+      z.object({
+        id: z.string().uuid(),
+        providerPersonId: z.string(),
+        linkedinUrl: z.string().nullable(),
+        teaser: z.record(z.string(), z.unknown()).openapi({ description: "The snapshot the verdict was judged on." }),
+        verdict: z.boolean().openapi({ description: "true = on target (revealed), false = rejected." }),
+        yesProbability: z.number().nullable(),
+        targetText: z.string().nullable(),
+        targetField: z.string().nullable(),
+        reason: z.string().nullable(),
+        model: z.string(),
+        promptVersion: z.string(),
+        createdAt: z.string(),
+      })
+    ),
+    total: z.number().int(),
+    limit: z.number().int(),
+    offset: z.number().int(),
+  })
+  .openapi("ListScreeningsResponse");
+
 // --- POST /orgs/audiences/{id}/avatar ---
 export const GenerateAudienceAvatarRequestSchema = z
   .object({
@@ -1879,6 +2013,83 @@ registry.registerPath({
     422: { description: "Audience not servable (no provider / no filters)", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
     502: { description: "Provider error", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/{id}/candidates/next",
+  summary:
+    "Next FREE candidate of an apollo audience (who + company, every free check applied), before any reveal is bought",
+  description:
+    "For lead-service's pre-pay qualification. Nothing is screened and nothing is billed. Each person is offered once per audience; an offer not decided within 15 minutes is offered again. serve-next is unchanged.",
+  security: [{ apiKey: [] }],
+  request: { headers: peopleHeaders, params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    200: { description: "A candidate, exhausted or pending", content: { "application/json": { schema: NextCandidateResponseSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    422: { description: "Not an apollo audience (use serve-next), or no stored filters", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "Provider or gate source error", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/{id}/candidates/{candidateId}/reveal",
+  summary: "Reveal (billed) an offered candidate, recorded as served exactly as serve-next. Billed once.",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: peopleHeaders,
+    params: z.object({ id: z.string().uuid(), candidateId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: RevealCandidateRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Served person, or not_served", content: { "application/json": { schema: RevealCandidateResponseSchema } } },
+    400: { description: "Invalid body", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Audience or candidate not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Candidate declined, or a reveal is in progress", content: { "application/json": { schema: ErrorSchema } } },
+    422: { description: "Not an apollo audience", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "Provider error; nothing recorded, the candidate can be revealed again", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/{id}/candidates/{candidateId}/decline",
+  summary:
+    "Decline an offered candidate: never offered or served again for this audience, and the audience Size drops by one (same as a screen rejection)",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: orgsListsHeaders,
+    params: z.object({ id: z.string().uuid(), candidateId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: DeclineCandidateRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Declined (idempotent)", content: { "application/json": { schema: DeclineCandidateResponseSchema } } },
+    400: { description: "Invalid body", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Audience or candidate not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Candidate already revealed / being revealed", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/audiences/{id}/screenings",
+  summary: "Past pre-pay screen verdicts of an audience (bronze, every verdict, oldest first)",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: orgsListsHeaders,
+    params: z.object({ id: z.string().uuid() }),
+    query: ListScreeningsQuerySchema,
+  },
+  responses: {
+    200: { description: "Verdicts page (limit default 100, max 1000)", content: { "application/json": { schema: ListScreeningsResponseSchema } } },
+    400: { description: "Invalid query", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
   },
 });
 

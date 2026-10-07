@@ -306,7 +306,7 @@ export async function refreshAudienceCountIfStale(
 // side cannot re-derive it (it can't distinguish "exhausted" from "still
 // serving"), so we persist at write. Self-correcting: if the provider pool later
 // grows, the next serve-next serves the new people and re-exhausts, bumping this.
-async function persistReachableCountOnExhaustion(
+export async function persistReachableCountOnExhaustion(
   orgId: string,
   audienceId: string
 ): Promise<void> {
@@ -2177,7 +2177,7 @@ export async function getAudienceInOrg(
 // A serve-next request carrying this feature identity (x-feature-slug, forwarded by
 // lead-service) sources from crm-service instead of a search provider — see
 // serveNextPerson. Byte-equal to features-service `src/seed/features.ts`.
-const CRM_OUTREACH_FEATURE_SLUG = "sales-crm-email-outreach";
+export const CRM_OUTREACH_FEATURE_SLUG = "sales-crm-email-outreach";
 
 export class AudienceNotServableError extends Error {
   constructor(message: string) {
@@ -2202,7 +2202,7 @@ export interface ServeNextResult {
 // Tag the served person as an audience member and answer `served` carrying the
 // canonical person id that tagging resolved. One helper so every provider path
 // returns the identity the same way.
-async function servedWithPersonId(
+export async function servedWithPersonId(
   orgId: string,
   audienceId: string,
   person: Person
@@ -2221,7 +2221,7 @@ async function servedWithPersonId(
 // "served" pushes an uncontactable lead into the cold-email funnel, which the
 // consumer correctly rejects (fail-loud) and crash-loops the campaign. This guard
 // is the single truth for "does this person satisfy the served contract".
-function hasUsableEmail(p: Person): boolean {
+export function hasUsableEmail(p: Person): boolean {
   return typeof p.email === "string" && p.email.trim().length > 0;
 }
 
@@ -2346,7 +2346,7 @@ const yieldRefillAsked = new Set<string>();
 // look at the brand now rather than at its next 6-hourly tick. The sweep keeps
 // every guard it has (billing can pay, pool really low, cooldown). The audience
 // itself is never edited: immutable, and a different population is a NEW one.
-async function exhaustOnScreenYield(
+export async function exhaustOnScreenYield(
   identity: Identity,
   audience: typeof audiences.$inferSelect,
   stats: { screens: number; passes: number }

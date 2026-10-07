@@ -28,6 +28,9 @@ export interface BufferedTeaser {
   // NULL on rows buffered before screening shipped — there is nothing to judge,
   // so those serve unscreened (counted + logged in screenTeaser).
   teaser: TeaserSnapshot | null;
+  // Employer web domain as the provider served it (null when none). Not part of
+  // the screened snapshot; read by the candidate API only.
+  organizationDomain: string | null;
 }
 
 // Enqueue a fetched apollo page's free teasers for later draining. Idempotent on
@@ -54,6 +57,7 @@ export async function bufferTeasers(
       providerPersonId: t.providerPersonId as string,
       linkedinUrl: t.linkedinUrl,
       teaser: toTeaserSnapshot(t),
+      organizationDomain: t.organization?.domain ?? null,
     }));
   if (rows.length === 0) return 0;
   const inserted = await db
@@ -82,6 +86,7 @@ export async function popTeaser(
       provider_person_id: string;
       linkedin_url: string | null;
       teaser: TeaserSnapshot | null;
+      organization_domain: string | null;
     }[]
   >`
     DELETE FROM audience_teaser_buffer
@@ -92,7 +97,7 @@ export async function popTeaser(
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     )
-    RETURNING provider_person_id, linkedin_url, teaser
+    RETURNING provider_person_id, linkedin_url, teaser, organization_domain
   `;
   const r = rows[0];
   return r
@@ -100,6 +105,7 @@ export async function popTeaser(
         providerPersonId: r.provider_person_id,
         linkedinUrl: r.linkedin_url,
         teaser: r.teaser,
+        organizationDomain: r.organization_domain,
       }
     : null;
 }

@@ -95,6 +95,10 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `DELETE /orgs/audiences/{id}` | apiKey + `x-org-id` | Hard delete (cascades members) — archive is a soft state, not delete |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/refresh-count` | apiKey + `x-org-id` + `x-user-id` | Re-snapshot apollo + apify counts via free dry-run |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/serve-next` | apiKey + `x-org-id` + `x-user-id` | Serve the NEXT unserved person of the audience (real provider match on its stored filters; records served; never repeats; clean exhausted signal) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/next` | apiKey + `x-org-id` + `x-user-id` | Next FREE candidate of an apollo audience (who + company incl. domain, every free gate applied, no screen, no reveal) for lead-service's pre-pay qualification. See "Candidate API" |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/{candidateId}/reveal` | apiKey + `x-org-id` + `x-user-id` | Billed reveal of an offered candidate, recorded as served exactly like serve-next; billed once (replay) |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/{candidateId}/decline` | apiKey + `x-org-id` | Decline: never offered/served again for that audience, Size drops by one (same exclusion set as the screen) |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/screenings` | apiKey + `x-org-id` | Past pre-pay screen verdicts (bronze), oldest first, `limit`/`offset`/`providerPersonId` |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview` | apiKey + `x-org-id` + `x-user-id` | Free sample of who the audience reaches: ~10 real companies + ~20 real people (no email/phone), taken once and stored on the row |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview/email-checks` | apiKey + `x-org-id` + `x-user-id` | Free read: for the preview's first 5 people, pending / found (verdict, finder) / not found. Never an address |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/preview/email-checks/next` | apiKey + `x-org-id` + `x-user-id` | Check ONE more sampled person: apollo billed reveal + verification (cost in apollo-service, caller's org), outcome stored, whole state returned. Loop until `done` |
@@ -612,7 +616,7 @@ when given. `src/services/transfer-brand.ts` owns it.
   (the target's own launch for the same offer wins), `lists` (brand lists only;
   org-wide `brand_id IS NULL` lists stay); through an audience of the brand
   `audience_members`, `audience_teaser_buffer`, `audience_teaser_screenings`,
-  `audience_screened_out`; through a list `list_members`; solo-brand
+  `audience_screened_out`, `audience_candidates`; through a list `list_members`; solo-brand
   `human_methodologies` + their `humans` row. **A new table that carries
   `org_id` + a brand (directly or through an audience) must be added here.**
 - **`people` is ORG-scoped, not brand-scoped**: a person only this brand's
@@ -1365,6 +1369,47 @@ apollo credit, the generated email and the send were all spent on them.
   using serve-next's own identity headers, so human-service's "declares no cost"
   invariant holds.
 - **Size shrinks by the rejections** — see "List contactability" above.
+
+### Candidate API — lead-service qualifies BEFORE the paid reveal (`src/services/audience-candidates.ts`)
+
+Owner 2026-10-07: human-service = WHO a person is; lead-service = whether a lead
+MEETS a business condition, the pre-pay audience screen included. So the free
+teaser, the decision and the billed reveal are split into calls. **ADDITIVE:
+serve-next keeps its own screen, byte-identical, until lead-service's screen is
+live in prod and it stops calling serve-next (relayed by lead-service session
+"apia"); only then is the screen dropped here.**
+
+- **next** (`POST …/candidates/next`, apollo audiences only; crm / apify / the
+  CRM-outreach feature 422 → keep serve-next): pops the shared teaser buffer and
+  applies every FREE gate serve-next applies (brand suppression, opt-outs + won,
+  own company, bounces, `audience_screened_out`), no screen, no spend. Answers
+  `{status: candidate|exhausted|pending, candidate, reason?, target}`;
+  `candidate.company.domain` = the provider's teaser domain
+  (`audience_teaser_buffer.organization_domain`, kept OUT of the judged snapshot
+  so the screen's input never moved; null when apollo serves none). `target` =
+  `screenTarget` (the text the screen judges). One row per (audience, person) in
+  `audience_candidates` (migration `0036`); an offer undecided for 15 min is
+  re-offered (a crash never loses a teaser).
+- **reveal**: atomic claim `offered → revealing` BEFORE `/enrich` (a dead claim
+  is re-takeable after 5 min), then `resolveEmail` + `servedWithPersonId`, the
+  serve-next tail verbatim: `{status: served|not_served, person, personId?,
+  replayed}`. The answer is stored (`reveal_result`), so a repeat replays, never
+  re-bills. A provider failure hands the candidate back (`offered`).
+- **decline** `{reason, basis?}`: one transaction writes the decision + an
+  `audience_screened_out` row (`reason = "declined: …"`), the SAME silver set the
+  screen writes, so the person is never re-buffered / offered / served (by
+  either path) for that audience and leaves Size like a screen rejection.
+- **Yield is computed HERE from the decisions** (the consequences, Remaining +
+  refill, are ours): the screen's rule (`isScreenYieldSpent`, 1,000 / 3) over
+  the latest `basis` the caller sent on reveal/decline (a new basis = a new
+  window, like a new target text for the screen) ⟹ `exhausted /
+  yield_exhausted` via `exhaustOnScreenYield`. The legacy screen's own yield is
+  NOT carried into this window.
+- **History**: `GET …/screenings` reads bronze `audience_teaser_screenings`;
+  every rejection the screen already bought stays in `audience_screened_out`,
+  which this path honours, so nothing judged is re-judged or re-bought.
+- No cost declared (apollo-service bills the reveal). Tests:
+  `tests/integration/audiences-candidates.test.ts`.
 
 ### Audience text — ONE text per audience (`src/services/audience-target-text.ts`)
 

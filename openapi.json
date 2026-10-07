@@ -2876,6 +2876,363 @@
           "person"
         ]
       },
+      "NextCandidateResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "candidate",
+              "exhausted",
+              "pending"
+            ],
+            "description": "'candidate' ⟹ a free candidate, every free check applied (brand suppression, opt-outs, won people, own company, hard bounces, people already rejected for this audience); nothing billed. 'exhausted' ⟹ none left (`reason`). 'pending' ⟹ the per-call walk budget ran out; call again."
+          },
+          "candidate": {
+            "$ref": "#/components/schemas/AudienceCandidateView"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "pool_exhausted",
+              "yield_exhausted"
+            ],
+            "description": "On 'exhausted' only. pool_exhausted = the provider has nobody new. yield_exhausted = over the last 1,000 decisions under the latest `basis`, fewer than 3 were reveals."
+          },
+          "target": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "field": {
+                "type": "string",
+                "enum": [
+                  "target_text",
+                  "nl_prompt"
+                ]
+              }
+            },
+            "required": [
+              "text",
+              "field"
+            ],
+            "description": "The audience's own text: who the client wants for THIS audience, the text the pre-pay screen judges every candidate against (`targetText`, else the shared `nlPrompt`). null when the audience has neither."
+          }
+        },
+        "required": [
+          "status",
+          "candidate",
+          "target"
+        ]
+      },
+      "AudienceCandidateView": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "candidateId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Handle for reveal / decline."
+          },
+          "audienceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "providerPersonId": {
+            "type": "string",
+            "description": "Apollo person id (the reveal handle)."
+          },
+          "linkedinUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "offeredAt": {
+            "type": "string",
+            "description": "ISO time the candidate was (last) offered. An undecided offer is offered again after 15 minutes."
+          },
+          "person": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "nullable": true
+              },
+              "title": {
+                "type": "string",
+                "nullable": true
+              },
+              "headline": {
+                "type": "string",
+                "nullable": true
+              },
+              "seniority": {
+                "type": "string",
+                "nullable": true
+              },
+              "city": {
+                "type": "string",
+                "nullable": true
+              },
+              "state": {
+                "type": "string",
+                "nullable": true
+              },
+              "country": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "name",
+              "title",
+              "headline",
+              "seniority",
+              "city",
+              "state",
+              "country"
+            ]
+          },
+          "company": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "nullable": true
+              },
+              "domain": {
+                "type": "string",
+                "nullable": true,
+                "description": "Employer web domain as the provider served it on the free teaser. null when the provider served none (never guessed)."
+              },
+              "industry": {
+                "type": "string",
+                "nullable": true
+              },
+              "employees": {
+                "type": "number",
+                "nullable": true
+              },
+              "city": {
+                "type": "string",
+                "nullable": true
+              },
+              "state": {
+                "type": "string",
+                "nullable": true
+              },
+              "country": {
+                "type": "string",
+                "nullable": true
+              },
+              "keywords": {
+                "type": "array",
+                "nullable": true,
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "name",
+              "domain",
+              "industry",
+              "employees",
+              "city",
+              "state",
+              "country",
+              "keywords"
+            ]
+          }
+        },
+        "required": [
+          "candidateId",
+          "audienceId",
+          "providerPersonId",
+          "linkedinUrl",
+          "offeredAt",
+          "person",
+          "company"
+        ]
+      },
+      "RevealCandidateResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "served",
+              "not_served"
+            ],
+            "description": "'served' ⟹ the same served person serve-next returns, recorded as served. 'not_served' ⟹ the reveal ran (billed) but nobody servable came out (no usable / deliverable email, or blocked after the reveal); ask for the next candidate."
+          },
+          "person": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Person"
+              },
+              {
+                "nullable": true
+              }
+            ]
+          },
+          "personId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Canonical human-service person id, present on 'served' (same as serve-next)."
+          },
+          "replayed": {
+            "type": "boolean",
+            "description": "true ⟹ this candidate was already revealed; the stored answer is returned and nothing is billed again."
+          }
+        },
+        "required": [
+          "status",
+          "person",
+          "replayed"
+        ]
+      },
+      "RevealCandidateRequest": {
+        "type": "object",
+        "properties": {
+          "basis": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Name of the question your qualification asked (e.g. a criteria version). The yield window is keyed on the latest basis: a new basis starts a new window."
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeclineCandidateResponse": {
+        "type": "object",
+        "properties": {
+          "declined": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "replayed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "declined",
+          "replayed"
+        ]
+      },
+      "DeclineCandidateRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "Why the candidate was declined (prose, stored for audit)."
+          },
+          "basis": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Same as on reveal."
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "additionalProperties": false
+      },
+      "ListScreeningsResponse": {
+        "type": "object",
+        "properties": {
+          "screenings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "providerPersonId": {
+                  "type": "string"
+                },
+                "linkedinUrl": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "teaser": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "nullable": true
+                  },
+                  "description": "The snapshot the verdict was judged on."
+                },
+                "verdict": {
+                  "type": "boolean",
+                  "description": "true = on target (revealed), false = rejected."
+                },
+                "yesProbability": {
+                  "type": "number",
+                  "nullable": true
+                },
+                "targetText": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "targetField": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "reason": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "model": {
+                  "type": "string"
+                },
+                "promptVersion": {
+                  "type": "string"
+                },
+                "createdAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "providerPersonId",
+                "linkedinUrl",
+                "teaser",
+                "verdict",
+                "yesProbability",
+                "targetText",
+                "targetField",
+                "reason",
+                "model",
+                "promptVersion",
+                "createdAt"
+              ]
+            }
+          },
+          "total": {
+            "type": "integer"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "screenings",
+          "total",
+          "limit",
+          "offset"
+        ]
+      },
       "GenerateAudienceAvatarRequest": {
         "type": "object",
         "properties": {
@@ -8721,6 +9078,478 @@
           },
           "502": {
             "description": "Provider error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/{id}/candidates/next": {
+      "post": {
+        "summary": "Next FREE candidate of an apollo audience (who + company, every free check applied), before any reveal is bought",
+        "description": "For lead-service's pre-pay qualification. Nothing is screened and nothing is billed. Each person is offered once per audience; an offer not decided within 15 minutes is offered again. serve-next is unchanged.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A candidate, exhausted or pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NextCandidateResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not an apollo audience (use serve-next), or no stored filters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider or gate source error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/{id}/candidates/{candidateId}/reveal": {
+      "post": {
+        "summary": "Reveal (billed) an offered candidate, recorded as served exactly as serve-next. Billed once.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "candidateId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevealCandidateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Served person, or not_served",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevealCandidateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience or candidate not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Candidate declined, or a reveal is in progress",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not an apollo audience",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider error; nothing recorded, the candidate can be revealed again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/{id}/candidates/{candidateId}/decline": {
+      "post": {
+        "summary": "Decline an offered candidate: never offered or served again for this audience, and the audience Size drops by one (same as a screen rejection)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "candidateId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — populates created_by/added_by columns when present"
+            },
+            "required": false,
+            "description": "Internal user UUID — populates created_by/added_by columns when present",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — used as parentRunId when creating this service's run"
+            },
+            "required": false,
+            "description": "Caller's run ID — used as parentRunId when creating this service's run",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeclineCandidateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Declined (idempotent)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeclineCandidateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience or candidate not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Candidate already revealed / being revealed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/{id}/screenings": {
+      "get": {
+        "summary": "Past pre-pay screen verdicts of an audience (bronze, every verdict, oldest first)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "nullable": true,
+              "minimum": 0
+            },
+            "required": false,
+            "name": "offset",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "required": false,
+            "name": "providerPersonId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — populates created_by/added_by columns when present"
+            },
+            "required": false,
+            "description": "Internal user UUID — populates created_by/added_by columns when present",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — used as parentRunId when creating this service's run"
+            },
+            "required": false,
+            "description": "Caller's run ID — used as parentRunId when creating this service's run",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verdicts page (limit default 100, max 1000)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListScreeningsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience not found",
             "content": {
               "application/json": {
                 "schema": {
