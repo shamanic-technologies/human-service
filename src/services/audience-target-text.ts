@@ -135,7 +135,7 @@ async function readTargetText(id: string): Promise<string | null> {
 /**
  * Write the audience's text if it has none. Deduped per audience through one
  * in-flight promise, so the background call after a confirm and the inline call
- * on serve-next never pay twice. Org-billed with the caller's identity (chat-
+ * on candidates/next never pay twice. Org-billed with the caller's identity (chat-
  * service owns the cost). Fail loud: a draft failure propagates.
  */
 export function ensureTargetText(

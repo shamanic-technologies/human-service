@@ -10,6 +10,7 @@ vi.mock("../../src/lib/email-verification.js", async (importOriginal) => ({
 import request from "supertest";
 import { eq } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
+import { serveApollo } from "../helpers/serve-apollo.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { isOptOutUrl, optOutResponse, setOptOutEnv } from "../helpers/opt-outs.js";
 import { bounceResponse, isBounceUrl } from "../helpers/bounces.js";
@@ -168,14 +169,14 @@ async function knownPerson(id: string, orgId = OTHER_ORG) {
   });
 }
 
-describe("a recorded hard bounce on the apollo serve path", () => {
+describe("a recorded hard bounce on the apollo serve path (candidate API: next → reveal)", () => {
   it("drops the teaser at the FREE stage — the credit is never spent — even when the bounce came from another org", async () => {
     await knownPerson("dead");
     bouncedEmails = ["dead@acme.com"];
     const calls = mockApollo([["dead", "alive"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("served");
     expect(res.body.person.email).toBe("alive@acme.com");
@@ -196,7 +197,7 @@ describe("a recorded hard bounce on the apollo serve path", () => {
     const calls = mockApollo([["dead", "alive"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.body.person.email).toBe("alive@acme.com");
     expect(calls.enriched).toEqual(["alive"]);
   });
@@ -206,14 +207,14 @@ describe("a recorded hard bounce on the apollo serve path", () => {
     const id = await createAudience("apollo", "A", BRAND_A);
 
     // Serve 1 buffers the whole page; nobody has bounced yet.
-    const r1 = await serveNext(id);
+    const r1 = await serveApollo(app, id);
     expect(r1.body.person.email).toBe("first@acme.com");
 
     // Then our send to "dead" bounces (for another org).
     await knownPerson("dead");
     bouncedEmails = ["dead@acme.com"];
 
-    const r2 = await serveNext(id);
+    const r2 = await serveApollo(app, id);
     expect(r2.body.person.email).toBe("alive@acme.com");
     expect(calls.enriched).toEqual(["first", "alive"]);
   });
@@ -225,7 +226,7 @@ describe("a recorded hard bounce on the apollo serve path", () => {
     const calls = mockApollo([["ghost", "alive"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(200);
     expect(res.body.person.email).toBe("alive@acme.com");
     expect(calls.enriched).toEqual(["ghost", "alive"]);
@@ -243,7 +244,7 @@ describe("a recorded hard bounce on the apollo serve path", () => {
     const calls = mockApollo([["alive"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.body.person.email).toBe("alive@acme.com");
     expect(calls.enriched).toEqual(["alive"]);
     // Only the post-reveal check on the address in hand.
@@ -256,7 +257,7 @@ describe("a recorded hard bounce on the apollo serve path", () => {
     const calls = mockApollo([["alive"]]);
     const id = await createAudience("apollo", "A", BRAND_A);
 
-    const res = await serveNext(id);
+    const res = await serveApollo(app, id);
     expect(res.status).toBe(502);
     expect(res.body.source).toBe("instantly-service");
     // A gate that cannot read its own input serves nobody, and pays for nobody.

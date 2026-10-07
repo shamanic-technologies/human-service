@@ -29,25 +29,20 @@ import {
   type Audience,
 } from "../db/schema.js";
 import {
-  filterSuppressed,
   normalizeEmail,
   normalizeLinkedinUrl,
   windowCutoff,
   type ServedContact,
 } from "./suppression.js";
-import { bufferTeasers, popTeaser } from "./teaser-buffer.js";
-import { readScreenYield, screenTeaser } from "./teaser-screening.js";
 import {
   loadOptOutExclusions,
-  loadServeExclusions,
   matchesOptOut,
 } from "./opt-outs.js";
-import { filterBounced, isEmailBounced } from "./bounces.js";
-import { isOwnCompany, isOwnCompanyPerson, loadOwnCompany } from "./own-company.js";
+import { isEmailBounced } from "./bounces.js";
+import { isOwnCompanyPerson, loadOwnCompany } from "./own-company.js";
 import {
   dryRun,
   peopleSearch,
-  resolveEmail,
   toServedContact,
   type Identity,
   type Person,
@@ -70,7 +65,7 @@ import { chooseAudienceCandidate, buildChooserTrace } from "./audience-chooser.j
 import { createRun, completeRun } from "./runs.js";
 import { audienceSourcingOriginSlug, isCrmSourcedFeature, withSourcingOrigin } from "./sourcing-origin.js";
 import { crmServeNext, normalizeCrmContact } from "../lib/crm-contacts.js";
-import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
+import { audienceTargetFields } from "./audience-target-text.js";
 
 // The transaction handle drizzle passes to the `db.transaction` callback.
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -2017,7 +2012,7 @@ async function buildPointerUnder(
 // lead pull (Olive's campaign failed ~1/min for 12h).
 //
 // Now the build runs (1) in the background right after the confirm, and (2)
-// inline on serve-next if it has not landed yet — so an active split audience is
+// inline on candidates/next if it has not landed yet — so an active split audience is
 // always servable, at worst with a slow first serve. Both paths go through ONE
 // in-flight promise per audience, so concurrent serves and the confirm trigger
 // never pay for two builds. Org-billed like every other build (apollo-service
@@ -2174,7 +2169,8 @@ export async function getAudienceInOrg(
 }
 
 // Thrown when an audience cannot serve people because it lacks the stored state
-// serve-next needs (a committed provider, or a non-empty filter set). Fail loud
+// serve-next needs (a committed provider, or a non-empty filter set), or because
+// it is an apollo audience, served only through the candidate API. Fail loud
 // (route → 422) rather than silently returning an empty / wrong result.
 // The CRM-outreach channel slug (and its sourcing twin `sourcing-crm-contacts`)
 // live in sourcing-origin.ts; re-exported for existing importers.
@@ -2188,10 +2184,7 @@ export class AudienceNotServableError extends Error {
 }
 
 export interface ServeNextResult {
-  // `pending` ⟹ the per-call walk budget (SERVE_NEXT_BUDGET_MS) ran out before a
-  // person was found. Nothing is lost: every judged teaser is recorded and popped,
-  // so the NEXT call resumes the walk where this one stopped. Not exhaustion.
-  status: "served" | "exhausted" | "pending";
+  status: "served" | "exhausted";
   person: Person | null;
   // The canonical human-service person (`people.id`) the served person resolved
   // to at membership tagging — the same id `GET /orgs/audiences/{id}/members`
@@ -2316,22 +2309,14 @@ async function serveNextCrmContact(
   }
 }
 
-// Wall-clock budget for ONE apollo serve-next walk. The drain loop screens teasers
-// one by one (~0.4s each); an audience whose filters are much wider than its text
-// rejects nearly everything (Shockwavecenters 2026-10-04: 25 passes in ~10,600
-// teasers, one call walking 700+ of them), so an unbounded call outran
-// lead-service's 300s client timeout. The client then gave up while this loop kept
-// going and revealed (paid for) a person nobody received. Past the budget the call
-// answers `pending` instead; the walk's progress is durable (popped buffer +
-// recorded verdicts), so the next call picks up exactly where this one stopped.
-// The budget is checked only BETWEEN teasers, so one in-flight screen / reveal can
-// overrun it by its own latency, and each call always makes progress.
+// Wall-clock budget for ONE candidate-path walk (audience-candidates.ts
+// `nextCandidate`). An audience whose filters are much wider than what the
+// caller accepts can walk a long free tail; an unbounded call outran
+// lead-service's 300s client timeout (serve-next, Shockwavecenters 2026-10-04).
+// Past the budget the call answers `pending`; the walk's progress is durable
+// (popped buffer), so the next call picks up where this one stopped. Checked
+// only BETWEEN teasers, so each call always makes progress.
 export const SERVE_NEXT_BUDGET_MS = 120_000;
-
-// How many screens one serve-next call makes between two reads of the screen
-// yield (teaser-screening.ts `readScreenYield`). Also read once before the walk.
-// 100 screens ≈ 40s of a call, so a dead audience stops within one call.
-export const SCREEN_YIELD_CHECK_EVERY = 100;
 
 // Audiences whose screen-yield exhaustion already asked for a refill in this
 // process, so a campaign retrying a dead audience does not re-run the sweep on
@@ -2339,8 +2324,9 @@ export const SCREEN_YIELD_CHECK_EVERY = 100;
 // make a second ask harmless.
 const yieldRefillAsked = new Set<string>();
 
-// The screen has exhausted this audience: the rest of what Apollo returns for
-// it is people the screen rejects (see teaser-screening.ts "Screen yield").
+// The caller's qualification has exhausted this audience: the rest of what
+// Apollo returns for it is people lead-service declines (candidate path, see
+// teaser-screening.ts "Screen yield").
 // Answer exactly what a walked-out audience answers — `exhausted`, with the
 // reachable ceiling persisted so its Remaining reads what is truly left (~0) and
 // campaign-service picks the brand's next audience — and ask the refill sweep to
@@ -2371,21 +2357,20 @@ export async function exhaustOnScreenYield(
   return { status: "exhausted", person: null };
 }
 
-// Serve the NEXT unserved person of an audience — the per-iteration lead
-// primitive lead-service calls. A thin wrapper over the existing people-gateway
-// machinery: it searches with the audience's STORED canonical filters via its
-// committed provider, scoped to the audience's brand so the per-brand cross-
-// provider suppression excludes anyone already served (the no-repeat guarantee),
-// records the serve, tags audience membership, and signals exhaustion cleanly.
+// Serve the NEXT unserved person of a crm or apify audience — the per-iteration
+// lead primitive lead-service calls for the providers WITHOUT a free teaser. An
+// apollo audience is NOT served here (2026-10-07): its pre-pay screen moved to
+// lead-service, which serves apollo through the candidate API
+// (audience-candidates.ts: next → reveal | decline). Serving apollo here would
+// hand back an UNSCREENED lead, so it answers 422 (AudienceNotServableError),
+// before any provider call.
 //
 // The caller (route) MUST pass identity.brandIds = [audience.brandId] — that is
 // what drives suppression. The audience is assumed already org-validated.
 export async function serveNextPerson(
   audience: typeof audiences.$inferSelect,
-  identity: Identity,
-  budgetMs: number = SERVE_NEXT_BUDGET_MS
+  identity: Identity
 ): Promise<ServeNextResult> {
-  const deadline = Date.now() + budgetMs;
   const provider = audience.provider;
   const featureSlug = identity.workflowTracking?.featureSlug;
 
@@ -2417,18 +2402,17 @@ export async function serveNextPerson(
     return serveNextCrmContact(audience, identity);
   }
 
-  if (provider !== "apollo" && provider !== "apify") {
+  if (provider === "apollo") {
+    throw new AudienceNotServableError(
+      `Apollo audiences are served through the candidate API, not serve-next: POST /orgs/audiences/${audience.id}/candidates/next, then /reveal or /decline.`
+    );
+  }
+  if (provider !== "apify") {
     throw new AudienceNotServableError(
       "Audience has no committed provider — cannot serve people."
     );
   }
-  // Stored filters are OPAQUE here: apollo rows hold the faithful Apollo filter
-  // object (apollo-service's shape); apify rows hold the neutral PeopleSearchFilters.
-  // A split-born apollo audience whose build has not landed yet: build it now
-  // rather than refuse the serve (see ensureApolloPointer).
-  if (needsApolloPointerBuild(audience)) {
-    audience = await ensureApolloPointer(audience, identity);
-  }
+  // apify rows hold the neutral PeopleSearchFilters (mapped to apify in the gateway).
   const storedFilters = (audience.filters ?? null) as Record<string, unknown> | null;
   if (!storedFilters || Object.keys(storedFilters).length === 0) {
     throw new AudienceNotServableError(
@@ -2436,214 +2420,26 @@ export async function serveNextPerson(
     );
   }
 
-  if (provider === "apify") {
-    // apify BILLS per returned lead and pushes the brand exclude-set down, so a
-    // single hit is already an unserved, suppression-recorded serve. limit 1. apify
-    // audiences keep the NEUTRAL filter shape (mapped to apify in the gateway).
-    const result = await peopleSearch({
-      provider: "apify",
-      filters: storedFilters as PeopleSearchFilters,
-      limit: 1,
-      audienceId: audience.id,
-      identity,
-    });
-    const person = result.people[0] ?? null;
-    // A no-email hit violates the served contract (apify is supposed to return a
-    // verified email per hit; a blank one is junk). It was already billed +
-    // suppression-recorded by the gateway, so surface exhausted rather than
-    // committing an uncontactable person as served.
-    if (!person || !hasUsableEmail(person)) {
-      await persistReachableCountOnExhaustion(identity.orgId, audience.id);
-      return { status: "exhausted", person: null };
-    }
-    return servedWithPersonId(identity.orgId, audience.id, person);
+  // apify BILLS per returned lead and pushes the brand exclude-set down, so a
+  // single hit is already an unserved, suppression-recorded serve. limit 1. apify
+  // audiences keep the NEUTRAL filter shape (mapped to apify in the gateway).
+  const result = await peopleSearch({
+    provider: "apify",
+    filters: storedFilters as PeopleSearchFilters,
+    limit: 1,
+    audienceId: audience.id,
+    identity,
+  });
+  const person = result.people[0] ?? null;
+  // A no-email hit violates the served contract (apify is supposed to return a
+  // verified email per hit; a blank one is junk). It was already billed +
+  // suppression-recorded by the gateway, so surface exhausted rather than
+  // committing an uncontactable person as served.
+  if (!person || !hasUsableEmail(person)) {
+    await persistReachableCountOnExhaustion(identity.orgId, audience.id);
+    return { status: "exhausted", person: null };
   }
-
-  // apollo: search is a FREE teaser list. Apollo's /search/next hands back up to
-  // 100 teasers per page AND advances its forward-only cursor a whole page, while
-  // serve-next reveals ONE lead per call — so we BUFFER each fetched page and
-  // DRAIN it one teaser per call, only re-advancing apollo's cursor when the
-  // buffer is empty. Without this the other ~99 teasers per page were discarded
-  // and the cursor moved on for good, capping the audience at ~1% of its pool.
-  //
-  // Pointer rows (apollo_audience_id set) store Apollo's FAITHFUL filter shape →
-  // forward it VERBATIM as the apollo search params (no neutral→apollo remap). A
-  // LEGACY pre-Wave-2 apollo row (no pointer) still holds the old NEUTRAL blob →
-  // let toApolloSearchParams remap it, so it keeps serving until the backfill
-  // gives it a pointer. Mirrors the same guard in refreshAudienceCounts.
-  // Standing opt-outs for the org + the people this brand has already WON, read
-  // once for this serve (loadServeExclusions). A buffered teaser
-  // may have been fetched before the person asked us to stop, so the check runs
-  // at POP time — the last free moment — beside the suppression re-check, and
-  // not only at refill. Read live, so a withdrawal is honoured on the next serve
-  // with nothing to expire or invalidate.
-  const optOuts = await loadServeExclusions(identity);
-  // The brand's own company, checked at POP time too: a teaser buffered before
-  // this rule existed must not reach the screen or the reveal.
-  const ownCompany = await loadOwnCompany(identity.orgId, [audience.brandId]);
-
-  // The audience's own text, the one the screen below judges against. A segment
-  // whose text has not landed yet (confirm's background draft still running or
-  // failed, or a row the backfill has not reached) gets it now, before any
-  // teaser is judged against the text its siblings share. Fail loud.
-  if (!audience.targetText) {
-    audience = { ...audience, targetText: await ensureTargetText(audience, identity) };
-  }
-
-  // A linkedin_engagement audience's no-repeat lives in apollo-service, keyed on
-  // x-audience-id: stamp THIS audience (the row being served, as the crm path
-  // does), never whatever audience the inbound header named. Other audiences
-  // keep the inbound identity untouched.
-  if (isLinkedinEngagementFilters(storedFilters)) {
-    identity = {
-      ...identity,
-      workflowTracking: { ...(identity.workflowTracking ?? {}), audienceId: audience.id },
-    };
-  }
-
-  const apolloSearchParams = audience.apolloAudienceId ? storedFilters : undefined;
-  const apolloFilters = audience.apolloAudienceId
-    ? {}
-    : (storedFilters as PeopleSearchFilters);
-
-  // Drain loop: pop one buffered teaser per iteration; refill (advancing apollo's
-  // cursor) only when the buffer is dry. Enrich ONE non-suppressed teaser at a
-  // time (the billed reveal records the serve in finalizeResolved) and return on
-  // the first reveal. Exhausted ONLY when the buffer is empty AND apollo returns
-  // no more fresh teasers — never a fabricated cap (apollo's `done` at totalPages
-  // guarantees termination, so the walk is bounded by the real pool).
-  // Screen yield: an audience whose recent verdicts are nearly all rejections
-  // is exhausted for the screen, whatever Apollo still has (see above). Read
-  // before the walk, so a dead audience pops and screens nobody.
-  const yieldAtStart = await readScreenYield(audience);
-  if (yieldAtStart?.spent) return exhaustOnScreenYield(identity, audience, yieldAtStart);
-
-  let walked = 0;
-  let screensSinceYieldRead = 0;
-  for (;;) {
-    // Budget spent and at least one step taken this call → hand back `pending`
-    // BEFORE popping, so no teaser is consumed without a verdict.
-    if (walked > 0 && Date.now() >= deadline) {
-      console.log(
-        `[human-service] audience.serve_next_budget_spent org=${identity.orgId} audience=${audience.id} walked=${walked} budgetMs=${budgetMs}`
-      );
-      return { status: "pending", person: null };
-    }
-    // Re-read the yield every SCREEN_YIELD_CHECK_EVERY screens, BEFORE popping,
-    // so a dead audience stops mid-call without dropping an unjudged teaser.
-    if (screensSinceYieldRead >= SCREEN_YIELD_CHECK_EVERY) {
-      screensSinceYieldRead = 0;
-      const yieldNow = await readScreenYield(audience);
-      if (yieldNow?.spent) return exhaustOnScreenYield(identity, audience, yieldNow);
-    }
-    walked += 1;
-    const teaser = await popTeaser(identity.orgId, audience.id);
-    if (!teaser) {
-      // Buffer dry → advance apollo's free cursor one fruitful chunk. peopleSearch
-      // already drops brand-suppressed teasers before returning, and returns the
-      // page's fresh teasers (or [] at true apollo pool exhaustion).
-      const search = await peopleSearch({
-        provider: "apollo",
-        filters: apolloFilters,
-        apolloSearchParams,
-        audienceId: audience.id,
-        identity,
-      });
-      if (search.people.length === 0) {
-        await persistReachableCountOnExhaustion(identity.orgId, audience.id);
-        return { status: "exhausted", person: null };
-      }
-      await bufferTeasers(identity.orgId, audience.id, search.people);
-      continue;
-    }
-
-    // Re-check suppression pre-pay: a teaser fresh at buffer time may have been
-    // served under ANOTHER audience for this brand since (cross-audience, within
-    // the window) — drop it before paying to enrich.
-    const [fresh] = await filterSuppressed(
-      identity.orgId,
-      [audience.brandId],
-      [{ linkedinUrl: teaser.linkedinUrl, providerPersonId: teaser.providerPersonId }]
-    );
-    if (!fresh) continue;
-
-    // Standing opt-out, checked BEFORE the screen and before the reveal: the
-    // teaser is free, the enrich is not, and a person who asked us to stop must
-    // cost nothing further. Org-wide, so it fires for every brand of the org,
-    // and it never lapses.
-    if (
-      matchesOptOut(optOuts, {
-        linkedinUrl: teaser.linkedinUrl,
-        providerPersonId: teaser.providerPersonId,
-      })
-    ) {
-      console.log(
-        `[human-service] opt_out.blocked_teaser org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`
-      );
-      continue;
-    }
-
-    if (isOwnCompany(ownCompany, { name: teaser.teaser?.organizationName ?? null })) {
-      console.log(
-        `[human-service] own_company.blocked_teaser org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`
-      );
-      continue;
-    }
-
-    // Hard bounce, checked at POP time for the same reason as the opt-out: the
-    // teaser may have been buffered before our send to them bounced. Fleet-wide
-    // (any org, any brand), free (a local key lookup + one read at the owner),
-    // and before the screen and the reveal.
-    const [reachable] = await filterBounced(identity, [
-      { linkedinUrl: teaser.linkedinUrl, providerPersonId: teaser.providerPersonId },
-    ]);
-    if (!reachable) {
-      console.log(
-        `[human-service] bounce.blocked_teaser org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`
-      );
-      continue;
-    }
-
-    // Pre-pay screen: does this person actually belong to the audience the
-    // client described? Apollo's filters cannot express every constraint an
-    // audience states in plain English, so a teaser can match them and still be
-    // the wrong person — and the credit, the generated email and the send are
-    // all spent before anyone finds out. A rejection is recorded (bronze verdict
-    // + silver exclusion) and we pop the next teaser; the credit is never spent.
-    // Fail loud: a chat-service failure propagates (502), because passing the
-    // teaser through would spend exactly what the screen protects.
-    screensSinceYieldRead += 1;
-    const screen = await screenTeaser({
-      orgId: identity.orgId,
-      audience,
-      subject: teaser,
-      identity,
-    });
-    if (screen.screened && !screen.onTarget) {
-      console.log(
-        `[human-service] teaser_screen.rejected org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`
-      );
-      continue;
-    }
-
-    const revealed = await resolveEmail({
-      provider: "apollo",
-      providerPersonId: teaser.providerPersonId,
-      audienceId: audience.id,
-      identity,
-    });
-    // Only commit as served when the reveal produced a person WITH a usable email
-    // — apollo /enrich can return a person record whose `email` is null (locked /
-    // not-found), and serving that violates the consumer contract. The credit is
-    // already spent + the serve suppression-recorded in finalizeResolved, so a
-    // no-email reveal is simply dropped and we pop the next teaser (never wasting
-    // it on a re-enrich).
-    if (revealed.person && hasUsableEmail(revealed.person)) {
-      return servedWithPersonId(identity.orgId, audience.id, revealed.person);
-    }
-    // Reveal yielded no usable email, or was post-pay suppressed → drop, pop the
-    // next buffered teaser.
-  }
+  return servedWithPersonId(identity.orgId, audience.id, person);
 }
 
 // --- Avatar style: flat-vector character on a distinctive colour ------------

@@ -278,13 +278,18 @@ describe("candidate API — decline", () => {
     expect(after.body.candidate.providerPersonId).toBe("p2");
   });
 
-  it("serve-next never serves a person declined for that audience", async () => {
+  it("a declined person is never offered again, and serve-next cannot reach them either (422, no provider call)", async () => {
     const id = await createAudience();
     const fleet = mockApollo([["p1"], ["p1"], []]);
     const c = (await next(id)).body.candidate.candidateId as string;
     await decline(id, c);
+    const calls = fetchSpy.mock.calls.length;
     const res = await request(app).post(`/orgs/audiences/${id}/serve-next`).set(getAuthHeaders());
-    expect(res.body.status).toBe("exhausted");
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain("candidates/next");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchSpy.mock.calls.length).toBe(calls);
+    expect((await next(id)).body).toMatchObject({ status: "exhausted", reason: "pool_exhausted" });
     expect(fleet.enriched).toEqual([]);
   });
 

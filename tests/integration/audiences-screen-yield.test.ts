@@ -9,21 +9,11 @@ vi.mock("../../src/lib/email-verification.js", async (importOriginal) => ({
 }));
 import request from "supertest";
 import { eq } from "drizzle-orm";
-import {
-  SCREEN_PROMPT_VERSION,
-  SCREEN_YIELD_WINDOW,
-  screenBarTag,
-} from "../../src/services/teaser-screening.js";
-import { screenTarget } from "../../src/services/audience-target-text.js";
+import { SCREEN_YIELD_WINDOW } from "../../src/services/teaser-screening.js";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
-import {
-  audiences,
-  audienceScreenedOut,
-  audienceTeaserBuffer,
-  audienceTeaserScreenings,
-} from "../../src/db/schema.js";
+import { audienceCandidates, audiences } from "../../src/db/schema.js";
 
 // The refill sweep has its own suites; here we only check it is ASKED for the brand.
 const refillSweep = vi.fn(async (_opts: { brandId?: string }) => null);
@@ -55,19 +45,19 @@ vi.mock("../../src/lib/instantly-optouts.js", () => ({
 }));
 
 
-// The pre-pay screen: an apollo free teaser is judged (Jev, yes-probability > 0.50)
-// against the customer's own words (nl_prompt) BEFORE the credit that reveals its
-// email is spent. The point of
-// every test here is the SPEND — a rejected teaser must never reach /enrich.
+// Yield: an apollo audience whose recent decisions are nearly all declines has
+// stopped producing people. Since 2026-10-07 the decisions are lead-service's
+// (candidate API reveal / decline; the screen moved there), and the stop rule is
+// applied to them: over the last SCREEN_YIELD_WINDOW decisions under the latest
+// basis, fewer than 3 reveals ⟹ candidates/next answers exhausted, persists the
+// reachable ceiling (Remaining) and asks the refill sweep. Every test here is
+// about the SPEND: a dead audience must not keep paging and revealing.
 
 const app = createTestApp();
 const BRAND = "00000000-0000-4000-8000-0000000000b1";
+const ORG = getAuthHeaders()["x-org-id"];
 
 const fetchSpy = vi.fn();
-// Stub fetch in beforeEach (not at describe-body eval, which would clobber the
-// other files' provider mocks at collection time), and hand the global BACK on
-// the way out — this suite runs with one shared global, so a stub left installed
-// silently disables whichever file's mock was there before ours.
 const fetchBeforeThisSuite = globalThis.fetch;
 
 beforeEach(async () => {
@@ -76,8 +66,6 @@ beforeEach(async () => {
   refillSweep.mockClear();
   process.env.APOLLO_SERVICE_URL = "http://apollo:8080";
   process.env.APOLLO_SERVICE_API_KEY = "apollo-key";
-  process.env.CHAT_SERVICE_URL = "http://chat:8080";
-  process.env.CHAT_SERVICE_API_KEY = "chat-key";
   await cleanTestData();
 });
 
@@ -90,7 +78,7 @@ function ok(json: unknown) {
   return { ok: true, status: 200, json: async () => json, text: async () => "" };
 }
 
-function teaser(id: string, title: string) {
+function teaser(id: string) {
   return {
     id,
     firstName: "C",
@@ -98,7 +86,7 @@ function teaser(id: string, title: string) {
     name: null,
     email: null,
     emailStatus: null,
-    title,
+    title: "Chiropractor",
     headline: null,
     seniority: "owner",
     linkedinUrl: `linkedin.com/in/${id}`,
@@ -119,17 +107,27 @@ function teaser(id: string, title: string) {
   };
 }
 
-function revealed(id: string, email: string) {
-  return { ...teaser(id, "Chiropractor"), lastName: "D", name: "C D", email, emailStatus: "verified" };
+function mockApollo(ids: string[]) {
+  const calls = { searches: 0, enriched: [] as string[] };
+  fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+    const u = String(url);
+    if (u.endsWith("/search/next")) {
+      const people = calls.searches === 0 ? ids.map(teaser) : [];
+      calls.searches += 1;
+      return ok({ people, done: people.length === 0, totalEntries: people.length });
+    }
+    if (u.endsWith("/enrich")) {
+      const id = (JSON.parse(init.body ?? "{}") as { apolloPersonId?: string }).apolloPersonId ?? "";
+      calls.enriched.push(id);
+      return ok({ person: { ...teaser(id), lastName: "D", name: "C D", email: `${id}@acme.com`, emailStatus: "verified" } });
+    }
+    if (u.includes("/dry-run")) return ok({ total: 41954 });
+    throw new Error("unexpected url " + u);
+  });
+  return calls;
 }
 
-// The screen judges against `nlPrompt` (the customer's words). `description` is
-// set too, to prove the screen never falls back to it.
-async function createDescribedAudience(
-  name: string,
-  nlPrompt: string | null,
-  apolloCount?: number
-) {
+async function createAudience(name: string, apolloCount?: number) {
   const res = await request(app)
     .post("/orgs/audiences")
     .set(getAuthHeaders())
@@ -139,127 +137,50 @@ async function createDescribedAudience(
       provider: "apollo",
       filters: { personTitles: ["Chiropractor"] },
       apolloAudienceId: "apollo-aud-1",
-      ...(nlPrompt ? { nlPrompt } : {}),
+      nlPrompt: "practicing chiropractors in the US",
       ...(apolloCount !== undefined ? { apolloCount } : {}),
     });
   expect(res.status).toBe(201);
   const id = res.body.audience.id as string;
-  await db
-    .update(audiences)
-    .set({ description: "LLM rewrite of the filters", nlPrompt })
-    .where(eq(audiences.id, id));
+  await db.update(audiences).set({ targetText: "practicing chiropractors in the US" }).where(eq(audiences.id, id));
   return id;
 }
 
-function serveNext(id: string) {
-  return request(app).post(`/orgs/audiences/${id}/serve-next`).set(getAuthHeaders());
-}
-
-// Route apollo + chat. `verdicts` maps an apollo person id to Jev's
-// yes-probability. The judged state carries the SNAPSHOT, which holds no person
-// id — so the mock identifies the candidate by its title, as the model would.
-function mockFleet(opts: {
-  pages: { id: string; title: string }[][];
-  verdicts: Record<string, number>;
-  chatFails?: boolean;
-}) {
-  const titleToId = new Map<string, string>();
-  for (const page of opts.pages) {
-    for (const t of page) titleToId.set(t.title, t.id);
-  }
-  let page = 0;
-  const enriched: string[] = [];
-  const screened: string[] = [];
-  const targets: string[] = [];
-  fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
-    const u = String(url);
-    if (u.endsWith("/search/next")) {
-      const people = (opts.pages[page] ?? []).map((t) => teaser(t.id, t.title));
-      page += 1;
-      return ok({ people, done: people.length === 0, totalEntries: people.length });
-    }
-    if (u.endsWith("/orgs/judgments")) {
-      if (opts.chatFails)
-        return { ok: false, status: 500, text: async () => "chat down", json: async () => ({}) };
-      const body = JSON.parse(init.body ?? "{}") as {
-        state: { targetAudience: string; candidate: { title: string } };
-      };
-      const id = titleToId.get(body.state.candidate.title);
-      if (!id) throw new Error("screen state named no known candidate: " + init.body);
-      screened.push(id);
-      targets.push(body.state.targetAudience);
-      return ok({
-        model: "jev-1.13.0",
-        answers: { answer: { type: "noul", noul: opts.verdicts[id] } },
-      });
-    }
-    if (u.endsWith("/enrich")) {
-      const body = JSON.parse(init.body ?? "{}") as { apolloPersonId?: string };
-      const id = body.apolloPersonId ?? "";
-      enriched.push(id);
-      return ok({ person: revealed(id, `${id}@acme.com`) });
-    }
-    throw new Error("unexpected url " + u);
-  });
-  return { enriched, screened, targets };
-}
-
-
-// Seed `n` verdicts for an audience, `passes` of them passes, oldest first, as if
-// judged under `opts` (defaults: the question the screen asks today).
-async function seedVerdicts(
-  audienceId: string,
-  n: number,
-  passes: number,
-  opts: { targetText?: string; bar?: string; startMs?: number } = {}
-) {
-  const [row] = await db.select().from(audiences).where(eq(audiences.id, audienceId));
-  const target = screenTarget(row)!;
-  const text = opts.targetText ?? target.text;
-  const bar = opts.bar ?? screenBarTag();
-  const start = opts.startMs ?? Date.now() - 3_600_000;
+// Seed `n` caller decisions, `reveals` of them reveals spread through the
+// window, the rest declines, all under `basis`.
+async function seedDecisions(audienceId: string, n: number, reveals: number, basis = "criteria-v1") {
+  const step = reveals > 0 ? Math.floor(n / reveals) : 0;
+  const start = Date.now() - 3_600_000;
   const rows = Array.from({ length: n }, (_, i) => {
-    // Passes spread evenly through the window, not bunched at one end.
-    const verdict = passes > 0 && i % Math.floor(n / passes) === 0 && i / Math.floor(n / passes) < passes;
+    const revealed = reveals > 0 && i % step === 0 && i / step < reveals;
     return {
-      orgId: row.orgId,
+      orgId: ORG,
       audienceId,
       providerPersonId: `seed-${i}`,
-      linkedinUrl: null,
-      teaser: { name: "S", title: "Physician" } as never,
-      verdict,
-      yesProbability: verdict ? 0.9 : 0.05,
-      reason: `P(yes)=${verdict ? "0.900" : "0.050"} ${bar}`,
-      model: "typesafe/jev-1.13.0",
-      promptVersion: SCREEN_PROMPT_VERSION,
-      targetText: text,
-      targetField: target.field,
-      createdAt: new Date(start + i),
+      status: (revealed ? "revealed" : "declined") as "revealed" | "declined",
+      basis,
+      decidedAt: new Date(start + i),
     };
   });
   for (let i = 0; i < rows.length; i += 500) {
-    await db.insert(audienceTeaserScreenings).values(rows.slice(i, i + 500));
+    await db.insert(audienceCandidates).values(rows.slice(i, i + 500));
   }
 }
 
-function page(prefix: string, n: number, title: string) {
-  return Array.from({ length: n }, (_, i) => ({ id: `${prefix}${i}`, title: `${title} ${i}` }));
-}
+const next = (id: string) =>
+  request(app).post(`/orgs/audiences/${id}/candidates/next`).set(getAuthHeaders());
 
-describe("screen yield: an audience the screen has exhausted stops costing screens", () => {
-  it("answers exhausted, screens and reveals nobody, persists Remaining, asks the refill", async () => {
-    const calls = mockFleet({
-      pages: [[{ id: "c1", title: "Chiropractor" }]],
-      verdicts: { c1: 0.95 },
-    });
-    const id = await createDescribedAudience("US Chiropractic Clinicians", "practicing chiropractors in the US", 41954);
+describe("yield: an audience the caller's screen has exhausted stops costing pages", () => {
+  it("answers exhausted, pages and reveals nobody, persists Remaining, asks the refill once", async () => {
+    const calls = mockApollo(["c1"]);
+    const id = await createAudience("US Chiropractic Clinicians", 41954);
     // Shockwavecenters 2026-10-04: 2 passes in its last 1,000 screens.
-    await seedVerdicts(id, SCREEN_YIELD_WINDOW, 2);
+    await seedDecisions(id, SCREEN_YIELD_WINDOW, 2);
 
-    const res = await serveNext(id);
+    const res = await next(id);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ status: "exhausted", person: null });
-    expect(calls.screened).toEqual([]);
+    expect(res.body).toMatchObject({ status: "exhausted", candidate: null, reason: "yield_exhausted" });
+    expect(calls.searches).toBe(0);
     expect(calls.enriched).toEqual([]);
 
     // Same as a walked-out audience: the reachable ceiling is written, so the
@@ -273,80 +194,31 @@ describe("screen yield: an audience the screen has exhausted stops costing scree
     expect(row.status).toBe("active");
     expect(row.filters).toEqual({ personTitles: ["Chiropractor"] });
 
-    expect(refillSweep).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(refillSweep).toHaveBeenCalledTimes(1));
     expect(refillSweep).toHaveBeenCalledWith({ brandId: BRAND });
     // A campaign retrying the dead audience does not re-run the sweep each time.
-    await serveNext(id);
+    await next(id);
+    await new Promise((r) => setTimeout(r, 20));
     expect(refillSweep).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps serving a selective but productive audience (12 passes in 1,000)", async () => {
-    const calls = mockFleet({
-      pages: [[{ id: "c1", title: "Chiropractor" }]],
-      verdicts: { c1: 0.95 },
-    });
-    const id = await createDescribedAudience("Chiros", "practicing chiropractors in the US");
-    await seedVerdicts(id, SCREEN_YIELD_WINDOW, 12);
-
-    const res = await serveNext(id);
-    expect(res.body.status).toBe("served");
-    expect(calls.enriched).toEqual(["c1"]);
+  it("keeps offering a selective but productive audience (12 reveals in 1,000)", async () => {
+    const calls = mockApollo(["c1"]);
+    const id = await createAudience("Chiros");
+    await seedDecisions(id, SCREEN_YIELD_WINDOW, 12);
+    const res = await next(id);
+    expect(res.body.status).toBe("candidate");
+    expect(res.body.candidate.providerPersonId).toBe("c1");
+    expect(calls.searches).toBe(1);
     expect(refillSweep).not.toHaveBeenCalled();
   });
 
-  it("keeps serving a new audience whose window is not full yet, even at zero passes", async () => {
-    const calls = mockFleet({
-      pages: [[{ id: "c1", title: "Chiropractor" }]],
-      verdicts: { c1: 0.95 },
-    });
-    const id = await createDescribedAudience("Chiros", "practicing chiropractors in the US");
-    await seedVerdicts(id, SCREEN_YIELD_WINDOW - 1, 0);
-
-    const res = await serveNext(id);
-    expect(res.body.status).toBe("served");
-    expect(calls.screened).toEqual(["c1"]);
-  });
-
-  it("a dead window under another text or another bar does not count: a new question starts fresh", async () => {
-    const calls = mockFleet({
-      pages: [[{ id: "c1", title: "Chiropractor" }]],
-      verdicts: { c1: 0.95 },
-    });
-    const id = await createDescribedAudience("Chiros", "practicing chiropractors in the US");
-    // "European Union" 2026-09-29: dead under the retired 0.80 bar, productive at 0.50.
-    await seedVerdicts(id, SCREEN_YIELD_WINDOW, 0, { bar: "threshold>0.8" });
-    await seedVerdicts(id, SCREEN_YIELD_WINDOW, 0, { targetText: "an older text of this audience" });
-
-    const res = await serveNext(id);
-    expect(res.body.status).toBe("served");
-    expect(calls.enriched).toEqual(["c1"]);
-  });
-
-  it("stops mid-call once its own rejections fill a dead window, without dropping an unjudged teaser", async () => {
-    // 950 dead verdicts before the call: not a full window, so the walk starts.
-    // Every teaser Apollo returns is rejected; after 100 more screens the last
-    // 1,000 hold no pass and the call ends exhausted instead of walking on.
-    const rejects = page("r", 150, "Physician");
-    const verdicts = Object.fromEntries(rejects.map((t) => [t.id, 0.05]));
-    const calls = mockFleet({ pages: [rejects], verdicts });
-    const id = await createDescribedAudience("Chiros", "practicing chiropractors in the US");
-    await seedVerdicts(id, 950, 0, { startMs: Date.now() - 7_200_000 });
-
-    const res = await serveNext(id);
-    expect(res.body).toEqual({ status: "exhausted", person: null });
-    expect(calls.screened).toHaveLength(100);
-    expect(calls.enriched).toEqual([]);
-    // The 50 teasers never screened are still buffered, not lost.
-    const bronze = await db
-      .select()
-      .from(audienceTeaserScreenings)
-      .where(eq(audienceTeaserScreenings.audienceId, id));
-    expect(bronze).toHaveLength(1050);
-    const buffered = await db
-      .select()
-      .from(audienceTeaserBuffer)
-      .where(eq(audienceTeaserBuffer.audienceId, id));
-    expect(buffered).toHaveLength(50);
-    expect(refillSweep).toHaveBeenCalledWith({ brandId: BRAND });
+  it("keeps offering a new audience whose window is not full yet, even at zero reveals", async () => {
+    mockApollo(["c1"]);
+    const id = await createAudience("Fresh chiros");
+    await seedDecisions(id, SCREEN_YIELD_WINDOW - 1, 0);
+    const res = await next(id);
+    expect(res.body.status).toBe("candidate");
+    expect(refillSweep).not.toHaveBeenCalled();
   });
 });
