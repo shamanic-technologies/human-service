@@ -1694,7 +1694,10 @@ the features-service catalogue read backwards (`listKindOfOriginSlug`).
   (`CAMPAIGN_SERVICE_URL`/`_API_KEY`), applied when it differs from `source_campaign_states` (the last
   state applied, migration 0037). A **first sighting is never a transition**: campaign-service's
   migration mirrors today's state, so a first-seen OFF only records, a first-seen ON only creates when
-  the offer holds NO audience of that list (else `active` / `exists_inactive`, nothing moves). A
+  the offer holds NO audience of that list (else `active` / `exists_inactive`, nothing moves) AND the
+  origin is not the channel's DEFAULT (Apollo Cold Filters / Your CRM Contacts: campaign-service turns
+  those ON by itself, so first seen they are today's state; prod 2026-10-07 had a running cold-email
+  offer with no live audience that would have been given new ones). A
   failed / `not_computed` ON is recorded as not applied, so the next tick retries.
 - **Competitor-engagement sweep follows it**: once an offer has a recorded source state, the sweep's
   engagement audience is born PAUSED unless the LinkedIn source is ON (ON then resumes it, nothing to

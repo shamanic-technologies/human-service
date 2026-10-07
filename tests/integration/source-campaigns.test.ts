@@ -362,3 +362,22 @@ describe("the competitor-engagement sweep follows the offer's LinkedIn source", 
     expect(rows[0].status).toBe("active");
   });
 });
+
+describe("a first-seen ON of the offer's DEFAULT origin is today's state", () => {
+  it("Apollo Cold Filters / Your CRM Contacts first seen ON with no list build NOTHING (no spend nobody asked for)", async () => {
+    // An offer whose outreach runs with no live audience (prod 2026-10-07).
+    await insertAudience({ name: "Old", status: "archived", provider: "crm", crmUploadId: null, filters: null });
+    vi.mocked(crmListUploads).mockResolvedValue([{ id: "up-1", brandId: BRAND, filename: "c.csv", rowCount: 1, status: "ready" }]);
+    campaignSays([
+      { featureSlug: COLD, campaignId: COLD_CAMPAIGN, status: "ongoing", running: true },
+      { featureSlug: CRM, campaignId: "33333333-3333-4333-8333-333333333333", status: "ongoing", running: true },
+    ]);
+    const res = await reconcile();
+    expect(res.status).toBe(200);
+    expect(res.body.entries.map((e: { action: string }) => e.action).sort()).toEqual(["exists_inactive", "recorded"]);
+    expect(vi.mocked(proposeAudienceSplit)).not.toHaveBeenCalled();
+    expect(vi.mocked(createRun)).not.toHaveBeenCalled();
+    const live = await db.select().from(audiences).where(eq(audiences.status, "active"));
+    expect(live).toHaveLength(0);
+  });
+});
