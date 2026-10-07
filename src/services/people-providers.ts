@@ -311,9 +311,30 @@ export interface PeopleSearchResult {
   nextOffset: number | null;
 }
 
+// Why a reveal handed nobody back. Internal: the candidate API names it on
+// every `not_served`; /orgs/people/resolve-email strips it (shape unchanged).
+export type RevealBlockReason =
+  | "provider_skipped" // the provider declined to buy the reveal (no credit spent)
+  | "no_person" // the provider returned no person
+  | "opted_out"
+  | "won"
+  | "already_served" // served for the brand within the window (claimServe lost)
+  | "own_company"
+  | "bounced"
+  | "not_deliverable"; // the provider's verification says this address is not deliverable
+
+export interface RevealBlock {
+  reason: RevealBlockReason;
+  // not_deliverable: the verification verdict (catch_all, unknown, invalid, risky).
+  verdict?: string;
+  // provider_skipped: the provider's own reason (e.g. catch_all_domain).
+  detail?: string;
+}
+
 export interface ResolveEmailResult {
   provider: Provider;
   person: Person | null;
+  blocked?: RevealBlock;
 }
 
 export interface Identity {
@@ -1213,7 +1234,7 @@ async function finalizeResolved(
   // The provider's own verdict on the revealed email (null when no email).
   verification: EmailVerification | null
 ): Promise<ResolveEmailResult> {
-  if (!person) return { provider, person };
+  if (!person) return { provider, person, blocked: { reason: "no_person" } };
   // Standing opt-out — the last line, for somebody this gateway never served
   // before (so no `people` row tied their address to a pre-pay key) and whose
   // opt-out therefore could not be matched on the free teaser. The credit is
@@ -1223,7 +1244,7 @@ async function finalizeResolved(
     console.log(
       `[human-service] opt_out.blocked_post_reveal org=${identity.orgId} provider=${provider}`
     );
-    return { provider, person: null };
+    return { provider, person: null, blocked: { reason: "opted_out" } };
   }
   // Already WON by a brand of this request — a paying client is never handed
   // back to cold outreach by the brand that sold to them. Permanent (no 3-month
@@ -1233,7 +1254,7 @@ async function finalizeResolved(
     console.log(
       `[human-service] won_lead.blocked_post_reveal org=${identity.orgId} provider=${provider}`
     );
-    return { provider, person: null };
+    return { provider, person: null, blocked: { reason: "won" } };
   }
   const brandIds = identity.brandIds ?? [];
   // Will this address bounce? The provider verified it at reveal time
@@ -1256,7 +1277,7 @@ async function finalizeResolved(
       emailVerdict,
     }))
   ) {
-    return { provider, person: null };
+    return { provider, person: null, blocked: { reason: "already_served" } };
   }
   // The brand's OWN company — the last line, now that the reveal carries the
   // work email and the employer's domain (the teaser had the name only). After
@@ -1269,7 +1290,7 @@ async function finalizeResolved(
     console.log(
       `[human-service] own_company.blocked_post_reveal org=${identity.orgId} provider=${provider}`
     );
-    return { provider, person: null };
+    return { provider, person: null, blocked: { reason: "own_company" } };
   }
   // Hard bounce on one of OUR sends, fleet-wide — the last line, for a person
   // whose key we had never tied to this address before (so the free-teaser gate
@@ -1281,13 +1302,17 @@ async function finalizeResolved(
     console.log(
       `[human-service] bounce.blocked_post_reveal org=${identity.orgId} provider=${provider}`
     );
-    return { provider, person: null };
+    return { provider, person: null, blocked: { reason: "bounced" } };
   }
   if (!servable) {
     console.log(
       `[human-service] verify_email.rejected org=${identity.orgId} provider=${provider} verdict=${emailVerdict}`
     );
-    return { provider, person: null };
+    return {
+      provider,
+      person: null,
+      blocked: { reason: "not_deliverable", ...(emailVerdict ? { verdict: emailVerdict } : {}) },
+    };
   }
   return { provider, person };
 }
@@ -1328,10 +1353,28 @@ export async function resolveEmail(args: {
         "/enrich",
         { apolloPersonId: args.providerPersonId },
         args.identity
-      )) as { person: ApolloPerson | null; emailVerification?: unknown; buyingSignal?: unknown };
+      )) as {
+        person: ApolloPerson | null;
+        emailVerification?: unknown;
+        buyingSignal?: unknown;
+        revealSkipped?: { reason?: unknown } | null;
+      };
       const person = data.person
         ? normalizeApolloPerson(data.person, readBuyingSignal(data.buyingSignal))
         : null;
+      // apollo-service's reveal gate declined to buy (no credit spent): named,
+      // never a bare null.
+      if (!person && data.revealSkipped) {
+        const detail = data.revealSkipped.reason;
+        return {
+          provider,
+          person: null,
+          blocked: {
+            reason: "provider_skipped",
+            ...(typeof detail === "string" ? { detail } : {}),
+          },
+        };
+      }
       return finalizeResolved(
         provider,
         person,

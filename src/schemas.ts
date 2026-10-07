@@ -1491,6 +1491,29 @@ export const RevealCandidateResponseSchema = z
     personId: z.string().uuid().optional().openapi({
       description: "Canonical human-service person id, present on 'served' (same as serve-next).",
     }),
+    reason: z
+      .enum([
+        "provider_skipped",
+        "no_person",
+        "no_email",
+        "opted_out",
+        "won",
+        "already_served",
+        "own_company",
+        "bounced",
+        "not_deliverable",
+      ])
+      .optional()
+      .openapi({
+        description:
+          "On every 'not_served'. provider_skipped = the provider declined to buy the reveal (its mail domain cannot verify; NO credit spent). Every other reason comes after a bought reveal: no_person / no_email = the provider returned nobody / no address; not_deliverable = the address failed verification (see verdict); opted_out / won / already_served / own_company / bounced = a gate after the reveal.",
+      }),
+    verdict: z.string().optional().openapi({
+      description: "not_deliverable only: the verification verdict (catch_all, unknown, invalid, risky).",
+    }),
+    detail: z.string().optional().openapi({
+      description: "provider_skipped only: the provider's reason (catch_all_domain, checker_blocked_domain).",
+    }),
     replayed: z.boolean().openapi({
       description: "true ⟹ this candidate was already revealed; the stored answer is returned and nothing is billed again.",
     }),

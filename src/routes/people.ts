@@ -219,7 +219,9 @@ router.post(
       console.log(
         `[human-service] people.resolve_email org=${orgId} provider=${result.provider} found=${result.person !== null} audience=${parsed.data.audienceId ?? "none"}`
       );
-      res.json(result);
+      // `blocked` is internal (the candidate API names it); this route's shape is unchanged.
+      const { blocked: _blocked, ...body } = result;
+      res.json(body);
     } catch (err) {
       sendProviderError(res, err);
     }
