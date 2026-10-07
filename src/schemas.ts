@@ -2075,6 +2075,44 @@ registry.registerPath({
   },
 });
 
+export const AudienceSourcingOriginResponseSchema = z
+  .object({
+    audienceId: z.string().uuid(),
+    list: AudienceListKindSchema.openapi({
+      description:
+        "The list a serve-next of this audience draws from under the request's x-feature-slug: crm_contacts when it names the CRM outreach channel (sales-crm-email-outreach) or the CRM origin (sourcing-crm-contacts), whatever the audience's provider; else the audience's own list (channels[].list).",
+    }),
+    sourcingFeatureSlug: z.string().openapi({
+      description:
+        "features-service sourcing origin slug of that list (e.g. sourcing-apollo-cold-filters). Open the serve run under it and send it as x-feature-slug on serve-next: serve-next serves the same person under it as under the outreach channel slug.",
+    }),
+  })
+  .openapi("AudienceSourcingOriginResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/audiences/{id}/sourcing-origin",
+  summary: "Sourcing origin (features-service slug) a serve-next of this audience draws from",
+  description:
+    "Send the x-feature-slug you would send to serve-next today (the outreach channel). Read from features-service's /public/sourcing-origins catalogue (cached 10 min). 502 when features-service cannot name it, never a fallback.",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: orgsListsHeaders.extend({
+      "x-feature-slug": z.string().optional().openapi({
+        description: "The campaign's outreach channel slug, exactly as sent to serve-next today (sales-crm-email-outreach routes to the client's CRM).",
+      }),
+    }),
+    params: z.object({ id: z.string().uuid() }),
+  },
+  responses: {
+    200: { description: "Origin of the list served", content: { "application/json": { schema: AudienceSourcingOriginResponseSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    422: { description: "Audience has no committed provider (serves from no list)", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "features-service unreachable or names no origin for the list", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/orgs/audiences/{id}/screenings",

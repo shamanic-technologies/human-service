@@ -23,3 +23,23 @@ vi.mock("../src/lib/brand-identity.js", () => ({
     salesRepEmail: null,
   }),
 }));
+
+// Sourcing origins (src/lib/features-sourcing.ts) are read from features-service
+// by every list build (pointer build, refill, portfolio, competitor engagement,
+// preview companies). Default answer: the features-service catalogue as shipped
+// 2026-10-07. tests/**/sourcing-origin*.test.ts drive it themselves.
+vi.mock("../src/lib/features-sourcing.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/features-sourcing.js")>();
+  return {
+    ...actual,
+    fetchSourcingOriginsByList: vi.fn(async () =>
+      new Map([
+        ["apollo_search", "sourcing-apollo-cold-filters"],
+        ["apollo_buying_signal", "sourcing-apollo-buying-signals"],
+        ["linkedin_engagement", "sourcing-linkedin-engagement-signals"],
+        ["crm_contacts", "sourcing-crm-contacts"],
+        ["apify_search", "sourcing-apify-search"],
+      ])
+    ),
+  };
+});

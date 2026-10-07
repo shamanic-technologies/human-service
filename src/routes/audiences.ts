@@ -45,6 +45,7 @@ import { createLinkedinEngagementAudience } from "../services/linkedin-engagemen
 import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import { launchAudiencePortfolio } from "../services/audience-portfolio.js";
 import { estimateSplitSegments } from "../services/audience-split-estimate.js";
+import { serveListKind, sourcingOriginSlug, SourcingOriginError } from "../services/sourcing-origin.js";
 import {
   proposeAudienceSplit,
   confirmAudienceSplit,
@@ -1225,6 +1226,44 @@ router.get(
         providerPersonId: parsed.data.providerPersonId,
       })
     );
+  }
+);
+
+// --- GET /orgs/audiences/:id/sourcing-origin ---
+// Which sourcing origin a serve-next of this audience draws from, as the
+// features-service origin slug. lead-service reads it before opening its serve
+// run, sending the SAME x-feature-slug it would send to serve-next today (the
+// outreach channel): the CRM outreach channel serves from the client's CRM
+// whatever the audience's provider, so the answer depends on it. It then
+// forwards the returned slug as x-feature-slug on serve-next, which serves the
+// same person under either label.
+router.get(
+  "/orgs/audiences/:id/sourcing-origin",
+  requireApiKey,
+  requireOrgIdOnly,
+  async (req, res) => {
+    const orgId = res.locals.orgId as string;
+    const audience = await getAudienceInOrg(orgId, req.params.id);
+    if (!audience) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
+    const featureSlug = getWorkflowTracking(res.locals).featureSlug;
+    const list = serveListKind(audience, featureSlug);
+    if (!list) {
+      res.status(422).json({ error: "Audience has no committed provider — it serves from no list." });
+      return;
+    }
+    try {
+      res.json({ audienceId: audience.id, list, sourcingFeatureSlug: await sourcingOriginSlug(list) });
+    } catch (err) {
+      if (err instanceof SourcingOriginError) {
+        console.error(`[human-service] audience.sourcing_origin_failed audience=${audience.id} list=${list} ${err.message}`);
+        res.status(502).json({ error: err.message, source: "features-service" });
+        return;
+      }
+      throw err;
+    }
   }
 );
 

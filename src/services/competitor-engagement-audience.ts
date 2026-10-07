@@ -39,6 +39,7 @@ import { dedupeSegmentNames, pickOffer } from "./audience-refill.js";
 import { createLinkedinEngagementAudience } from "./linkedin-engagement-audience.js";
 import type { Identity } from "./people-providers.js";
 import { completeRun, createRun } from "./runs.js";
+import { sourcingOriginSlug, withSourcingOrigin } from "./sourcing-origin.js";
 
 /** apollo-service accepts 1-3 competitor pages per audience. */
 export const MAX_COMPETITOR_PAGES = 3;
@@ -147,7 +148,10 @@ async function ensureOnce(args: {
     const existing = await findExisting(args.orgId, args.brandId, args.offerId);
     if (existing) return done({ outcome: "exists", audienceId: existing.id });
 
-    const answer = await discoverBrandCompetitors(args.brandId, args.identity);
+    // Building this list is linkedin_engagement sourcing: the discovery and the
+    // creation carry that origin (unresolvable ⟹ failed, nothing spent).
+    const identity = withSourcingOrigin(args.identity, await sourcingOriginSlug("linkedin_engagement"));
+    const answer = await discoverBrandCompetitors(args.brandId, identity);
     if (answer.status === "not_computed") return done({ outcome: "not_computed", reason: answer.reason });
     const pages = pickCompetitorPages(answer.competitors);
     if (pages.length === 0) {
@@ -181,7 +185,7 @@ async function ensureOnce(args: {
       windowDays: COMPETITOR_ENGAGEMENT_WINDOW_DAYS,
       competitorPages: pages,
       baseFilters: {},
-      identity: { ...args.identity, brandIds: [args.brandId] },
+      identity: { ...identity, brandIds: [args.brandId] },
     });
     return done({ outcome: "created", audienceId: row.id, pages });
   } catch (err) {
@@ -298,7 +302,14 @@ export async function runCompetitorEngagementSweep(
         continue;
       }
 
-      const tracking = { brandIds: [brandId] };
+      let tracking: { brandIds: string[]; featureSlug: string };
+      try {
+        tracking = { brandIds: [brandId], featureSlug: await sourcingOriginSlug("linkedin_engagement") };
+      } catch (err) {
+        entry.reason = `sourcing_origin_unresolved: ${err instanceof Error ? err.message : String(err)}`;
+        console.error(`[human-service] competitor_engagement.sweep_origin_failed org=${orgId} brand=${brandId} ${entry.reason}`);
+        continue;
+      }
       const runId = await createRun({ orgId, userId, taskName: "competitor-engagement-audience", workflowTracking: tracking });
       if (!runId) {
         entry.reason = "run_failed";

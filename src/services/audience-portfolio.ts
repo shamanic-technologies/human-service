@@ -67,6 +67,7 @@ import { dedupeSegmentNames } from "./audience-refill.js";
 import { ensureApolloPointer } from "./audiences.js";
 import type { Identity } from "./people-providers.js";
 import { completeRun, createRun } from "./runs.js";
+import { sourcingOriginSlug, withSourcingOrigin } from "./sourcing-origin.js";
 import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
@@ -240,13 +241,26 @@ async function runLaunch(args: LaunchPortfolioArgs, key: string): Promise<Portfo
   const closeRun = async (status: "completed" | "failed") => {
     if (ownRunId) await completeRun(ownRunId, status, runIdentity);
   };
+  // The launch builds lists of several origins, so its own run carries none; each
+  // part's calls carry the origin of the lists it builds (the cold split: Apollo
+  // search; the ICP build + coverage + signal rows: Apollo buying signals; the
+  // competitor-engagement audience labels itself). Unresolvable ⟹ fail loud.
+  let coldIdentity: Identity;
+  let signalIdentity: Identity;
+  try {
+    coldIdentity = withSourcingOrigin(identity, await sourcingOriginSlug("apollo_search"));
+    signalIdentity = withSourcingOrigin(identity, await sourcingOriginSlug("apollo_buying_signal"));
+  } catch (err) {
+    await closeRun("failed");
+    throw err;
+  }
 
   // The ICP's apollo audience only feeds the signals, so it is built alongside
   // the cold part. Its failure is a signal failure, never the launch's: settle
   // it into a value right away (no unhandled rejection if the cold part throws).
   const icpBase: Promise<IcpBase> = portfolio.icpApolloAudienceId
     ? Promise.resolve({ ok: true, id: portfolio.icpApolloAudienceId })
-    : buildIcpApolloAudience(icpText, args.brandId, identity).then(
+    : buildIcpApolloAudience(icpText, args.brandId, signalIdentity).then(
         async (id) => {
           await db
             .update(audiencePortfolios)
@@ -261,7 +275,7 @@ async function runLaunch(args: LaunchPortfolioArgs, key: string): Promise<Portfo
   let target = portfolio.target;
   if (!coldIds) {
     try {
-      const cold = await buildColdAudiences(icpText, args, identity);
+      const cold = await buildColdAudiences(icpText, args, coldIdentity);
       coldIds = cold.ids;
       target = cold.target;
     } catch (err) {
@@ -274,7 +288,7 @@ async function runLaunch(args: LaunchPortfolioArgs, key: string): Promise<Portfo
       .where(eq(audiencePortfolios.id, portfolio.id));
   }
 
-  const background = finishSignals({ portfolio, icpBase, target, args, identity, closeRun })
+  const background = finishSignals({ portfolio, icpBase, target, args, identity, signalIdentity, closeRun })
     .catch((err) =>
       // The row stays `building` with its cold set: the next call resumes.
       console.error(`[human-service] audience_portfolio.background_failed portfolio=${portfolio.id}`, err)
@@ -291,6 +305,7 @@ async function finishSignals(input: {
   target: string | null;
   args: LaunchPortfolioArgs;
   identity: Identity;
+  signalIdentity: Identity;
   closeRun: (status: "completed" | "failed") => Promise<void>;
 }): Promise<void> {
   const { portfolio, args } = input;
@@ -299,7 +314,7 @@ async function finishSignals(input: {
       base: await input.icpBase,
       target: input.target,
       args,
-      identity: input.identity,
+      identity: input.signalIdentity,
     });
     // The competitor-engagement audience (competitor-engagement-audience.ts):
     // free to create, built from brand-service's competitor pages. Never fails

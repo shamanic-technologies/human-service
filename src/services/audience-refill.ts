@@ -67,6 +67,7 @@ import { confirmAudienceSplit, proposeAudienceSplit } from "./audience-split.js"
 import { draftAudienceTarget } from "./audience-target.js";
 import { listBrandOffers } from "../lib/brand-offers.js";
 import { completeRun, createRun } from "./runs.js";
+import { sourcingOriginSlug } from "./sourcing-origin.js";
 import { ensureTargetText } from "./audience-target-text.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
@@ -544,7 +545,15 @@ async function refillBrand(
     .orderBy(desc(audiences.createdAt))
     .limit(40);
 
-  const tracking = { brandIds: [pool.brandId] };
+  // A refill builds new Apollo search lists: its run and every call under it
+  // carry that sourcing origin (unresolvable ⟹ skipped loud, nothing spent).
+  let featureSlug: string;
+  try {
+    featureSlug = await sourcingOriginSlug("apollo_search");
+  } catch (err) {
+    return skip("failed", `sourcing origin unresolved: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const tracking = { brandIds: [pool.brandId], featureSlug };
   const runId = await createRun({
     orgId: pool.orgId,
     userId,
