@@ -60,9 +60,9 @@ import {
 } from "./people-providers.js";
 import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import { ensureTargetText, screenTarget } from "./audience-target-text.js";
+import { isCrmSourcedFeature } from "./sourcing-origin.js";
 import {
   AudienceNotServableError,
-  CRM_OUTREACH_FEATURE_SLUG,
   ensureApolloPointer,
   exhaustOnScreenYield,
   hasUsableEmail,
@@ -168,7 +168,7 @@ function toView(row: AudienceCandidate): CandidateView {
 // is no free moment to hand out: those keep serve-next.
 function assertCandidateProvider(audience: AudienceRow, identity: Identity): void {
   if (
-    identity.workflowTracking?.featureSlug === CRM_OUTREACH_FEATURE_SLUG ||
+    isCrmSourcedFeature(identity.workflowTracking?.featureSlug) ||
     audience.provider !== "apollo"
   ) {
     throw new AudienceNotServableError(

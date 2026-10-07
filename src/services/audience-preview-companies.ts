@@ -24,6 +24,7 @@ import {
   type ApolloPreviewCompanyRow,
 } from "../lib/apollo-audiences.js";
 import { completeRun, createRun } from "./runs.js";
+import { audienceSourcingOriginSlug } from "./sourcing-origin.js";
 import { ProviderError, type Identity } from "./people-providers.js";
 import type { AudiencePreviewReason } from "./audience-preview.js";
 import { isOwnCompany, loadOwnCompany, type OwnCompany } from "./own-company.js";
@@ -240,10 +241,13 @@ async function withRun<T>(
   identity: Identity,
   fn: (identity: Identity) => Promise<T>
 ): Promise<T> {
+  // The company table builds the audience's list: its run and every call under
+  // it carry the list's sourcing origin (unresolvable ⟹ throws, nothing spent).
   const tracking = {
     ...(identity.workflowTracking ?? {}),
     brandIds: [audience.brandId],
     audienceId: audience.id,
+    featureSlug: await audienceSourcingOriginSlug(audience),
   };
   const scoped: Identity = { ...identity, brandIds: [audience.brandId], workflowTracking: tracking };
   if (identity.runId) return fn(scoped);

@@ -99,6 +99,7 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/{candidateId}/reveal` | apiKey + `x-org-id` + `x-user-id` | Billed reveal of an offered candidate, recorded as served exactly like serve-next; billed once (replay) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/{candidateId}/decline` | apiKey + `x-org-id` | Decline: never offered/served again for that audience, Size drops by one (same exclusion set as the screen) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/screenings` | apiKey + `x-org-id` | Past pre-pay screen verdicts (bronze), oldest first, `limit`/`offset`/`providerPersonId` |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/sourcing-origin` | apiKey + `x-org-id` (+ `x-feature-slug`) | `{audienceId, list, sourcingFeatureSlug}`: the features-service sourcing origin a serve-next of it draws from (lead-service labels its serve run with it). See "Sourcing origin label" |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview` | apiKey + `x-org-id` + `x-user-id` | Free sample of who the audience reaches: ~10 real companies + ~20 real people (no email/phone), taken once and stored on the row |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview/email-checks` | apiKey + `x-org-id` + `x-user-id` | Free read: for the preview's first 5 people, pending / found (verdict, finder) / not found. Never an address |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/preview/email-checks/next` | apiKey + `x-org-id` + `x-user-id` | Check ONE more sampled person: apollo billed reveal + verification (cost in apollo-service, caller's org), outcome stored, whole state returned. Loop until `done` |
@@ -2535,6 +2536,24 @@ key-service, `scraping.ts` → scraping-service, `chat-client.ts` → chat-servi
   provider routing**: the CRM-outreach feature sources from crm-service regardless of
   the audience's stored provider (see the serve-next section). Absent outside the
   campaign flow ⟹ omitted, never thrown.
+- **Sourcing origin label (2026-10-07, `src/services/sourcing-origin.ts`).** Cents
+  spent FINDING a lead carry the features-service sourcing origin of the list
+  (`sourcing-apollo-cold-filters` / `-apollo-buying-signals` /
+  `-linkedin-engagement-signals` / `-crm-contacts` / `-apify-search`), read from
+  features-service `GET /public/sourcing-origins` (list kind -> slug, cached 10
+  min, `FEATURES_SERVICE_URL`; unresolvable ⟹ `SourcingOriginError`, never a
+  fallback label). **Serve**: lead-service asks `GET /orgs/audiences/{id}/sourcing-origin`
+  (sending its outreach slug as `x-feature-slug`; the CRM outreach channel answers
+  `crm_contacts` whatever the provider), opens its serve run under the returned
+  slug and sends it on serve-next. serve-next routes `sourcing-crm-contacts`
+  exactly like `sales-crm-email-outreach` (`isCrmSourcedFeature`), every other
+  slug leaves the audience's provider in charge ⟹ same person either label.
+  **List building**: the pointer build, preview companies, refill and
+  competitor-engagement runs AND every call forwarded under them carry their
+  list's origin (`withSourcingOrigin`); the portfolio launch run carries none
+  (several origins), its cold / signal parts' calls carry theirs. runs-service
+  accepts a sourcing child under an outreach parent (v0.47.24), never two
+  different sourcing slugs. Not labelled: split estimate, target draft (no list).
 - **Egress guardrail**: every downstream URL human-service calls
   (apollo/apify/chat/runs/key/scraping) is an INTERNAL sibling — the actual
   vendor (anthropic/gemini/apollo.io/apify actor) is reached INSIDE those
