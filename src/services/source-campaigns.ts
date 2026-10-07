@@ -131,6 +131,19 @@ export interface ApplySourceArgs {
 
 const RETIRED_LISTS = new Set<AudienceListKind>(["apify_search"]);
 
+/**
+ * The origins an outreach channel found its leads from BEFORE sources were campaigns
+ * (campaign-service DEFAULT_SOURCE_ORIGIN_BY_CHANNEL: cold email -> Apollo Cold Filters,
+ * CRM email -> Your CRM Contacts). campaign-service creates them ON by itself (its
+ * migration mirrors the outreach status, a first outreach start is born with it), so a
+ * first-seen ON of one is TODAY'S state, never a customer's new choice: it builds nothing
+ * (prod 2026-10-07: an offer whose cold-email outreach runs with no live audience would
+ * otherwise have been given new audiences, and spend, it never asked for). Any other
+ * origin is only mirrored when it already spent (its list exists), so a first-seen ON of
+ * one with no list is a person who just turned it on.
+ */
+const DEFAULT_ORIGINS = new Set(["sourcing-apollo-cold-filters", "sourcing-crm-contacts"]);
+
 // One apply per scope at a time in this process (push and reconcile can meet).
 const scopeLocks = new Map<string, Promise<unknown>>();
 function withScopeLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -313,6 +326,11 @@ async function firstSighting(args: ApplySourceArgs, list: AudienceListKind, resu
   // exhausted): today's state, left exactly as it is.
   if (rows.length > 0) {
     result.outcome = "exists_inactive";
+    return;
+  }
+  if (DEFAULT_ORIGINS.has(args.originSlug)) {
+    result.outcome = "recorded";
+    result.reason = "default origin first seen ON: today's state, nothing built";
     return;
   }
   await createList(args, list, result);
