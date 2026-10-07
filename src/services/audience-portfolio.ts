@@ -564,6 +564,38 @@ async function buildSignalAudiences(input: {
   return outcomes;
 }
 
+/**
+ * The buying-signal audiences of ONE offer, outside a launch (a source campaign
+ * "Apollo Buying Signals" turned ON for an offer that holds none,
+ * src/services/source-campaigns.ts). Measured on the offer's recorded ICP pointer
+ * when a launch built one, else on one exploration of `target`. Same outcomes,
+ * threshold and rows as the launch; `identity` must already carry the buying-signal
+ * origin. Never throws for a signal: each failure is that signal's outcome.
+ */
+export async function buildBuyingSignalAudiencesForOffer(args: LaunchPortfolioArgs & { target: string }): Promise<SignalOutcome[]> {
+  const [p] = await db
+    .select({ icpApolloAudienceId: audiencePortfolios.icpApolloAudienceId })
+    .from(audiencePortfolios)
+    .where(
+      and(
+        eq(audiencePortfolios.orgId, args.orgId),
+        eq(audiencePortfolios.brandId, args.brandId),
+        eq(audiencePortfolios.offerId, args.offerId)
+      )
+    );
+  let base: IcpBase;
+  if (p?.icpApolloAudienceId) {
+    base = { ok: true, id: p.icpApolloAudienceId };
+  } else {
+    try {
+      base = { ok: true, id: await buildIcpApolloAudience(args.icpText, args.brandId, args.identity) };
+    } catch (err) {
+      base = { ok: false, reason: errMessage(err) };
+    }
+  }
+  return buildSignalAudiences({ base, target: args.target, args, identity: args.identity });
+}
+
 function failedOutcome(
   args: LaunchPortfolioArgs,
   type: BuyingSignalType,

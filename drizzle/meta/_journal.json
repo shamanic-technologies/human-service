@@ -260,6 +260,13 @@
       "when": 1771587971299,
       "tag": "0036_add_audience_candidates",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1771587972299,
+      "tag": "0037_add_source_campaign_states",
+      "breakpoints": true
     }
   ]
 }
