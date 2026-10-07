@@ -86,6 +86,8 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/split/estimate` | apiKey + `x-org-id` + `x-user-id` | Proposed segments (1-8, name + description) -> approximate verified-email people count each. One cheap filter draft + free dry-runs, creates no audience |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/split/confirm` | apiKey + `x-org-id` | Kept segments → ACTIVE audiences under brand + offer, all or nothing (409 on a taken name) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/portfolio` | apiKey + `x-org-id` + `x-user-id` | Launch-time ICP portfolio for brand + offer: cold split (adopted if pre-confirmed) + one buying-signal audience per signal reaching 20+ companies, all ACTIVE, one shared nl_prompt. Idempotent per (org, brand, offer) |
+| Org-scoped (Source campaigns) | `POST /orgs/source-campaigns/state` | apiKey + `x-org-id` (+ `x-user-id`) | A source campaign of an offer turned ON / OFF: ON = the origin's audience exists for the offer and is active (resumed, else created); OFF = paused + held. Idempotent. See "Source campaigns" |
+| Internal | `POST /internal/source-campaigns/reconcile` | apiKey | Reconcile now (`?dryRun&orgId&offerId`; also every 2 min): read campaign-service, apply each on/off that changed |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/signal` | apiKey + `x-org-id` + `x-user-id` | Create a `linkedin_engagement` signal audience (competitor LinkedIn post engagers); apollo-service's 4xx relayed |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider + optional `crmUploadId` source binding + optional `offerId` scope) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` / `offerId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
@@ -1667,6 +1669,37 @@ audiences use.
   switch the refill off fleet-wide.
 - Tests: `tests/integration/competitor-engagement-audience.test.ts`,
   `tests/unit/competitor-engagement-pages.test.ts`.
+
+### Source campaigns — an offer's lead sources are campaigns (`src/services/source-campaigns.ts`)
+
+Owner 2026-10-07: `[Apollo Cold Filters] -> Lead found [On] [Up to $X/day]` per origin, beside
+`Lead found -> Sales Cold Email -> Positive reply`. campaign-service OWNS on/off (a campaign keyed
+offer + featureSlug = origin slug + legKey `start_to_lead_found`); this service keeps the offer's
+audiences in step, because campaigns serve the offer's ACTIVE audiences. The origin's list kind is
+the features-service catalogue read backwards (`listKindOfOriginSlug`).
+- **ON**: release the holds an earlier OFF left (only audiences still `paused`; a person who changed
+  one since wins); none of the list active ⟹ resume the newest paused one; none live (archived
+  aside) ⟹ CREATE, done for the customer: `apollo_search` = split of the offer's validated target
+  (`pickValidatedTarget`, else its portfolio target; `source='source_campaign'`), `apollo_buying_signal`
+  = `buildBuyingSignalAudiencesForOffer` (portfolio ICP pointer reused, same threshold),
+  `linkedin_engagement` = `ensureCompetitorEngagementAudience` (`ignoreArchived`, born active),
+  `crm_contacts` = one `provider='crm'` audience per uploaded file not bound yet (needs
+  `CRM_SERVICE_URL`/`_API_KEY`). Built under a `source-campaign-audience` run labelled with the origin
+  slug AND the source campaign id, billed to the caller's user else the brand's audience creator.
+- **OFF**: every ACTIVE audience of that list under the offer ⟹ `paused` + a row in
+  `source_campaign_audience_holds` (one open hold per audience). History kept.
+- **Transport**: PUSH `POST /orgs/source-campaigns/state` (always applied) and RECONCILE every
+  `SOURCE_CAMPAIGN_RECONCILE_INTERVAL_MS` (2 min, `0` = off): every (org, brand, offer) holding
+  audiences or a state ⟹ campaign-service `GET /internal/offers/{offerId}/source-campaigns?brandId=`
+  (`CAMPAIGN_SERVICE_URL`/`_API_KEY`), applied when it differs from `source_campaign_states` (the last
+  state applied, migration 0037). A **first sighting is never a transition**: campaign-service's
+  migration mirrors today's state, so a first-seen OFF only records, a first-seen ON only creates when
+  the offer holds NO audience of that list (else `active` / `exists_inactive`, nothing moves). A
+  failed / `not_computed` ON is recorded as not applied, so the next tick retries.
+- **Competitor-engagement sweep follows it**: once an offer has a recorded source state, the sweep's
+  engagement audience is born PAUSED unless the LinkedIn source is ON (ON then resumes it, nothing to
+  build); an offer whose sources are not campaigns yet keeps "born active".
+- Both tables are in the brand transfer. Tests: `tests/integration/source-campaigns.test.ts`.
 
 ### Audience refill — a paying brand never runs dry (`src/services/audience-refill.ts`)
 

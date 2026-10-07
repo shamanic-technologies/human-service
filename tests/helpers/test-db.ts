@@ -17,6 +17,8 @@ import {
   people,
   suppressionRecoveries,
   suppressionBackfills,
+  sourceCampaignStates,
+  sourceCampaignAudienceHolds,
 } from "../../src/db/schema.js";
 import { sql } from "../../src/db/index.js";
 
@@ -36,6 +38,8 @@ export async function cleanTestData() {
   await db.delete(audienceMembers);
   await db.delete(audiencePortfolios);
   await db.delete(audienceWideningProposals);
+  await db.delete(sourceCampaignAudienceHolds);
+  await db.delete(sourceCampaignStates);
   await db.delete(audiences);
   await db.delete(people);
 }

@@ -10,6 +10,7 @@ import transferBrandRoutes from "./routes/transfer-brand.js";
 import backfillRoutes from "./routes/backfill.js";
 import audienceRefillRoutes from "./routes/audience-refill.js";
 import competitorEngagementRoutes from "./routes/competitor-engagement.js";
+import sourceCampaignRoutes from "./routes/source-campaigns.js";
 import listsRoutes from "./routes/lists.js";
 import peopleRoutes from "./routes/people.js";
 import audiencesRoutes from "./routes/audiences.js";
@@ -21,6 +22,7 @@ import { register as runInstrumentation } from "./instrumentation.js";
 import { startOfferAttributionSweep } from "./services/offer-attribution-sweep.js";
 import { startAudienceRefillSweep } from "./services/audience-refill.js";
 import { startCompetitorEngagementSweep } from "./services/competitor-engagement-audience.js";
+import { startSourceCampaignReconcile } from "./services/source-campaigns.js";
 
 // Process-level safety net: a single request must NEVER crash-loop the whole
 // service. Before this, an unawaited async rejection (e.g. a bad `uuid` param →
@@ -59,6 +61,7 @@ app.use(backfillRoutes);
 app.use(audienceRefillRoutes);
 app.use(audienceSnapshotRoutes);
 app.use(competitorEngagementRoutes);
+app.use(sourceCampaignRoutes);
 app.use(suppressionRecoveryRoutes);
 app.use(listsRoutes);
 app.use(peopleRoutes);
@@ -105,6 +108,10 @@ if (process.env.NODE_ENV !== "test") {
   // yet (existing brands, and brands whose competitors were not computed at
   // launch). Free to create. Timers only.
   startCompetitorEngagementSweep();
+
+  // Source campaigns (owner 2026-10-07): keep each offer's audiences in step with the
+  // on/off of its source campaigns in campaign-service. Timers only.
+  startSourceCampaignReconcile();
 }
 
 export default app;
