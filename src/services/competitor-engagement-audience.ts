@@ -31,7 +31,7 @@
 
 import { and, desc, eq, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { audiences } from "../db/schema.js";
+import { audiences, sourceCampaignStates } from "../db/schema.js";
 import { discoverBrandCompetitors, type BrandCompetitor } from "../lib/brand-competitors.js";
 import { canBeCharged, getPaymentOutlook } from "../lib/billing-outlook.js";
 import { getMigrationState } from "../lib/migration-state.js";
@@ -80,8 +80,12 @@ export function pickCompetitorPages(competitors: BrandCompetitor[]): string[] {
   return pages;
 }
 
-/** The scope's existing linkedin_engagement audience, any status, any source. */
-async function findExisting(orgId: string, brandId: string, offerId: string | null) {
+/**
+ * The scope's existing linkedin_engagement audience, any status, any source.
+ * `ignoreArchived`: a row a person archived does not count (a source campaign the
+ * customer turned ON asks for a live one; the sweep never re-creates after an archive).
+ */
+async function findExisting(orgId: string, brandId: string, offerId: string | null, ignoreArchived = false) {
   const [row] = await db
     .select({ id: audiences.id })
     .from(audiences)
@@ -90,11 +94,40 @@ async function findExisting(orgId: string, brandId: string, offerId: string | nu
         eq(audiences.orgId, orgId),
         eq(audiences.brandId, brandId),
         offerId ? eq(audiences.offerId, offerId) : sql`${audiences.offerId} is null`,
-        sql`${audiences.filters}->'buying_signal'->>'type' = 'linkedin_engagement'`
+        sql`${audiences.filters}->'buying_signal'->>'type' = 'linkedin_engagement'`,
+        ...(ignoreArchived ? [sql`${audiences.status} not in ('archived', 'deprecated')`] : [])
       )
     )
     .limit(1);
   return row ?? null;
+}
+
+/**
+ * SOURCE CAMPAIGNS (src/services/source-campaigns.ts): once an offer's lead sources are
+ * campaigns (source_campaign_states holds a row for the offer), this audience is the
+ * "LinkedIn Engagement Signals" source's list, so it is born PAUSED unless that source
+ * is ON (its ON resumes it at once, nothing left to build). An offer whose sources are
+ * not campaigns yet keeps the owner's 2026-10-03 rule: born active.
+ */
+async function birthStatus(
+  orgId: string,
+  brandId: string,
+  offerId: string | null,
+  originSlug: string | undefined
+): Promise<"active" | "paused"> {
+  if (!offerId || !originSlug) return "active";
+  const rows = await db
+    .select({ originSlug: sourceCampaignStates.originSlug, status: sourceCampaignStates.status })
+    .from(sourceCampaignStates)
+    .where(
+      and(
+        eq(sourceCampaignStates.orgId, orgId),
+        eq(sourceCampaignStates.brandId, brandId),
+        eq(sourceCampaignStates.offerId, offerId)
+      )
+    );
+  if (rows.length === 0) return "active";
+  return rows.some((r) => r.originSlug === originSlug && r.status === "on") ? "active" : "paused";
 }
 
 const inFlight = new Map<string, Promise<CompetitorEngagementOutcome>>();
@@ -110,8 +143,12 @@ export async function ensureCompetitorEngagementAudience(args: {
   offerId: string | null;
   target: string;
   identity: Identity;
+  /** An archived row does not count as existing (source campaign ON). Default false. */
+  ignoreArchived?: boolean;
+  /** Born status. Default: active, unless the offer's source campaigns say LinkedIn is OFF (birthStatus). */
+  status?: "active" | "paused";
 }): Promise<CompetitorEngagementOutcome> {
-  const key = `${args.orgId}:${args.brandId}:${args.offerId ?? "-"}`;
+  const key = `${args.orgId}:${args.brandId}:${args.offerId ?? "-"}:${args.ignoreArchived ? "live" : "any"}`;
   const running = inFlight.get(key);
   if (running) return running;
   const p = ensureOnce(args).finally(() => inFlight.delete(key));
@@ -126,6 +163,10 @@ async function ensureOnce(args: {
   offerId: string | null;
   target: string;
   identity: Identity;
+  /** An archived row does not count as existing (source campaign ON). Default false. */
+  ignoreArchived?: boolean;
+  /** Born status. Default: active, unless the offer's source campaigns say LinkedIn is OFF (birthStatus). */
+  status?: "active" | "paused";
 }): Promise<CompetitorEngagementOutcome> {
   const out: CompetitorEngagementOutcome = {
     orgId: args.orgId,
@@ -145,7 +186,7 @@ async function ensureOnce(args: {
   };
 
   try {
-    const existing = await findExisting(args.orgId, args.brandId, args.offerId);
+    const existing = await findExisting(args.orgId, args.brandId, args.offerId, args.ignoreArchived);
     if (existing) return done({ outcome: "exists", audienceId: existing.id });
 
     // Building this list is linkedin_engagement sourcing: the discovery and the
@@ -166,7 +207,7 @@ async function ensureOnce(args: {
 
     // Re-check after the (possibly slow) discovery: a concurrent path may have
     // created it meanwhile.
-    const raced = await findExisting(args.orgId, args.brandId, args.offerId);
+    const raced = await findExisting(args.orgId, args.brandId, args.offerId, args.ignoreArchived);
     if (raced) return done({ outcome: "exists", audienceId: raced.id, pages });
 
     const taken = await db
@@ -174,6 +215,7 @@ async function ensureOnce(args: {
       .from(audiences)
       .where(and(eq(audiences.orgId, args.orgId), eq(audiences.brandId, args.brandId)));
     const [name] = dedupeSegmentNames([COMPETITOR_ENGAGEMENT_NAME], taken.map((t) => t.name));
+    const status = args.status ?? (await birthStatus(args.orgId, args.brandId, args.offerId, identity.workflowTracking?.featureSlug));
     const row = await createLinkedinEngagementAudience({
       orgId: args.orgId,
       userId: args.userId,
@@ -181,7 +223,7 @@ async function ensureOnce(args: {
       offerId: args.offerId,
       name,
       nlPrompt: args.target,
-      status: "active",
+      status,
       windowDays: COMPETITOR_ENGAGEMENT_WINDOW_DAYS,
       competitorPages: pages,
       baseFilters: {},

@@ -3833,3 +3833,110 @@ registry.registerPath({
     ...snapshotErrors,
   },
 });
+
+// --- SOURCE CAMPAIGNS (owner 2026-10-07; src/services/source-campaigns.ts) ---
+//
+// A lead SOURCE of an offer is a campaign-service campaign keyed (offer, featureSlug =
+// <origin slug>, legKey = "start_to_lead_found"). ON = its origin's audience exists for
+// the offer and is active; OFF = paused, history kept.
+
+const SOURCE_OUTCOMES = [
+  "paused",
+  "none_active",
+  "active",
+  "resumed",
+  "created",
+  "no_target",
+  "not_computed",
+  "exists_inactive",
+  "recorded",
+  "unchanged",
+  "retired_origin",
+  "failed",
+] as const;
+
+export const SourceCampaignStateRequestSchema = z
+  .object({
+    brandId: z.string().regex(LAX_UUID_REGEX, "brandId must be a valid UUID"),
+    offerId: z.string().regex(LAX_UUID_REGEX, "offerId must be a valid UUID"),
+    originSlug: z.string().min(1).openapi({
+      description: "The sourcing origin slug (features-service catalogue), e.g. sourcing-linkedin-engagement-signals.",
+    }),
+    campaignId: z.string().min(1).nullable().openapi({
+      description: "campaign-service's id of the source campaign (null when none exists yet).",
+    }),
+    status: z.enum(["on", "off"]),
+  })
+  .openapi("SourceCampaignStateRequest");
+
+export const SourceCampaignStateResponseSchema = z
+  .object({
+    orgId: z.string(),
+    brandId: z.string(),
+    offerId: z.string(),
+    originSlug: z.string(),
+    listKind: z.enum(AUDIENCE_LIST_KINDS).nullable(),
+    campaignId: z.string().nullable(),
+    status: z.enum(["on", "off"]),
+    previousStatus: z.enum(["on", "off"]).nullable(),
+    outcome: z.enum(SOURCE_OUTCOMES),
+    reason: z.string().nullable(),
+    audiences: z.array(z.object({ id: z.string(), name: z.string(), status: z.string() })),
+  })
+  .openapi("SourceCampaignStateResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/source-campaigns/state",
+  summary:
+    "A source campaign of an offer was turned ON or OFF (campaign-service owns the switch). ON: the origin's audience exists for the offer and is active (an audience an earlier OFF paused is resumed, else one is created from what the platform knows: the offer's target, its buying signals, competitors' LinkedIn pages, the brand's uploaded contacts). OFF: every active audience of that list under the offer is paused, history kept, and resumed by the next ON. Idempotent. The same state is also reconciled from campaign-service every 2 minutes.",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: SourceCampaignStateRequestSchema } } } },
+  responses: {
+    200: { description: "Applied", content: { "application/json": { schema: SourceCampaignStateResponseSchema } } },
+    400: { description: "Invalid body or unknown origin", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+export const SourceCampaignReconcileQuerySchema = z.object({
+  dryRun: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({ description: "When 'true', read campaign-service and report what WOULD be applied, writing nothing." }),
+  orgId: z.string().regex(LAX_UUID_REGEX, "orgId must be a valid UUID").optional(),
+  offerId: z.string().regex(LAX_UUID_REGEX, "offerId must be a valid UUID").optional(),
+});
+
+export const SourceCampaignReconcileResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    offers: z.number().int(),
+    applied: z.number().int(),
+    entries: z.array(
+      z.object({
+        orgId: z.string(),
+        brandId: z.string(),
+        offerId: z.string(),
+        originSlug: z.string().nullable(),
+        action: z.enum([...SOURCE_OUTCOMES, "would_apply", "read_failed"]),
+        status: z.enum(["on", "off"]).nullable(),
+        reason: z.string().nullable(),
+      })
+    ),
+  })
+  .openapi("SourceCampaignReconcileResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/source-campaigns/reconcile",
+  summary:
+    "Reconcile now (also runs every 2 minutes): read every offer's source campaigns from campaign-service and apply each on/off that changed since the last one applied. A source campaign seen for the first time is recorded, never treated as a change (an ON one only gets an audience when the offer holds none of its list).",
+  security: [{ apiKey: [] }],
+  request: { query: SourceCampaignReconcileQuerySchema },
+  responses: {
+    200: { description: "Reconcile result", content: { "application/json": { schema: SourceCampaignReconcileResponseSchema } } },
+    401: { description: "Unauthorized" },
+    409: { description: "Already running or migrations not ready", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});

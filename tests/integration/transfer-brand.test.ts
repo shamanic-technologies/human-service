@@ -8,7 +8,7 @@ import {
   insertMethodology,
 } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
-import { humanMethodologies } from "../../src/db/schema.js";
+import { audiences, humanMethodologies, sourceCampaignAudienceHolds, sourceCampaignStates } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 
 const app = createTestApp();
@@ -29,6 +29,46 @@ afterAll(async () => {
 });
 
 describe("POST /internal/transfer-brand", () => {
+  it("moves the brand's source-campaign states and audience holds with it", async () => {
+    const OFFER = "c0000000-0000-4000-8000-000000000001";
+    const [aud] = await db
+      .insert(audiences)
+      .values({ orgId: SOURCE_ORG, brandId: BRAND_A, offerId: OFFER, name: "Engaged", status: "paused", provider: "apollo" })
+      .returning();
+    await db.insert(sourceCampaignStates).values({
+      orgId: SOURCE_ORG,
+      brandId: BRAND_A,
+      offerId: OFFER,
+      originSlug: "sourcing-linkedin-engagement-signals",
+      listKind: "linkedin_engagement",
+      status: "off",
+    });
+    await db.insert(sourceCampaignAudienceHolds).values({
+      orgId: SOURCE_ORG,
+      brandId: BRAND_A,
+      offerId: OFFER,
+      originSlug: "sourcing-linkedin-engagement-signals",
+      audienceId: aud.id,
+    });
+
+    const res = await request(app)
+      .post("/internal/transfer-brand")
+      .set(apiKeyHeader)
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
+
+    expect(res.status).toBe(200);
+    expect(res.body.updatedTables).toEqual(
+      expect.arrayContaining([
+        { tableName: "source_campaign_states", count: 1 },
+        { tableName: "source_campaign_audience_holds", count: 1 },
+      ])
+    );
+    const [state] = await db.select().from(sourceCampaignStates);
+    const [hold] = await db.select().from(sourceCampaignAudienceHolds);
+    expect(state.orgId).toBe(TARGET_ORG);
+    expect(hold.orgId).toBe(TARGET_ORG);
+  });
+
   it("transfers solo-brand methodology rows to target org", async () => {
     const human = await insertHuman({
       orgId: SOURCE_ORG,

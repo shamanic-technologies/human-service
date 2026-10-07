@@ -10,6 +10,7 @@ import backfillRoutes from "../../src/routes/backfill.js";
 import audienceRefillRoutes from "../../src/routes/audience-refill.js";
 import audienceSnapshotRoutes from "../../src/routes/audience-snapshot.js";
 import competitorEngagementRoutes from "../../src/routes/competitor-engagement.js";
+import sourceCampaignRoutes from "../../src/routes/source-campaigns.js";
 import listsRoutes from "../../src/routes/lists.js";
 import peopleRoutes from "../../src/routes/people.js";
 import audiencesRoutes from "../../src/routes/audiences.js";
@@ -37,6 +38,7 @@ export function createTestApp() {
   app.use(audienceRefillRoutes);
   app.use(audienceSnapshotRoutes);
   app.use(competitorEngagementRoutes);
+  app.use(sourceCampaignRoutes);
   app.use(suppressionRecoveryRoutes);
   app.use(listsRoutes);
   app.use(peopleRoutes);

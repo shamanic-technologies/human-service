@@ -63,6 +63,15 @@ export async function sourcingOriginSlug(list: AudienceListKind): Promise<string
   return slug;
 }
 
+// The list kind an origin slug IS (the catalogue read backwards), or null when the
+// catalogue names no list for it. Source campaigns are keyed on the origin slug.
+export async function listKindOfOriginSlug(slug: string): Promise<AudienceListKind | null> {
+  for (const [list, origin] of await loadCatalogue()) {
+    if (origin === slug) return list as AudienceListKind;
+  }
+  return null;
+}
+
 type AudienceShape = { id: string; provider: string | null; filters: unknown };
 
 // The list a serve-next of this audience draws from, given the request's feature

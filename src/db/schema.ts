@@ -959,3 +959,60 @@ export const audienceWideningProposals = pgTable(
       .where(sql`status = 'pending'`),
   ]
 );
+
+// --- SOURCE CAMPAIGNS (owner 2026-10-07; migration 0037; src/services/source-campaigns.ts) ---
+//
+// A lead SOURCE of an offer is a campaign-service campaign keyed (offer, featureSlug =
+// <origin slug>, legKey = "start_to_lead_found"). ON = its origin's audience exists for
+// the offer and is active; OFF = paused, history kept.
+
+// The last on/off this service APPLIED per (org, brand, offer, origin): a transition is a
+// change against this row, so the reconcile acts once per real change.
+export const sourceCampaignStates = pgTable(
+  "source_campaign_states",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    offerId: uuid("offer_id").notNull(),
+    originSlug: text("origin_slug").notNull(),
+    listKind: text("list_kind").notNull(),
+    campaignId: text("campaign_id"),
+    // "on" | "off"
+    status: text("status").notNull(),
+    // What applying it did (created / resumed / active / paused / none / no_target ...).
+    outcome: text("outcome"),
+    outcomeReason: text("outcome_reason"),
+    appliedAt: timestamp("applied_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_source_campaign_states_scope").on(table.orgId, table.brandId, table.offerId, table.originSlug),
+  ]
+);
+
+export type SourceCampaignState = typeof sourceCampaignStates.$inferSelect;
+
+// Every audience an OFF paused, so the next ON resumes exactly those (never one a person
+// paused or archived). Open while released_at IS NULL (at most one open hold per audience).
+export const sourceCampaignAudienceHolds = pgTable(
+  "source_campaign_audience_holds",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    offerId: uuid("offer_id").notNull(),
+    originSlug: text("origin_slug").notNull(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    campaignId: text("campaign_id"),
+    heldAt: timestamp("held_at", { withTimezone: true }).notNull().defaultNow(),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("idx_source_campaign_audience_holds_scope").on(table.orgId, table.brandId, table.offerId, table.originSlug),
+    uniqueIndex("idx_source_campaign_audience_holds_open").on(table.audienceId).where(sql`released_at IS NULL`),
+  ]
+);
