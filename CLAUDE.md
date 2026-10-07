@@ -1395,7 +1395,15 @@ live in prod and it stops calling serve-next (relayed by lead-service session
   is re-takeable after 5 min), then `resolveEmail` + `servedWithPersonId`, the
   serve-next tail verbatim: `{status: served|not_served, person, personId?,
   replayed}`. The answer is stored (`reveal_result`), so a repeat replays, never
-  re-bills. A provider failure hands the candidate back (`offered`).
+  re-bills. A provider failure hands the candidate back (`offered`). Every
+  `not_served` names its `reason` (from `ResolveEmailResult.blocked`, internal:
+  `/orgs/people/resolve-email` strips it): `provider_skipped` (apollo-service's
+  domain gate declined, NO credit, `detail` = its reason), `no_person`,
+  `no_email`, `not_deliverable` (+ `verdict`), `opted_out`, `won`,
+  `already_served`, `own_company`, `bounced`. Measured 2026-10-07 on the
+  serve-next path (7 days, apollo): only 47% of bought reveals were served
+  (catch_all 26%, unknown 21%, invalid 5%), so a high `not_served` rate is
+  the deliverability gate, not the candidate path.
 - **decline** `{reason, basis?}`: one transaction writes the decision + an
   `audience_screened_out` row (`reason = "declined: …"`), the SAME silver set the
   screen writes, so the person is never re-buffered / offered / served (by

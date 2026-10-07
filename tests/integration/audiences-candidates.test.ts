@@ -1,10 +1,19 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 
-vi.mock("../../src/lib/email-verification.js", async (importOriginal) => ({
-  ...((await importOriginal()) as Record<string, unknown>),
-  readEmailVerification: (_p: string, _r: unknown, email: string | null | undefined) =>
-    email ? { verdict: "valid", deliverable: true } : null,
-}));
+// Every revealed address reads as deliverable, unless the provider's answer
+// carries a verdict (the not_deliverable case below), which is then read as is.
+vi.mock("../../src/lib/email-verification.js", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    readEmailVerification: (p: string, raw: unknown, email: string | null | undefined) =>
+      raw
+        ? (actual.readEmailVerification as (a: string, b: unknown, c: unknown) => unknown)(p, raw, email)
+        : email
+          ? { verdict: "valid", deliverable: true }
+          : null,
+  };
+});
 import request from "supertest";
 import { eq } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
@@ -257,6 +266,62 @@ describe("candidate API — reveal", () => {
     fetchSpy.mockImplementation(base);
     const res = await reveal(id, c);
     expect(res.body.status).toBe("served");
+  });
+});
+
+describe("candidate API — reveal names why nobody was served", () => {
+  async function revealWith(enrichBody: (id: string) => unknown) {
+    const id = await createAudience();
+    mockApollo([["p1"]]);
+    const base = fetchSpy.getMockImplementation()!;
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) =>
+      String(url).endsWith("/enrich")
+        ? ok(enrichBody(JSON.parse(init.body ?? "{}").apolloPersonId))
+        : base(url, init)
+    );
+    const c = (await next(id)).body.candidate.candidateId as string;
+    const res = await reveal(id, c);
+    expect(res.status).toBe(200);
+    return res.body;
+  }
+
+  it("provider_skipped when apollo-service declined to buy the reveal", async () => {
+    const body = await revealWith(() => ({
+      person: null,
+      emailVerification: null,
+      revealSkipped: { skipId: "s1", reason: "catch_all_domain" },
+    }));
+    expect(body).toMatchObject({ status: "not_served", reason: "provider_skipped", detail: "catch_all_domain" });
+  });
+
+  it("no_person when the provider returned nobody", async () => {
+    const body = await revealWith(() => ({ person: null }));
+    expect(body).toMatchObject({ status: "not_served", reason: "no_person" });
+  });
+
+  it("no_email when the reveal carried no address", async () => {
+    const body = await revealWith((id) => ({ person: { ...teaser(id, "Chiropractor"), lastName: "D", email: null } }));
+    expect(body).toMatchObject({ status: "not_served", reason: "no_email" });
+  });
+
+  it("not_deliverable with the verdict when the address failed verification", async () => {
+    const body = await revealWith((id) => ({
+      person: { ...teaser(id, "Chiropractor"), lastName: "D", email: "catch@all.example", emailStatus: "verified" },
+      emailVerification: { verdict: "catch_all", deliverable: false },
+    }));
+    expect(body).toMatchObject({ status: "not_served", reason: "not_deliverable", verdict: "catch_all" });
+  });
+
+  it("the stored answer replays the reason", async () => {
+    const id = await createAudience();
+    mockApollo([["p1"]]);
+    const base = fetchSpy.getMockImplementation()!;
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) =>
+      String(url).endsWith("/enrich") ? ok({ person: null }) : base(url, init)
+    );
+    const c = (await next(id)).body.candidate.candidateId as string;
+    await reveal(id, c);
+    expect((await reveal(id, c)).body).toMatchObject({ reason: "no_person", replayed: true });
   });
 });
 

@@ -57,6 +57,7 @@ import {
   type Identity,
   type PeopleSearchFilters,
   type Person,
+  type RevealBlockReason,
 } from "./people-providers.js";
 import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import { ensureTargetText, screenTarget } from "./audience-target-text.js";
@@ -411,6 +412,14 @@ export interface RevealCandidateResult {
   status: "served" | "not_served";
   person: Person | null;
   personId?: string;
+  // On every `not_served`: why nobody came back. `provider_skipped` means the
+  // provider declined to buy the reveal (no credit spent); every other reason
+  // comes after a bought reveal. `no_email` = the reveal carried no address.
+  reason?: RevealBlockReason | "no_email";
+  // not_deliverable: the verification verdict (catch_all, unknown, invalid, risky).
+  verdict?: string;
+  // provider_skipped: the provider's own reason (e.g. catch_all_domain).
+  detail?: string;
   replayed: boolean;
 }
 
@@ -468,8 +477,19 @@ export async function revealCandidate(
     if (revealed.person && hasUsableEmail(revealed.person)) {
       const served = await servedWithPersonId(identity.orgId, audienceIn.id, revealed.person);
       result = { status: "served", person: served.person, personId: served.personId };
+    } else if (revealed.person) {
+      result = { status: "not_served", person: null, reason: "no_email" };
     } else {
-      result = { status: "not_served", person: null };
+      // person null ⟹ resolveEmail always names why; "no_person" is what a
+      // null person literally is.
+      const block = revealed.blocked;
+      result = {
+        status: "not_served",
+        person: null,
+        reason: block?.reason ?? "no_person",
+        ...(block?.verdict ? { verdict: block.verdict } : {}),
+        ...(block?.detail ? { detail: block.detail } : {}),
+      };
     }
   } catch (err) {
     // Nothing recorded: hand the candidate back so a retry can reveal it.
@@ -484,7 +504,7 @@ export async function revealCandidate(
     .set({ status: "revealed", revealResult: result })
     .where(eq(audienceCandidates.id, candidateId));
   console.log(
-    `[human-service] audience.candidate_revealed org=${identity.orgId} audience=${audienceIn.id} candidate=${candidateId} status=${result.status}`
+    `[human-service] audience.candidate_revealed org=${identity.orgId} audience=${audienceIn.id} candidate=${candidateId} status=${result.status}${result.reason ? ` reason=${result.reason}` : ""}`
   );
   return { ...result, replayed: false };
 }
