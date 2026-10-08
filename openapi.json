@@ -5914,6 +5914,112 @@
           "companies"
         ]
       },
+      "BrandMembershipsByEmailResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "byEmail": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "nullable": true,
+              "properties": {
+                "personId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "memberships": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "audienceId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "offerId": {
+                        "type": "string",
+                        "nullable": true,
+                        "format": "uuid"
+                      },
+                      "list": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "apollo_search",
+                          "apollo_buying_signal",
+                          "linkedin_engagement",
+                          "crm_contacts",
+                          "apify_search",
+                          null
+                        ]
+                      },
+                      "status": {
+                        "$ref": "#/components/schemas/AudienceStatus"
+                      },
+                      "provenance": {
+                        "type": "string",
+                        "enum": [
+                          "served",
+                          "found_taken"
+                        ],
+                        "description": "'served' = a serve made under this audience handed the person out. 'found_taken' = this audience's FREE search found the person while they were already taken (served) for the brand; they were not served again and nothing was paid to record it."
+                      },
+                      "joinedAt": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "audienceId",
+                      "offerId",
+                      "list",
+                      "status",
+                      "provenance",
+                      "joinedAt"
+                    ]
+                  },
+                  "description": "Every audience of the brand that found this person, raw, oldest first. [] = a person of the org no audience of this brand found."
+                }
+              },
+              "required": [
+                "personId",
+                "memberships"
+              ],
+              "description": "null = the org holds no person for this email."
+            }
+          }
+        },
+        "required": [
+          "brandId",
+          "byEmail"
+        ]
+      },
+      "BrandMembershipsByEmailRequest": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "description": "Internal org UUID that holds the people."
+          },
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "description": "Lead emails, as many as a whole brand holds (25 MB body cap). Each comes back as a key, raw as sent."
+          }
+        },
+        "required": [
+          "orgId",
+          "emails"
+        ]
+      },
       "BrandMembershipsResponse": {
         "type": "object",
         "properties": {
@@ -12236,6 +12342,62 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BrandHeldCompanies"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/memberships/by-email": {
+      "post": {
+        "summary": "Per EMAIL: every audience of the brand (list, offer, provenance served|found_taken) that found the person. Raw membership, thousands of emails per call, no spend.",
+        "description": "Service auth, 25 MB body. Unlike /internal/audiences/resolve (one served-only card per email, unchanged), this answers every membership, found-while-taken included.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrandMembershipsByEmailRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Memberships per email",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandMembershipsByEmailResponse"
                 }
               }
             }

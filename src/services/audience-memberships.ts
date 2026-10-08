@@ -11,10 +11,11 @@
 // provenance ('served' | 'found_taken') is explained in audience-provenance.ts.
 //
 // Pure DB read: no provider call, no spend.
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { audiences } from "../db/schema.js";
+import { audienceMembers, audiences, people } from "../db/schema.js";
 import { audienceListKind } from "./audience-snapshot.js";
+import { normalizeEmail } from "./suppression.js";
 
 export interface MembershipScope {
   brandId: string;
@@ -193,4 +194,86 @@ export async function brandAudienceOverlap(scope: MembershipScope) {
       })
       .sort((x, y) => y.memberCount - x.memberCount || x.name.localeCompare(y.name)),
   };
+}
+
+// Same membership rows as brandMemberships, keyed by EMAIL for a caller that holds
+// leads, not person ids (lead-service: a page of 20-50 leads, or a whole-brand
+// walk of tens of thousands, in one server-to-server call). Every requested email
+// comes back as a key (raw, as sent): null when this org holds no person for it,
+// else the person and every audience of the brand that found them ([] when none).
+const EMAIL_CHUNK = 10_000; // well under Postgres' 65,535 bind-parameter cap
+
+export async function brandMembershipsByEmail(
+  scope: { brandId: string; orgId: string },
+  emails: string[]
+) {
+  const auds = await loadBrandAudiences(scope);
+  const normOf = new Map(emails.map((e) => [e, normalizeEmail(e)]));
+  const norms = [...new Set([...normOf.values()].filter((x): x is string => x !== null))];
+
+  const personByNorm = new Map<string, string>();
+  const membershipsByPerson = new Map<
+    string,
+    Array<{
+      audienceId: string;
+      offerId: string | null;
+      list: ReturnType<typeof audienceListKind>;
+      status: string;
+      provenance: string;
+      joinedAt: string;
+    }>
+  >();
+  for (let i = 0; i < norms.length; i += EMAIL_CHUNK) {
+    const chunk = norms.slice(i, i + EMAIL_CHUNK);
+    const found = await db
+      .select({ id: people.id, emailNorm: people.emailNorm })
+      .from(people)
+      .where(and(eq(people.orgId, scope.orgId), inArray(people.emailNorm, chunk)));
+    for (const p of found) personByNorm.set(p.emailNorm as string, p.id);
+    const ids = found.map((p) => p.id);
+    if (ids.length === 0) continue;
+    const rows = await db
+      .select({
+        personId: audienceMembers.personId,
+        audienceId: audienceMembers.audienceId,
+        provenance: audienceMembers.provenance,
+        joinedAt: audienceMembers.joinedAt,
+      })
+      .from(audienceMembers)
+      .innerJoin(audiences, eq(audiences.id, audienceMembers.audienceId))
+      .where(
+        and(
+          eq(audiences.brandId, scope.brandId),
+          eq(audiences.orgId, scope.orgId),
+          inArray(audienceMembers.personId, ids)
+        )
+      )
+      .orderBy(audienceMembers.joinedAt, audienceMembers.audienceId);
+    for (const r of rows) {
+      const a = auds.get(r.audienceId);
+      if (!a) throw new Error(`audience ${r.audienceId} missing from brand scope`);
+      const list = membershipsByPerson.get(r.personId) ?? [];
+      list.push({
+        audienceId: a.id,
+        offerId: a.offerId,
+        list: audienceListKind(a),
+        status: a.status,
+        provenance: r.provenance,
+        joinedAt: r.joinedAt.toISOString(),
+      });
+      membershipsByPerson.set(r.personId, list);
+    }
+  }
+
+  const byEmail: Record<
+    string,
+    { personId: string; memberships: NonNullable<ReturnType<typeof membershipsByPerson.get>> } | null
+  > = {};
+  for (const [raw, norm] of normOf) {
+    const personId = norm ? personByNorm.get(norm) : undefined;
+    byEmail[raw] = personId
+      ? { personId, memberships: membershipsByPerson.get(personId) ?? [] }
+      : null;
+  }
+  return { brandId: scope.brandId, byEmail };
 }

@@ -228,6 +228,25 @@ describe("multi-source provenance", () => {
     const ob = o.body.audiences.find((x: { audienceId: string }) => x.audienceId === b);
     expect(ob).toMatchObject({ memberCount: 1, servedCount: 0, foundTakenCount: 1, alsoInOtherAudienceCount: 1, alsoInOtherListCount: 1 });
 
+    // Per email (lead-service): both audiences with list + provenance; an
+    // unknown email is null.
+    const be = await request(app)
+      .post(`/internal/brands/${BRAND}/memberships/by-email`)
+      .set({ "X-API-Key": "test-api-key", "Content-Type": "application/json" })
+      .send({ orgId: ORG, emails: ["P2@x.com", "nobody@x.com"] });
+    expect(be.status).toBe(200);
+    expect(be.body.byEmail["nobody@x.com"]).toBeNull();
+    expect(
+      be.body.byEmail["P2@x.com"].memberships
+        .map((x: { audienceId: string; list: string; provenance: string }) => [x.audienceId, x.list, x.provenance])
+        .sort()
+    ).toEqual(
+      [
+        [a, "apollo_search", "served"],
+        [b, "apollo_buying_signal", "found_taken"],
+      ].sort()
+    );
+
     // The lead's card stays the audience that SERVED it.
     const r = await request(app)
       .post("/internal/audiences/resolve")
@@ -240,6 +259,15 @@ describe("multi-source provenance", () => {
     expect(s.body.matched[0].audiences.map((x: { audienceId: string; provenance: string }) => [x.audienceId, x.provenance]).sort()).toEqual(
       [[a, "served"], [b, "found_taken"]].sort()
     );
+  });
+
+  it("the by-email read 400s without emails", async () => {
+    mockApollo([]);
+    const res = await request(app)
+      .post(`/internal/brands/${BRAND}/memberships/by-email`)
+      .set({ "X-API-Key": "test-api-key", "Content-Type": "application/json" })
+      .send({ orgId: ORG, emails: [] });
+    expect(res.status).toBe(400);
   });
 
   it("the memberships read 400s a bad brand id and 401s without a key", async () => {

@@ -10,8 +10,13 @@
 // resolution engine + rationale live in src/services/audiences.ts.
 import express, { Router } from "express";
 import { requireApiKey } from "../middleware/auth.js";
-import { ResolveAudiencesRequestSchema } from "../schemas.js";
+import {
+  BrandMembershipsByEmailRequestSchema,
+  BrandSnapshotParamsSchema,
+  ResolveAudiencesRequestSchema,
+} from "../schemas.js";
 import { resolveAudiencesForBrand } from "../services/audiences.js";
+import { brandMembershipsByEmail } from "../services/audience-memberships.js";
 
 const router = Router();
 
@@ -37,6 +42,35 @@ router.post(
       emails,
     });
     res.json(result);
+  }
+);
+
+// Every audience of the brand that found each email's person (multi-source
+// provenance, src/services/audience-memberships.ts). Same 25 MB parser: a
+// whole-brand walk sends tens of thousands of emails. RAW membership, unlike the
+// served-only card above, which is untouched.
+router.post(
+  "/internal/brands/:brandId/memberships/by-email",
+  express.json({ limit: RESOLVE_BODY_LIMIT }),
+  requireApiKey,
+  async (req, res) => {
+    const params = BrandSnapshotParamsSchema.safeParse(req.params);
+    const body = BrandMembershipsByEmailRequestSchema.safeParse(req.body);
+    if (!params.success || !body.success) {
+      res.status(400).json({
+        error:
+          (params.success ? undefined : params.error.issues[0]?.message) ??
+          (body.success ? undefined : body.error.issues[0]?.message) ??
+          "Invalid request",
+      });
+      return;
+    }
+    res.json(
+      await brandMembershipsByEmail(
+        { brandId: params.data.brandId, orgId: body.data.orgId },
+        body.data.emails
+      )
+    );
   }
 );
 
