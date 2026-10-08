@@ -13,6 +13,7 @@ import {
   brandAudienceSnapshot,
   brandHeldCompanies,
   brandHeldPeople,
+  brandHeldPersonCompanies,
 } from "../services/audience-snapshot.js";
 import { brandAudienceOverlap, brandMemberships } from "../services/audience-memberships.js";
 
@@ -51,6 +52,15 @@ router.get("/internal/brands/:brandId/audience-snapshot/people", requireApiKey, 
   const args = pageArgs(req, res);
   if (!args) return;
   res.json(await brandHeldPeople(args.scope, args.page));
+});
+
+// One read of every held person's company (features-service sourcing figures).
+router.get("/internal/brands/:brandId/audience-snapshot/person-companies", requireApiKey, async (req, res) => {
+  const params = BrandSnapshotParamsSchema.safeParse(req.params);
+  const query = BrandSnapshotQuerySchema.safeParse(req.query);
+  if (!params.success) return badRequest(res, params.error.issues[0]?.message);
+  if (!query.success) return badRequest(res, query.error.issues[0]?.message);
+  res.json(await brandHeldPersonCompanies({ brandId: params.data.brandId, orgId: query.data.orgId }));
 });
 
 router.get("/internal/brands/:brandId/audience-snapshot/companies", requireApiKey, async (req, res) => {
