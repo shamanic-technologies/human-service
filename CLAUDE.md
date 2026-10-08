@@ -890,6 +890,12 @@ Optional `?orgId=` narrows; omitted = every org holding the brand.
 - Measured 2026-10-05: ~1.1-1.4s on the two biggest brands (42.7k screenings /
   17.9k members). No provider call, no spend, no state. Tests:
   `tests/integration/audience-snapshot.test.ts`.
+- **`/person-companies`** = provider person id -> company for EVERY held person
+  in one statement (same relation + per-person max as `/people`, no sort, no
+  page). features-service's sourcing figures read it; never walk `/people` in
+  OFFSET pages for a full set (each page re-runs the whole relation plus the
+  sort and jsonb_agg: ~5.5s a page, 17+ pages a refresh; this read: 0.2s /
+  1.1s on the two big brands, 2026-10-08).
 
 ### Internal bulk audience resolver — `POST /internal/audiences/resolve`
 

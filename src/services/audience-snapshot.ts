@@ -285,6 +285,31 @@ export async function brandHeldPeople(scope: SnapshotScope, page: PageArgs) {
   };
 }
 
+// 2b. Every held person's company, in ONE statement (no page, no sort): the
+// relation brandHeldPeople pages over, reduced to provider person id -> company
+// with the same per-person aggregation (max of key / name / domain), so a person
+// lands on the company the Audience page shows them at. Only people carrying a
+// provider person id (a revealed person with none has no key a caller can join
+// on). Replaces walking /people in OFFSET pages, each re-running heldSql.
+export async function brandHeldPersonCompanies(scope: SnapshotScope) {
+  const list = await rows<Record<string, unknown>>(sql`
+    with ${heldSql(scope)}
+    select person_key, max(company_key) as company_key, max(company_name) as company_name,
+      max(company_domain) as company_domain
+    from keyed where person_key not like 'person:%' and person_key <> ''
+    group by person_key`);
+  return {
+    brandId: scope.brandId,
+    total: list.length,
+    people: list.map((r) => ({
+      providerPersonId: String(r.person_key),
+      company: r.company_key
+        ? { companyKey: String(r.company_key), name: (r.company_name as string | null) ?? null, domain: (r.company_domain as string | null) ?? null }
+        : null,
+    })),
+  };
+}
+
 async function countPeople(scope: SnapshotScope, acceptedOnly: boolean) {
   const [r] = await rows<Record<string, unknown>>(sql`
     with ${heldSql(scope)}
