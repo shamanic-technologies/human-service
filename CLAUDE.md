@@ -70,6 +70,7 @@ section — the port binds first).
 | Internal | `POST /internal/audiences/resolve` | apiKey | **Bulk server-to-server audience resolver** for lead-service (#166): body `{orgId, brandId, audienceIds?, emails?}` → `{byAudienceId, byEmail}` maps of `{id,name,avatarUrl}` \| null. Brand-correct + active-preferred (deprecated→canonical), keyed by audienceId AND/OR email (historical coverage). Dedicated **25 MB** body parser (mounts before the global 100 KB json) — NO browser 413 cap. See below. |
 | Internal (staff) | `GET /internal/brands/{brandId}/audience-snapshot` (+ `/people`, `/companies`) | apiKey | What a brand HOLDS per list: people + companies stored (revealed / screened / waiting) and how many its target accepted; paginated people and company lists with source lists + accepting audiences. Pure DB read. See "Staff audience snapshot" |
 | Internal | `GET /internal/brands/{brandId}/memberships` (`?orgId&limit≤5000&offset`) | apiKey | Per person of a brand: every audience that FOUND them (`offerId`, `list`, `status`, `provenance` served\|found_taken). RAW membership, paged by person. See "Multi-source provenance" |
+| Internal | `POST /internal/brands/{brandId}/memberships/by-email` | apiKey | Same memberships keyed by EMAIL (body `{orgId, emails[]}`, 25 MB parser, mounted before the global json) → `byEmail[raw] = {personId, memberships[]} \| null`. For lead-service's lead pages / whole-brand walks |
 | Internal | `GET /internal/brands/{brandId}/audience-overlap` (`?orgId`) | apiKey | Per audience: members, served vs found-while-taken, how many another audience / list found too, + brand multi-source counts |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
@@ -780,7 +781,8 @@ carried only the first audience. `src/services/audience-provenance.ts`.
   NULL); a later real serve under the audience flips it to `served`.
 - **Reads**: `GET /internal/brands/{brandId}/memberships` (per person, RAW: a
   person on a deprecated `[Apify]` audience stays credited to it, list
-  `apify_search`) and `/audience-overlap` (per audience); `POST
+  `apify_search`), `POST .../memberships/by-email` (same rows keyed by email,
+  for lead-service) and `/audience-overlap` (per audience); `POST
   /orgs/audiences/stats` entries and `/{id}/members` rows carry `provenance`.
   The lead's audience CARD (`/internal/audiences/resolve` by email) reads
   `served` rows only, and the staff snapshot's "revealed" counts `served` only:
