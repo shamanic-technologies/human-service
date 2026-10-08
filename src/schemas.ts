@@ -3889,6 +3889,49 @@ export const BrandMembershipsResponseSchema = z
   })
   .openapi("BrandMembershipsResponse");
 
+export const BrandMembershipsByEmailRequestSchema = z
+  .object({
+    orgId: z.string().regex(LAX_UUID_REGEX).openapi({ description: "Internal org UUID that holds the people." }),
+    emails: z.array(z.string().min(1)).min(1).openapi({
+      description: "Lead emails, as many as a whole brand holds (25 MB body cap). Each comes back as a key, raw as sent.",
+    }),
+  })
+  .openapi("BrandMembershipsByEmailRequest");
+
+export const BrandMembershipsByEmailResponseSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    byEmail: z.record(
+      z.string(),
+      z
+        .object({
+          personId: z.string().uuid(),
+          memberships: z.array(BrandMembershipSchema).openapi({
+            description: "Every audience of the brand that found this person, raw, oldest first. [] = a person of the org no audience of this brand found.",
+          }),
+        })
+        .nullable()
+        .openapi({ description: "null = the org holds no person for this email." })
+    ),
+  })
+  .openapi("BrandMembershipsByEmailResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/brands/{brandId}/memberships/by-email",
+  summary: "Per EMAIL: every audience of the brand (list, offer, provenance served|found_taken) that found the person. Raw membership, thousands of emails per call, no spend.",
+  description: "Service auth, 25 MB body. Unlike /internal/audiences/resolve (one served-only card per email, unchanged), this answers every membership, found-while-taken included.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: BrandSnapshotParamsSchema,
+    body: { content: { "application/json": { schema: BrandMembershipsByEmailRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Memberships per email", content: { "application/json": { schema: BrandMembershipsByEmailResponseSchema } } },
+    ...snapshotErrors,
+  },
+});
+
 export const BrandAudienceOverlapResponseSchema = z
   .object({
     brandId: z.string().uuid(),
