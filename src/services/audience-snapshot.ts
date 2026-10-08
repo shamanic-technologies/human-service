@@ -88,6 +88,9 @@ function heldSql(scope: SnapshotScope) {
       from audience_members m
       join aud on aud.id = m.audience_id
       join people p on p.id = m.person_id
+      -- what THIS list revealed; a person it only found while taken
+      -- (multi-source, audience-memberships.ts) was bought by another list
+      where m.provenance = 'served'
       union all
       select scr.audience_id, scr.provider_person_id, null, 'screened',
         scr.teaser->>'name', scr.teaser->>'title', scr.teaser->>'organizationName', null,

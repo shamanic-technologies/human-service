@@ -15,13 +15,15 @@
 import type { WorkflowTrackingHeaders } from "../middleware/auth.js";
 import { workflowTrackingToHeaders } from "../middleware/auth.js";
 import {
-  filterSuppressed,
+  partitionSuppressed,
+  normalizeEmail,
   getSuppressionSet,
   claimServe,
   recordServe,
   type ServedContact,
 } from "./suppression.js";
 import { deriveBusinessLanguages } from "./business-languages.js";
+import { tagFoundAlreadyTaken } from "./audience-provenance.js";
 import { readEmailVerification, type EmailVerification } from "../lib/email-verification.js";
 import {
   filterOptedOut,
@@ -1110,7 +1112,14 @@ export async function peopleSearch(args: {
       people = await filterBounced(args.identity, people);
       const droppedBounced = people.length < beforeBounce;
       if (brandIds.length > 0) {
-        people = await filterSuppressed(args.identity.orgId, brandIds, people);
+        const split = await partitionSuppressed(args.identity.orgId, brandIds, people);
+        people = split.fresh;
+        // Searched UNDER an audience: the teasers already taken for the brand
+        // stay unserved, but the audience found them — record it (multi-source
+        // provenance, from the free match only, no spend).
+        if (args.audienceId && split.taken.length > 0) {
+          await tagFoundAlreadyTaken(args.identity.orgId, args.audienceId, "apollo", split.taken);
+        }
       }
       collected.push(...people);
 
@@ -1277,6 +1286,18 @@ async function finalizeResolved(
       emailVerdict,
     }))
   ) {
+    // Taken for the brand by a concurrent serve: not handed back, but the
+    // audience this reveal ran under found them too (multi-source provenance).
+    // The address is the one just revealed; the credit was already spent.
+    const emailNorm = normalizeEmail(person.email);
+    if (audienceId && emailNorm && provider !== "crm") {
+      await tagFoundAlreadyTaken(identity.orgId, audienceId, provider, [
+        {
+          item: { linkedinUrl: person.linkedinUrl, providerPersonId: person.providerPersonId },
+          match: { emailNorm, linkedinUrlNorm: null, providerPersonId: person.providerPersonId },
+        },
+      ]);
+    }
     return { provider, person: null, blocked: { reason: "already_served" } };
   }
   // The brand's OWN company — the last line, now that the reveal carries the

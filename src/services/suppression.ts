@@ -6,9 +6,12 @@
 //
 //   recordServe        — append bronze `lead_serves` + upsert silver
 //                        `brand_suppressions`, one per atomic brand.
-//   filterSuppressed   — apollo path: drop free teasers already served for the
-//                        brand (match on linkedin_url_norm OR provider_person_id),
-//                        BEFORE paying to reveal their email.
+//   partitionSuppressed — apollo path: split free teasers into fresh / already
+//                        served for the brand (match on linkedin_url_norm OR
+//                        provider_person_id), BEFORE paying to reveal their email;
+//                        the taken half carries the row it matched so the caller
+//                        can record that its audience FOUND them (multi-source).
+//   filterSuppressed   — the fresh half of partitionSuppressed.
 //   getSuppressionSet  — apify path: the exclude-set (emails + linkedin urls)
 //                        pushed down so apify never returns/bills a served lead.
 //   isEmailSuppressed  — resolve-email block: cap re-emission for the residual
@@ -139,13 +142,28 @@ export async function recordServe(
   }
 }
 
-// apollo path: drop teasers already served for any requested brand within the
-// window, matching on the FREE pre-pay keys (linkedin_url_norm OR
-// provider_person_id) — so we never pay to enrich an already-served lead.
-export async function filterSuppressed<
+// The suppression row a dropped teaser matched: the address it was served
+// under, plus the pre-pay keys. Enough to tie the teaser to its canonical person
+// without paying for anything.
+export interface SuppressionMatch {
+  emailNorm: string;
+  linkedinUrlNorm: string | null;
+  providerPersonId: string | null;
+}
+
+// apollo path: split teasers into those still free for every requested brand and
+// those already served for one of them within the window, matching on the FREE
+// pre-pay keys (linkedin_url_norm OR provider_person_id) — so we never pay to
+// enrich an already-served lead. The taken ones carry the suppression row they
+// matched, so the caller can still record that this source FOUND them.
+export async function partitionSuppressed<
   T extends { linkedinUrl: string | null; providerPersonId: string | null }
->(orgId: string, brandIds: string[], items: T[]): Promise<T[]> {
-  if (brandIds.length === 0 || items.length === 0) return items;
+>(
+  orgId: string,
+  brandIds: string[],
+  items: T[]
+): Promise<{ fresh: T[]; taken: Array<{ item: T; match: SuppressionMatch }> }> {
+  if (brandIds.length === 0 || items.length === 0) return { fresh: items, taken: [] };
 
   const linkedinNorms = [
     ...new Set(
@@ -161,7 +179,7 @@ export async function filterSuppressed<
         .filter((x): x is string => x !== null && x.length > 0)
     ),
   ];
-  if (linkedinNorms.length === 0 && personIds.length === 0) return items;
+  if (linkedinNorms.length === 0 && personIds.length === 0) return { fresh: items, taken: [] };
 
   const matchConds = [];
   if (linkedinNorms.length > 0)
@@ -171,6 +189,7 @@ export async function filterSuppressed<
 
   const rows = await db
     .select({
+      emailNorm: brandSuppressions.emailNorm,
       linkedinUrlNorm: brandSuppressions.linkedinUrlNorm,
       providerPersonId: brandSuppressions.providerPersonId,
     })
@@ -184,20 +203,32 @@ export async function filterSuppressed<
       )
     );
 
-  const suppressedLinkedins = new Set(
-    rows.map((r) => r.linkedinUrlNorm).filter((x): x is string => x !== null)
-  );
-  const suppressedPersonIds = new Set(
-    rows.map((r) => r.providerPersonId).filter((x): x is string => x !== null)
-  );
+  const byLinkedin = new Map<string, SuppressionMatch>();
+  const byPersonId = new Map<string, SuppressionMatch>();
+  for (const r of rows) {
+    if (r.linkedinUrlNorm !== null) byLinkedin.set(r.linkedinUrlNorm, r);
+    if (r.providerPersonId !== null) byPersonId.set(r.providerPersonId, r);
+  }
 
-  return items.filter((i) => {
+  const fresh: T[] = [];
+  const taken: Array<{ item: T; match: SuppressionMatch }> = [];
+  for (const i of items) {
     const ln = normalizeLinkedinUrl(i.linkedinUrl);
-    if (ln !== null && suppressedLinkedins.has(ln)) return false;
-    if (i.providerPersonId && suppressedPersonIds.has(i.providerPersonId))
-      return false;
-    return true;
-  });
+    const match =
+      (ln !== null ? byLinkedin.get(ln) : undefined) ??
+      (i.providerPersonId ? byPersonId.get(i.providerPersonId) : undefined);
+    if (match) taken.push({ item: i, match });
+    else fresh.push(i);
+  }
+  return { fresh, taken };
+}
+
+// apollo path: drop teasers already served for any requested brand within the
+// window (the `fresh` half of partitionSuppressed).
+export async function filterSuppressed<
+  T extends { linkedinUrl: string | null; providerPersonId: string | null }
+>(orgId: string, brandIds: string[], items: T[]): Promise<T[]> {
+  return (await partitionSuppressed(orgId, brandIds, items)).fresh;
 }
 
 // apify path: the windowed exclude-set pushed down to apify /search so the paid

@@ -69,6 +69,8 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/widening-proposals/{id}/decline` | apiKey + `x-org-id` | Client declines: nothing changes, never re-proposed for that target. Idempotent; 409 if accepted |
 | Internal | `POST /internal/audiences/resolve` | apiKey | **Bulk server-to-server audience resolver** for lead-service (#166): body `{orgId, brandId, audienceIds?, emails?}` → `{byAudienceId, byEmail}` maps of `{id,name,avatarUrl}` \| null. Brand-correct + active-preferred (deprecated→canonical), keyed by audienceId AND/OR email (historical coverage). Dedicated **25 MB** body parser (mounts before the global 100 KB json) — NO browser 413 cap. See below. |
 | Internal (staff) | `GET /internal/brands/{brandId}/audience-snapshot` (+ `/people`, `/companies`) | apiKey | What a brand HOLDS per list: people + companies stored (revealed / screened / waiting) and how many its target accepted; paginated people and company lists with source lists + accepting audiences. Pure DB read. See "Staff audience snapshot" |
+| Internal | `GET /internal/brands/{brandId}/memberships` (`?orgId&limit≤5000&offset`) | apiKey | Per person of a brand: every audience that FOUND them (`offerId`, `list`, `status`, `provenance` served\|found_taken). RAW membership, paged by person. See "Multi-source provenance" |
+| Internal | `GET /internal/brands/{brandId}/audience-overlap` (`?orgId`) | apiKey | Per audience: members, served vs found-while-taken, how many another audience / list found too, + brand multi-source counts |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
 | Org-scoped (CRM v1) | `GET /orgs/lists/{id}` | apiKey + `x-org-id` | Get a CRM list |
@@ -700,7 +702,9 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
   after both ship Size converges on the true reachable pool. Independently correct
   regardless of ordering (the clamp below covers a still-inflated snapshot).
 - **Membership = PROVENANCE, not local matching.** A person joins an audience
-  iff a serve made under that audience returned them. The caller passes
+  iff that audience's search FOUND them: a serve under it returned them
+  (`provenance='served'`), or its free search found them already taken for the
+  brand (`'found_taken'`, see "Multi-source provenance" below). The caller passes
   `audienceId` on `/orgs/people/search` or `/resolve-email`; the route validates
   it belongs to the org (404 before any provider spend) and, after the result,
   tags every returned person (apollo free teasers + apify billed hits alike) as
@@ -750,6 +754,44 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
   >$100k Revenue" rows in DIFFERENT orgs do not collide — org-scoping separates
   them). FAIL LOUD on ambiguity: a deprecated row with no variant suffix, 0
   siblings, or (defensively) >1 sibling is SKIPPED + logged, never guessed.
+
+### Multi-source provenance — a person carries EVERY source that found them
+
+Owner 2026-10-08: « It must be tagged both ... So we know a human belongs to
+several signals, which is a higher interest. » Before, a teaser already taken
+for the brand was dropped at the suppression check with no trace, so a person
+found first by Apollo Cold Filters and later by a LinkedIn engagement signal
+carried only the first audience. `src/services/audience-provenance.ts`.
+
+- **`audience_members.provenance`** (migration `0038`, default `served`):
+  `served` = a serve under that audience handed them out; `found_taken` = that
+  audience's FREE search found them while already taken (in-window
+  `brand_suppressions`) for the brand. Suppression is unchanged: a
+  `found_taken` person is never served again.
+- **Tagged where the drop happens, from what the free match knows, never a
+  paid call**: the apollo teaser filter in `peopleSearch` (when searched under
+  an audience), serve-next's POP-time re-check, the candidate API's free checks
+  (`partitionSuppressed` returns the suppression row each taken teaser matched;
+  its address resolves the canonical person). Plus `finalizeResolved` when a
+  concurrent serve won the claim (credit already spent by the race, not to tag).
+  Not tagged: apify (exclude-set pushed down, the actor never returns them) and
+  crm (crm-service owns its no-re-serve and never returns a served contact).
+- **A `found_taken` row's `last_served_at` = when it was found** (column NOT
+  NULL); a later real serve under the audience flips it to `served`.
+- **Reads**: `GET /internal/brands/{brandId}/memberships` (per person, RAW: a
+  person on a deprecated `[Apify]` audience stays credited to it, list
+  `apify_search`) and `/audience-overlap` (per audience); `POST
+  /orgs/audiences/stats` entries and `/{id}/members` rows carry `provenance`.
+  The lead's audience CARD (`/internal/audiences/resolve` by email) reads
+  `served` rows only, and the staff snapshot's "revealed" counts `served` only:
+  both byte-identical to before. Remaining now subtracts in-window `found_taken`
+  members too (they are in the pool and not contactable), and `reachable_count`
+  counts them at exhaustion, so the clamp stays consistent.
+- **Backfill (in `0038`) from stored facts only**: a screening / candidate row
+  of audience B for a person who is a member of another audience of the brand,
+  not rejected by B. 34 pairs / 5 brands on prod. Teasers dropped as taken
+  before this shipped were never stored: unrecoverable.
+- Tests: `tests/integration/audiences-multi-source.test.ts`.
 
 ### List contactability (Size / Remaining) — `GET /orgs/audiences`
 
