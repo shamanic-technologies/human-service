@@ -5735,6 +5735,64 @@
           "people"
         ]
       },
+      "BrandHeldPersonCompanies": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "total": {
+            "type": "integer",
+            "description": "Number of people listed (every held person carrying a provider person id)."
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "providerPersonId": {
+                  "type": "string",
+                  "description": "Same value as /people providerPersonId (the person key)."
+                },
+                "company": {
+                  "type": "object",
+                  "nullable": true,
+                  "properties": {
+                    "companyKey": {
+                      "type": "string",
+                      "description": "'domain:<domain>' when the domain is known, else 'name:<lowercased name>'."
+                    },
+                    "name": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "domain": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "companyKey",
+                    "name",
+                    "domain"
+                  ],
+                  "description": "Same company the /people row carries; null when we know none."
+                }
+              },
+              "required": [
+                "providerPersonId",
+                "company"
+              ]
+            }
+          }
+        },
+        "required": [
+          "brandId",
+          "total",
+          "people"
+        ]
+      },
       "BrandHeldCompanies": {
         "type": "object",
         "properties": {
@@ -12246,6 +12304,64 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BrandHeldPeople"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/audience-snapshot/person-companies": {
+      "get": {
+        "summary": "Every person a brand's lists hold (provider person id) -> their company, in one read. Same relation and company key as /people, no page, no order. Pure DB read, no spend.",
+        "description": "People with no provider person id (a revealed person with none) are not listed: nothing can join on them.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "description": "Only this org's audiences of the brand. Omitted ⟹ every org holding the brand."
+            },
+            "required": false,
+            "description": "Only this org's audiences of the brand. Omitted ⟹ every org holding the brand.",
+            "name": "orgId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every held person's company",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandHeldPersonCompanies"
                 }
               }
             }

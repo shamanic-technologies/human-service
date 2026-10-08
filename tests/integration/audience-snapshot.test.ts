@@ -195,3 +195,31 @@ describe("GET /internal/brands/:brandId/audience-snapshot/companies", () => {
     expect(lone).toMatchObject({ name: "Lone Firm", domain: null, acceptedBy: [] });
   });
 });
+
+describe("GET /internal/brands/:brandId/audience-snapshot/person-companies", () => {
+  it("answers every held person's company in one read, equal to what /people pages carry", async () => {
+    await seed();
+    const res = await request(app).get(`/internal/brands/${BRAND}/audience-snapshot/person-companies?orgId=${ORG}`).set(getAuthHeaders());
+    expect(res.status).toBe(200);
+    const pages = await request(app).get(`/internal/brands/${BRAND}/audience-snapshot/people?orgId=${ORG}&limit=500`).set(getAuthHeaders());
+    const expected = Object.fromEntries(
+      pages.body.people
+        .filter((p: { providerPersonId: string | null }) => p.providerPersonId)
+        .map((p: { providerPersonId: string; company: unknown }) => [p.providerPersonId, p.company])
+    );
+    const got = Object.fromEntries(res.body.people.map((p: { providerPersonId: string; company: unknown }) => [p.providerPersonId, p.company]));
+    expect(got).toEqual(expected);
+    // p6 has no provider id, so 6 of the 7 held people.
+    expect(res.body.total).toBe(6);
+    expect(got.p2).toEqual({ companyKey: "domain:smithlaw.com", name: "Smith Law", domain: "smithlaw.com" });
+    expect(got.p5).toEqual({ companyKey: "name:lone firm", name: "Lone Firm", domain: null });
+    expect(got.p7).toBeNull();
+  });
+
+  it("answers an empty list for a brand with nothing held, and rejects a bad brand id / missing key", async () => {
+    const res = await request(app).get(`/internal/brands/${OTHER_BRAND}/audience-snapshot/person-companies`).set(getAuthHeaders());
+    expect(res.body).toEqual({ brandId: OTHER_BRAND, total: 0, people: [] });
+    expect((await request(app).get(`/internal/brands/nope/audience-snapshot/person-companies`).set(getAuthHeaders())).status).toBe(400);
+    expect((await request(app).get(`/internal/brands/${BRAND}/audience-snapshot/person-companies`)).status).toBe(401);
+  });
+});

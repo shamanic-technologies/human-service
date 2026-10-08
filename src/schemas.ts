@@ -3787,6 +3787,19 @@ export const BrandHeldPeopleResponseSchema = z
   })
   .openapi("BrandHeldPeople");
 
+export const BrandHeldPersonCompaniesResponseSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    total: z.number().int().openapi({ description: "Number of people listed (every held person carrying a provider person id)." }),
+    people: z.array(
+      z.object({
+        providerPersonId: z.string().openapi({ description: "Same value as /people providerPersonId (the person key)." }),
+        company: SnapshotCompanyRefSchema.nullable().openapi({ description: "Same company the /people row carries; null when we know none." }),
+      })
+    ),
+  })
+  .openapi("BrandHeldPersonCompanies");
+
 export const BrandHeldCompaniesResponseSchema = z
   .object({
     brandId: z.string().uuid(),
@@ -3832,6 +3845,19 @@ registry.registerPath({
   request: { params: BrandSnapshotParamsSchema, query: BrandSnapshotPageQuerySchema },
   responses: {
     200: { description: "A page of people", content: { "application/json": { schema: BrandHeldPeopleResponseSchema } } },
+    ...snapshotErrors,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/audience-snapshot/person-companies",
+  summary: "Every person a brand's lists hold (provider person id) -> their company, in one read. Same relation and company key as /people, no page, no order. Pure DB read, no spend.",
+  description: "People with no provider person id (a revealed person with none) are not listed: nothing can join on them.",
+  security: [{ apiKey: [] }],
+  request: { params: BrandSnapshotParamsSchema, query: BrandSnapshotQuerySchema },
+  responses: {
+    200: { description: "Every held person's company", content: { "application/json": { schema: BrandHeldPersonCompaniesResponseSchema } } },
     ...snapshotErrors,
   },
 });
