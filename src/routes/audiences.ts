@@ -1346,6 +1346,7 @@ router.get(
           companyDomain: people.companyDomain,
           source: audienceMembers.source,
           confidence: audienceMembers.confidence,
+          provenance: audienceMembers.provenance,
           joinedAt: audienceMembers.joinedAt,
           lastServedAt: audienceMembers.lastServedAt,
         })
@@ -1369,6 +1370,7 @@ router.get(
         companyDomain: r.companyDomain,
         source: r.source,
         confidence: r.confidence,
+        provenance: r.provenance,
         joinedAt: r.joinedAt.toISOString(),
         lastServedAt: r.lastServedAt.toISOString(),
       })),

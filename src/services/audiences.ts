@@ -1,14 +1,17 @@
 // Audiences: saved persona/ICP filter-sets, canonical people dedup, and
 // provenance-based membership tagging.
 //
-// A person joins an audience iff a serve made UNDER that audience returned them
-// (provenance). We never re-implement provider matching locally — membership is
-// "the audience's search returned this person", which matches provider semantics
-// exactly. One person accrues many audiences over time as different audiences'
-// searches surface them.
+// A person joins an audience iff that audience's search FOUND them (provenance):
+// either a serve made under it handed them out ('served'), or its free search
+// found them while they were already taken for the brand ('found_taken', see
+// audience-provenance.ts — never served again, never paid for). We never
+// re-implement provider matching locally — membership is "the audience's search
+// returned this person", which matches provider semantics exactly. One person
+// accrues every audience (hence every list / sourcing origin) that found them.
 //
-//   resolvePersonId   — dedup an incoming served contact into the canonical
-//                       `people` dimension (email_norm -> linkedin -> provider id).
+//   resolvePersonId   — (audience-provenance.ts) dedup a contact into the
+//                       canonical `people` dimension (email_norm -> linkedin ->
+//                       provider id).
 //   tagAudienceServe  — upsert the person + the audience_members bridge row.
 //   refreshCounts     — re-snapshot per-provider counts via the free dry-run.
 //   computeStats      — given a list of emails/personIds, return per-audience
@@ -29,13 +32,18 @@ import {
   type Audience,
 } from "../db/schema.js";
 import {
-  filterSuppressed,
+  partitionSuppressed,
   normalizeEmail,
   normalizeLinkedinUrl,
   windowCutoff,
   type ServedContact,
 } from "./suppression.js";
 import { bufferTeasers, popTeaser } from "./teaser-buffer.js";
+import {
+  resolvePersonId,
+  tagFoundAlreadyTaken,
+  type MembershipProvenance,
+} from "./audience-provenance.js";
 import { readScreenYield, screenTeaser } from "./teaser-screening.js";
 import {
   loadOptOutExclusions,
@@ -72,107 +80,6 @@ import { audienceSourcingOriginSlug, isCrmSourcedFeature, withSourcingOrigin } f
 import { crmServeNext, normalizeCrmContact } from "../lib/crm-contacts.js";
 import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
 
-// The transaction handle drizzle passes to the `db.transaction` callback.
-type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
-
-// Resolve (dedup) a served contact into the canonical `people` dimension,
-// returning its person id. Match order: email_norm (canonical) -> linkedin ->
-// provider person id. Merges newly-learned identity fields onto the existing row
-// (coalesce: prefer the new value, keep the old when the new is null).
-async function resolvePersonId(
-  tx: Tx,
-  orgId: string,
-  c: ServedContact
-): Promise<string> {
-  const emailNorm = normalizeEmail(c.email);
-  const linkedinNorm = normalizeLinkedinUrl(c.linkedinUrl);
-  const apolloId =
-    c.provider === "apollo" && c.providerPersonId ? c.providerPersonId : null;
-  const apifyId =
-    c.provider === "apify" && c.providerPersonId ? c.providerPersonId : null;
-
-  const keyConds = [];
-  if (emailNorm) keyConds.push(eq(people.emailNorm, emailNorm));
-  if (linkedinNorm) keyConds.push(eq(people.linkedinUrlNorm, linkedinNorm));
-  if (apolloId) keyConds.push(eq(people.apolloPersonId, apolloId));
-  if (apifyId) keyConds.push(eq(people.apifyPersonId, apifyId));
-
-  const fullName =
-    c.firstName || c.lastName
-      ? [c.firstName, c.lastName].filter(Boolean).join(" ")
-      : null;
-
-  if (keyConds.length > 0) {
-    const [existing] = await tx
-      .select()
-      .from(people)
-      .where(and(eq(people.orgId, orgId), or(...keyConds)))
-      .limit(1);
-    if (existing) {
-      await tx
-        .update(people)
-        .set({
-          emailNorm: emailNorm ?? existing.emailNorm,
-          linkedinUrlNorm: linkedinNorm ?? existing.linkedinUrlNorm,
-          apolloPersonId: apolloId ?? existing.apolloPersonId,
-          apifyPersonId: apifyId ?? existing.apifyPersonId,
-          firstName: c.firstName ?? existing.firstName,
-          lastName: c.lastName ?? existing.lastName,
-          fullName: fullName ?? existing.fullName,
-          companyDomain: c.companyDomain ?? existing.companyDomain,
-          lastSeenAt: new Date(),
-        })
-        .where(eq(people.id, existing.id));
-      return existing.id;
-    }
-  }
-
-  // No match — insert. ON CONFLICT (org_id, email_norm) covers the race where a
-  // concurrent serve created the same email between the select and the insert.
-  if (emailNorm) {
-    const [row] = await tx
-      .insert(people)
-      .values({
-        orgId,
-        emailNorm,
-        linkedinUrlNorm: linkedinNorm,
-        apolloPersonId: apolloId,
-        apifyPersonId: apifyId,
-        firstName: c.firstName,
-        lastName: c.lastName,
-        fullName,
-        companyDomain: c.companyDomain,
-      })
-      .onConflictDoUpdate({
-        target: [people.orgId, people.emailNorm],
-        set: {
-          linkedinUrlNorm: sql`coalesce(excluded.linkedin_url_norm, ${people.linkedinUrlNorm})`,
-          apolloPersonId: sql`coalesce(excluded.apollo_person_id, ${people.apolloPersonId})`,
-          apifyPersonId: sql`coalesce(excluded.apify_person_id, ${people.apifyPersonId})`,
-          lastSeenAt: sql`now()`,
-        },
-      })
-      .returning({ id: people.id });
-    return row.id;
-  }
-
-  const [row] = await tx
-    .insert(people)
-    .values({
-      orgId,
-      emailNorm: null,
-      linkedinUrlNorm: linkedinNorm,
-      apolloPersonId: apolloId,
-      apifyPersonId: apifyId,
-      firstName: c.firstName,
-      lastName: c.lastName,
-      fullName,
-      companyDomain: c.companyDomain,
-    })
-    .returning({ id: people.id });
-  return row.id;
-}
-
 // Tag served contacts as members of an audience (provenance membership). Upserts
 // the canonical person, then the audience_members bridge row (idempotent on
 // (audience_id, person_id) — re-serving just bumps last_served_at).
@@ -200,10 +107,13 @@ export async function tagAudienceServe(
           personId,
           source: c.provider,
           confidence: "provider_confirmed",
+          provenance: "served",
         })
         .onConflictDoUpdate({
           target: [audienceMembers.audienceId, audienceMembers.personId],
-          set: { lastServedAt: sql`now()`, source: c.provider },
+          // A person first found while taken, then served by this audience once
+          // their window lapsed, becomes 'served'.
+          set: { lastServedAt: sql`now()`, source: c.provider, provenance: "served" },
         });
     });
   }
@@ -334,7 +244,7 @@ export interface AudienceStats {
     personId: string;
     emailNorm: string | null;
     fullName: string | null;
-    audiences: Array<{ audienceId: string; name: string }>;
+    audiences: Array<{ audienceId: string; name: string; provenance: MembershipProvenance }>;
   }>;
   unmatched: { emails: string[]; personIds: string[] };
   byAudience: Array<{
@@ -393,6 +303,7 @@ export async function computeStats(
       ? await db
           .select({
             personId: audienceMembers.personId,
+            provenance: audienceMembers.provenance,
             matchedAudienceId: audiences.id,
             matchedName: audiences.name,
             matchedBrandId: audiences.brandId,
@@ -418,7 +329,12 @@ export async function computeStats(
   // De-dupe per person AND per audience on the RESOLVED audience id: a person on
   // both the deprecated variant and its canonical twin must surface the canonical
   // audience exactly once (and count once in the per-audience rollup).
-  const perPerson = new Map<string, Map<string, string>>(); // personId -> (audienceId -> name)
+  // personId -> (audienceId -> name + provenance; 'served' wins when several
+  // memberships resolve to one audience).
+  const perPerson = new Map<
+    string,
+    Map<string, { name: string; provenance: MembershipProvenance }>
+  >();
   const perAudience = new Map<
     string,
     { audienceId: string; name: string; brandId: string; members: Set<string> }
@@ -435,8 +351,17 @@ export async function computeStats(
       ? (m.canonicalBrandId as string)
       : m.matchedBrandId;
 
-    const personMap = perPerson.get(m.personId) ?? new Map<string, string>();
-    personMap.set(audienceId, name);
+    const personMap =
+      perPerson.get(m.personId) ??
+      new Map<string, { name: string; provenance: MembershipProvenance }>();
+    const prev = personMap.get(audienceId);
+    personMap.set(audienceId, {
+      name,
+      provenance:
+        prev?.provenance === "served" || m.provenance === "served"
+          ? "served"
+          : "found_taken",
+    });
     perPerson.set(m.personId, personMap);
 
     const agg = perAudience.get(audienceId) ?? {
@@ -454,7 +379,7 @@ export async function computeStats(
     emailNorm: p.emailNorm,
     fullName: p.fullName,
     audiences: [...(perPerson.get(p.id)?.entries() ?? [])].map(
-      ([audienceId, name]) => ({ audienceId, name })
+      ([audienceId, v]) => ({ audienceId, name: v.name, provenance: v.provenance })
     ),
   }));
 
@@ -826,7 +751,10 @@ export async function resolveAudiencesForBrand(
         and(
           eq(people.orgId, orgId),
           inArray(people.emailNorm, emailNorms),
-          eq(audiences.brandId, brandId)
+          eq(audiences.brandId, brandId),
+          // The card of a lead is the audience that SERVED it; an audience that
+          // only found them while taken (multi-source) is not where it came from.
+          eq(audienceMembers.provenance, "served")
         )
       );
 
@@ -2559,13 +2487,17 @@ export async function serveNextPerson(
 
     // Re-check suppression pre-pay: a teaser fresh at buffer time may have been
     // served under ANOTHER audience for this brand since (cross-audience, within
-    // the window) — drop it before paying to enrich.
-    const [fresh] = await filterSuppressed(
+    // the window) — drop it before paying to enrich, but record that this
+    // audience found them too (multi-source provenance, no spend).
+    const popped = await partitionSuppressed(
       identity.orgId,
       [audience.brandId],
       [{ linkedinUrl: teaser.linkedinUrl, providerPersonId: teaser.providerPersonId }]
     );
-    if (!fresh) continue;
+    if (popped.taken.length > 0) {
+      await tagFoundAlreadyTaken(identity.orgId, audience.id, "apollo", popped.taken);
+      continue;
+    }
 
     // Standing opt-out, checked BEFORE the screen and before the reveal: the
     // teaser is free, the enrich is not, and a person who asked us to stop must

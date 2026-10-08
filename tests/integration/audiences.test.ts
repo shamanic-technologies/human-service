@@ -465,7 +465,7 @@ describe("stats: deprecated -> canonical resolution", () => {
     expect(stats.matched).toHaveLength(1);
     // Resolves to the canonical active audience, NOT the deprecated "[Apify]" row.
     expect(stats.matched[0].audiences).toEqual([
-      { audienceId: CANON, name: "Agency Owners and MDs" },
+      { audienceId: CANON, name: "Agency Owners and MDs", provenance: "served" },
     ]);
     expect(stats.byAudience).toEqual([
       {
@@ -487,7 +487,7 @@ describe("stats: deprecated -> canonical resolution", () => {
     expect(stats.matched).toHaveLength(1);
     // ONE canonical audience entry, not two (deprecated + canonical collapsed).
     expect(stats.matched[0].audiences).toEqual([
-      { audienceId: CANON, name: "Agency Owners and MDs" },
+      { audienceId: CANON, name: "Agency Owners and MDs", provenance: "served" },
     ]);
     expect(stats.byAudience).toHaveLength(1);
     expect(stats.byAudience[0]).toMatchObject({
@@ -511,7 +511,7 @@ describe("stats: deprecated -> canonical resolution", () => {
     ]);
     const stats = await computeStats(ORG_A, { emails: ["orphan@x.com"] });
     expect(stats.matched[0].audiences).toEqual([
-      { audienceId: DEPR, name: "Orphan [Apify]" },
+      { audienceId: DEPR, name: "Orphan [Apify]", provenance: "served" },
     ]);
   });
 });

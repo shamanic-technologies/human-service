@@ -10,13 +10,26 @@ vi.mock("../../src/lib/email-verification.js", async (importOriginal) => ({
 
 // Mock the suppression layer so we test the people-gateway WIRING (does it call
 // filter / exclude-set / record / block at the right moments?) without a db.
-const supp = vi.hoisted(() => ({
-  filterSuppressed: vi.fn(),
-  getSuppressionSet: vi.fn(),
-  claimServe: vi.fn(),
-  recordServe: vi.fn(),
-}));
+// partitionSuppressed delegates to the filterSuppressed spy: the taken half is
+// the multi-source suite's subject (audiences-multi-source.test.ts).
+const supp = vi.hoisted(() => {
+  const s = {
+    filterSuppressed: vi.fn(),
+    getSuppressionSet: vi.fn(),
+    claimServe: vi.fn(),
+    recordServe: vi.fn(),
+    partitionSuppressed: async (o: string, b: string[], items: unknown[]) => ({
+      fresh: await s.filterSuppressed(o, b, items),
+      taken: [],
+    }),
+    normalizeEmail: (e: string | null | undefined) => (e ? e.trim().toLowerCase() || null : null),
+  };
+  return s;
+});
 vi.mock("../../src/services/suppression.js", () => supp);
+vi.mock("../../src/services/audience-provenance.js", () => ({
+  tagFoundAlreadyTaken: vi.fn(async () => []),
+}));
 
 import {
   peopleSearch,

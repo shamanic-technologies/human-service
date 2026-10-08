@@ -267,6 +267,13 @@
       "when": 1771587972299,
       "tag": "0037_add_source_campaign_states",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1771587973299,
+      "tag": "0038_add_audience_member_provenance",
+      "breakpoints": true
     }
   ]
 }

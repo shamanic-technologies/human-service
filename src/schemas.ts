@@ -1036,6 +1036,12 @@ export const AUDIENCE_LIST_KINDS = [
 ] as const;
 export const AudienceListKindSchema = z.enum(AUDIENCE_LIST_KINDS);
 
+// How a person became a member of an audience (src/services/audience-provenance.ts).
+export const MembershipProvenanceSchema = z.enum(["served", "found_taken"]).openapi({
+  description:
+    "'served' = a serve made under this audience handed the person out. 'found_taken' = this audience's FREE search found the person while they were already taken (served) for the brand; they were not served again and nothing was paid to record it.",
+});
+
 export const AudienceChannelSchema = z
   .object({
     channel: z.enum(["cold_email"]).openapi({
@@ -1271,8 +1277,11 @@ export const AudienceMemberSchema = z
     companyDomain: z.string().nullable(),
     source: z.string().nullable(),
     confidence: z.string(),
+    provenance: MembershipProvenanceSchema,
     joinedAt: z.string(),
-    lastServedAt: z.string(),
+    lastServedAt: z.string().openapi({
+      description: "Last serve under this audience; for a 'found_taken' member, the moment it was found.",
+    }),
   })
   .openapi("AudienceMember");
 
@@ -1293,7 +1302,13 @@ export const AudienceStatsResponseSchema = z
         emailNorm: z.string().nullable(),
         fullName: z.string().nullable(),
         audiences: z.array(
-          z.object({ audienceId: z.string().uuid(), name: z.string() })
+          z.object({
+            audienceId: z.string().uuid(),
+            name: z.string(),
+            provenance: MembershipProvenanceSchema.openapi({
+              description: "'served' when any membership resolving to this audience was a serve, else 'found_taken'.",
+            }),
+          })
         ),
       })
     ),
@@ -3830,6 +3845,95 @@ registry.registerPath({
   request: { params: BrandSnapshotParamsSchema, query: BrandSnapshotPageQuerySchema },
   responses: {
     200: { description: "A page of companies", content: { "application/json": { schema: BrandHeldCompaniesResponseSchema } } },
+    ...snapshotErrors,
+  },
+});
+
+// --- Internal: multi-source provenance (src/services/audience-memberships.ts) ---
+//
+// Which audiences (hence which lists / sourcing origins) FOUND each person of a
+// brand, and per audience how many of its people another audience found too.
+// RAW membership (no deprecated -> canonical collapse). Pure DB read, no spend.
+
+
+export const BrandMembershipsQuerySchema = BrandSnapshotQuerySchema.extend({
+  limit: z.coerce.number().int().min(1).max(5000).optional().openapi({ description: "People per page, default 1000, max 5000." }),
+  offset: z.coerce.number().int().min(0).optional().openapi({ description: "People to skip, default 0." }),
+});
+
+const BrandMembershipSchema = z.object({
+  audienceId: z.string().uuid(),
+  offerId: z.string().uuid().nullable(),
+  list: AudienceListKindSchema.nullable(),
+  status: AudienceStatusSchema,
+  provenance: MembershipProvenanceSchema,
+  joinedAt: z.string(),
+});
+
+export const BrandMembershipsResponseSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    total: z.number().int().openapi({ description: "Distinct people the brand's audiences found (all pages)." }),
+    limit: z.number().int(),
+    offset: z.number().int(),
+    people: z.array(
+      z.object({
+        personId: z.string().uuid().openapi({ description: "Canonical human-service person id (= serve-next's personId)." }),
+        orgId: z.string(),
+        emailNorm: z.string().nullable(),
+        memberships: z.array(BrandMembershipSchema).openapi({
+          description: "Every audience of the brand that found this person, raw (a deprecated audience stays itself), oldest first. Several lists = a multi-source person.",
+        }),
+      })
+    ),
+  })
+  .openapi("BrandMembershipsResponse");
+
+export const BrandAudienceOverlapResponseSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    people: z.number().int().openapi({ description: "Distinct people the brand's audiences found." }),
+    peopleInSeveralAudiences: z.number().int(),
+    peopleInSeveralLists: z.number().int().openapi({ description: "People found by audiences of 2+ list kinds (multi-source)." }),
+    audiences: z.array(
+      z.object({
+        audienceId: z.string().uuid(),
+        name: z.string(),
+        orgId: z.string(),
+        offerId: z.string().uuid().nullable(),
+        list: AudienceListKindSchema.nullable(),
+        status: AudienceStatusSchema,
+        memberCount: z.number().int(),
+        servedCount: z.number().int(),
+        foundTakenCount: z.number().int(),
+        alsoInOtherAudienceCount: z.number().int().openapi({ description: "Members another audience of the brand found too." }),
+        alsoInOtherListCount: z.number().int().openapi({ description: "Members an audience of ANOTHER list kind found too." }),
+      })
+    ),
+  })
+  .openapi("BrandAudienceOverlapResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/memberships",
+  summary: "Per person of a brand: every audience (list, offer, provenance) that found them. Raw membership, paged by person, no spend.",
+  description: "Ordered by personId. Service auth. A person found by several lists is a multi-source (higher-intent) lead.",
+  security: [{ apiKey: [] }],
+  request: { params: BrandSnapshotParamsSchema, query: BrandMembershipsQuerySchema },
+  responses: {
+    200: { description: "A page of people with their memberships", content: { "application/json": { schema: BrandMembershipsResponseSchema } } },
+    ...snapshotErrors,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/audience-overlap",
+  summary: "Per audience of a brand: members, served vs found-while-taken, and how many another audience / list found too. Raw membership, no spend.",
+  security: [{ apiKey: [] }],
+  request: { params: BrandSnapshotParamsSchema, query: BrandSnapshotQuerySchema },
+  responses: {
+    200: { description: "Overlap", content: { "application/json": { schema: BrandAudienceOverlapResponseSchema } } },
     ...snapshotErrors,
   },
 });

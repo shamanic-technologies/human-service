@@ -45,7 +45,8 @@ import {
   type AudienceCandidate,
   type TeaserSnapshot,
 } from "../db/schema.js";
-import { filterSuppressed } from "./suppression.js";
+import { partitionSuppressed } from "./suppression.js";
+import { tagFoundAlreadyTaken } from "./audience-provenance.js";
 import { bufferTeasers, popTeaser, type BufferedTeaser } from "./teaser-buffer.js";
 import { isScreenYieldSpent, SCREEN_YIELD_WINDOW } from "./teaser-screening.js";
 import { loadServeExclusions, matchesOptOut } from "./opt-outs.js";
@@ -257,8 +258,13 @@ async function passesFreeChecks(
   ownCompany: Awaited<ReturnType<typeof loadOwnCompany>>
 ): Promise<boolean> {
   const key = { linkedinUrl: teaser.linkedinUrl, providerPersonId: teaser.providerPersonId };
-  const [fresh] = await filterSuppressed(identity.orgId, [audience.brandId], [key]);
-  if (!fresh) return false;
+  // Already taken for the brand (served under another audience): never offered,
+  // but this audience found them too (multi-source provenance, no spend).
+  const { taken } = await partitionSuppressed(identity.orgId, [audience.brandId], [key]);
+  if (taken.length > 0) {
+    await tagFoundAlreadyTaken(identity.orgId, audience.id, "apollo", taken);
+    return false;
+  }
   if (matchesOptOut(exclusions, key)) {
     console.log(
       `[human-service] opt_out.blocked_candidate org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`
