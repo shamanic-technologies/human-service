@@ -4,6 +4,7 @@
 import { Router, type Request, type Response } from "express";
 import { requireApiKey } from "../middleware/auth.js";
 import {
+  BrandMembershipsQuerySchema,
   BrandSnapshotPageQuerySchema,
   BrandSnapshotParamsSchema,
   BrandSnapshotQuerySchema,
@@ -13,6 +14,7 @@ import {
   brandHeldCompanies,
   brandHeldPeople,
 } from "../services/audience-snapshot.js";
+import { brandAudienceOverlap, brandMemberships } from "../services/audience-memberships.js";
 
 const router = Router();
 
@@ -55,6 +57,31 @@ router.get("/internal/brands/:brandId/audience-snapshot/companies", requireApiKe
   const args = pageArgs(req, res);
   if (!args) return;
   res.json(await brandHeldCompanies(args.scope, args.page));
+});
+
+// Multi-source provenance reads (src/services/audience-memberships.ts): RAW
+// membership, every audience of the brand, any status.
+const DEFAULT_MEMBERSHIPS_LIMIT = 1000;
+
+router.get("/internal/brands/:brandId/memberships", requireApiKey, async (req, res) => {
+  const params = BrandSnapshotParamsSchema.safeParse(req.params);
+  const query = BrandMembershipsQuerySchema.safeParse(req.query);
+  if (!params.success) return badRequest(res, params.error.issues[0]?.message);
+  if (!query.success) return badRequest(res, query.error.issues[0]?.message);
+  res.json(
+    await brandMemberships(
+      { brandId: params.data.brandId, orgId: query.data.orgId },
+      { limit: query.data.limit ?? DEFAULT_MEMBERSHIPS_LIMIT, offset: query.data.offset ?? 0 }
+    )
+  );
+});
+
+router.get("/internal/brands/:brandId/audience-overlap", requireApiKey, async (req, res) => {
+  const params = BrandSnapshotParamsSchema.safeParse(req.params);
+  const query = BrandSnapshotQuerySchema.safeParse(req.query);
+  if (!params.success) return badRequest(res, params.error.issues[0]?.message);
+  if (!query.success) return badRequest(res, query.error.issues[0]?.message);
+  res.json(await brandAudienceOverlap({ brandId: params.data.brandId, orgId: query.data.orgId }));
 });
 
 export default router;

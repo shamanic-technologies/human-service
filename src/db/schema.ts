@@ -587,6 +587,19 @@ export type Audience = typeof audiences.$inferSelect;
 export type NewAudience = typeof audiences.$inferInsert;
 
 // 🥈 Silver — Kimball bridge: person <-> audience (many-to-many).
+//
+// A person is a member of an audience iff that audience's search FOUND them:
+//   provenance 'served'      — a serve made under the audience handed them out;
+//   provenance 'found_taken' — the audience's FREE search (teaser) found them
+//                              while they were already taken (served) for the
+//                              brand. They are not served again (suppression is
+//                              unchanged); the row records that this source found
+//                              them too, from what the free match already knew,
+//                              never a paid reveal. Owner 2026-10-08: a person
+//                              found by several sources is a higher-intent lead.
+// One person therefore carries every audience (hence every list / sourcing
+// origin) that found them. For a 'found_taken' row, last_served_at = the moment
+// it was found (the column is NOT NULL); `provenance` disambiguates.
 export const audienceMembers = pgTable(
   "audience_members",
   {
@@ -600,6 +613,7 @@ export const audienceMembers = pgTable(
       .references(() => people.id, { onDelete: "cascade" }),
     source: text("source"), // provider that surfaced it: "apollo" | "apify"
     confidence: text("confidence").notNull().default("provider_confirmed"),
+    provenance: text("provenance").notNull().default("served"), // "served" | "found_taken"
     joinedAt: timestamp("joined_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

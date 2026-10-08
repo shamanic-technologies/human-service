@@ -2203,11 +2203,20 @@
                       },
                       "name": {
                         "type": "string"
+                      },
+                      "provenance": {
+                        "type": "string",
+                        "enum": [
+                          "served",
+                          "found_taken"
+                        ],
+                        "description": "'served' when any membership resolving to this audience was a serve, else 'found_taken'."
                       }
                     },
                     "required": [
                       "audienceId",
-                      "name"
+                      "name",
+                      "provenance"
                     ]
                   }
                 }
@@ -3360,11 +3369,20 @@
           "confidence": {
             "type": "string"
           },
+          "provenance": {
+            "type": "string",
+            "enum": [
+              "served",
+              "found_taken"
+            ],
+            "description": "'served' = a serve made under this audience handed the person out. 'found_taken' = this audience's FREE search found the person while they were already taken (served) for the brand; they were not served again and nothing was paid to record it."
+          },
           "joinedAt": {
             "type": "string"
           },
           "lastServedAt": {
-            "type": "string"
+            "type": "string",
+            "description": "Last serve under this audience; for a 'found_taken' member, the moment it was found."
           }
         },
         "required": [
@@ -3377,6 +3395,7 @@
           "companyDomain",
           "source",
           "confidence",
+          "provenance",
           "joinedAt",
           "lastServedAt"
         ]
@@ -5893,6 +5912,205 @@
           "limit",
           "offset",
           "companies"
+        ]
+      },
+      "BrandMembershipsResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "total": {
+            "type": "integer",
+            "description": "Distinct people the brand's audiences found (all pages)."
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "personId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "Canonical human-service person id (= serve-next's personId)."
+                },
+                "orgId": {
+                  "type": "string"
+                },
+                "emailNorm": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "memberships": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "audienceId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "offerId": {
+                        "type": "string",
+                        "nullable": true,
+                        "format": "uuid"
+                      },
+                      "list": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "apollo_search",
+                          "apollo_buying_signal",
+                          "linkedin_engagement",
+                          "crm_contacts",
+                          "apify_search",
+                          null
+                        ]
+                      },
+                      "status": {
+                        "$ref": "#/components/schemas/AudienceStatus"
+                      },
+                      "provenance": {
+                        "type": "string",
+                        "enum": [
+                          "served",
+                          "found_taken"
+                        ],
+                        "description": "'served' = a serve made under this audience handed the person out. 'found_taken' = this audience's FREE search found the person while they were already taken (served) for the brand; they were not served again and nothing was paid to record it."
+                      },
+                      "joinedAt": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "audienceId",
+                      "offerId",
+                      "list",
+                      "status",
+                      "provenance",
+                      "joinedAt"
+                    ]
+                  },
+                  "description": "Every audience of the brand that found this person, raw (a deprecated audience stays itself), oldest first. Several lists = a multi-source person."
+                }
+              },
+              "required": [
+                "personId",
+                "orgId",
+                "emailNorm",
+                "memberships"
+              ]
+            }
+          }
+        },
+        "required": [
+          "brandId",
+          "total",
+          "limit",
+          "offset",
+          "people"
+        ]
+      },
+      "BrandAudienceOverlapResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "people": {
+            "type": "integer",
+            "description": "Distinct people the brand's audiences found."
+          },
+          "peopleInSeveralAudiences": {
+            "type": "integer"
+          },
+          "peopleInSeveralLists": {
+            "type": "integer",
+            "description": "People found by audiences of 2+ list kinds (multi-source)."
+          },
+          "audiences": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "orgId": {
+                  "type": "string"
+                },
+                "offerId": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "uuid"
+                },
+                "list": {
+                  "type": "string",
+                  "nullable": true,
+                  "enum": [
+                    "apollo_search",
+                    "apollo_buying_signal",
+                    "linkedin_engagement",
+                    "crm_contacts",
+                    "apify_search",
+                    null
+                  ]
+                },
+                "status": {
+                  "$ref": "#/components/schemas/AudienceStatus"
+                },
+                "memberCount": {
+                  "type": "integer"
+                },
+                "servedCount": {
+                  "type": "integer"
+                },
+                "foundTakenCount": {
+                  "type": "integer"
+                },
+                "alsoInOtherAudienceCount": {
+                  "type": "integer",
+                  "description": "Members another audience of the brand found too."
+                },
+                "alsoInOtherListCount": {
+                  "type": "integer",
+                  "description": "Members an audience of ANOTHER list kind found too."
+                }
+              },
+              "required": [
+                "audienceId",
+                "name",
+                "orgId",
+                "offerId",
+                "list",
+                "status",
+                "memberCount",
+                "servedCount",
+                "foundTakenCount",
+                "alsoInOtherAudienceCount",
+                "alsoInOtherListCount"
+              ]
+            }
+          }
+        },
+        "required": [
+          "brandId",
+          "people",
+          "peopleInSeveralAudiences",
+          "peopleInSeveralLists",
+          "audiences"
         ]
       },
       "SourceCampaignStateResponse": {
@@ -12018,6 +12236,145 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BrandHeldCompanies"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/memberships": {
+      "get": {
+        "summary": "Per person of a brand: every audience (list, offer, provenance) that found them. Raw membership, paged by person, no spend.",
+        "description": "Ordered by personId. Service auth. A person found by several lists is a multi-source (higher-intent) lead.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "description": "Only this org's audiences of the brand. Omitted ⟹ every org holding the brand."
+            },
+            "required": false,
+            "description": "Only this org's audiences of the brand. Omitted ⟹ every org holding the brand.",
+            "name": "orgId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000,
+              "description": "People per page, default 1000, max 5000."
+            },
+            "required": false,
+            "description": "People per page, default 1000, max 5000.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "nullable": true,
+              "minimum": 0,
+              "description": "People to skip, default 0."
+            },
+            "required": false,
+            "description": "People to skip, default 0.",
+            "name": "offset",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of people with their memberships",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandMembershipsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/audience-overlap": {
+      "get": {
+        "summary": "Per audience of a brand: members, served vs found-while-taken, and how many another audience / list found too. Raw membership, no spend.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "description": "Only this org's audiences of the brand. Omitted ⟹ every org holding the brand."
+            },
+            "required": false,
+            "description": "Only this org's audiences of the brand. Omitted ⟹ every org holding the brand.",
+            "name": "orgId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Overlap",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandAudienceOverlapResponse"
                 }
               }
             }
