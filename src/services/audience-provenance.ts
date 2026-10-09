@@ -16,9 +16,10 @@
 // Lives apart from audiences.ts so the people gateway (people-providers.ts, which
 // audiences.ts imports) can tag without an import cycle.
 
-import { and, eq, or, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { audienceMembers, people } from "../db/schema.js";
+import { audienceMembers, people, personEmails } from "../db/schema.js";
+import { recordServedEmail } from "./person-emails.js";
 import {
   normalizeEmail,
   normalizeLinkedinUrl,
@@ -32,10 +33,25 @@ export type MembershipProvenance = "served" | "found_taken";
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // Resolve (dedup) a served contact into the canonical `people` dimension,
-// returning its person id. Match order: email_norm (canonical) -> linkedin ->
-// provider person id. Merges newly-learned identity fields onto the existing row
-// (coalesce: prefer the new value, keep the old when the new is null).
+// returning its person id. Match order: email_norm (canonical, ANY address of the
+// person: person-emails.ts) -> linkedin -> provider person id. Merges
+// newly-learned identity fields onto the existing row (coalesce: prefer the new
+// value, keep the old when the new is null), and records the address on the
+// person, so an address a person used before stays theirs when the primary moves.
 export async function resolvePersonId(
+  tx: Tx,
+  orgId: string,
+  c: ServedContact
+): Promise<string> {
+  const personId = await resolvePersonRow(tx, orgId, c);
+  const emailNorm = normalizeEmail(c.email);
+  if (emailNorm) {
+    await recordServedEmail(tx, orgId, personId, emailNorm, c.companyDomain);
+  }
+  return personId;
+}
+
+async function resolvePersonRow(
   tx: Tx,
   orgId: string,
   c: ServedContact
@@ -48,7 +64,18 @@ export async function resolvePersonId(
     c.provider === "apify" && c.providerPersonId ? c.providerPersonId : null;
 
   const keyConds = [];
-  if (emailNorm) keyConds.push(eq(people.emailNorm, emailNorm));
+  if (emailNorm) {
+    keyConds.push(eq(people.emailNorm, emailNorm));
+    keyConds.push(
+      inArray(
+        people.id,
+        tx
+          .select({ id: personEmails.personId })
+          .from(personEmails)
+          .where(and(eq(personEmails.orgId, orgId), eq(personEmails.emailNorm, emailNorm)))
+      )
+    );
+  }
   if (linkedinNorm) keyConds.push(eq(people.linkedinUrlNorm, linkedinNorm));
   if (apolloId) keyConds.push(eq(people.apolloPersonId, apolloId));
   if (apifyId) keyConds.push(eq(people.apifyPersonId, apifyId));
@@ -65,10 +92,28 @@ export async function resolvePersonId(
       .where(and(eq(people.orgId, orgId), or(...keyConds)))
       .limit(1);
     if (existing) {
+      // Revealed at one of the person's OTHER addresses: the primary stays.
+      const keepPrimary =
+        emailNorm !== null &&
+        existing.emailNorm !== null &&
+        existing.emailNorm !== emailNorm &&
+        (
+          await tx
+            .select({ id: personEmails.id })
+            .from(personEmails)
+            .where(
+              and(
+                eq(personEmails.orgId, orgId),
+                eq(personEmails.emailNorm, emailNorm),
+                eq(personEmails.personId, existing.id)
+              )
+            )
+            .limit(1)
+        ).length > 0;
       await tx
         .update(people)
         .set({
-          emailNorm: emailNorm ?? existing.emailNorm,
+          emailNorm: keepPrimary ? existing.emailNorm : emailNorm ?? existing.emailNorm,
           linkedinUrlNorm: linkedinNorm ?? existing.linkedinUrlNorm,
           apolloPersonId: apolloId ?? existing.apolloPersonId,
           apifyPersonId: apifyId ?? existing.apifyPersonId,

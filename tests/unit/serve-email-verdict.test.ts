@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 
+// One person, several addresses (src/services/person-emails.ts): no person holds
+// another address here, so every address stands for itself.
+vi.mock("../../src/services/person-emails.js", () => ({
+  personAddressSet: vi.fn(async (_db: unknown, _org: string, emails: string[]) => emails),
+  personIdsByEmail: vi.fn(async () => new Map()),
+}));
+
 // The gate under test: after the billed reveal, finalizeResolved reads the
 // provider's own verdict (apollo-service `emailVerification`) and serves only a
 // deliverable address.

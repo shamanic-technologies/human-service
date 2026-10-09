@@ -420,6 +420,37 @@ export const people = pgTable(
 export type Person = typeof people.$inferSelect;
 export type NewPerson = typeof people.$inferInsert;
 
+// 🥈 Silver — every email address a person holds (migration 0040). One human
+// often writes from several mailboxes; `people.email_norm` stays the PRIMARY
+// address and is also a row here. An address belongs to at most one person per
+// org, so a lookup by ANY address resolves to one person id.
+// source: 'served' (learned from a serve/reveal) | 'attached' (explicit act).
+export const personEmails = pgTable(
+  "person_emails",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    personId: uuid("person_id")
+      .notNull()
+      .references(() => people.id, { onDelete: "cascade" }),
+    emailNorm: text("email_norm").notNull(),
+    companyDomain: text("company_domain"),
+    companyName: text("company_name"),
+    source: text("source").notNull(),
+    evidence: text("evidence"),
+    attachedBy: text("attached_by"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_person_emails_org_email").on(table.orgId, table.emailNorm),
+    index("idx_person_emails_person").on(table.personId),
+  ]
+);
+
+export type PersonEmail = typeof personEmails.$inferSelect;
+
 // 🥈 Silver — saved audience (neutral filter-set + per-provider count snapshot).
 export const audiences = pgTable(
   "audiences",

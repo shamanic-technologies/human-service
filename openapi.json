@@ -3349,6 +3349,13 @@
             "type": "string",
             "nullable": true
           },
+          "emails": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonEmail"
+            },
+            "description": "Every email address of the person, primary first. A lookup by ANY of them returns this person."
+          },
           "linkedinUrlNorm": {
             "type": "string",
             "nullable": true
@@ -3395,6 +3402,7 @@
         "required": [
           "personId",
           "emailNorm",
+          "emails",
           "linkedinUrlNorm",
           "firstName",
           "lastName",
@@ -3405,6 +3413,47 @@
           "provenance",
           "joinedAt",
           "lastServedAt"
+        ]
+      },
+      "PersonEmail": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "Lower-cased address."
+          },
+          "primary": {
+            "type": "boolean",
+            "description": "true for the person's primary address (= emailNorm on the other reads)."
+          },
+          "companyDomain": {
+            "type": "string",
+            "nullable": true,
+            "description": "Company the address belongs to, when known."
+          },
+          "companyName": {
+            "type": "string",
+            "nullable": true
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "served",
+              "attached"
+            ],
+            "description": "served = seen on a serve / reveal of this person; attached = explicitly attached by a service or staff."
+          },
+          "addedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "primary",
+          "companyDomain",
+          "companyName",
+          "source",
+          "addedAt"
         ]
       },
       "BackfillAudienceTargetTextsResponse": {
@@ -5990,6 +6039,118 @@
           "companies"
         ]
       },
+      "PersonLookupResponse": {
+        "type": "object",
+        "properties": {
+          "person": {
+            "$ref": "#/components/schemas/PersonWithEmails"
+          }
+        },
+        "required": [
+          "person"
+        ]
+      },
+      "PersonWithEmails": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "personId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "fullName": {
+            "type": "string",
+            "nullable": true
+          },
+          "firstName": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastName": {
+            "type": "string",
+            "nullable": true
+          },
+          "primaryEmail": {
+            "type": "string",
+            "nullable": true
+          },
+          "emails": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonEmail"
+            },
+            "description": "Every email address of the person, primary first. A lookup by ANY of them returns this person."
+          }
+        },
+        "required": [
+          "personId",
+          "orgId",
+          "fullName",
+          "firstName",
+          "lastName",
+          "primaryEmail",
+          "emails"
+        ],
+        "description": "null = the org holds no person for this address."
+      },
+      "AttachPersonEmailResponse": {
+        "type": "object",
+        "properties": {
+          "attached": {
+            "type": "boolean",
+            "description": "false = the person already held this address (idempotent)."
+          },
+          "person": {
+            "$ref": "#/components/schemas/PersonWithEmails"
+          }
+        },
+        "required": [
+          "attached",
+          "person"
+        ]
+      },
+      "AttachPersonEmailRequest": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "description": "The extra address to attach."
+          },
+          "companyDomain": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Company the address belongs to (e.g. her own practice)."
+          },
+          "companyName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Why this address is the same human (e.g. 'replied from it to our email sent to the primary address'). Stored verbatim."
+          },
+          "attachedBy": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Who attached it: a service name or a staff user id."
+          }
+        },
+        "required": [
+          "orgId",
+          "email",
+          "evidence",
+          "attachedBy"
+        ]
+      },
       "BrandMembershipsByEmailResponse": {
         "type": "object",
         "properties": {
@@ -6006,6 +6167,13 @@
                 "personId": {
                   "type": "string",
                   "format": "uuid"
+                },
+                "emails": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PersonEmail"
+                  },
+                  "description": "Every email address of the person, primary first. A lookup by ANY of them returns this person."
                 },
                 "memberships": {
                   "type": "array",
@@ -6062,6 +6230,7 @@
               },
               "required": [
                 "personId",
+                "emails",
                 "memberships"
               ],
               "description": "null = the org holds no person for this email."
@@ -6088,7 +6257,7 @@
               "minLength": 1
             },
             "minItems": 1,
-            "description": "Lead emails, as many as a whole brand holds (25 MB body cap). Each comes back as a key, raw as sent."
+            "description": "Lead emails, as many as a whole brand holds (25 MB body cap). Each comes back as a key, raw as sent; ANY address of a person resolves to that person."
           }
         },
         "required": [
@@ -6129,6 +6298,13 @@
                 "emailNorm": {
                   "type": "string",
                   "nullable": true
+                },
+                "emails": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PersonEmail"
+                  },
+                  "description": "Every email address of the person, primary first. A lookup by ANY of them returns this person."
                 },
                 "memberships": {
                   "type": "array",
@@ -6187,6 +6363,7 @@
                 "personId",
                 "orgId",
                 "emailNorm",
+                "emails",
                 "memberships"
               ]
             }
@@ -12501,6 +12678,208 @@
           },
           "401": {
             "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/people/by-email": {
+      "get": {
+        "summary": "Find a person by ANY of their email addresses; returns the person id and every address they hold.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "description": "Internal org UUID."
+            },
+            "required": true,
+            "description": "Internal org UUID.",
+            "name": "orgId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Any address of the person."
+            },
+            "required": true,
+            "description": "Any address of the person.",
+            "name": "email",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The person, or null",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonLookupResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/people/{personId}": {
+      "get": {
+        "summary": "One person of the org with every email address they hold.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "personId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "description": "Internal org UUID."
+            },
+            "required": true,
+            "description": "Internal org UUID.",
+            "name": "orgId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The person",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonWithEmails"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "No such person in this org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/people/{personId}/emails": {
+      "post": {
+        "summary": "Attach an extra email address to an existing person (explicit act, never a guess). Idempotent.",
+        "description": "Facts on any address then hold for the person: per-brand suppression, opt-outs and won leads. An address another person of the org already holds is a 409: merging two people is not done by attaching an address.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "personId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachPersonEmailRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The person with every address",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachPersonEmailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "No such person in this org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The address belongs to another person of the org",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }

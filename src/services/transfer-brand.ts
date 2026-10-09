@@ -71,6 +71,7 @@ const TABLES = [
   "audience_screened_out",
   "audience_candidates",
   "people",
+  "person_emails",
   "lead_serves",
   "brand_suppressions",
   "suppression_recoveries",
@@ -379,6 +380,24 @@ async function movePeopleAndMembers(
     FROM transfer_person_map m JOIN people p ON p.id = m.old_id
     WHERE NOT m.matched AND m.shared
     RETURNING id`;
+
+  // Every address the person holds follows them to the target org (an address
+  // the target org already gives to a person stays with that person). The
+  // source rows of a person that moved or collapsed go; a copied person's stay
+  // with the source org, which still holds it.
+  const emailsCopied = await tx`
+    INSERT INTO person_emails (org_id, person_id, email_norm, company_domain,
+      company_name, source, evidence, attached_by, created_at)
+    SELECT ${toOrg}, m.new_id, pe.email_norm, pe.company_domain, pe.company_name,
+      pe.source, pe.evidence, pe.attached_by, pe.created_at
+    FROM transfer_person_map m JOIN person_emails pe ON pe.person_id = m.old_id
+    WHERE pe.org_id = ${sourceOrgId}
+    ON CONFLICT (org_id, email_norm) DO NOTHING
+    RETURNING id`;
+  await tx`
+    DELETE FROM person_emails pe USING transfer_person_map m
+    WHERE pe.person_id = m.old_id AND pe.org_id = ${sourceOrgId} AND NOT m.shared`;
+  add("person_emails", emailsCopied.length);
 
   const members = await tx`
     UPDATE audience_members am SET org_id = ${toOrg}, person_id = m.new_id

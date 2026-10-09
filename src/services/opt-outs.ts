@@ -38,6 +38,7 @@ import {
 } from "../lib/instantly-optouts.js";
 import { isEmailWon, listWonEmails } from "../lib/lead-won.js";
 import { normalizeEmail, normalizeLinkedinUrl } from "./suppression.js";
+import { personAddressSet, personIdsByEmail } from "./person-emails.js";
 import type { Identity } from "./people-providers.js";
 
 export { isEmailOptedOut, listStandingOptOutEmails };
@@ -93,17 +94,42 @@ export async function loadServeExclusions(
   ]);
 }
 
-// Post-reveal: has any brand of this request already won this exact address?
-// One narrowed read per brand at the owner. No brand ⟹ false.
+// Post-reveal: has any brand of this request already won this person, at any of
+// their addresses? One narrowed read per brand and address. No brand ⟹ false.
 export async function isEmailWonForRequest(
   identity: Identity,
   email: string | null | undefined
 ): Promise<boolean> {
   const brandIds = [...new Set(identity.brandIds ?? [])];
+  const addresses = await addressesOfPersonOf(identity.orgId, email);
   const hits = await Promise.all(
-    brandIds.map((brandId) => isEmailWon(identity, brandId, email))
+    brandIds.flatMap((brandId) =>
+      addresses.map((a) => isEmailWon(identity, brandId, a))
+    )
   );
   return hits.some(Boolean);
+}
+
+// Post-reveal: has the person behind this address opted out, at ANY of their
+// addresses? One narrowed read per address at the owner (usually one).
+export async function isPersonOptedOut(
+  identity: Identity,
+  email: string | null | undefined
+): Promise<boolean> {
+  const addresses = await addressesOfPersonOf(identity.orgId, email);
+  const hits = await Promise.all(addresses.map((a) => isEmailOptedOut(identity, a)));
+  return hits.some(Boolean);
+}
+
+// The address itself plus every other address of the person holding it. A
+// blank address is no address (the owner's single-address read answers false).
+async function addressesOfPersonOf(
+  orgId: string,
+  email: string | null | undefined
+): Promise<Array<string | null | undefined>> {
+  const norm = email?.trim().toLowerCase();
+  if (!norm) return [email];
+  return personAddressSet(db, orgId, [norm]);
 }
 
 async function resolveExclusionKeys(
@@ -112,25 +138,30 @@ async function resolveExclusionKeys(
 ): Promise<OptOutExclusions> {
   if (emails.length === 0) return EMPTY_OPT_OUT_EXCLUSIONS;
 
-  const rows = await db
-    .select({
-      linkedinUrlNorm: people.linkedinUrlNorm,
-      apolloPersonId: people.apolloPersonId,
-      apifyPersonId: people.apifyPersonId,
-    })
-    .from(people)
-    .where(
-      and(eq(people.orgId, orgId), inArray(people.emailNorm, emails))
-    );
+  // The fact holds for the PERSON: every address they hold is excluded, and
+  // their pre-pay keys are found whichever address the fact was stated on.
+  const personIds = [...new Set((await personIdsByEmail(db, orgId, emails)).values())];
+  const addresses = await personAddressSet(db, orgId, emails);
+  const rows =
+    personIds.length === 0
+      ? []
+      : await db
+          .select({
+            linkedinUrlNorm: people.linkedinUrlNorm,
+            apolloPersonId: people.apolloPersonId,
+            apifyPersonId: people.apifyPersonId,
+          })
+          .from(people)
+          .where(and(eq(people.orgId, orgId), inArray(people.id, personIds)));
 
   const linkedinUrls = new Set<string>();
-  const personIds = new Set<string>();
+  const providerIds = new Set<string>();
   for (const r of rows) {
     if (r.linkedinUrlNorm) linkedinUrls.add(r.linkedinUrlNorm);
-    if (r.apolloPersonId) personIds.add(r.apolloPersonId);
-    if (r.apifyPersonId) personIds.add(r.apifyPersonId);
+    if (r.apolloPersonId) providerIds.add(r.apolloPersonId);
+    if (r.apifyPersonId) providerIds.add(r.apifyPersonId);
   }
-  return { emails: new Set(emails), linkedinUrls, personIds };
+  return { emails: new Set(addresses), linkedinUrls, personIds: providerIds };
 }
 
 // Does this candidate carry any key the org has a standing opt-out on? Every key

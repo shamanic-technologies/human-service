@@ -13,9 +13,10 @@
 // Pure DB read: no provider call, no spend.
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { audienceMembers, audiences, people } from "../db/schema.js";
+import { audienceMembers, audiences } from "../db/schema.js";
 import { audienceListKind } from "./audience-snapshot.js";
 import { normalizeEmail } from "./suppression.js";
+import { emailsOfPersons, personIdsByEmail, type PersonEmailView } from "./person-emails.js";
 
 export interface MembershipScope {
   brandId: string;
@@ -82,6 +83,7 @@ export async function brandMemberships(
       personId: string;
       orgId: string;
       emailNorm: string | null;
+      emails: PersonEmailView[];
       memberships: Array<{
         audienceId: string;
         offerId: string | null;
@@ -100,6 +102,7 @@ export async function brandMemberships(
       personId: r.person_id,
       orgId: r.org_id,
       emailNorm: r.email_norm,
+      emails: [],
       memberships: [],
     };
     person.memberships.push({
@@ -112,6 +115,9 @@ export async function brandMemberships(
     });
     out.set(r.person_id, person);
   }
+  // Every address of each person (person-emails.ts), primary first.
+  const emails = await emailsOfPersons(db, [...out.keys()]);
+  for (const p of out.values()) p.emails = emails.get(p.personId) ?? [];
   return {
     brandId: scope.brandId,
     total: Number(totalRow?.total ?? 0),
@@ -196,8 +202,8 @@ export async function brandAudienceOverlap(scope: MembershipScope) {
   };
 }
 
-// Same membership rows as brandMemberships, keyed by EMAIL for a caller that holds
-// leads, not person ids (lead-service: a page of 20-50 leads, or a whole-brand
+// Same membership rows as brandMemberships, keyed by EMAIL (ANY address of the
+// person, see person-emails.ts) for a caller that holds leads, not person ids (lead-service: a page of 20-50 leads, or a whole-brand
 // walk of tens of thousands, in one server-to-server call). Every requested email
 // comes back as a key (raw, as sent): null when this org holds no person for it,
 // else the person and every audience of the brand that found them ([] when none).
@@ -225,12 +231,10 @@ export async function brandMembershipsByEmail(
   >();
   for (let i = 0; i < norms.length; i += EMAIL_CHUNK) {
     const chunk = norms.slice(i, i + EMAIL_CHUNK);
-    const found = await db
-      .select({ id: people.id, emailNorm: people.emailNorm })
-      .from(people)
-      .where(and(eq(people.orgId, scope.orgId), inArray(people.emailNorm, chunk)));
-    for (const p of found) personByNorm.set(p.emailNorm as string, p.id);
-    const ids = found.map((p) => p.id);
+    // ANY address of the person resolves to them (person-emails.ts).
+    const found = await personIdsByEmail(db, scope.orgId, chunk);
+    for (const [norm, id] of found) personByNorm.set(norm, id);
+    const ids = [...new Set(found.values())];
     if (ids.length === 0) continue;
     const rows = await db
       .select({
@@ -265,14 +269,23 @@ export async function brandMembershipsByEmail(
     }
   }
 
+  const emailsByPerson = await emailsOfPersons(db, [...new Set(personByNorm.values())]);
   const byEmail: Record<
     string,
-    { personId: string; memberships: NonNullable<ReturnType<typeof membershipsByPerson.get>> } | null
+    {
+      personId: string;
+      emails: PersonEmailView[];
+      memberships: NonNullable<ReturnType<typeof membershipsByPerson.get>>;
+    } | null
   > = {};
   for (const [raw, norm] of normOf) {
     const personId = norm ? personByNorm.get(norm) : undefined;
     byEmail[raw] = personId
-      ? { personId, memberships: membershipsByPerson.get(personId) ?? [] }
+      ? {
+          personId,
+          emails: emailsByPerson.get(personId) ?? [],
+          memberships: membershipsByPerson.get(personId) ?? [],
+        }
       : null;
   }
   return { brandId: scope.brandId, byEmail };
