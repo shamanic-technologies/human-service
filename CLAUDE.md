@@ -72,6 +72,9 @@ section — the port binds first).
 | Internal | `GET /internal/brands/{brandId}/memberships` (`?orgId&limit≤5000&offset`) | apiKey | Per person of a brand: every audience that FOUND them (`offerId`, `list`, `status`, `provenance` served\|found_taken). RAW membership, paged by person. See "Multi-source provenance" |
 | Internal | `POST /internal/brands/{brandId}/memberships/by-email` | apiKey | Same memberships keyed by EMAIL (body `{orgId, emails[]}`, 25 MB parser, mounted before the global json) → `byEmail[raw] = {personId, memberships[]} \| null`. For lead-service's lead pages / whole-brand walks |
 | Internal | `GET /internal/brands/{brandId}/audience-overlap` (`?orgId`) | apiKey | Per audience: members, served vs found-while-taken, how many another audience / list found too, + brand multi-source counts |
+| Internal | `GET /internal/people/by-email` (`?orgId&email`) | apiKey | The person holding ANY of their addresses → `{person: {personId, primaryEmail, emails[]} \| null}`. See "One person, several addresses" |
+| Internal | `GET /internal/people/{personId}` (`?orgId`) | apiKey | One person with every address they hold |
+| Internal | `POST /internal/people/{personId}/emails` | apiKey | Attach an extra address (explicit act, `evidence` + `attachedBy` required). Idempotent; 409 when another person holds it |
 | Org-scoped (CRM v1) | `POST /orgs/lists` | apiKey + `x-org-id` | Create a CRM list |
 | Org-scoped (CRM v1) | `GET /orgs/lists` | apiKey + `x-org-id` | List CRM lists (paginated, optional `brandId` filter) |
 | Org-scoped (CRM v1) | `GET /orgs/lists/{id}` | apiKey + `x-org-id` | Get a CRM list |
@@ -622,7 +625,8 @@ when given. `src/services/transfer-brand.ts` owns it.
   (the target's own launch for the same offer wins), `lists` (brand lists only;
   org-wide `brand_id IS NULL` lists stay); through an audience of the brand
   `audience_members`, `audience_teaser_buffer`, `audience_teaser_screenings`,
-  `audience_screened_out`, `audience_candidates`; through a list `list_members`; solo-brand
+  `audience_screened_out`, `audience_candidates`, `person_emails` (follows its
+  person); through a list `list_members`; solo-brand
   `human_methodologies` + their `humans` row. **A new table that carries
   `org_id` + a brand (directly or through an audience) must be added here.**
 - **`people` is ORG-scoped, not brand-scoped**: a person only this brand's
@@ -755,6 +759,34 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
   >$100k Revenue" rows in DIFFERENT orgs do not collide — org-scoping separates
   them). FAIL LOUD on ambiguity: a deprecated row with no variant suffix, 0
   siblings, or (defensively) >1 sibling is SKIPPED + logged, never guessed.
+
+### One person, several addresses (`src/services/person-emails.ts`)
+
+Owner 2026-10-09: « one HUMAN in Human Service (human id), with several email
+addresses ». Stacy Blecher (org `91e76989…`) was contacted at her Twin Health
+address and answered from her own practice's.
+
+- **`person_emails`** (migration `0040`): every address of a person, the primary
+  included, with its company when known. `people.email_norm` stays the PRIMARY
+  (every existing read unchanged). Unique `(org_id, email_norm)`: an address
+  belongs to at most one person per org. Backfilled from `people.email_norm`.
+- **Joins two ways only**: `served` (resolvePersonId records every address a
+  serve shows; a person re-revealed at a new address keeps the old one) and
+  `attached` (`POST /internal/people/{id}/emails`, with `evidence` +
+  `attachedBy`). No name matching, no merge: an address another person holds is
+  a 409. An automatic path must be a Jev judgment, never a regex.
+- **Any address resolves the person**: resolvePersonId (a reveal at an attached
+  address keeps the primary), `/internal/people/by-email`, memberships by-email,
+  `/internal/audiences/resolve`, `/orgs/audiences/stats`.
+- **Facts hold for the person** (`personAddressSet`): per-brand suppression
+  (`claimServe`, `isEmailSuppressed`, Remaining rollup), opt-outs and won
+  (exclusion keys + post-reveal checks). NOT bounces: a bounce is about the
+  mailbox. crm path unchanged (crm-service owns it).
+- **Reads carry `emails[]`** (primary first): `/{id}/members`, both memberships
+  reads, the person routes. Additive.
+- Brand transfer copies a moved person's addresses. Tests:
+  `tests/integration/person-emails.test.ts`; unit suites that mock
+  `suppression.js` mock `person-emails.js` too.
 
 ### Multi-source provenance — a person carries EVERY source that found them
 

@@ -1266,10 +1266,29 @@ export const ListAudiencesResponseSchema = z
   })
   .openapi("ListAudiencesResponse");
 
+// Every address of a person (src/services/person-emails.ts).
+export const PersonEmailSchema = z
+  .object({
+    email: z.string().openapi({ description: "Lower-cased address." }),
+    primary: z.boolean().openapi({ description: "true for the person's primary address (= emailNorm on the other reads)." }),
+    companyDomain: z.string().nullable().openapi({ description: "Company the address belongs to, when known." }),
+    companyName: z.string().nullable(),
+    source: z.enum(["served", "attached"]).openapi({
+      description: "served = seen on a serve / reveal of this person; attached = explicitly attached by a service or staff.",
+    }),
+    addedAt: z.string(),
+  })
+  .openapi("PersonEmail");
+
+const PersonEmailsField = z.array(PersonEmailSchema).openapi({
+  description: "Every email address of the person, primary first. A lookup by ANY of them returns this person.",
+});
+
 export const AudienceMemberSchema = z
   .object({
     personId: z.string().uuid(),
     emailNorm: z.string().nullable(),
+    emails: PersonEmailsField,
     linkedinUrlNorm: z.string().nullable(),
     firstName: z.string().nullable(),
     lastName: z.string().nullable(),
@@ -3875,6 +3894,104 @@ registry.registerPath({
   },
 });
 
+// --- Internal: one person, several email addresses (src/services/person-emails.ts) ---
+//
+// A person (canonical `people` row, `personId`) holds every address they write
+// from. `people.email_norm` stays the primary; any address resolves to the person.
+
+export const PersonWithEmailsSchema = z
+  .object({
+    personId: z.string().uuid(),
+    orgId: z.string(),
+    fullName: z.string().nullable(),
+    firstName: z.string().nullable(),
+    lastName: z.string().nullable(),
+    primaryEmail: z.string().nullable(),
+    emails: PersonEmailsField,
+  })
+  .openapi("PersonWithEmails");
+
+export const PersonLookupResponseSchema = z
+  .object({ person: PersonWithEmailsSchema.nullable().openapi({ description: "null = the org holds no person for this address." }) })
+  .openapi("PersonLookupResponse");
+
+export const PersonOrgQuerySchema = z.object({
+  orgId: z.string().regex(LAX_UUID_REGEX, "orgId must be a valid UUID").openapi({ description: "Internal org UUID." }),
+});
+
+export const PersonByEmailQuerySchema = PersonOrgQuerySchema.extend({
+  email: z.string().min(1).openapi({ description: "Any address of the person." }),
+});
+
+export const PersonIdParamsSchema = z.object({ personId: z.string().uuid() });
+
+export const AttachPersonEmailRequestSchema = z
+  .object({
+    orgId: z.string().regex(LAX_UUID_REGEX, "orgId must be a valid UUID"),
+    email: z.string().email().openapi({ description: "The extra address to attach." }),
+    companyDomain: z.string().min(1).optional().openapi({ description: "Company the address belongs to (e.g. her own practice)." }),
+    companyName: z.string().min(1).optional(),
+    evidence: z.string().min(1).openapi({
+      description: "Why this address is the same human (e.g. 'replied from it to our email sent to the primary address'). Stored verbatim.",
+    }),
+    attachedBy: z.string().min(1).openapi({ description: "Who attached it: a service name or a staff user id." }),
+  })
+  .openapi("AttachPersonEmailRequest");
+
+export const AttachPersonEmailResponseSchema = z
+  .object({
+    attached: z.boolean().openapi({ description: "false = the person already held this address (idempotent)." }),
+    person: PersonWithEmailsSchema,
+  })
+  .openapi("AttachPersonEmailResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/people/by-email",
+  summary: "Find a person by ANY of their email addresses; returns the person id and every address they hold.",
+  security: [{ apiKey: [] }],
+  request: { query: PersonByEmailQuerySchema },
+  responses: {
+    200: { description: "The person, or null", content: { "application/json": { schema: PersonLookupResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/people/{personId}",
+  summary: "One person of the org with every email address they hold.",
+  security: [{ apiKey: [] }],
+  request: { params: PersonIdParamsSchema, query: PersonOrgQuerySchema },
+  responses: {
+    200: { description: "The person", content: { "application/json": { schema: PersonWithEmailsSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    404: { description: "No such person in this org", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/people/{personId}/emails",
+  summary: "Attach an extra email address to an existing person (explicit act, never a guess). Idempotent.",
+  description:
+    "Facts on any address then hold for the person: per-brand suppression, opt-outs and won leads. An address another person of the org already holds is a 409: merging two people is not done by attaching an address.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: PersonIdParamsSchema,
+    body: { content: { "application/json": { schema: AttachPersonEmailRequestSchema } } },
+  },
+  responses: {
+    200: { description: "The person with every address", content: { "application/json": { schema: AttachPersonEmailResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    404: { description: "No such person in this org", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "The address belongs to another person of the org", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 // --- Internal: multi-source provenance (src/services/audience-memberships.ts) ---
 //
 // Which audiences (hence which lists / sourcing origins) FOUND each person of a
@@ -3907,6 +4024,7 @@ export const BrandMembershipsResponseSchema = z
         personId: z.string().uuid().openapi({ description: "Canonical human-service person id (= serve-next's personId)." }),
         orgId: z.string(),
         emailNorm: z.string().nullable(),
+        emails: PersonEmailsField,
         memberships: z.array(BrandMembershipSchema).openapi({
           description: "Every audience of the brand that found this person, raw (a deprecated audience stays itself), oldest first. Several lists = a multi-source person.",
         }),
@@ -3919,7 +4037,7 @@ export const BrandMembershipsByEmailRequestSchema = z
   .object({
     orgId: z.string().regex(LAX_UUID_REGEX).openapi({ description: "Internal org UUID that holds the people." }),
     emails: z.array(z.string().min(1)).min(1).openapi({
-      description: "Lead emails, as many as a whole brand holds (25 MB body cap). Each comes back as a key, raw as sent.",
+      description: "Lead emails, as many as a whole brand holds (25 MB body cap). Each comes back as a key, raw as sent; ANY address of a person resolves to that person.",
     }),
   })
   .openapi("BrandMembershipsByEmailRequest");
@@ -3932,6 +4050,7 @@ export const BrandMembershipsByEmailResponseSchema = z
       z
         .object({
           personId: z.string().uuid(),
+          emails: PersonEmailsField,
           memberships: z.array(BrandMembershipSchema).openapi({
             description: "Every audience of the brand that found this person, raw, oldest first. [] = a person of the org no audience of this brand found.",
           }),

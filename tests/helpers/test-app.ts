@@ -12,6 +12,7 @@ import audienceSnapshotRoutes from "../../src/routes/audience-snapshot.js";
 import competitorEngagementRoutes from "../../src/routes/competitor-engagement.js";
 import sourceCampaignRoutes from "../../src/routes/source-campaigns.js";
 import listsRoutes from "../../src/routes/lists.js";
+import personEmailRoutes from "../../src/routes/people-emails.js";
 import peopleRoutes from "../../src/routes/people.js";
 import audiencesRoutes from "../../src/routes/audiences.js";
 import internalAudiencesRoutes from "../../src/routes/internal-audiences.js";
@@ -41,6 +42,7 @@ export function createTestApp() {
   app.use(sourceCampaignRoutes);
   app.use(suppressionRecoveryRoutes);
   app.use(listsRoutes);
+  app.use(personEmailRoutes);
   app.use(peopleRoutes);
   app.use(audiencesRoutes);
 

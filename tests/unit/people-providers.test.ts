@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
+// One person, several addresses (src/services/person-emails.ts): no person holds
+// another address here, so every address stands for itself.
+vi.mock("../../src/services/person-emails.js", () => ({
+  personAddressSet: vi.fn(async (_db: unknown, _org: string, emails: string[]) => emails),
+  personIdsByEmail: vi.fn(async () => new Map()),
+}));
+
 // The provider's verdict on a revealed email (apollo-service emailVerification)
 // is its own suite's concern; here every revealed address reads as deliverable.
 vi.mock("../../src/lib/email-verification.js", async (importOriginal) => ({

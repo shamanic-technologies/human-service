@@ -15,7 +15,8 @@
 //   getSuppressionSet  — apify path: the exclude-set (emails + linkedin urls)
 //                        pushed down so apify never returns/bills a served lead.
 //   isEmailSuppressed  — resolve-email block: cap re-emission for the residual
-//                        no-linkedin cross-provider edge.
+//                        no-linkedin cross-provider edge. Checks EVERY address of
+//                        the person (person-emails.ts), like claimServe.
 //   claimServe         — the reveal path's ATOMIC check-and-record: claims the
 //                        person for every brand, or reports them already served
 //                        (two concurrent serves of one person, e.g. under two
@@ -30,6 +31,7 @@
 import { and, eq, gt, inArray, or, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { brandSuppressions, leadServes } from "../db/schema.js";
+import { personAddressSet } from "./person-emails.js";
 
 // Calendar-accurate 3-month window, evaluated by Postgres at query time. The
 // single source of the re-contact window — every read path (teaser filter,
@@ -274,7 +276,20 @@ export async function isEmailSuppressed(
 ): Promise<boolean> {
   const emailNorm = normalizeEmail(email);
   if (brandIds.length === 0 || emailNorm === null) return false;
+  return anyAddressSuppressed(
+    orgId,
+    brandIds,
+    await personAddressSet(db, orgId, [emailNorm])
+  );
+}
 
+// Is any of these addresses served for any requested brand within the window?
+async function anyAddressSuppressed(
+  orgId: string,
+  brandIds: string[],
+  emailNorms: string[]
+): Promise<boolean> {
+  if (emailNorms.length === 0) return false;
   const rows = await db
     .select({ id: brandSuppressions.id })
     .from(brandSuppressions)
@@ -282,12 +297,11 @@ export async function isEmailSuppressed(
       and(
         eq(brandSuppressions.orgId, orgId),
         inArray(brandSuppressions.brandId, brandIds),
-        eq(brandSuppressions.emailNorm, emailNorm),
+        inArray(brandSuppressions.emailNorm, emailNorms),
         gt(brandSuppressions.lastServedAt, windowCutoff())
       )
     )
     .limit(1);
-
   return rows.length > 0;
 }
 
@@ -316,6 +330,13 @@ export async function claimServe(
     await recordServe(orgId, brandIds, [contact], ctx);
     return true;
   }
+  // A person holds every address they write from (person-emails.ts): served at
+  // ANY of them for the brand means served. The address being claimed is decided
+  // atomically below; the person's OTHER addresses are checked here.
+  const otherAddresses = (await personAddressSet(db, orgId, [emailNorm])).filter(
+    (e) => e !== emailNorm
+  );
+  if (await anyAddressSuppressed(orgId, brandIds, otherAddresses)) return false;
   const linkedinNorm = normalizeLinkedinUrl(contact.linkedinUrl);
   try {
     await db.transaction(async (tx) => {

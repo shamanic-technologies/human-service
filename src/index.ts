@@ -12,6 +12,7 @@ import audienceRefillRoutes from "./routes/audience-refill.js";
 import competitorEngagementRoutes from "./routes/competitor-engagement.js";
 import sourceCampaignRoutes from "./routes/source-campaigns.js";
 import listsRoutes from "./routes/lists.js";
+import personEmailRoutes from "./routes/people-emails.js";
 import peopleRoutes from "./routes/people.js";
 import audiencesRoutes from "./routes/audiences.js";
 import internalAudiencesRoutes from "./routes/internal-audiences.js";
@@ -64,6 +65,7 @@ app.use(competitorEngagementRoutes);
 app.use(sourceCampaignRoutes);
 app.use(suppressionRecoveryRoutes);
 app.use(listsRoutes);
+app.use(personEmailRoutes);
 app.use(peopleRoutes);
 app.use(audiencesRoutes);
 

@@ -27,7 +27,7 @@ import { tagFoundAlreadyTaken } from "./audience-provenance.js";
 import { readEmailVerification, type EmailVerification } from "../lib/email-verification.js";
 import {
   filterOptedOut,
-  isEmailOptedOut,
+  isPersonOptedOut,
   isEmailWonForRequest,
   loadServeExclusions,
 } from "./opt-outs.js";
@@ -1249,7 +1249,7 @@ async function finalizeResolved(
   // opt-out therefore could not be matched on the free teaser. The credit is
   // already spent; what this prevents is the email. ORG-wide and unconditional:
   // checked whether or not the request names a brand.
-  if (await isEmailOptedOut(identity, person.email)) {
+  if (await isPersonOptedOut(identity, person.email)) {
     console.log(
       `[human-service] opt_out.blocked_post_reveal org=${identity.orgId} provider=${provider}`
     );
