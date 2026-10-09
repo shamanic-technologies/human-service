@@ -1,5 +1,6 @@
-// The competitor-engagement audience we create for every client brand: at
-// portfolio launch, and on the sweep for existing / not-yet-computed brands.
+// The competitor-engagement lists we create for every client brand, one per
+// client PROFILE (profile-sources.ts): at portfolio launch, and on the sweep for
+// existing / not-yet-computed brands.
 // Free at creation (apollo-service persists the criterion only), never
 // duplicated, never from client input, never from an invented page. The LLM /
 // Apollo / brand-service / billing / runs calls are mocked at their modules.
@@ -9,7 +10,8 @@ import { and, eq } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
-import { audiences, leadServes } from "../../src/db/schema.js";
+import { audiences, leadServes, sourceCampaignAudienceHolds } from "../../src/db/schema.js";
+import { ensureTargetText } from "../../src/services/audience-target-text.js";
 import { draftAudienceTarget } from "../../src/services/audience-target.js";
 import { proposeAudienceSplit } from "../../src/services/audience-split.js";
 import { settlePortfolioBackground } from "../../src/services/audience-portfolio.js";
@@ -40,7 +42,14 @@ vi.mock("../../src/lib/apollo-audiences.js", async (orig) => ({
 }));
 vi.mock("../../src/services/audiences.js", async (orig) => ({
   ...(await orig<typeof import("../../src/services/audiences.js")>()),
-  ensureApolloPointer: vi.fn(async (row: unknown) => row),
+  ensureApolloPointer: vi.fn(async (row: { name: string; apolloAudienceId: string | null }) => ({
+    ...row,
+    apolloAudienceId: row.apolloAudienceId ?? `apollo-${row.name}`,
+  })),
+}));
+vi.mock("../../src/services/audience-target-text.js", async (orig) => ({
+  ...(await orig<typeof import("../../src/services/audience-target-text.js")>()),
+  ensureTargetText: vi.fn(),
 }));
 vi.mock("../../src/lib/brand-competitors.js", async (orig) => ({
   ...(await orig<typeof import("../../src/lib/brand-competitors.js")>()),
@@ -108,6 +117,7 @@ async function engagementRows(offerId: string | null = OFFER) {
 
 beforeEach(async () => {
   vi.mocked(draftAudienceTarget).mockReset().mockResolvedValue(DRAFTED);
+  vi.mocked(ensureTargetText).mockReset().mockImplementation(async (row) => row.targetText ?? `Own text of ${row.name}`);
   vi.mocked(proposeAudienceSplit).mockReset().mockResolvedValue({
     axes: ["geography"],
     segments: [
@@ -145,14 +155,18 @@ afterAll(async () => {
 });
 
 describe("competitor-engagement audience at portfolio launch", () => {
-  it("creates ONE active audience from up to 3 competitor pages, screened on the portfolio target, visible in the list", async () => {
-    await launched();
+  it("creates ONE active list per profile from up to 3 competitor pages, screened on the profile's text, visible in the list", async () => {
+    const res = await launched();
+    const profile = res.body.audiences[0];
     const rows = await engagementRows();
     expect(rows).toHaveLength(1);
     const row = rows[0];
     expect(row.status).toBe("active");
-    expect(row.nlPrompt).toBe(DRAFTED);
-    expect(row.name).toBe("Engaged with competitor posts");
+    expect(row.profileAudienceId).toBe(profile.id);
+    // A one-segment split: the profile's own text IS the drafted target.
+    expect(row.nlPrompt).toBe(profile.targetText);
+    expect(row.targetText).toBe(DRAFTED);
+    expect(row.name).toBe("US SaaS founders (Engaged with competitor posts)");
     // Free at creation: no Apollo count was read.
     expect(row.apolloCount).toBeNull();
     const call = vi.mocked(createApolloLinkedinEngagementAudience).mock.calls[0][0];
@@ -201,6 +215,22 @@ describe("competitor-engagement audience at portfolio launch", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].nlPrompt).toBe(DRAFTED);
   });
+
+  it("two profiles get one list each, from ONE competitor discovery", async () => {
+    vi.mocked(proposeAudienceSplit).mockResolvedValue({
+      axes: ["seniority_role"],
+      segments: [
+        { name: "Heads of QA", description: "Heads of QA at B2B software companies.", icon: "x", iconConfidence: 1, estimatedLeadCount: null },
+        { name: "CTOs", description: "CTOs at B2B software companies.", icon: "y", iconConfidence: 1, estimatedLeadCount: null },
+      ],
+    });
+    const res = await launched();
+    const ids = res.body.audiences.filter((a: { kind: string }) => a.kind === "cold").map((a: { id: string }) => a.id);
+    const rows = await engagementRows();
+    expect(rows.map((r) => r.profileAudienceId).sort()).toEqual([...ids].sort());
+    expect(rows.map((r) => r.nlPrompt).sort()).toEqual(["Own text of CTOs", "Own text of Heads of QA"]);
+    expect(vi.mocked(discoverBrandCompetitors)).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("POST /internal/competitor-engagement-audiences (sweep)", () => {
@@ -241,6 +271,43 @@ describe("POST /internal/competitor-engagement-audiences (sweep)", () => {
     expect(res.body.entries[0].action).toBe("would_ensure");
     expect(vi.mocked(discoverBrandCompetitors)).not.toHaveBeenCalled();
     expect(await engagementRows()).toHaveLength(0);
+  });
+
+  it("an offer's whole-ICP list is replaced: each profile gets its own in the same state (paused + its source hold), the whole-ICP one is archived", async () => {
+    const profile = await seedCold();
+    const [legacy] = await db
+      .insert(audiences)
+      .values({
+        orgId: ORG,
+        brandId: BRAND,
+        offerId: OFFER,
+        name: "Engaged with competitor posts",
+        nlPrompt: "VPs of Engineering, Heads of QA, and CTOs",
+        provider: "apollo",
+        apolloAudienceId: "apollo-legacy",
+        filters: { buying_signal: { type: "linkedin_engagement", window_days: 30, competitor_pages: PAGES } },
+        status: "paused",
+        source: "linkedin_engagement_signal",
+        createdByUserId: USER,
+      })
+      .returning();
+    await db.insert(sourceCampaignAudienceHolds).values({
+      orgId: ORG,
+      brandId: BRAND,
+      offerId: OFFER,
+      originSlug: "sourcing-linkedin-engagement-signals",
+      audienceId: legacy.id,
+      campaignId: "camp-1",
+    });
+    const res = await request(app).post("/internal/competitor-engagement-audiences").set(getAuthHeaders());
+    expect(res.body.entries[0].action).toBe("created");
+    const rows = await engagementRows();
+    const own = rows.find((r) => r.profileAudienceId === profile.id)!;
+    expect(own.status).toBe("paused");
+    expect(rows.find((r) => r.id === legacy.id)!.status).toBe("archived");
+    const holds = await db.select().from(sourceCampaignAudienceHolds).where(eq(sourceCampaignAudienceHolds.audienceId, own.id));
+    expect(holds).toHaveLength(1);
+    expect(holds[0]).toMatchObject({ originSlug: "sourcing-linkedin-engagement-signals", campaignId: "camp-1" });
   });
 
   it("an existing brand gets it once; the next sweep reports it exists", async () => {

@@ -1102,6 +1102,10 @@ export const AudienceSchema = z
     status: AudienceStatusSchema,
     // Provenance: "brand_persona_backfill" for backfilled rows, else null.
     source: z.string().nullable(),
+    profileAudienceId: z.string().uuid().nullable().openapi({
+      description:
+        "The client PROFILE (WHO, a cold audience the client keeps or pauses on the Targeting page) this source list was built for: a buying-signal list (hiring now, new in role, recently funded) or a competitor-post engagement list finds THAT profile's people, screened against the profile's text. Pausing or archiving the profile pauses its lists; resuming it resumes them (unless the source itself is off). null on a profile itself, on a whole-ICP list built before profiles had their own (retired once they do), and on every other audience. Show profiles = rows with null here and channels[0].list = apollo_search; sources = channels[0].list.",
+    }),
     canonicalAudienceId: z.string().uuid().nullable().openapi({
       description:
         "When this audience is a deprecated provider-variant (e.g. retired '<base> [Apify]' from the apify->apollo migration), the id of its active canonical replacement. Membership/stats reads resolve a deprecated match to this audience. null for non-deprecated / unlinked rows.",
@@ -1213,6 +1217,9 @@ export const ListAudiencesQuerySchema = z.object({
   // the brand when brandId is given), whatever offer they carry and including
   // the ones that carry none — the pre-offer answer, byte-identical.
   offerId: z.string().uuid().optional(),
+  // Narrow the list to the source lists built for ONE client profile (their
+  // profileAudienceId). Omitted = no narrowing.
+  profileAudienceId: z.string().uuid().optional(),
   status: AudienceStatusSchema.optional(),
 });
 
@@ -3616,7 +3623,7 @@ export const LaunchAudiencePortfolioRequestSchema = z
 
 const PortfolioAudienceSchema = AudienceSchema.extend({
   kind: z.enum(["cold", "signal"]).openapi({
-    description: "cold = a segment of the ICP split; signal = the whole ICP narrowed to one buying signal.",
+    description: "cold = a segment of the ICP split (a client profile); signal = one profile narrowed to one buying signal (its profileAudienceId).",
   }),
   signal: z
     .object({ type: z.enum(PORTFOLIO_SIGNAL_TYPES), windowDays: z.number().int() })
@@ -3631,11 +3638,13 @@ const PortfolioSignalOutcomeSchema = z
   .object({
     type: z.enum(PORTFOLIO_SIGNAL_TYPES),
     windowDays: z.number().int(),
-    outcome: z.enum(["created", "below_threshold", "failed"]).openapi({
+    profileAudienceId: z.string().uuid().openapi({ description: "The client profile (a cold audience) this signal was measured for." }),
+    profileName: z.string(),
+    outcome: z.enum(["created", "exists", "below_threshold", "failed"]).openapi({
       description:
-        "created = an active signal audience was added; below_threshold = the signal reaches fewer than 20 distinct companies for this ICP; failed = the coverage read or the creation failed (logged; the cold audiences still shipped).",
+        "created = a signal list was added for this profile; exists = the profile already had one; below_threshold = the signal reaches fewer than 20 distinct companies for this profile; failed = the profile's build, the coverage read or the creation failed (logged; the cold audiences still shipped).",
     }),
-    people: z.number().int().nullable().openapi({ description: "Verified-email people the signal reaches for the ICP. null when not measured." }),
+    people: z.number().int().nullable().openapi({ description: "Verified-email people the signal reaches for the profile. null when not measured." }),
     companies: z.number().int().nullable().openapi({ description: "Distinct companies of those people. null when not measured." }),
     companiesExact: z.boolean().nullable().openapi({ description: "false = companies counted over the first 500 people (a floor)." }),
     audienceId: z.string().uuid().nullable(),
@@ -3660,7 +3669,7 @@ export const LaunchAudiencePortfolioResponseSchema = z
       description: "Cold audiences first, then signal audiences (signal ones appear once status=ready). All created/activated ACTIVE.",
     }),
     signals: z.array(PortfolioSignalOutcomeSchema).openapi({
-      description: "One outcome per buying signal (hiring, job_change, funding). Empty while status=building.",
+      description: "One outcome per (client profile, buying signal). Empty while status=building.",
     }),
   })
   .openapi("LaunchAudiencePortfolioResponse");
