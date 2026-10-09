@@ -523,6 +523,14 @@ export const audiences = pgTable(
       (): AnyPgColumn => audiences.id,
       { onDelete: "set null" }
     ),
+    // PROFILE x SOURCE (migration 0039): the client profile (a cold audience, WHO)
+    // this source list (a buying signal, competitor-post engagement) was built for.
+    // Pausing the profile pauses its lists. NULL on a profile itself, on the
+    // whole-ICP lists built before the column, and on every other audience.
+    profileAudienceId: uuid("profile_audience_id").references(
+      (): AnyPgColumn => audiences.id,
+      { onDelete: "set null" }
+    ),
     // Neutral PeopleSearchFilters shape (maps to both providers).
     filters: jsonb("filters").$type<Record<string, unknown>>(),
     // Hosted avatar URL.
@@ -588,6 +596,7 @@ export const audiences = pgTable(
   (table) => [
     index("idx_audiences_org_brand").on(table.orgId, table.brandId),
     index("idx_audiences_canonical").on(table.canonicalAudienceId),
+    index("idx_audiences_profile").on(table.profileAudienceId),
     index("idx_audiences_apollo_audience_id").on(table.apolloAudienceId),
     index("idx_audiences_crm_upload_id").on(table.crmUploadId),
     index("idx_audiences_offer_id").on(table.offerId),
@@ -1059,5 +1068,29 @@ export const sourceCampaignAudienceHolds = pgTable(
   (table) => [
     index("idx_source_campaign_audience_holds_scope").on(table.orgId, table.brandId, table.offerId, table.originSlug),
     uniqueIndex("idx_source_campaign_audience_holds_open").on(table.audienceId).where(sql`released_at IS NULL`),
+  ]
+);
+
+// PROFILE x SOURCE (migration 0039): the source lists a person's pause of their
+// profile held, so resuming the profile resumes exactly those. One open hold per
+// list. src/services/profile-sources.ts.
+export const audienceProfileHolds = pgTable(
+  "audience_profile_holds",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    profileAudienceId: uuid("profile_audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    heldAt: timestamp("held_at", { withTimezone: true }).notNull().defaultNow(),
+    releasedAt: timestamp("released_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("idx_audience_profile_holds_profile").on(table.profileAudienceId),
+    uniqueIndex("idx_audience_profile_holds_open").on(table.audienceId).where(sql`released_at IS NULL`),
   ]
 );

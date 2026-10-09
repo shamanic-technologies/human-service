@@ -96,10 +96,10 @@ section — the port binds first).
 | Internal | `POST /internal/source-campaigns/reconcile` | apiKey | Reconcile now (`?dryRun&orgId&offerId`; also every 2 min): read campaign-service, apply each on/off that changed |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/signal` | apiKey + `x-org-id` + `x-user-id` | Create a `linkedin_engagement` signal audience (competitor LinkedIn post engagers); apollo-service's 4xx relayed |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences` | apiKey + `x-org-id` | Create an audience (saved filter-set + optional count snapshot + provider + optional `crmUploadId` source binding + optional `offerId` scope) |
-| Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` / `offerId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` / `offerId` / `profileAudienceId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
 | Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}` | apiKey + `x-org-id` | Update metadata (name / nlPrompt only) — immutable otherwise |
-| Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}/status` | apiKey + `x-org-id` | Change status (active / paused / archived) — mutates only status |
+| Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}/status` | apiKey + `x-org-id` | Change status (active / paused / archived) — mutates only status; a profile's source lists follow (see "Profile x source") |
 | Org-scoped (Audiences v1) | `DELETE /orgs/audiences/{id}` | apiKey + `x-org-id` | Hard delete (cascades members) — archive is a soft state, not delete |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/refresh-count` | apiKey + `x-org-id` + `x-user-id` | Re-snapshot apollo + apify counts via free dry-run |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/serve-next` | apiKey + `x-org-id` + `x-user-id` | Serve the NEXT unserved person of the audience (real provider match on its stored filters; records served; never repeats; clean exhausted signal) |
@@ -625,8 +625,8 @@ when given. `src/services/transfer-brand.ts` owns it.
   (the target's own launch for the same offer wins), `lists` (brand lists only;
   org-wide `brand_id IS NULL` lists stay); through an audience of the brand
   `audience_members`, `audience_teaser_buffer`, `audience_teaser_screenings`,
-  `audience_screened_out`, `audience_candidates`, `person_emails` (follows its
-  person); through a list `list_members`; solo-brand
+  `audience_screened_out`, `audience_candidates`, `audience_profile_holds`,
+  `person_emails` (follows its person); through a list `list_members`; solo-brand
   `human_methodologies` + their `humans` row. **A new table that carries
   `org_id` + a brand (directly or through an audience) must be added here.**
 - **`people` is ORG-scoped, not brand-scoped**: a person only this brand's
@@ -1647,19 +1647,17 @@ people, companies, companiesExact, audienceId, reason})}`.
   `proposeAudienceSplit` + `confirmAudienceSplit` (`source='icp_portfolio'`,
   every segment kept, colliding names date-suffixed). Background pointer builds
   as after a confirm. A cold failure fails the call loud (502), nothing recorded.
-- **Signal = whole ICP + one buying signal**, kept only at **≥ 20 distinct
-  companies** (`SIGNAL_MIN_COMPANIES`, owner threshold). The ICP is built ONCE as
-  an apollo-service audience (`suggest-from-segment` on the ICP text + the
-  chooser), in parallel with the cold part; apollo-service
-  `POST /audiences/signal-coverage` (windows 30 + 90) measures, `POST
-  /audiences/signal` persists; the row is a plain apollo audience
-  (`source='icp_portfolio_signal'`, filters carry the relative `buying_signal`
-  forwarded verbatim to `/search/next`). Windows: hiring 30 days (a posting is
-  stale fast), job_change and funding 90. Hiring counts ANY role (naming roles
-  would be a guess). A failed ICP build / coverage read / creation is that
-  signal's `failed` outcome, logged loud; the cold audiences still ship.
-- **One nl_prompt for all** (the pre-pay screen's target): adopted rows keep
+- **Signal = one cold audience (a PROFILE) + one buying signal**, per profile,
+  kept only at **≥ 20 distinct companies FOR THAT PROFILE** (see "Profile x
+  source"). No whole-ICP Apollo build any more (`icp_apollo_audience_id` is no
+  longer written). Windows: hiring 30 days, job_change and funding 90. A failed
+  profile build / coverage read / creation is that pair's `failed` outcome,
+  logged loud; the cold audiences still ship.
+- **One nl_prompt for the cold rows** (the shared target): adopted rows keep
   theirs when they share one, else every row gets one fresh `draftAudienceTarget`.
+  An adopted row that held the whole target as its OWN text (a one-segment
+  confirm) has it cleared once it is one of several, so its segment text is
+  drafted (prod 2026-10-09: "Heads of QA" was screened against "... and CTOs").
 - **Answers fast, finishes in the background.** The call returns once the cold
   audiences exist (`status:"building"`, signals `[]`; ~15s when the split is
   written, ~1s when adopted). The signal part waits on the ICP exploration
@@ -1671,7 +1669,9 @@ people, companies, companiesExact, audienceId, reason})}`.
   (`replayed:true`), creates nothing; a call while the cold part runs joins it,
   while the signals run reads the current state; a launch a process restart cut
   short (`building`, no background in flight) is resumed by the next call from
-  its recorded cold ids / ICP pointer. `settlePortfolioBackground()` awaits the
+  its recorded cold ids. **Adoption of earlier split proposals is intended**
+  (owner 2026-10-09): every `split_proposal` row of the offer, anonymous
+  onboarding included, becomes a profile. `settlePortfolioBackground()` awaits the
   background (tests).
 - **No repeat across the portfolio**: per-brand suppression already excludes a
   person served under one audience from every other one pre-pay, and the
@@ -1720,10 +1720,11 @@ owns the criterion, the harvest, the per-audience no-repeat and the spend.
 ### Competitor-engagement audience, created by us (`src/services/competitor-engagement-audience.ts`)
 
 Owner 2026-10-03: every client brand gets one, NO client input ("c'est à nous de
-gérer nos audiences"). One `linkedin_engagement` audience per (org, brand, offer),
-`source='linkedin_engagement_signal'`, born `active`, name "Engaged with
-competitor posts", window 30 days, `nl_prompt` = the ICP target the brand's other
-audiences use.
+gérer nos audiences"). One `linkedin_engagement` list per live PROFILE of the
+(org, brand, offer) (see "Profile x source"), `source='linkedin_engagement_signal'`,
+name "<profile> (Engaged with competitor posts)", window 30 days, `nl_prompt` =
+the profile's own text. One competitor discovery per offer; apollo-service's post
+harvest is global per page, so N lists re-read nothing.
 - **Pages**: brand-service `POST /orgs/brands/{id}/competitors/discover`
   (`src/lib/brand-competitors.ts`; computes once, stored answer free after). Up
   to 3 distinct `linkedinUrl`s in brand-service order; only pages a competitor's
@@ -1737,9 +1738,12 @@ audiences use.
   (`canBeCharged`) before the discovery's model call. That covers existing brands
   and the not-computed retries.
 - **Outcomes** (logged `competitor_engagement.<outcome>` with reason): `created`,
-  `exists` (any linkedin_engagement row in the scope, any status: never
-  duplicated, never re-created after a client archived it), `no_pages`,
+  `exists` (every live profile holds its list, any status: never duplicated,
+  never re-created after a client archived it), `no_profile`, `no_pages`,
   `not_computed`, `failed` (both retried by the sweep).
+- **The sweep also ensures each profile's buying-signal lists** when the offer
+  uses buying signals (a launch portfolio, or signal lists already there), so a
+  profile born later (refill, accepted widening) gets its lists within 6h.
 - **Cost: zero at creation** (owner rule): apollo-service's create persists the
   criterion only (no count, no harvest, no reveal). Spend happens only when a
   campaign serves it, teaser screened before the paid reveal. The one paid step
@@ -1766,7 +1770,9 @@ the features-service catalogue read backwards (`listKindOfOriginSlug`).
   = `buildBuyingSignalAudiencesForOffer` (portfolio ICP pointer reused, same threshold),
   `linkedin_engagement` = `ensureCompetitorEngagementAudience` (`ignoreArchived`, born active),
   `crm_contacts` = one `provider='crm'` audience per uploaded file not bound yet (needs
-  `CRM_SERVICE_URL`/`_API_KEY`). Built under a `source-campaign-audience` run labelled with the origin
+  `CRM_SERVICE_URL`/`_API_KEY`). Buying signals and LinkedIn are built PER PROFILE: an ON also builds
+  the lists a live profile still lacks (the offer's whole-ICP list is retired). Built under a
+  `source-campaign-audience` run labelled with the origin
   slug AND the source campaign id, billed to the caller's user else the brand's audience creator.
 - **OFF**: every ACTIVE audience of that list under the offer ⟹ `paused` + a row in
   `source_campaign_audience_holds` (one open hold per audience). History kept.
@@ -1781,10 +1787,41 @@ the features-service catalogue read backwards (`listKindOfOriginSlug`).
   those ON by itself, so first seen they are today's state; prod 2026-10-07 had a running cold-email
   offer with no live audience that would have been given new ones). A
   failed / `not_computed` ON is recorded as not applied, so the next tick retries.
+- **A list a profile pause holds is never resumed by an ON**; an OFF also holds the lists a profile
+  pause holds, so the list runs again only once neither holds it (see "Profile x source").
 - **Competitor-engagement sweep follows it**: once an offer has a recorded source state, the sweep's
   engagement audience is born PAUSED unless the LinkedIn source is ON (ON then resumes it, nothing to
   build); an offer whose sources are not campaigns yet keeps "born active".
 - Both tables are in the brand transfer. Tests: `tests/integration/source-campaigns.test.ts`.
+
+### Profile x source — a paused profile is contacted through NO source (`src/services/profile-sources.ts`)
+
+Owner 2026-10-09. A client PROFILE = WHO: a cold `apollo_search` audience the client keeps or pauses on
+the Targeting page ("Heads of QA"). A SOURCE = WHERE: a buying signal (hiring / job_change / funding)
+or competitor-post engagement. Lists are profile x source: one audience per pair, carrying
+**`audiences.profile_audience_id`** (migration `0039`, self-FK `ON DELETE SET NULL`), named
+"<profile> (<source>)", screened against the PROFILE's own text. Before: each signal list carried the
+whole launch ICP (brand d0965c2c: CTOs paused, "Hiring now" 5,470 still found CTOs).
+
+- **Build**: signal lists on the profile's own Apollo pointer (apollo-service `POST /audiences/signal`
+  takes it as base; coverage per profile, threshold 20 companies per pair, below = no list);
+  engagement lists with `{}` base (no Apollo filters exist for that kind). `readyProfile` awaits the
+  profile's pointer build and text (deduped). Live profile = active, or paused ONLY by a source
+  campaign hold (Cold Filters OFF is not unwanting the profile).
+- **Whole-ICP lists retired**: once every live profile of an offer has its answer for a source with no
+  failure, its `profile_audience_id IS NULL` lists of that source are ARCHIVED (stats kept).
+- **Born status** (`bornStatus`): the origin's source campaign state (OFF ⟹ paused + source hold),
+  else the whole-ICP list's status (and hold), else siblings, else the source default.
+- **Pause cascade**: `PATCH /orgs/audiences/{id}/status` closes the row's OWN open holds (a person
+  wins over both switches), then for a profile: not active ⟹ its running or source-held lists get an
+  `audience_profile_holds` row and the running ones pause; active ⟹ its holds release and those lists
+  resume unless a source hold remains. Archived lists never move.
+- **Read**: every audience response carries `profileAudienceId`; `GET /orgs/audiences?profileAudienceId=`
+  lists one profile's lists. Profiles = `profileAudienceId` null + `channels[0].list = apollo_search`.
+- **When**: portfolio launch, source campaign ON, the 6h competitor-engagement sweep
+  (`POST /internal/competitor-engagement-audiences` runs it now). No cost declared here; coverage and
+  sizes are free teaser reads. Tests: the "profile x source" block of `source-campaigns.test.ts`,
+  `audiences-portfolio.test.ts`, `competitor-engagement-audience.test.ts`.
 
 ### Audience refill — a paying brand never runs dry (`src/services/audience-refill.ts`)
 
@@ -2453,6 +2490,8 @@ returns 404, never 403, to avoid leaking existence.
   the API edge.
 - **`audiences.chooser_trace`** is `jsonb` (nullable, no default) — the whole
   `/suggest` decision, audit-only, never read back by this service.
+- **`audience_profile_holds`** (profile x source): `org_id` / `brand_id` /
+  `profile_audience_id` / `audience_id` uuid; one open hold per list.
 - **`audience_portfolios`** (launch record): `org_id` / `brand_id` / `offer_id`
   uuid; `icp_text` / `target` / `status` / `icp_apollo_audience_id` text;
   `cold_audience_ids` / `signals` jsonb.

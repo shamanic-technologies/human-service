@@ -1806,6 +1806,12 @@
             "type": "string",
             "nullable": true
           },
+          "profileAudienceId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid",
+            "description": "The client PROFILE (WHO, a cold audience the client keeps or pauses on the Targeting page) this source list was built for: a buying-signal list (hiring now, new in role, recently funded) or a competitor-post engagement list finds THAT profile's people, screened against the profile's text. Pausing or archiving the profile pauses its lists; resuming it resumes them (unless the source itself is off). null on a profile itself, on a whole-ICP list built before profiles had their own (retired once they do), and on every other audience. Show profiles = rows with null here and channels[0].list = apollo_search; sources = channels[0].list."
+          },
           "canonicalAudienceId": {
             "type": "string",
             "nullable": true,
@@ -1897,6 +1903,7 @@
           "offerId",
           "status",
           "source",
+          "profileAudienceId",
           "canonicalAudienceId",
           "filters",
           "avatarUrl",
@@ -5208,7 +5215,7 @@
             "items": {
               "$ref": "#/components/schemas/PortfolioSignalOutcome"
             },
-            "description": "One outcome per buying signal (hiring, job_change, funding). Empty while status=building."
+            "description": "One outcome per (client profile, buying signal). Empty while status=building."
           }
         },
         "required": [
@@ -5236,7 +5243,7 @@
                   "cold",
                   "signal"
                 ],
-                "description": "cold = a segment of the ICP split; signal = the whole ICP narrowed to one buying signal."
+                "description": "cold = a segment of the ICP split (a client profile); signal = one profile narrowed to one buying signal (its profileAudienceId)."
               },
               "signal": {
                 "type": "object",
@@ -5287,19 +5294,28 @@
           "windowDays": {
             "type": "integer"
           },
+          "profileAudienceId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The client profile (a cold audience) this signal was measured for."
+          },
+          "profileName": {
+            "type": "string"
+          },
           "outcome": {
             "type": "string",
             "enum": [
               "created",
+              "exists",
               "below_threshold",
               "failed"
             ],
-            "description": "created = an active signal audience was added; below_threshold = the signal reaches fewer than 20 distinct companies for this ICP; failed = the coverage read or the creation failed (logged; the cold audiences still shipped)."
+            "description": "created = a signal list was added for this profile; exists = the profile already had one; below_threshold = the signal reaches fewer than 20 distinct companies for this profile; failed = the profile's build, the coverage read or the creation failed (logged; the cold audiences still shipped)."
           },
           "people": {
             "type": "integer",
             "nullable": true,
-            "description": "Verified-email people the signal reaches for the ICP. null when not measured."
+            "description": "Verified-email people the signal reaches for the profile. null when not measured."
           },
           "companies": {
             "type": "integer",
@@ -5324,6 +5340,8 @@
         "required": [
           "type",
           "windowDays",
+          "profileAudienceId",
+          "profileName",
           "outcome",
           "people",
           "companies",
@@ -8556,6 +8574,15 @@
             },
             "required": false,
             "name": "offerId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "profileAudienceId",
             "in": "query"
           },
           {

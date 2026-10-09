@@ -276,9 +276,16 @@
       "breakpoints": true
     },
     {
+      "idx": 39,
+      "version": "7",
+      "when": 1771587973399,
+      "tag": "0039_add_profile_sources",
+      "breakpoints": true
+    },
+    {
       "idx": 40,
       "version": "7",
-      "when": 1771587973350,
+      "when": 1771587974399,
       "tag": "0040_add_person_emails",
       "breakpoints": true
     }
