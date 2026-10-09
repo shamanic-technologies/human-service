@@ -3,10 +3,14 @@
 // connaître les competitors de notre client et leurs LinkedIn"). No client input.
 //
 // What: one linkedin_engagement signal audience (linkedin-engagement-audience.ts)
-// per (org, brand, offer), built from up to 3 competitor LinkedIn company pages
-// brand-service found (src/lib/brand-competitors.ts). Born ACTIVE so campaigns
-// test it against the other audiences. Its screen target (`nl_prompt`) is the
-// ICP target the brand's other audiences already use.
+// per CLIENT PROFILE of the offer (profile-sources.ts, owner 2026-10-09), built
+// from up to 3 competitor LinkedIn company pages brand-service found
+// (src/lib/brand-competitors.ts). Every list engages the same pages; each screens
+// the engagers against ITS profile's text, so pausing a profile stops its list.
+// apollo-service reads a page's posts and engagement once a day whoever asks, so
+// one list per profile re-reads nothing. Born ACTIVE (see bornStatus) so
+// campaigns test it against the other audiences. The offer's earlier whole-ICP
+// engagement list is retired once every profile has its own.
 //
 // When:
 //   - at portfolio launch (audience-portfolio.ts, background phase);
@@ -15,8 +19,9 @@
 //     it: existing brands, and brands whose competitors were not computed yet.
 //
 // Outcomes, each logged with its reason:
-//   created       one audience created
-//   exists        the scope already holds one (any status): never duplicated
+//   created       at least one profile's list created
+//   exists        every live profile already holds one (any status): never duplicated
+//   no_profile    the offer has no live client profile to build a list for
 //   no_pages      competitors computed, none with a LinkedIn page: nothing created
 //   not_computed  brand-service has no answer yet: retried by the next sweep
 //   failed        a read or the creation failed: retried by the next sweep
@@ -29,9 +34,12 @@
 // a cent of model tokens, once per brand, declared by brand-service), which is
 // why the sweep only runs it for orgs billing can charge.
 
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { audiences, sourceCampaignStates } from "../db/schema.js";
+import { audiencePortfolios, audiences, sourceCampaignStates } from "../db/schema.js";
+import { BUYING_SIGNAL_TYPES } from "../lib/apollo-audiences.js";
+
+type AudienceRow = typeof audiences.$inferSelect;
 import { discoverBrandCompetitors, type BrandCompetitor } from "../lib/brand-competitors.js";
 import { canBeCharged, getPaymentOutlook } from "../lib/billing-outlook.js";
 import { getMigrationState } from "../lib/migration-state.js";
@@ -40,6 +48,17 @@ import { createLinkedinEngagementAudience } from "./linkedin-engagement-audience
 import type { Identity } from "./people-providers.js";
 import { completeRun, createRun } from "./runs.js";
 import { sourcingOriginSlug, withSourcingOrigin } from "./sourcing-origin.js";
+import {
+  bornStatus,
+  ensureProfileSignalLists,
+  holdBornList,
+  liveProfiles,
+  profileListName,
+  readyProfile,
+  retireWholeIcpLists,
+  sourceKeyOf,
+  type ProfileSignalOutcome,
+} from "./profile-sources.js";
 
 /** apollo-service accepts 1-3 competitor pages per audience. */
 export const MAX_COMPETITOR_PAGES = 3;
@@ -48,14 +67,17 @@ export const MAX_COMPETITOR_PAGES = 3;
 export const COMPETITOR_ENGAGEMENT_WINDOW_DAYS = 30;
 export const COMPETITOR_ENGAGEMENT_NAME = "Engaged with competitor posts";
 
-export type CompetitorEngagementOutcomeKind = "created" | "exists" | "no_pages" | "not_computed" | "failed";
+export type CompetitorEngagementOutcomeKind = "created" | "exists" | "no_profile" | "no_pages" | "not_computed" | "failed";
 
 export interface CompetitorEngagementOutcome {
   orgId: string;
   brandId: string;
   offerId: string | null;
   outcome: CompetitorEngagementOutcomeKind;
+  /** The first of `audienceIds` (one list per profile). */
   audienceId: string | null;
+  /** The offer's per-profile engagement lists after this call. */
+  audienceIds: string[];
   pages: string[];
   reason: string | null;
 }
@@ -80,75 +102,26 @@ export function pickCompetitorPages(competitors: BrandCompetitor[]): string[] {
   return pages;
 }
 
-/**
- * The scope's existing linkedin_engagement audience, any status, any source.
- * `ignoreArchived`: a row a person archived does not count (a source campaign the
- * customer turned ON asks for a live one; the sweep never re-creates after an archive).
- */
-async function findExisting(orgId: string, brandId: string, offerId: string | null, ignoreArchived = false) {
-  const [row] = await db
-    .select({ id: audiences.id })
-    .from(audiences)
-    .where(
-      and(
-        eq(audiences.orgId, orgId),
-        eq(audiences.brandId, brandId),
-        offerId ? eq(audiences.offerId, offerId) : sql`${audiences.offerId} is null`,
-        sql`${audiences.filters}->'buying_signal'->>'type' = 'linkedin_engagement'`,
-        ...(ignoreArchived ? [sql`${audiences.status} not in ('archived', 'deprecated')`] : [])
-      )
-    )
-    .limit(1);
-  return row ?? null;
-}
-
-/**
- * SOURCE CAMPAIGNS (src/services/source-campaigns.ts): once an offer's lead sources are
- * campaigns (source_campaign_states holds a row for the offer), this audience is the
- * "LinkedIn Engagement Signals" source's list, so it is born PAUSED unless that source
- * is ON (its ON resumes it at once, nothing left to build). An offer whose sources are
- * not campaigns yet keeps the owner's 2026-10-03 rule: born active.
- */
-async function birthStatus(
-  orgId: string,
-  brandId: string,
-  offerId: string | null,
-  originSlug: string | undefined
-): Promise<"active" | "paused"> {
-  if (!offerId || !originSlug) return "active";
-  const rows = await db
-    .select({ originSlug: sourceCampaignStates.originSlug, status: sourceCampaignStates.status })
-    .from(sourceCampaignStates)
-    .where(
-      and(
-        eq(sourceCampaignStates.orgId, orgId),
-        eq(sourceCampaignStates.brandId, brandId),
-        eq(sourceCampaignStates.offerId, offerId)
-      )
-    );
-  if (rows.length === 0) return "active";
-  return rows.some((r) => r.originSlug === originSlug && r.status === "on") ? "active" : "paused";
-}
-
 const inFlight = new Map<string, Promise<CompetitorEngagementOutcome>>();
 
-/**
- * Create the scope's competitor-engagement audience unless it already has one.
- * Never throws: every failure is the `failed` outcome, logged loud.
- */
-export async function ensureCompetitorEngagementAudience(args: {
+export interface EnsureEngagementArgs {
   orgId: string;
   userId: string;
   brandId: string;
-  offerId: string | null;
-  target: string;
+  offerId: string;
   identity: Identity;
-  /** An archived row does not count as existing (source campaign ON). Default false. */
+  /** An archived list does not count as existing (source campaign ON). Default false. */
   ignoreArchived?: boolean;
-  /** Born status. Default: active, unless the offer's source campaigns say LinkedIn is OFF (birthStatus). */
+  /** Born status. Default: bornStatus (source campaign, the retired whole-ICP list, siblings). */
   status?: "active" | "paused";
-}): Promise<CompetitorEngagementOutcome> {
-  const key = `${args.orgId}:${args.brandId}:${args.offerId ?? "-"}:${args.ignoreArchived ? "live" : "any"}`;
+}
+
+/**
+ * Give every live profile of the offer its competitor-engagement list unless it
+ * already has one. Never throws: every failure is the `failed` outcome, logged loud.
+ */
+export async function ensureCompetitorEngagementAudience(args: EnsureEngagementArgs): Promise<CompetitorEngagementOutcome> {
+  const key = `${args.orgId}:${args.brandId}:${args.offerId}:${args.ignoreArchived ? "live" : "any"}`;
   const running = inFlight.get(key);
   if (running) return running;
   const p = ensureOnce(args).finally(() => inFlight.delete(key));
@@ -156,48 +129,70 @@ export async function ensureCompetitorEngagementAudience(args: {
   return p;
 }
 
-async function ensureOnce(args: {
-  orgId: string;
-  userId: string;
-  brandId: string;
-  offerId: string | null;
-  target: string;
-  identity: Identity;
-  /** An archived row does not count as existing (source campaign ON). Default false. */
-  ignoreArchived?: boolean;
-  /** Born status. Default: active, unless the offer's source campaigns say LinkedIn is OFF (birthStatus). */
-  status?: "active" | "paused";
-}): Promise<CompetitorEngagementOutcome> {
+/** Each live profile's engagement list (any status; archived ones only when counted). */
+function engagementListOf(rows: AudienceRow[], profileId: string, ignoreArchived: boolean): AudienceRow | null {
+  return (
+    rows.find(
+      (r) =>
+        r.profileAudienceId === profileId &&
+        sourceKeyOf(r) === "linkedin_engagement" &&
+        r.status !== "deprecated" &&
+        !(ignoreArchived && r.status === "archived")
+    ) ?? null
+  );
+}
+
+async function offerAudiences(orgId: string, brandId: string, offerId: string): Promise<AudienceRow[]> {
+  return db
+    .select()
+    .from(audiences)
+    .where(and(eq(audiences.orgId, orgId), eq(audiences.brandId, brandId), eq(audiences.offerId, offerId)))
+    .orderBy(audiences.createdAt);
+}
+
+async function ensureOnce(args: EnsureEngagementArgs): Promise<CompetitorEngagementOutcome> {
+  const scope = { orgId: args.orgId, brandId: args.brandId, offerId: args.offerId };
   const out: CompetitorEngagementOutcome = {
-    orgId: args.orgId,
-    brandId: args.brandId,
-    offerId: args.offerId,
+    ...scope,
     outcome: "failed",
     audienceId: null,
+    audienceIds: [],
     pages: [],
     reason: null,
   };
   const done = (o: Partial<CompetitorEngagementOutcome>): CompetitorEngagementOutcome => {
     Object.assign(out, o);
-    const line = `[human-service] competitor_engagement.${out.outcome} org=${out.orgId} brand=${out.brandId} offer=${out.offerId ?? "-"} audience=${out.audienceId ?? "-"} pages=${out.pages.length}${out.reason ? ` reason=${JSON.stringify(out.reason)}` : ""}`;
+    out.audienceId = out.audienceIds[0] ?? null;
+    const line = `[human-service] competitor_engagement.${out.outcome} org=${out.orgId} brand=${out.brandId} offer=${out.offerId ?? "-"} audiences=${out.audienceIds.join(",") || "-"} pages=${out.pages.length}${out.reason ? ` reason=${JSON.stringify(out.reason)}` : ""}`;
     if (out.outcome === "failed") console.error(line);
     else console.log(line);
     return out;
   };
+  const ignoreArchived = args.ignoreArchived ?? false;
 
   try {
-    const existing = await findExisting(args.orgId, args.brandId, args.offerId, args.ignoreArchived);
-    if (existing) return done({ outcome: "exists", audienceId: existing.id });
+    let rows = await offerAudiences(args.orgId, args.brandId, args.offerId);
+    const profiles = await liveProfiles(scope, rows.filter((r) => r.status !== "deprecated"));
+    if (profiles.length === 0) return done({ outcome: "no_profile", reason: "the offer has no live client profile" });
+    const listIds = () =>
+      profiles.map((p) => engagementListOf(rows, p.id, ignoreArchived)?.id).filter((x): x is string => !!x);
+    let missing = profiles.filter((p) => !engagementListOf(rows, p.id, ignoreArchived));
+    if (missing.length === 0) {
+      await retireWholeIcpLists(scope, "linkedin_engagement");
+      return done({ outcome: "exists", audienceIds: listIds() });
+    }
 
-    // Building this list is linkedin_engagement sourcing: the discovery and the
-    // creation carry that origin (unresolvable ⟹ failed, nothing spent).
-    const identity = withSourcingOrigin(args.identity, await sourcingOriginSlug("linkedin_engagement"));
+    // Building these lists is linkedin_engagement sourcing: the discovery and the
+    // creations carry that origin (unresolvable ⟹ failed, nothing spent).
+    const originSlug = await sourcingOriginSlug("linkedin_engagement");
+    const identity = withSourcingOrigin(args.identity, originSlug);
     const answer = await discoverBrandCompetitors(args.brandId, identity);
-    if (answer.status === "not_computed") return done({ outcome: "not_computed", reason: answer.reason });
+    if (answer.status === "not_computed") return done({ outcome: "not_computed", reason: answer.reason, audienceIds: listIds() });
     const pages = pickCompetitorPages(answer.competitors);
     if (pages.length === 0) {
       return done({
         outcome: "no_pages",
+        audienceIds: listIds(),
         reason:
           answer.competitors.length === 0
             ? "brand-service found no competitor"
@@ -205,48 +200,95 @@ async function ensureOnce(args: {
       });
     }
 
-    // Re-check after the (possibly slow) discovery: a concurrent path may have
-    // created it meanwhile.
-    const raced = await findExisting(args.orgId, args.brandId, args.offerId, args.ignoreArchived);
-    if (raced) return done({ outcome: "exists", audienceId: raced.id, pages });
-
-    const taken = await db
-      .select({ name: audiences.name })
-      .from(audiences)
-      .where(and(eq(audiences.orgId, args.orgId), eq(audiences.brandId, args.brandId)));
-    const [name] = dedupeSegmentNames([COMPETITOR_ENGAGEMENT_NAME], taken.map((t) => t.name));
-    const status = args.status ?? (await birthStatus(args.orgId, args.brandId, args.offerId, identity.workflowTracking?.featureSlug));
-    const row = await createLinkedinEngagementAudience({
-      orgId: args.orgId,
-      userId: args.userId,
-      brandId: args.brandId,
-      offerId: args.offerId,
-      name,
-      nlPrompt: args.target,
-      status,
-      windowDays: COMPETITOR_ENGAGEMENT_WINDOW_DAYS,
-      competitorPages: pages,
-      baseFilters: {},
-      identity: { ...identity, brandIds: [args.brandId] },
+    // Re-read after the (possibly slow) discovery: a concurrent path may have
+    // created some meanwhile.
+    rows = await offerAudiences(args.orgId, args.brandId, args.offerId);
+    missing = profiles.filter((p) => !engagementListOf(rows, p.id, ignoreArchived));
+    // The legacy rule for an offer whose sources are not campaigns: born active,
+    // unless the offer's sources ARE campaigns and LinkedIn's is not on.
+    const fallback = (await hasSourceStates(scope)) ? "paused" : "active";
+    const live = rows.filter((r) => r.status !== "deprecated");
+    let created = 0;
+    const failures: string[] = [];
+    for (const profile of missing) {
+      try {
+        const ready = await readyProfile(profile, identity);
+        const born = args.status
+          ? { status: args.status, sourceHold: null }
+          : await bornStatus(scope, "linkedin_engagement", originSlug, live, fallback);
+        const [name] = dedupeSegmentNames(
+          [profileListName(profile, COMPETITOR_ENGAGEMENT_NAME)],
+          rows.map((r) => r.name)
+        );
+        const row = await createLinkedinEngagementAudience({
+          orgId: args.orgId,
+          userId: args.userId,
+          brandId: args.brandId,
+          offerId: args.offerId,
+          name,
+          nlPrompt: ready.text,
+          status: born.status,
+          windowDays: COMPETITOR_ENGAGEMENT_WINDOW_DAYS,
+          competitorPages: pages,
+          baseFilters: {},
+          profileAudienceId: profile.id,
+          identity: { ...identity, brandIds: [args.brandId] },
+        });
+        await holdBornList(scope, row.id, born);
+        rows.push(row);
+        live.push(row);
+        created++;
+      } catch (err) {
+        failures.push(`${profile.name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (failures.length === 0) await retireWholeIcpLists(scope, "linkedin_engagement");
+    if (failures.length > 0 && created === 0) {
+      return done({ outcome: "failed", reason: failures.join("; "), pages, audienceIds: listIds() });
+    }
+    return done({
+      outcome: "created",
+      pages,
+      audienceIds: listIds(),
+      reason: failures.length > 0 ? failures.join("; ") : null,
     });
-    return done({ outcome: "created", audienceId: row.id, pages });
   } catch (err) {
     return done({ outcome: "failed", reason: err instanceof Error ? err.message : String(err) });
   }
 }
 
+async function hasSourceStates(scope: { orgId: string; brandId: string; offerId: string }): Promise<boolean> {
+  const [row] = await db
+    .select({ id: sourceCampaignStates.id })
+    .from(sourceCampaignStates)
+    .where(
+      and(
+        eq(sourceCampaignStates.orgId, scope.orgId),
+        eq(sourceCampaignStates.brandId, scope.brandId),
+        eq(sourceCampaignStates.offerId, scope.offerId)
+      )
+    )
+    .limit(1);
+  return !!row;
+}
+
 // --- Sweep: existing brands, and brands whose competitors were not ready ---
 
-export type SweepSkipReason = "not_chargeable" | "billing_unreadable" | "no_offer" | "no_target" | "no_user" | "run_failed";
+export type SweepSkipReason = "not_chargeable" | "billing_unreadable" | "no_offer" | "no_user" | "run_failed";
 
 export interface SweepEntry {
   orgId: string;
   brandId: string;
   offerId: string | null;
+  /** The engagement lists' outcome (or, when only signal lists were due, theirs). */
   action: CompetitorEngagementOutcomeKind | "would_ensure" | "skipped";
   reason: string | null;
   audienceId: string | null;
+  /** The offer's per-profile engagement lists. */
+  audienceIds: string[];
   pages: string[];
+  /** Per (profile, buying signal), when the offer uses buying signals and a pair was due. */
+  signals: ProfileSignalOutcome[];
 }
 
 export interface CompetitorEngagementSweepResult {
@@ -259,8 +301,12 @@ export interface CompetitorEngagementSweepResult {
 let sweeping = false;
 
 /**
- * For every (org, brand) holding an ACTIVE audience and no competitor-engagement
- * audience on its main offer yet: when billing can charge the org, ensure one.
+ * For every (org, brand) holding an ACTIVE audience, on its main offer: every live
+ * client profile gets its competitor-engagement list and, when the offer uses
+ * buying signals (a launch portfolio, or signal lists already there), its signal
+ * lists (profile-sources.ts). A profile added later (refill, accepted widening)
+ * gets its lists on the next tick, and an offer's whole-ICP lists are retired once
+ * its profiles have their own. Only when billing can charge the org.
  * `dryRun` reads billing (free) and reports, creating and spending nothing.
  * Returns null when skipped (schema not ready or a sweep already running).
  */
@@ -298,25 +344,40 @@ export async function runCompetitorEngagementSweep(
     for (const rows of byBrand.values()) {
       const { orgId, brandId } = rows[0];
       const offerId = pickOffer(rows);
-      const entry: SweepEntry = { orgId, brandId, offerId, action: "skipped", reason: null, audienceId: null, pages: [] };
+      const entry: SweepEntry = {
+        orgId,
+        brandId,
+        offerId,
+        action: "skipped",
+        reason: null,
+        audienceId: null,
+        audienceIds: [],
+        pages: [],
+        signals: [],
+      };
       entries.push(entry);
       if (!offerId) {
         entry.reason = "no_offer";
         continue;
       }
-      const existing = await findExisting(orgId, brandId, offerId);
-      if (existing) {
+      const scope = { orgId, brandId, offerId };
+      const inOffer = await offerAudiences(orgId, brandId, offerId);
+      const live = inOffer.filter((r) => r.status !== "deprecated");
+      const profiles = await liveProfiles(scope, live);
+      if (profiles.length === 0) {
+        entry.action = "no_profile";
+        continue;
+      }
+      const engagementDue = profiles.some((p) => !engagementListOf(inOffer, p.id, false));
+      const signalsDue = (await offerUsesSignals(scope, live)) && profiles.some((p) => signalTypesMissing(live, p.id));
+      if (!engagementDue && !signalsDue) {
+        await retireWholeIcpLists(scope, "linkedin_engagement");
         entry.action = "exists";
-        entry.audienceId = existing.id;
+        entry.audienceIds = profiles.map((p) => engagementListOf(inOffer, p.id, false)?.id).filter((x): x is string => !!x);
+        entry.audienceId = entry.audienceIds[0] ?? null;
         continue;
       }
-      const inOffer = rows.filter((a) => a.offerId === offerId);
-      const target = inOffer.find((a) => a.nlPrompt?.trim())?.nlPrompt?.trim() ?? null;
-      if (!target) {
-        entry.reason = "no_target";
-        continue;
-      }
-      const userId = inOffer.find((a) => a.createdByUserId)?.createdByUserId ?? null;
+      const userId = live.find((a) => a.createdByUserId)?.createdByUserId ?? null;
       if (!userId) {
         entry.reason = "no_user";
         continue;
@@ -344,37 +405,46 @@ export async function runCompetitorEngagementSweep(
         continue;
       }
 
-      let tracking: { brandIds: string[]; featureSlug: string };
-      try {
-        tracking = { brandIds: [brandId], featureSlug: await sourcingOriginSlug("linkedin_engagement") };
-      } catch (err) {
-        entry.reason = `sourcing_origin_unresolved: ${err instanceof Error ? err.message : String(err)}`;
-        console.error(`[human-service] competitor_engagement.sweep_origin_failed org=${orgId} brand=${brandId} ${entry.reason}`);
-        continue;
+      if (engagementDue) {
+        const result = await underOwnRun(orgId, brandId, userId, "linkedin_engagement", "competitor-engagement-audience", (identity) =>
+          ensureCompetitorEngagementAudience({ orgId, userId, brandId, offerId, identity }),
+          (v) => v.outcome === "failed"
+        );
+        if ("skip" in result) {
+          entry.reason = result.skip;
+          continue;
+        }
+        entry.action = result.value.outcome;
+        entry.reason = result.value.reason;
+        entry.audienceId = result.value.audienceId;
+        entry.audienceIds = result.value.audienceIds;
+        entry.pages = result.value.pages;
       }
-      const runId = await createRun({ orgId, userId, taskName: "competitor-engagement-audience", workflowTracking: tracking });
-      if (!runId) {
-        entry.reason = "run_failed";
-        console.error(`[human-service] competitor_engagement.sweep_run_failed org=${orgId} brand=${brandId}`);
-        continue;
+      if (signalsDue) {
+        const result = await underOwnRun(orgId, brandId, userId, "apollo_buying_signal", "profile-signal-lists", (identity) =>
+          ensureProfileSignalLists({
+            orgId,
+            brandId,
+            offerId,
+            userId,
+            identity,
+            originSlug: identity.workflowTracking?.featureSlug ?? null,
+          }),
+          (v) => v.some((o) => o.outcome === "failed")
+        );
+        if ("skip" in result) {
+          entry.reason = entry.reason ?? result.skip;
+          continue;
+        }
+        entry.signals = result.value;
+        if (!engagementDue) {
+          entry.action = result.value.some((o) => o.outcome === "created")
+            ? "created"
+            : result.value.some((o) => o.outcome === "failed")
+              ? "failed"
+              : "exists";
+        }
       }
-      const result = await ensureCompetitorEngagementAudience({
-        orgId,
-        userId,
-        brandId,
-        offerId,
-        target,
-        identity: { orgId, userId, runId, workflowTracking: tracking },
-      });
-      await completeRun(runId, result.outcome === "failed" ? "failed" : "completed", {
-        orgId,
-        userId,
-        workflowTracking: tracking,
-      });
-      entry.action = result.outcome;
-      entry.reason = result.reason;
-      entry.audienceId = result.audienceId;
-      entry.pages = result.pages;
     }
 
     const result: CompetitorEngagementSweepResult = {
@@ -390,6 +460,64 @@ export async function runCompetitorEngagementSweep(
   } finally {
     sweeping = false;
   }
+}
+
+/** A profile still without a list for some buying signal (a below-threshold pair is re-measured: free). */
+function signalTypesMissing(rows: AudienceRow[], profileId: string): boolean {
+  const have = new Set(rows.filter((r) => r.profileAudienceId === profileId).map((r) => sourceKeyOf(r)));
+  return BUYING_SIGNAL_TYPES.some((t) => !have.has(t));
+}
+
+/** The offer sources from buying signals: it was launched with a portfolio, or holds signal lists. */
+async function offerUsesSignals(
+  scope: { orgId: string; brandId: string; offerId: string },
+  rows: AudienceRow[]
+): Promise<boolean> {
+  const hasList = rows.some((r) => {
+    const k = sourceKeyOf(r);
+    return k !== null && k !== "linkedin_engagement" && (r.status === "active" || r.status === "paused");
+  });
+  if (hasList) return true;
+  const [portfolio] = await db
+    .select({ id: audiencePortfolios.id })
+    .from(audiencePortfolios)
+    .where(
+      and(
+        eq(audiencePortfolios.orgId, scope.orgId),
+        eq(audiencePortfolios.brandId, scope.brandId),
+        eq(audiencePortfolios.offerId, scope.offerId)
+      )
+    )
+    .limit(1);
+  return !!portfolio;
+}
+
+/** Run `fn` under an org-billed run labelled with the list's sourcing origin. */
+async function underOwnRun<T>(
+  orgId: string,
+  brandId: string,
+  userId: string,
+  list: "linkedin_engagement" | "apollo_buying_signal",
+  taskName: string,
+  fn: (identity: Identity) => Promise<T>,
+  isFailed: (value: T) => boolean
+): Promise<{ value: T } | { skip: string }> {
+  let tracking: { brandIds: string[]; featureSlug: string };
+  try {
+    tracking = { brandIds: [brandId], featureSlug: await sourcingOriginSlug(list) };
+  } catch (err) {
+    const skip = `sourcing_origin_unresolved: ${err instanceof Error ? err.message : String(err)}`;
+    console.error(`[human-service] competitor_engagement.sweep_origin_failed org=${orgId} brand=${brandId} ${skip}`);
+    return { skip };
+  }
+  const runId = await createRun({ orgId, userId, taskName, workflowTracking: tracking });
+  if (!runId) {
+    console.error(`[human-service] competitor_engagement.sweep_run_failed org=${orgId} brand=${brandId} task=${taskName}`);
+    return { skip: "run_failed" };
+  }
+  const value = await fn({ orgId, userId, runId, workflowTracking: tracking });
+  await completeRun(runId, isFailed(value) ? "failed" : "completed", { orgId, userId, workflowTracking: tracking });
+  return { value };
 }
 
 function summarize(entries: SweepEntry[]): string {

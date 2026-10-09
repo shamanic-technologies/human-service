@@ -19,7 +19,7 @@ import { sql } from "../db/index.js";
  *    `audience_portfolios` (a launch the target already holds for the same
  *    offer wins: one portfolio per (org, brand, offer)),
  *    `source_campaign_states` (the target's own applied state per (offer, origin)
- *    wins), `source_campaign_audience_holds`,
+ *    wins), `source_campaign_audience_holds`, `audience_profile_holds`,
  *    `lists` (brand_id nullable; brand-less lists are org-wide, left alone).
  *  - keyed through an audience of the brand: `audience_members`,
  *    `audience_teaser_buffer`, `audience_teaser_screenings`,
@@ -78,6 +78,7 @@ const TABLES = [
   "audience_portfolios",
   "source_campaign_states",
   "source_campaign_audience_holds",
+  "audience_profile_holds",
   "lists",
   "list_members",
 ] as const;
@@ -116,6 +117,7 @@ export async function transferBrand(
       add("audience_portfolios", await movePortfolios(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
       add("source_campaign_states", await moveSourceCampaignStates(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
       add("source_campaign_audience_holds", await moveSourceCampaignHolds(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
+      add("audience_profile_holds", await moveProfileHolds(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
       if (await tableExists(tx, "lists")) {
         add("lists", await moveBrandKeyed(tx, "lists", fromOrg, fromBrand, targetOrgId, targetBrandId));
       }
@@ -275,6 +277,18 @@ async function moveSourceCampaignStates(
   const moved = await tx`UPDATE source_campaign_states SET org_id = ${toOrg}, brand_id = ${toBrand}, updated_at = now()
                          WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`;
   return dropped.length + moved.length;
+}
+
+async function moveProfileHolds(
+  tx: Tx,
+  fromOrg: string,
+  fromBrand: string,
+  toOrg: string,
+  toBrand: string
+): Promise<number> {
+  const moved = await tx`UPDATE audience_profile_holds SET org_id = ${toOrg}, brand_id = ${toBrand}
+                         WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`;
+  return moved.length;
 }
 
 async function moveSourceCampaignHolds(

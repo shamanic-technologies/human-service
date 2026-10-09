@@ -1,6 +1,8 @@
 // The launch-time ICP audience portfolio: the cold split (adopted when a
-// pre-payment flow already confirmed it) plus one buying-signal audience per
-// signal reaching 20+ companies, all ACTIVE, all carrying ONE nl_prompt.
+// pre-payment flow already confirmed it) = the client PROFILES, plus per profile
+// one buying-signal list per signal reaching 20+ companies FOR THAT PROFILE, all
+// ACTIVE. The cold rows share ONE nl_prompt; a signal list screens on its
+// profile's own text (profile-sources.ts).
 // Idempotent per (org, brand, offer). The LLM / Apollo calls are mocked at
 // their client modules; their own suites pin them.
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
@@ -10,13 +12,13 @@ import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import { audiences } from "../../src/db/schema.js";
+import { ensureTargetText } from "../../src/services/audience-target-text.js";
 import { draftAudienceTarget } from "../../src/services/audience-target.js";
 import { proposeAudienceSplit } from "../../src/services/audience-split.js";
 import { settlePortfolioBackground } from "../../src/services/audience-portfolio.js";
 import {
   createApolloSignalAudience,
   measureSignalCoverage,
-  suggestApolloAudience,
 } from "../../src/lib/apollo-audiences.js";
 import { ProviderError } from "../../src/services/people-providers.js";
 import { ChatServiceError } from "../../src/lib/chat-client.js";
@@ -35,10 +37,19 @@ vi.mock("../../src/lib/apollo-audiences.js", async (orig) => ({
   measureSignalCoverage: vi.fn(),
   createApolloSignalAudience: vi.fn(),
 }));
-// The background Apollo build of each cold row has its own suite.
+// The background Apollo build of each cold row has its own suite: here it lands a
+// pointer named after the profile, so the signal lists are built on it.
 vi.mock("../../src/services/audiences.js", async (orig) => ({
   ...(await orig<typeof import("../../src/services/audiences.js")>()),
-  ensureApolloPointer: vi.fn(async (row: unknown) => row),
+  ensureApolloPointer: vi.fn(async (row: { name: string; apolloAudienceId: string | null }) => ({
+    ...row,
+    apolloAudienceId: row.apolloAudienceId ?? `apollo-${row.name}`,
+  })),
+}));
+// Each profile's own text (segment drafting has its own suite).
+vi.mock("../../src/services/audience-target-text.js", async (orig) => ({
+  ...(await orig<typeof import("../../src/services/audience-target-text.js")>()),
+  ensureTargetText: vi.fn(),
 }));
 
 const app = createTestApp();
@@ -90,19 +101,10 @@ beforeEach(async () => {
       { name: "Europe SaaS founders", description: "Founders of B2B SaaS companies in Europe.", icon: "y", iconConfidence: 1, estimatedLeadCount: null },
     ],
   });
-  vi.mocked(suggestApolloAudience).mockReset().mockResolvedValue({
-    apolloAudienceId: "11111111-0000-4000-8000-000000000001",
-    filters: { person_titles: ["founder"] },
-    count: 40_000,
-    status: null,
-    degraded: false,
-    candidates: [
-      { apolloAudienceId: "11111111-0000-4000-8000-000000000001", filters: { person_titles: ["founder"] }, count: 40_000, sample: [], notes: null },
-    ],
-  });
+  vi.mocked(ensureTargetText).mockReset().mockImplementation(async (row) => row.targetText ?? `Own text of ${row.name}`);
   vi.mocked(measureSignalCoverage).mockReset().mockResolvedValue(coverage({ hiring: 300, job_change: 120, funding: 7 }));
   vi.mocked(createApolloSignalAudience).mockReset().mockImplementation(async (a) => ({
-    apolloAudienceId: a.type === "hiring" ? "22222222-0000-4000-8000-000000000001" : "22222222-0000-4000-8000-000000000002",
+    apolloAudienceId: `${a.baseApolloAudienceId}/${a.type}`,
     filters: { person_titles: ["founder"], buying_signal: { type: a.type, window_days: a.windowDays } },
     count: 900,
   }));
@@ -126,44 +128,53 @@ describe("POST /orgs/audiences/portfolio", () => {
     const done = await launch();
     expect(done.body.status).toBe("ready");
     expect(done.body.replayed).toBe(true);
-    expect(done.body.audiences).toHaveLength(4);
+    expect(done.body.audiences).toHaveLength(6);
   });
 
-  it("creates the cold split + a signal audience per signal reaching 20+ companies, all ACTIVE with ONE nl_prompt", async () => {
+  it("creates the cold split (the profiles) + per profile a signal list per signal reaching 20+ companies FOR THAT PROFILE", async () => {
     const res = await launched();
     expect(res.status).toBe(200);
     expect(res.body.target).toBe(DRAFTED);
 
     const kinds = res.body.audiences.map((a: { name: string; kind: string }) => `${a.kind}:${a.name}`);
-    expect(kinds).toEqual([
-      "cold:US SaaS founders",
-      "cold:Europe SaaS founders",
-      "signal:Hiring now",
-      "signal:New in role",
+    // Cold first (split order), then the signal lists (profiles share one created_at: any order).
+    expect(kinds.slice(0, 2)).toEqual(["cold:US SaaS founders", "cold:Europe SaaS founders"]);
+    expect(kinds.slice(2).sort()).toEqual([
+      "signal:Europe SaaS founders (Hiring now)",
+      "signal:Europe SaaS founders (New in role)",
+      "signal:US SaaS founders (Hiring now)",
+      "signal:US SaaS founders (New in role)",
     ]);
+    const [us, eu] = res.body.audiences;
     for (const a of res.body.audiences) {
       expect(a.status).toBe("active");
-      expect(a.nlPrompt).toBe(DRAFTED);
       expect(a.offerId).toBe(OFFER);
       expect(a.brandId).toBe(BRAND);
     }
-    const hiring = res.body.audiences.find((a: { name: string }) => a.name === "Hiring now");
+    // The profiles share the split's target; each signal list screens on ITS profile's own text.
+    expect(us.nlPrompt).toBe(DRAFTED);
+    expect(us.profileAudienceId).toBeNull();
+    const hiring = res.body.audiences.find((a: { name: string }) => a.name === "US SaaS founders (Hiring now)");
+    expect(hiring.profileAudienceId).toBe(us.id);
+    expect(hiring.nlPrompt).toBe("Own text of US SaaS founders");
+    expect(hiring.targetText).toBe("Own text of US SaaS founders");
     expect(hiring.signal).toEqual({ type: "hiring", windowDays: 30 });
     expect(hiring.provider).toBe("apollo");
-    expect(hiring.apolloAudienceId).toBe("22222222-0000-4000-8000-000000000001");
+    expect(hiring.apolloAudienceId).toBe("apollo-US SaaS founders/hiring");
     expect(hiring.filters.buying_signal).toEqual({ type: "hiring", window_days: 30 });
+    const euList = res.body.audiences.find((a: { name: string }) => a.name === "Europe SaaS founders (New in role)");
+    expect(euList.profileAudienceId).toBe(eu.id);
 
-    // funding reaches 7 companies (< 20): absent, its shortfall reported.
-    const funding = res.body.signals.find((s: { type: string }) => s.type === "funding");
-    expect(funding).toMatchObject({ outcome: "below_threshold", companies: 7, windowDays: 90, audienceId: null });
-    expect(res.body.audiences.some((a: { signal: { type: string } | null }) => a.signal?.type === "funding")).toBe(false);
+    // funding reaches 7 companies (< 20) per profile: absent, its shortfall reported per profile.
+    const funding = res.body.signals.filter((s: { type: string }) => s.type === "funding");
+    expect(funding).toHaveLength(2);
+    for (const f of funding) expect(f).toMatchObject({ outcome: "below_threshold", companies: 7, windowDays: 90, audienceId: null });
+    expect(funding.map((f: { profileAudienceId: string }) => f.profileAudienceId).sort()).toEqual([us.id, eu.id].sort());
 
-    // Signals measured on the WHOLE ICP's apollo audience, in the windows used.
-    expect(vi.mocked(measureSignalCoverage).mock.calls[0][0]).toMatchObject({
-      apolloAudienceId: "11111111-0000-4000-8000-000000000001",
-      windowDays: [30, 90],
-    });
-    expect(vi.mocked(suggestApolloAudience).mock.calls[0][0]).toMatchObject({ description: ICP, brandId: BRAND });
+    // Each signal measured on the PROFILE's Apollo audience; no whole-ICP build any more.
+    const measuredOn = vi.mocked(measureSignalCoverage).mock.calls.map((c) => c[0].apolloAudienceId).sort();
+    expect(measuredOn).toEqual(["apollo-Europe SaaS founders", "apollo-US SaaS founders"]);
+    expect(vi.mocked(measureSignalCoverage).mock.calls[0][0].windowDays).toEqual([30, 90]);
   });
 
   it("a replay returns the same set and creates nothing new", async () => {
@@ -179,8 +190,7 @@ describe("POST /orgs/audiences/portfolio", () => {
     expect(second.body.signals).toEqual(first.body.signals);
     expect(await db.select().from(audiences)).toHaveLength(before.length);
     expect(proposeAudienceSplit).toHaveBeenCalledTimes(1);
-    expect(suggestApolloAudience).toHaveBeenCalledTimes(1);
-    expect(createApolloSignalAudience).toHaveBeenCalledTimes(2);
+    expect(createApolloSignalAudience).toHaveBeenCalledTimes(4);
   });
 
   it("two concurrent calls run ONE launch", async () => {
@@ -190,7 +200,7 @@ describe("POST /orgs/audiences/portfolio", () => {
     expect(a.body.portfolioId).toBe(b.body.portfolioId);
     await settlePortfolioBackground();
     expect(proposeAudienceSplit).toHaveBeenCalledTimes(1);
-    expect(await db.select().from(audiences)).toHaveLength(4);
+    expect(await db.select().from(audiences)).toHaveLength(6);
   });
 
   it("ADOPTS the split a pre-payment flow already confirmed (suggested), activates it, never re-splits", async () => {
@@ -217,12 +227,11 @@ describe("POST /orgs/audiences/portfolio", () => {
     expect(draftAudienceTarget).not.toHaveBeenCalled();
     const cold = res.body.audiences.filter((a: { kind: string }) => a.kind === "cold");
     expect(cold.map((a: { id: string }) => a.id).sort()).toEqual(pre.map((p) => p.id).sort());
-    for (const a of res.body.audiences) {
-      expect(a.status).toBe("active");
-      expect(a.nlPrompt).toBe(shared);
-    }
+    for (const a of res.body.audiences) expect(a.status).toBe("active");
+    for (const a of cold) expect(a.nlPrompt).toBe(shared);
     expect(cold.every((a: { adopted: boolean }) => a.adopted)).toBe(true);
-    expect(res.body.audiences.filter((a: { kind: string }) => a.kind === "signal")).toHaveLength(2);
+    // 3 adopted profiles x (hiring, job_change) above threshold.
+    expect(res.body.audiences.filter((a: { kind: string }) => a.kind === "signal")).toHaveLength(6);
   });
 
   it("adopted rows that disagree on nl_prompt are all given ONE fresh draft", async () => {
@@ -240,7 +249,24 @@ describe("POST /orgs/audiences/portfolio", () => {
     );
     const res = await launched();
     expect(res.status).toBe(200);
-    for (const a of res.body.audiences) expect(a.nlPrompt).toBe(DRAFTED);
+    for (const a of res.body.audiences.filter((x: { kind: string }) => x.kind === "cold")) expect(a.nlPrompt).toBe(DRAFTED);
+  });
+
+  it("an adopted one-segment row holding the whole target as its text gets its own segment text once it is one of several", async () => {
+    const shared = "Heads of QA and CTOs at B2B software companies.";
+    const [alone] = await db
+      .insert(audiences)
+      .values([
+        { orgId: ORG, brandId: BRAND, offerId: OFFER, name: "Heads of QA", description: "Heads of QA at B2B software companies.", nlPrompt: shared, targetText: shared, targetTextOrigin: "audience_target", provider: "apollo", status: "active", source: "split_proposal" },
+        { orgId: ORG, brandId: BRAND, offerId: OFFER, name: "CTOs", description: "CTOs at B2B software companies.", nlPrompt: shared, targetText: "CTOs (also titled ...)", targetTextOrigin: "segment_target", provider: "apollo", status: "suggested", source: "split_proposal" },
+      ])
+      .returning();
+    await launched();
+    const [row] = await db.select().from(audiences).where(eq(audiences.id, alone.id));
+    // Cleared, so its own segment text is drafted (ensureTargetText); never the whole target.
+    expect(row.targetText).toBeNull();
+    const call = vi.mocked(ensureTargetText).mock.calls.find((c) => c[0].id === alone.id);
+    expect(call?.[0].targetText).toBeNull();
   });
 
   it("a failed coverage read skips every signal (recorded) but the cold audiences still ship", async () => {
@@ -248,28 +274,26 @@ describe("POST /orgs/audiences/portfolio", () => {
     const res = await launched();
     expect(res.status).toBe(200);
     expect(res.body.audiences.map((a: { kind: string }) => a.kind)).toEqual(["cold", "cold"]);
-    expect(res.body.signals.map((s: { outcome: string }) => s.outcome)).toEqual(["failed", "failed", "failed"]);
-    expect(res.body.signals[0].reason).toContain("coverage read failed");
-  });
-
-  it("a failed ICP build skips the signals, cold still ships", async () => {
-    vi.mocked(suggestApolloAudience).mockRejectedValue(new ProviderError("apollo", 504, "timeout"));
-    const res = await launched();
-    expect(res.status).toBe(200);
-    expect(res.body.audiences).toHaveLength(2);
-    expect(res.body.signals.every((s: { outcome: string }) => s.outcome === "failed")).toBe(true);
-    expect(measureSignalCoverage).not.toHaveBeenCalled();
+    expect(res.body.signals.map((s: { outcome: string }) => s.outcome)).toEqual(Array(6).fill("failed"));
+    expect(res.body.signals[0].reason).toContain("boom");
   });
 
   it("one signal's creation failing does not stop the others", async () => {
     vi.mocked(createApolloSignalAudience).mockImplementation(async (a) => {
       if (a.type === "hiring") throw new ProviderError("apollo", 400, "conflict");
-      return { apolloAudienceId: "22222222-0000-4000-8000-000000000002", filters: { buying_signal: { type: a.type } }, count: 10 };
+      return { apolloAudienceId: `${a.baseApolloAudienceId}/${a.type}`, filters: { buying_signal: { type: a.type } }, count: 10 };
     });
     const res = await launched();
     expect(res.status).toBe(200);
-    const outcomes = Object.fromEntries(res.body.signals.map((s: { type: string; outcome: string }) => [s.type, s.outcome]));
-    expect(outcomes).toEqual({ hiring: "failed", job_change: "created", funding: "below_threshold" });
+    const outcomes = res.body.signals.map((s: { profileName: string; type: string; outcome: string }) => `${s.profileName}/${s.type}:${s.outcome}`);
+    expect(outcomes.sort()).toEqual([
+      "Europe SaaS founders/funding:below_threshold",
+      "Europe SaaS founders/hiring:failed",
+      "Europe SaaS founders/job_change:created",
+      "US SaaS founders/funding:below_threshold",
+      "US SaaS founders/hiring:failed",
+      "US SaaS founders/job_change:created",
+    ]);
   });
 
   it("a failed cold split fails the call loud (502), creates nothing, and a retry launches again", async () => {
@@ -279,7 +303,7 @@ describe("POST /orgs/audiences/portfolio", () => {
     expect(await db.select().from(audiences)).toHaveLength(0);
     const retry = await launched();
     expect(retry.status).toBe(200);
-    expect(retry.body.audiences).toHaveLength(4);
+    expect(retry.body.audiences).toHaveLength(6);
   });
 
   it("a cold segment name already taken in the offer gets a date suffix, never a 409", async () => {
@@ -300,7 +324,7 @@ describe("POST /orgs/audiences/portfolio", () => {
       .select()
       .from(audiences)
       .where(and(eq(audiences.brandId, BRAND), eq(audiences.status, "active")));
-    expect(rows).toHaveLength(4);
+    expect(rows).toHaveLength(6);
   });
 
   it("400 on a missing ICP text", async () => {

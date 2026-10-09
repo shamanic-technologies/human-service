@@ -28,6 +28,8 @@ export async function createLinkedinEngagementAudience(args: {
   windowDays: number;
   competitorPages: string[];
   baseFilters: Record<string, unknown>;
+  /** The client profile this list is built for (profile-sources.ts); omitted = none. */
+  profileAudienceId?: string;
   identity: Identity;
 }): Promise<Audience> {
   const apollo = await createApolloLinkedinEngagementAudience({
@@ -60,6 +62,7 @@ export async function createLinkedinEngagementAudience(args: {
       countedAt: null,
       status: args.status,
       source: LINKEDIN_ENGAGEMENT_SOURCE,
+      profileAudienceId: args.profileAudienceId ?? null,
       createdByUserId: args.userId,
     })
     .returning();

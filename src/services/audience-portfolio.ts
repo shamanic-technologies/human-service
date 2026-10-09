@@ -12,30 +12,31 @@
 //     (brand, offer) before payment (rows `source='split_proposal'`, status
 //     suggested/active), those rows are ADOPTED and activated, never copied.
 //     Otherwise the split is proposed and confirmed here, every segment kept.
-//   - SIGNAL: one audience per buying signal (hiring / job_change / funding)
-//     whose coverage for the WHOLE ICP reaches SIGNAL_MIN_COMPANIES distinct
-//     companies (owner threshold 2026-10-03: below it the measurement costs
-//     more than it can return). apollo-service owns the signal (vocabulary,
-//     date filters, rolling window, coverage count); the ICP it is measured on
-//     is one apollo audience built from the ICP text by the same exploration +
-//     chooser every pointer build uses.
+//   - SIGNAL: per cold audience (a client PROFILE, profile-sources.ts), one list
+//     per buying signal (hiring / job_change / funding) whose coverage for THAT
+//     profile reaches SIGNAL_MIN_COMPANIES distinct companies (owner threshold
+//     2026-10-03: below it the measurement costs more than it can return). Each
+//     list is built on the profile's own Apollo audience and screened against
+//     the profile's own text, so pausing a profile stops its signal lists too
+//     (owner 2026-10-09). apollo-service owns the signal (vocabulary, date
+//     filters, rolling window, coverage count).
 //
-// Every audience of the portfolio carries ONE identical `nl_prompt` (the target
-// the pre-pay screen judges each teaser against): the person-level restatement
-// of the ICP (audience-target.ts), drafted once. Adopted rows keep theirs when
-// they already share one; otherwise all of them are given the fresh draft.
+// Every cold audience carries ONE identical `nl_prompt` (the shared target the
+// split was drafted from): the person-level restatement of the ICP
+// (audience-target.ts), drafted once. Adopted rows keep theirs when they already
+// share one; otherwise all of them are given the fresh draft.
 //
 // No-repeat across the portfolio needs nothing new: suppression is per BRAND
 // (brand_suppressions), so a person served under one audience is excluded,
 // before any reveal is paid, under every other audience of the brand.
 //
 // The call answers once the COLD audiences exist (status `building`); the
-// signal part (one Apollo exploration of the whole ICP: minutes) finishes in the
+// signal part (it waits on each profile's Apollo build: minutes) finishes in the
 // background and flips the record to `ready`. Idempotent per (org, brand, offer)
 // through `audience_portfolios`: a replay returns the recorded set and creates
 // nothing; a call while one is in flight in this process joins it; a launch
 // that crashed half-way (process restart) is resumed from what it recorded
-// (cold set, ICP pointer) by the next call.
+// (cold set) by the next call.
 //
 // Failure split (brief no-gos): a failure of the COLD part fails the call loud;
 // a failure of any SIGNAL read is recorded as that signal's `failed` outcome,
@@ -51,15 +52,7 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audiencePortfolios, audiences } from "../db/schema.js";
-import {
-  BUYING_SIGNAL_TYPES,
-  createApolloSignalAudience,
-  measureSignalCoverage,
-  suggestApolloAudience,
-  type BuyingSignalType,
-  type SignalCoverage,
-} from "../lib/apollo-audiences.js";
-import { chooseAudienceCandidate } from "./audience-chooser.js";
+import type { BuyingSignalType } from "../lib/apollo-audiences.js";
 import { confirmAudienceSplit, proposeAudienceSplit } from "./audience-split.js";
 import { ensureCompetitorEngagementAudience } from "./competitor-engagement-audience.js";
 import { draftAudienceTarget } from "./audience-target.js";
@@ -69,62 +62,26 @@ import type { Identity } from "./people-providers.js";
 import { completeRun, createRun } from "./runs.js";
 import { sourcingOriginSlug, withSourcingOrigin } from "./sourcing-origin.js";
 import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
+import {
+  ensureProfileSignalLists,
+  PROFILE_SIGNAL_SOURCE,
+  SIGNAL_MIN_COMPANIES,
+  SIGNAL_WINDOW_DAYS,
+  type ProfileSignalOutcome,
+} from "./profile-sources.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
 type PortfolioRow = typeof audiencePortfolios.$inferSelect;
 
 export const PORTFOLIO_COLD_SOURCE = "icp_portfolio";
-export const PORTFOLIO_SIGNAL_SOURCE = "icp_portfolio_signal";
+export const PORTFOLIO_SIGNAL_SOURCE = PROFILE_SIGNAL_SOURCE;
+export { SIGNAL_MIN_COMPANIES, SIGNAL_WINDOW_DAYS };
 /** Split rows a pre-payment flow confirmed: adopted instead of re-created. */
 const ADOPTABLE_SOURCE = "split_proposal";
 const ADOPTABLE_STATUSES = ["suggested", "active"];
 
-/** Owner threshold (2026-10-03): distinct companies a signal must reach. */
-export const SIGNAL_MIN_COMPANIES = 20;
-
-/**
- * Recency window per signal. A job posting goes stale fast (the hiring push is
- * now or never), so 30 days. A new-in-role person keeps rebuilding their stack
- * for about their first quarter, and a funded company spends the round over
- * months, so 90 days for both. Hiring is measured for ANY role: the ICP text
- * names who we write to, not which roles their company hires, and naming roles
- * would be a guess.
- */
-export const SIGNAL_WINDOW_DAYS: Record<BuyingSignalType, number> = {
-  hiring: 30,
-  job_change: 90,
-  funding: 90,
-};
-
-const SIGNAL_NAMES: Record<BuyingSignalType, string> = {
-  hiring: "Hiring now",
-  job_change: "New in role",
-  funding: "Recently funded",
-};
-
-function signalDescription(type: BuyingSignalType, windowDays: number): string {
-  const what =
-    type === "hiring"
-      ? "whose company posted a job opening"
-      : type === "job_change"
-        ? "who started their current role"
-        : "whose company raised its latest funding round";
-  return `People in the ideal customer profile ${what} in the last ${windowDays} days.`;
-}
-
-export interface SignalOutcome {
-  type: BuyingSignalType;
-  windowDays: number;
-  outcome: "created" | "below_threshold" | "failed";
-  /** Verified-email people the signal reaches for the ICP. Null when unmeasured. */
-  people: number | null;
-  /** Distinct companies of those people. Null when unmeasured. */
-  companies: number | null;
-  companiesExact: boolean | null;
-  audienceId: string | null;
-  /** Why a signal is absent: the measured shortfall or the failure. */
-  reason: string | null;
-}
+/** One (profile, buying signal) pair of the launch. */
+export type SignalOutcome = ProfileSignalOutcome;
 
 export interface PortfolioAudience {
   row: AudienceRow;
@@ -154,11 +111,9 @@ export interface LaunchPortfolioArgs {
   identity: Identity;
 }
 
-type IcpBase = { ok: true; id: string } | { ok: false; reason: string };
-
 // The call answers as soon as the COLD audiences exist (seconds); the signal
-// part waits on one Apollo exploration of the whole ICP (minutes, up to
-// apollo-service's 210s bound plus the chooser and the coverage walk), so it
+// part waits on each profile's Apollo build (minutes, up to apollo-service's
+// 210s bound plus the chooser and the coverage walk), so it
 // finishes in the background and a replay reads it back. A caller that times
 // out or disconnects changes nothing: both phases run to completion server-side.
 const coldInFlight = new Map<string, Promise<PortfolioResult>>();
@@ -243,33 +198,19 @@ async function runLaunch(args: LaunchPortfolioArgs, key: string): Promise<Portfo
   };
   // The launch builds lists of several origins, so its own run carries none; each
   // part's calls carry the origin of the lists it builds (the cold split: Apollo
-  // search; the ICP build + coverage + signal rows: Apollo buying signals; the
+  // search; the coverage + signal rows: Apollo buying signals; the
   // competitor-engagement audience labels itself). Unresolvable ⟹ fail loud.
   let coldIdentity: Identity;
   let signalIdentity: Identity;
+  let signalOrigin: string;
   try {
     coldIdentity = withSourcingOrigin(identity, await sourcingOriginSlug("apollo_search"));
-    signalIdentity = withSourcingOrigin(identity, await sourcingOriginSlug("apollo_buying_signal"));
+    signalOrigin = await sourcingOriginSlug("apollo_buying_signal");
+    signalIdentity = withSourcingOrigin(identity, signalOrigin);
   } catch (err) {
     await closeRun("failed");
     throw err;
   }
-
-  // The ICP's apollo audience only feeds the signals, so it is built alongside
-  // the cold part. Its failure is a signal failure, never the launch's: settle
-  // it into a value right away (no unhandled rejection if the cold part throws).
-  const icpBase: Promise<IcpBase> = portfolio.icpApolloAudienceId
-    ? Promise.resolve({ ok: true, id: portfolio.icpApolloAudienceId })
-    : buildIcpApolloAudience(icpText, args.brandId, signalIdentity).then(
-        async (id) => {
-          await db
-            .update(audiencePortfolios)
-            .set({ icpApolloAudienceId: id, updatedAt: new Date() })
-            .where(eq(audiencePortfolios.id, portfolio.id));
-          return { ok: true as const, id };
-        },
-        (err) => ({ ok: false as const, reason: errMessage(err) })
-      );
 
   let coldIds = portfolio.coldAudienceIds;
   let target = portfolio.target;
@@ -288,7 +229,7 @@ async function runLaunch(args: LaunchPortfolioArgs, key: string): Promise<Portfo
       .where(eq(audiencePortfolios.id, portfolio.id));
   }
 
-  const background = finishSignals({ portfolio, icpBase, target, args, identity, signalIdentity, closeRun })
+  const background = finishSignals({ portfolio, args, identity, signalIdentity, signalOrigin, closeRun })
     .catch((err) =>
       // The row stays `building` with its cold set: the next call resumes.
       console.error(`[human-service] audience_portfolio.background_failed portfolio=${portfolio.id}`, err)
@@ -301,31 +242,34 @@ async function runLaunch(args: LaunchPortfolioArgs, key: string): Promise<Portfo
 
 async function finishSignals(input: {
   portfolio: PortfolioRow;
-  icpBase: Promise<IcpBase>;
-  target: string | null;
   args: LaunchPortfolioArgs;
   identity: Identity;
   signalIdentity: Identity;
+  signalOrigin: string;
   closeRun: (status: "completed" | "failed") => Promise<void>;
 }): Promise<void> {
   const { portfolio, args } = input;
   try {
-    const signals = await buildSignalAudiences({
-      base: await input.icpBase,
-      target: input.target,
-      args,
+    // One list per (live profile, buying signal) above threshold. Waits on each
+    // profile's background Apollo build (deduped, never built twice).
+    const signals = await ensureProfileSignalLists({
+      orgId: args.orgId,
+      brandId: args.brandId,
+      offerId: args.offerId,
+      userId: args.userId,
       identity: input.signalIdentity,
+      originSlug: input.signalOrigin,
     });
-    // The competitor-engagement audience (competitor-engagement-audience.ts):
-    // free to create, built from brand-service's competitor pages. Never fails
-    // the launch: every outcome (none found, not computed yet, failed) is logged
-    // there, and the recurring sweep retries the ones that are not final.
+    // The competitor-engagement lists, one per profile
+    // (competitor-engagement-audience.ts): free to create, built from
+    // brand-service's competitor pages. Never fails the launch: every outcome
+    // (none found, not computed yet, failed) is logged there, and the recurring
+    // sweep retries the ones that are not final.
     await ensureCompetitorEngagementAudience({
       orgId: args.orgId,
       userId: args.userId,
       brandId: args.brandId,
       offerId: args.offerId,
-      target: input.target ?? portfolio.icpText,
       identity: input.identity,
     });
     await db
@@ -334,7 +278,7 @@ async function finishSignals(input: {
       .where(eq(audiencePortfolios.id, portfolio.id));
     console.log(
       `[human-service] audience_portfolio.ready org=${args.orgId} brand=${args.brandId} offer=${args.offerId} ms=${Date.now() - portfolio.createdAt.getTime()} signals=${signals
-        .map((s) => `${s.type}:${s.outcome}${s.companies !== null ? `(${s.companies}co)` : ""}`)
+        .map((s) => `${s.profileName}/${s.type}:${s.outcome}${s.companies !== null ? `(${s.companies}co)` : ""}`)
         .join(",")}`
     );
     await input.closeRun("completed");
@@ -390,19 +334,30 @@ async function buildColdAudiences(
     console.log(
       `[human-service] audience_portfolio.cold_adopted org=${args.orgId} brand=${args.brandId} offer=${args.offerId} adopted=${ids.length} target=${shared ? "kept" : "redrafted"}`
     );
-    // An adopted audience that is not one of several has the target AS its
-    // text, so the text follows a redrafted target; a segment target stays.
-    if (!shared) {
+    // Adopted together, the rows are now several sharing ONE target: a row that
+    // carries its own segment sentence but holds the whole target as its text
+    // (a one-segment confirm wrote it when it was alone) gets its own segment
+    // text drafted, else the screen would judge it against every profile
+    // (prod 2026-10-09, "Heads of QA" screened against "... and CTOs"). A row
+    // with no segment sentence keeps the target AS its text.
+    const ownText = adoptable.filter((a) => a.targetTextOrigin === "audience_target");
+    const toSegment = ids.length > 1 ? ownText.filter((a) => a.description?.trim()).map((a) => a.id) : [];
+    if (toSegment.length > 0) {
       await db
         .update(audiences)
-        .set(audienceTargetFields(target))
-        .where(and(inArray(audiences.id, ids), eq(audiences.targetTextOrigin, "audience_target")));
+        .set({ targetText: null, targetTextOrigin: null })
+        .where(inArray(audiences.id, toSegment));
+    }
+    const keepOwn = ownText.map((a) => a.id).filter((id) => !toSegment.includes(id));
+    if (!shared && keepOwn.length > 0) {
+      await db.update(audiences).set(audienceTargetFields(target)).where(inArray(audiences.id, keepOwn));
     }
     for (const row of adoptable) {
       void ensureApolloPointer(row, buildIdentity).catch((err) =>
         console.error(`[human-service] audience_portfolio.pointer_build.failed audience=${row.id}`, err)
       );
-      void ensureTargetText({ ...row, nlPrompt: target }, buildIdentity).catch((err) =>
+      const fresh = toSegment.includes(row.id) ? { targetText: null, targetTextOrigin: null } : {};
+      void ensureTargetText({ ...row, ...fresh, nlPrompt: target }, buildIdentity).catch((err) =>
         console.error(`[human-service] audience_portfolio.target_text.failed audience=${row.id}`, err)
       );
     }
@@ -458,219 +413,6 @@ async function buildColdAudiences(
   return { ids: created.map((r) => r.id), target };
 }
 
-/**
- * The whole ICP as one apollo-service audience: the exploration apollo-service
- * runs, then the chooser picks among its rounds (apollo's own top-level pick is
- * the argmax-count the chooser replaced). Only the pointer is kept; it is the
- * base every signal is measured on, never an audience of its own here.
- */
-async function buildIcpApolloAudience(
-  icpText: string,
-  brandId: string,
-  identity: Identity
-): Promise<string> {
-  const apollo = await suggestApolloAudience({
-    name: "Ideal customer profile",
-    description: icpText,
-    brandId,
-    identity,
-  });
-  if (apollo.candidates.length <= 1) return apollo.apolloAudienceId;
-  const chosen = await chooseAudienceCandidate({
-    nlPrompt: icpText,
-    candidates: apollo.candidates,
-    identity,
-  });
-  console.log(
-    `[human-service] audience_portfolio.icp_base chooser picked attempt ${chosen.chosen}/${apollo.candidates.length} (count ${chosen.candidate.count}): ${chosen.why}`
-  );
-  return chosen.candidate.apolloAudienceId;
-}
-
-async function buildSignalAudiences(input: {
-  base: { ok: true; id: string } | { ok: false; reason: string };
-  target: string | null;
-  args: LaunchPortfolioArgs;
-  identity: Identity;
-}): Promise<SignalOutcome[]> {
-  const { base, args, identity } = input;
-  const failedAll = (reason: string): SignalOutcome[] => {
-    console.error(
-      `[human-service] audience_portfolio.signals_failed org=${args.orgId} brand=${args.brandId} offer=${args.offerId} reason=${JSON.stringify(reason)}`
-    );
-    return BUYING_SIGNAL_TYPES.map((type) => ({
-      type,
-      windowDays: SIGNAL_WINDOW_DAYS[type],
-      outcome: "failed",
-      people: null,
-      companies: null,
-      companiesExact: null,
-      audienceId: null,
-      reason,
-    }));
-  };
-  if (!base.ok) return failedAll(`ICP build failed: ${base.reason}`);
-
-  let coverage: SignalCoverage[];
-  try {
-    const windows = [...new Set(Object.values(SIGNAL_WINDOW_DAYS))].sort((a, b) => a - b);
-    coverage = (await measureSignalCoverage({ apolloAudienceId: base.id, windowDays: windows, identity }))
-      .signals;
-  } catch (err) {
-    return failedAll(`coverage read failed: ${errMessage(err)}`);
-  }
-
-  const outcomes: SignalOutcome[] = [];
-  for (const type of BUYING_SIGNAL_TYPES) {
-    const windowDays = SIGNAL_WINDOW_DAYS[type];
-    const measured = coverage.find((c) => c.type === type && c.windowDays === windowDays);
-    if (!measured) {
-      outcomes.push(failedOutcome(args, type, windowDays, "apollo-service returned no coverage for this signal"));
-      continue;
-    }
-    const common = {
-      type,
-      windowDays,
-      people: measured.count,
-      companies: measured.companies,
-      companiesExact: measured.companiesExact,
-    };
-    if (measured.companies < SIGNAL_MIN_COMPANIES) {
-      console.log(
-        `[human-service] audience_portfolio.signal_below_threshold org=${args.orgId} brand=${args.brandId} type=${type} companies=${measured.companies} people=${measured.count} min=${SIGNAL_MIN_COMPANIES}`
-      );
-      outcomes.push({
-        ...common,
-        outcome: "below_threshold",
-        audienceId: null,
-        reason: `${measured.companies} companies < ${SIGNAL_MIN_COMPANIES}`,
-      });
-      continue;
-    }
-    try {
-      const row = await createSignalAudienceRow({
-        type,
-        windowDays,
-        baseApolloAudienceId: base.id,
-        target: input.target,
-        args,
-        identity,
-      });
-      outcomes.push({ ...common, outcome: "created", audienceId: row.id, reason: null });
-    } catch (err) {
-      outcomes.push({ ...failedOutcome(args, type, windowDays, errMessage(err)), ...common, outcome: "failed" });
-    }
-  }
-  return outcomes;
-}
-
-/**
- * The buying-signal audiences of ONE offer, outside a launch (a source campaign
- * "Apollo Buying Signals" turned ON for an offer that holds none,
- * src/services/source-campaigns.ts). Measured on the offer's recorded ICP pointer
- * when a launch built one, else on one exploration of `target`. Same outcomes,
- * threshold and rows as the launch; `identity` must already carry the buying-signal
- * origin. Never throws for a signal: each failure is that signal's outcome.
- */
-export async function buildBuyingSignalAudiencesForOffer(args: LaunchPortfolioArgs & { target: string }): Promise<SignalOutcome[]> {
-  const [p] = await db
-    .select({ icpApolloAudienceId: audiencePortfolios.icpApolloAudienceId })
-    .from(audiencePortfolios)
-    .where(
-      and(
-        eq(audiencePortfolios.orgId, args.orgId),
-        eq(audiencePortfolios.brandId, args.brandId),
-        eq(audiencePortfolios.offerId, args.offerId)
-      )
-    );
-  let base: IcpBase;
-  if (p?.icpApolloAudienceId) {
-    base = { ok: true, id: p.icpApolloAudienceId };
-  } else {
-    try {
-      base = { ok: true, id: await buildIcpApolloAudience(args.icpText, args.brandId, args.identity) };
-    } catch (err) {
-      base = { ok: false, reason: errMessage(err) };
-    }
-  }
-  return buildSignalAudiences({ base, target: args.target, args, identity: args.identity });
-}
-
-function failedOutcome(
-  args: LaunchPortfolioArgs,
-  type: BuyingSignalType,
-  windowDays: number,
-  reason: string
-): SignalOutcome {
-  console.error(
-    `[human-service] audience_portfolio.signal_failed org=${args.orgId} brand=${args.brandId} type=${type} reason=${JSON.stringify(reason)}`
-  );
-  return {
-    type,
-    windowDays,
-    outcome: "failed",
-    people: null,
-    companies: null,
-    companiesExact: null,
-    audienceId: null,
-    reason,
-  };
-}
-
-async function createSignalAudienceRow(input: {
-  type: BuyingSignalType;
-  windowDays: number;
-  baseApolloAudienceId: string;
-  target: string | null;
-  args: LaunchPortfolioArgs;
-  identity: Identity;
-}): Promise<AudienceRow> {
-  const { args } = input;
-  const taken = await db
-    .select({ name: audiences.name })
-    .from(audiences)
-    .where(
-      and(
-        eq(audiences.orgId, args.orgId),
-        eq(audiences.brandId, args.brandId),
-        eq(audiences.offerId, args.offerId)
-      )
-    );
-  const [name] = dedupeSegmentNames([SIGNAL_NAMES[input.type]], taken.map((t) => t.name));
-  const apollo = await createApolloSignalAudience({
-    baseApolloAudienceId: input.baseApolloAudienceId,
-    brandId: args.brandId,
-    name,
-    type: input.type,
-    windowDays: input.windowDays,
-    identity: input.identity,
-  });
-  const [row] = await db
-    .insert(audiences)
-    .values({
-      orgId: args.orgId,
-      brandId: args.brandId,
-      offerId: args.offerId,
-      name,
-      description: signalDescription(input.type, input.windowDays),
-      nlPrompt: input.target,
-      ...audienceTargetFields(input.target),
-      provider: "apollo",
-      apolloAudienceId: apollo.apolloAudienceId,
-      filters: apollo.filters,
-      apolloCount: apollo.count,
-      countedAt: new Date(),
-      status: "active",
-      source: PORTFOLIO_SIGNAL_SOURCE,
-      createdByUserId: args.userId,
-    })
-    .returning();
-  console.log(
-    `[human-service] audience_portfolio.signal_created org=${args.orgId} brand=${args.brandId} type=${input.type} audience=${row.id} count=${apollo.count}`
-  );
-  return row;
-}
-
 /** The recorded portfolio, re-read from the audiences it names. */
 async function readPortfolio(p: PortfolioRow, replayed: boolean): Promise<PortfolioResult> {
   const signals = (p.signals ?? []) as unknown as SignalOutcome[];
@@ -700,8 +442,4 @@ async function readPortfolio(p: PortfolioRow, replayed: boolean): Promise<Portfo
     audiences: out,
     signals,
   };
-}
-
-function errMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
