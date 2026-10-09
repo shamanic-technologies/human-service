@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { ensureAvatar, ensureProfileAvatar } from "../services/audience-avatar.js";
 import { emailsOfPersons } from "../services/person-emails.js";
 import { EmailVerificationError } from "../lib/email-verification.js";
 import { and, asc, count, desc, eq, isNotNull, ne, sql } from "drizzle-orm";
@@ -291,6 +292,13 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
   console.log(
     `[human-service] audience.create org=${orgId} audience=${audience.id} brand=${audience.brandId}`
   );
+  // Born active by default: a client profile gets its avatar now, in the
+  // background, org-billed like every request-driven avatar.
+  if (audience.status === "active") {
+    void ensureProfileAvatar(audience, buildIdentity(res)).catch((err) =>
+      console.error(`[human-service] audience.avatar_failed org=${orgId} audience=${audience.id}`, err)
+    );
+  }
 
   res.status(201).json({ audience: (await serializeAudiences([audience]))[0] });
 });
@@ -471,6 +479,9 @@ router.post(
           `[human-service] audience.target_text.failed org=${orgId} audience=${row.id}`,
           err
         )
+      );
+      void ensureProfileAvatar(row, buildIdentityForSplit).catch((err) =>
+        console.error(`[human-service] audience.avatar_failed org=${orgId} audience=${row.id}`, err)
       );
     }
     res.status(201).json({ audiences: await serializeAudiences(created) });
@@ -807,12 +818,7 @@ router.patch(
     // there's no avatarUrl, so re-activating never double-bills. Fire-and-forget
     // (best-effort) — a generation failure is logged loud, never surfaced.
     if (updated.status === "active" && !updated.avatarUrl) {
-      generateAvatar(
-        orgId,
-        updated.id,
-        buildAvatarPrompt(updated),
-        buildIdentity(res)
-      ).catch((err) =>
+      ensureAvatar(updated, buildIdentity(res)).catch((err) =>
         console.error(
           `[human-service] audience.status.avatar_failed org=${orgId} audience=${updated.id}`,
           err

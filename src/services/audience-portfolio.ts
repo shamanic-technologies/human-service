@@ -49,6 +49,7 @@
 // coverage read and the signal audience's size estimate are free Apollo teaser
 // searches on apollo-service's side.
 
+import { ensureProfileAvatar } from "./audience-avatar.js";
 import { and, eq, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audiencePortfolios, audiences } from "../db/schema.js";
@@ -360,6 +361,9 @@ async function buildColdAudiences(
       void ensureTargetText({ ...row, ...fresh, nlPrompt: target }, buildIdentity).catch((err) =>
         console.error(`[human-service] audience_portfolio.target_text.failed audience=${row.id}`, err)
       );
+      void ensureProfileAvatar(row, buildIdentity).catch((err) =>
+        console.error(`[human-service] audience_portfolio.avatar_failed audience=${row.id}`, err)
+      );
     }
     return { ids, target };
   }
@@ -408,6 +412,9 @@ async function buildColdAudiences(
     );
     void ensureTargetText(row, buildIdentity).catch((err) =>
       console.error(`[human-service] audience_portfolio.target_text.failed audience=${row.id}`, err)
+    );
+    void ensureProfileAvatar(row, buildIdentity).catch((err) =>
+      console.error(`[human-service] audience_portfolio.avatar_failed audience=${row.id}`, err)
     );
   }
   return { ids: created.map((r) => r.id), target };

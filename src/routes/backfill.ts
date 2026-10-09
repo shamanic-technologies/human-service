@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { isProfile } from "../services/profile-sources.js";
 import { and, eq, isNull, ne } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audiences } from "../db/schema.js";
@@ -494,6 +495,8 @@ router.post(
 
 // How many {id,name} previews the avatar backfill returns.
 const AVATAR_SAMPLE_LIMIT = 25;
+// Images generated in parallel by the avatar backfill.
+const AVATAR_CONCURRENCY = 4;
 
 // Generate + store a flat-vector avatar URL for avatar-less audiences. A per-row
 // image failure is logged + counted in `failed`; missing service config aborts the sweep loud
@@ -506,23 +509,33 @@ async function runAvatarBackfill(
 }> {
   let filled = 0;
   const failed: Array<{ id: string; name: string; error: string }> = [];
-  for (const row of rows) {
-    try {
-      const prompt = buildAvatarPrompt(row);
-      await generateAudienceAvatarViaPlatform(row.orgId, row.id, prompt);
-      filled++;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (err instanceof ChatConfigError) {
-        console.error(`[human-service] backfill_avatars.abort id=${row.id} ${msg}`);
-        throw new MigrationAborted(msg, [], failed);
+  let aborted: MigrationAborted | null = null;
+  let next = 0;
+  // A few images at a time: one is ~10s, and a sweep of hundreds run one by
+  // one takes hours.
+  const worker = async () => {
+    while (!aborted && next < rows.length) {
+      const row = rows[next++];
+      try {
+        const prompt = buildAvatarPrompt(row);
+        await generateAudienceAvatarViaPlatform(row.orgId, row.id, prompt);
+        filled++;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (err instanceof ChatConfigError) {
+          console.error(`[human-service] backfill_avatars.abort id=${row.id} ${msg}`);
+          aborted = new MigrationAborted(msg, [], failed);
+          return;
+        }
+        console.warn(
+          `[human-service] backfill_avatars.row_failed id=${row.id} ${msg}`
+        );
+        failed.push({ id: row.id, name: row.name, error: msg });
       }
-      console.warn(
-        `[human-service] backfill_avatars.row_failed id=${row.id} ${msg}`
-      );
-      failed.push({ id: row.id, name: row.name, error: msg });
     }
-  }
+  };
+  await Promise.all(Array.from({ length: AVATAR_CONCURRENCY }, worker));
+  if (aborted) throw aborted;
   return { filled, failed };
 }
 
@@ -554,8 +567,9 @@ router.post(
     }
     const dryRun = parsedQuery.data.dryRun === "true";
     const asyncMode = parsedQuery.data.async === "true";
+    const profilesOnly = parsedQuery.data.profilesOnly === "true";
 
-    const rows = await db
+    const all = await db
       .select()
       .from(audiences)
       .where(
@@ -564,6 +578,10 @@ router.post(
           isNull(audiences.avatarUrl)
         )
       );
+    // Client profiles only: a source list shows its profile's avatar.
+    const rows = profilesOnly
+      ? all.filter((r) => r.status !== "archived" && isProfile(r))
+      : all;
 
     const scanned = rows.length;
 

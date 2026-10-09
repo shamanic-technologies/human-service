@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import request from "supertest";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
+import { db } from "../../src/db/index.js";
+import { audiences } from "../../src/db/schema.js";
 
 const app = createTestApp();
 const BRAND = "00000000-0000-4000-8000-0000000000c1";
@@ -24,13 +26,21 @@ afterAll(async () => {
   await closeDb();
 });
 
+// Seeded straight in the DB: POST /orgs/audiences now gives a born-active
+// profile its avatar in the background, and this suite is about the manual route.
 async function createAudience(name: string) {
-  const res = await request(app)
-    .post("/orgs/audiences")
-    .set(getAuthHeaders())
-    .send({ name, brandId: BRAND, provider: "apollo", nlPrompt: "fintech CMOs", filters: { titles: ["CMO"] } });
-  expect(res.status).toBe(201);
-  return res.body.audience.id as string;
+  const [row] = await db
+    .insert(audiences)
+    .values({
+      orgId: getAuthHeaders()["x-org-id"],
+      brandId: BRAND,
+      name,
+      provider: "apollo",
+      nlPrompt: "fintech CMOs",
+      filters: { titles: ["CMO"] },
+    })
+    .returning();
+  return row.id;
 }
 
 function avatar(id: string, body?: unknown) {
