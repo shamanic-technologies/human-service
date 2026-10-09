@@ -1917,6 +1917,16 @@ text`). The route (re)generates it by delegating image generation to
   `generationConfig` and does NOT yet set `aspectRatio:"1:1"`, so squareness rides
   on the prompt text only — image bytes can come back non-square until chat-service
   forces the aspect ratio.
+- **Every client profile gets one at birth** (`src/services/audience-avatar.ts`):
+  `ensureProfileAvatar` (isProfile gate, deduped in-flight, skips a row that has
+  one) fires in the background beside the pointer build at every place a profile
+  is born (split confirm, portfolio create + adoption, refill, widening accept,
+  source campaign ON, staff create). Source lists (`profile_audience_id` set) get
+  none: the dashboard shows the profile's. ONE billing rule: a request-driven
+  avatar is org-billed with the identity that caused it (activation, creation);
+  the backfill (no request) runs on the platform path. Backfill the profiles only:
+  `POST /internal/backfill-audience-avatars?profilesOnly=true&async=true`
+  (non-archived, 4 images in parallel).
 - **No cost declared here** — chat-service OWNS the image-gen cost (it does the
   provision→authorize→execute→actualize against the org balance, exactly like
   `/complete` for `/suggest`); the invariant holds. Fail loud: a chat-service

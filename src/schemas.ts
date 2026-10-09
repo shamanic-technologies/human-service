@@ -2558,6 +2558,13 @@ export const BackfillAudienceAvatarsQuerySchema = z.object({
       description:
         "When 'true', respond 202 immediately and run the sweep in the background (image generation is slow; a whole-table run exceeds an HTTP timeout). Progress is durable per-row + observable via ?dryRun=true. Ignored when dryRun=true.",
     }),
+  profilesOnly: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({
+      description:
+        "When 'true', only CLIENT PROFILES (cold Apollo search audiences that are not a profile's source list), non-archived. Source lists show their profile's avatar, so they need none.",
+    }),
 });
 
 export const BackfillAudienceAvatarsResponseSchema = z

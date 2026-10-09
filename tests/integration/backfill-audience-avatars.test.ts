@@ -191,6 +191,36 @@ describe("POST /internal/backfill-audience-avatars", () => {
     expect(filled.length).toBe(3);
   });
 
+  it("profilesOnly=true fills client profiles only: no source list, no archived, no signal list", async () => {
+    const PROFILE = "c0000000-0000-4000-8000-000000000011";
+    const SOURCE_LIST = "c0000000-0000-4000-8000-000000000012";
+    const ARCHIVED = "c0000000-0000-4000-8000-000000000013";
+    const SIGNAL = "c0000000-0000-4000-8000-000000000014";
+    await db.insert(audiences).values([
+      { id: PROFILE, orgId: ORG, brandId: BRAND, name: "Heads of QA", status: "active", provider: "apollo" },
+      { id: SOURCE_LIST, orgId: ORG, brandId: BRAND, name: "Heads of QA (Hiring now)", status: "active", provider: "apollo", profileAudienceId: PROFILE },
+      { id: ARCHIVED, orgId: ORG, brandId: BRAND, name: "Old", status: "archived", provider: "apollo" },
+      { id: SIGNAL, orgId: ORG, brandId: BRAND, name: "Hiring now", status: "active", provider: "apollo", filters: { buying_signal: { type: "hiring", window_days: 30 } } },
+    ]);
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).endsWith("/internal/platform-images/generate")) return imageOk();
+      throw new Error("unexpected url " + url);
+    });
+
+    const dry = await request(app)
+      .post("/internal/backfill-audience-avatars?dryRun=true&profilesOnly=true")
+      .set(apiKeyHeader);
+    expect(dry.body.sample.map((r: { id: string }) => r.id)).toEqual([PROFILE]);
+
+    const res = await request(app)
+      .post("/internal/backfill-audience-avatars?dryRun=false&profilesOnly=true")
+      .set(apiKeyHeader);
+    expect(res.body.filled).toBe(1);
+    const rows = await db.select({ id: audiences.id, avatarUrl: audiences.avatarUrl }).from(audiences);
+    const filled = rows.filter((r) => r.avatarUrl).map((r) => r.id);
+    expect(filled).toEqual([PROFILE]);
+  });
+
   it("requires api key", async () => {
     const res = await request(app).post("/internal/backfill-audience-avatars");
     expect(res.status).toBe(401);
