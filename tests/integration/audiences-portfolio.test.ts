@@ -137,13 +137,13 @@ describe("POST /orgs/audiences/portfolio", () => {
     expect(res.body.target).toBe(DRAFTED);
 
     const kinds = res.body.audiences.map((a: { name: string; kind: string }) => `${a.kind}:${a.name}`);
-    expect(kinds).toEqual([
-      "cold:US SaaS founders",
-      "cold:Europe SaaS founders",
-      "signal:US SaaS founders (Hiring now)",
-      "signal:US SaaS founders (New in role)",
+    // Cold first (split order), then the signal lists (profiles share one created_at: any order).
+    expect(kinds.slice(0, 2)).toEqual(["cold:US SaaS founders", "cold:Europe SaaS founders"]);
+    expect(kinds.slice(2).sort()).toEqual([
       "signal:Europe SaaS founders (Hiring now)",
       "signal:Europe SaaS founders (New in role)",
+      "signal:US SaaS founders (Hiring now)",
+      "signal:US SaaS founders (New in role)",
     ]);
     const [us, eu] = res.body.audiences;
     for (const a of res.body.audiences) {
