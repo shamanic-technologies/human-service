@@ -43,6 +43,7 @@
 // org-billed under a `source-campaign-audience` run labelled with the origin slug and
 // the source campaign id: only ever because the customer turned that source ON.
 
+import { ensureProfileAvatar } from "./audience-avatar.js";
 import { and, desc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import {
@@ -590,6 +591,9 @@ async function createColdFilters(args: ApplySourceArgs, userId: string, identity
     );
     void ensureApolloPointer(row, { orgId: args.orgId, userId }).catch((err) =>
       console.error(`[human-service] source_campaign.pointer_build.failed org=${args.orgId} audience=${row.id}`, err)
+    );
+    void ensureProfileAvatar(row, { orgId: args.orgId, userId }).catch((err) =>
+      console.error(`[human-service] source_campaign.avatar_failed org=${args.orgId} audience=${row.id}`, err)
     );
   }
   result.outcome = created.length > 0 ? "created" : "no_target";

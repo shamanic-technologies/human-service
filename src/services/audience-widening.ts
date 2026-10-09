@@ -19,6 +19,7 @@
 // created; declining a declined one returns it unchanged. The opposite decision
 // on a decided proposal is a conflict (409).
 
+import { ensureProfileAvatar } from "./audience-avatar.js";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audiences, audienceWideningProposals } from "../db/schema.js";
@@ -151,6 +152,9 @@ export async function acceptWideningProposal(args: {
       );
       void ensureApolloPointer(row, identity).catch((err) =>
         console.error(`[human-service] audience_widening.pointer_build.failed org=${args.orgId} audience=${row.id}`, err)
+      );
+      void ensureProfileAvatar(row, identity).catch((err) =>
+        console.error(`[human-service] audience_widening.avatar_failed org=${args.orgId} audience=${row.id}`, err)
       );
     }
     console.log(

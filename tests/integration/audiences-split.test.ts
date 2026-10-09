@@ -249,6 +249,31 @@ describe("POST /orgs/audiences/split/confirm", () => {
     }
   });
 
+  it("gives every confirmed profile its avatar right away, org-billed with the confirm's identity", async () => {
+    const imageCalls: Array<Record<string, string>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { headers?: Record<string, string> }) => {
+      if (String(url).endsWith("/orgs/images/generate")) {
+        imageCalls.push(init.headers ?? {});
+        return ok({ url: `https://cdn.test/${imageCalls.length}.png`, mimeType: "image/png" });
+      }
+      // Pointer build / target text are not under test here.
+      return { ok: false, status: 503, json: async () => ({}), text: async () => "not under test" };
+    });
+    const res = await confirm({ segments: TWO });
+    expect(res.status).toBe(201);
+
+    let rows: Array<typeof audiences.$inferSelect> = [];
+    for (let i = 0; i < 50; i++) {
+      rows = await db.select().from(audiences);
+      if (rows.every((r) => r.avatarUrl)) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(rows).toHaveLength(2);
+    for (const r of rows) expect(r.avatarUrl).toMatch(/^https:\/\/cdn\.test\/\d\.png$/);
+    expect(imageCalls).toHaveLength(2);
+    for (const h of imageCalls) expect(h["x-org-id"]).toBe(getAuthHeaders()["x-org-id"]);
+  });
+
   it("is all-or-nothing: a name already taken under the offer 409s and writes nothing", async () => {
     expect((await confirm({ segments: [TWO[0]] })).status).toBe(201);
     const res = await confirm({ segments: [TWO[1], { ...TWO[0], name: "us saas FOUNDERS" }] });

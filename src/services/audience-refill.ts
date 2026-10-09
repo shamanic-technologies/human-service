@@ -47,6 +47,7 @@
 // Boot safety: NOTHING here is awaited before `app.listen()` (same pattern as
 // offer-attribution-sweep.ts).
 
+import { ensureProfileAvatar } from "./audience-avatar.js";
 import { and, desc, eq, ne, notInArray, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import {
@@ -627,6 +628,9 @@ async function refillBrand(
         `[human-service] audience_refill.pointer_build.failed org=${pool.orgId} audience=${row.id}`,
         err
       )
+    );
+    void ensureProfileAvatar(row, { orgId: pool.orgId, userId }).catch((err) =>
+      console.error(`[human-service] audience_refill.avatar_failed org=${pool.orgId} audience=${row.id}`, err)
     );
   }
 
