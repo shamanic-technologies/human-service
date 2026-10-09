@@ -11,7 +11,11 @@ import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import { audiences, sourceCampaignAudienceHolds, sourceCampaignStates } from "../../src/db/schema.js";
-import { createApolloLinkedinEngagementAudience } from "../../src/lib/apollo-audiences.js";
+import {
+  createApolloLinkedinEngagementAudience,
+  createApolloSignalAudience,
+  measureSignalCoverage,
+} from "../../src/lib/apollo-audiences.js";
 import { discoverBrandCompetitors } from "../../src/lib/brand-competitors.js";
 import { fetchOfferSourceCampaigns, type OfferSourceCampaign } from "../../src/lib/campaign-source-campaigns.js";
 import { crmListUploads } from "../../src/lib/crm-contacts.js";
@@ -22,6 +26,8 @@ import { getPaymentOutlook } from "../../src/lib/billing-outlook.js";
 vi.mock("../../src/lib/apollo-audiences.js", async (orig) => ({
   ...(await orig<typeof import("../../src/lib/apollo-audiences.js")>()),
   createApolloLinkedinEngagementAudience: vi.fn(),
+  measureSignalCoverage: vi.fn(),
+  createApolloSignalAudience: vi.fn(),
 }));
 vi.mock("../../src/lib/brand-competitors.js", async (orig) => ({
   ...(await orig<typeof import("../../src/lib/brand-competitors.js")>()),
@@ -45,7 +51,7 @@ vi.mock("../../src/services/audiences.js", async (orig) => ({
 }));
 vi.mock("../../src/services/audience-target-text.js", async (orig) => ({
   ...(await orig<typeof import("../../src/services/audience-target-text.js")>()),
-  ensureTargetText: vi.fn(async (row: unknown) => row),
+  ensureTargetText: vi.fn(async (row: { targetText: string | null; nlPrompt: string | null }) => row.targetText ?? row.nlPrompt),
 }));
 vi.mock("../../src/lib/billing-outlook.js", async (orig) => ({
   ...(await orig<typeof import("../../src/lib/billing-outlook.js")>()),
@@ -79,6 +85,7 @@ async function insertAudience(v: {
   filters?: unknown;
   source?: string | null;
   crmUploadId?: string | null;
+  profileAudienceId?: string | null;
 }) {
   const [row] = await db
     .insert(audiences)
@@ -94,6 +101,7 @@ async function insertAudience(v: {
       status: v.status ?? "active",
       source: v.source ?? null,
       crmUploadId: v.crmUploadId ?? null,
+      profileAudienceId: v.profileAudienceId ?? null,
       createdByUserId: USER,
     })
     .returning();
@@ -136,6 +144,17 @@ beforeEach(async () => {
     status: "computed",
     competitors: [{ name: "lemlist", domain: "lemlist.com", linkedinUrl: PAGES[0] }],
   } as never);
+  vi.mocked(measureSignalCoverage).mockReset().mockResolvedValue({
+    baseCount: 5000,
+    signals: (["hiring", "job_change", "funding"] as const).flatMap((type) =>
+      [30, 90].map((windowDays) => ({ type, windowDays, count: 300, companies: type === "funding" ? 4 : 80, companiesExact: true }))
+    ),
+  });
+  vi.mocked(createApolloSignalAudience).mockReset().mockImplementation(async (a) => ({
+    apolloAudienceId: `${a.baseApolloAudienceId}/${a.type}`,
+    filters: { person_titles: ["owner"], buying_signal: { type: a.type, window_days: a.windowDays } },
+    count: 300,
+  }));
   vi.mocked(fetchOfferSourceCampaigns).mockReset();
   vi.mocked(crmListUploads).mockReset();
   vi.mocked(proposeAudienceSplit).mockReset();
@@ -174,8 +193,8 @@ describe("push: POST /orgs/source-campaigns/state", () => {
   });
 
   it("OFF pauses every active audience of THAT list only, and the next ON resumes exactly those", async () => {
-    const li = await insertAudience({ name: "Engaged", filters: ENGAGEMENT_FILTERS, source: "linkedin_engagement_signal" });
     const cold = await insertAudience({ name: "Clinic owners" });
+    const li = await insertAudience({ name: "Engaged", filters: ENGAGEMENT_FILTERS, source: "linkedin_engagement_signal", profileAudienceId: cold.id });
     const elsewhere = await insertAudience({ name: "Engaged elsewhere", filters: ENGAGEMENT_FILTERS, offerId: OTHER_OFFER });
 
     const off = await push({ originSlug: LINKEDIN, status: "off" });
@@ -256,9 +275,9 @@ describe("push: POST /orgs/source-campaigns/state", () => {
 
 describe("reconcile: campaign-service is read, what CHANGED is applied", () => {
   it("first sighting moves nothing that exists (migrated state), later transitions pause and resume", async () => {
-    const li = await insertAudience({ name: "Engaged", filters: ENGAGEMENT_FILTERS, source: "linkedin_engagement_signal" });
-    const signal = await insertAudience({ name: "Hiring now", filters: SIGNAL_FILTERS });
     const cold = await insertAudience({ name: "Owners" });
+    const li = await insertAudience({ name: "Engaged", filters: ENGAGEMENT_FILTERS, source: "linkedin_engagement_signal", profileAudienceId: cold.id });
+    const signal = await insertAudience({ name: "Hiring now", filters: SIGNAL_FILTERS, profileAudienceId: cold.id });
 
     // Mirrored from today: cold filters ON, LinkedIn OFF (row exists), buying signals never created.
     campaignSays([
@@ -379,5 +398,115 @@ describe("a first-seen ON of the offer's DEFAULT origin is today's state", () =>
     expect(vi.mocked(createRun)).not.toHaveBeenCalled();
     const live = await db.select().from(audiences).where(eq(audiences.status, "active"));
     expect(live).toHaveLength(0);
+  });
+});
+
+// PROFILE x SOURCE (owner 2026-10-09): a client profile (a cold audience) is WHO; a
+// source list (buying signal, engagement) is built per profile and follows it.
+describe("profile x source: pausing a profile stops every list of its people", () => {
+  const SIGNALS = "sourcing-apollo-buying-signals";
+
+  function setStatus(id: string, status: string) {
+    return request(app).patch(`/orgs/audiences/${id}/status`).set(getAuthHeaders()).send({ status });
+  }
+
+  async function seedProfiles() {
+    const qa = await insertAudience({ name: "Heads of QA" });
+    const cto = await insertAudience({ name: "CTOs" });
+    await db.update(audiences).set({ targetText: "Heads of QA (also Director of QA)" }).where(eq(audiences.id, qa.id));
+    await db.update(audiences).set({ targetText: "CTOs (also Head of Technology)" }).where(eq(audiences.id, cto.id));
+    return { qa, cto };
+  }
+
+  async function listsOf(profileId: string) {
+    return db.select().from(audiences).where(eq(audiences.profileAudienceId, profileId));
+  }
+
+  it("buying signals ON builds one list per (profile, signal above threshold), each screened on its profile's text, the whole-ICP lists archived", async () => {
+    const { qa, cto } = await seedProfiles();
+    const wholeIcp = await insertAudience({ name: "Hiring now", filters: SIGNAL_FILTERS, source: "icp_portfolio_signal" });
+    const res = await push({ originSlug: SIGNALS, status: "on" });
+    expect(res.body.outcome).toBe("created");
+    for (const p of [qa, cto]) {
+      const lists = await listsOf(p.id);
+      expect(lists.map((l) => l.name).sort()).toEqual([`${p.name} (Hiring now)`, `${p.name} (New in role)`]);
+      for (const l of lists) {
+        expect(l.status).toBe("active");
+        expect(l.nlPrompt).toBe(p.id === qa.id ? "Heads of QA (also Director of QA)" : "CTOs (also Head of Technology)");
+      }
+    }
+    // Measured on each profile's own Apollo audience.
+    expect(vi.mocked(createApolloSignalAudience).mock.calls.every((c) => c[0].baseApolloAudienceId === qa.apolloAudienceId)).toBe(true);
+    expect(await statusOf(wholeIcp.id)).toBe("archived");
+
+    const list = await request(app).get(`/orgs/audiences?brandId=${BRAND}&profileAudienceId=${qa.id}`).set(getAuthHeaders());
+    expect(list.body.audiences.map((a: { profileAudienceId: string }) => a.profileAudienceId)).toEqual([qa.id, qa.id]);
+  });
+
+  it("a person pausing a profile pauses its lists (signals AND engagement); resuming it resumes them; the other profile is untouched", async () => {
+    const { qa, cto } = await seedProfiles();
+    await push({ originSlug: SIGNALS, status: "on" });
+    await push({ originSlug: LINKEDIN, status: "on" });
+    const ctoLists = await listsOf(cto.id);
+    expect(ctoLists).toHaveLength(3);
+    expect(ctoLists.every((l) => l.status === "active")).toBe(true);
+
+    const paused = await setStatus(cto.id, "paused");
+    expect(paused.status).toBe(200);
+    expect((await listsOf(cto.id)).map((l) => l.status)).toEqual(["paused", "paused", "paused"]);
+    expect((await listsOf(qa.id)).every((l) => l.status === "active")).toBe(true);
+
+    await setStatus(cto.id, "active");
+    expect((await listsOf(cto.id)).every((l) => l.status === "active")).toBe(true);
+  });
+
+  it("archiving a profile pauses its lists too", async () => {
+    const { cto } = await seedProfiles();
+    await push({ originSlug: SIGNALS, status: "on" });
+    await setStatus(cto.id, "archived");
+    expect((await listsOf(cto.id)).every((l) => l.status === "paused")).toBe(true);
+  });
+
+  it("source OFF + profile paused: the list runs again only once BOTH are back on, in either order", async () => {
+    const { cto } = await seedProfiles();
+    await push({ originSlug: SIGNALS, status: "on" });
+    const [list] = await listsOf(cto.id);
+
+    // Source off, then profile paused, then profile resumed: still off by the source.
+    await push({ originSlug: SIGNALS, status: "off" });
+    await setStatus(cto.id, "paused");
+    await setStatus(cto.id, "active");
+    expect(await statusOf(list.id)).toBe("paused");
+    await push({ originSlug: SIGNALS, status: "on" });
+    expect(await statusOf(list.id)).toBe("active");
+
+    // Profile paused, then source off, then source on: still paused by the profile.
+    await setStatus(cto.id, "paused");
+    await push({ originSlug: SIGNALS, status: "off" });
+    await push({ originSlug: SIGNALS, status: "on" });
+    expect(await statusOf(list.id)).toBe("paused");
+    await setStatus(cto.id, "active");
+    expect(await statusOf(list.id)).toBe("active");
+  });
+
+  it("a list a PERSON paused directly is never revived by its profile's resume nor by its source's ON", async () => {
+    const { cto } = await seedProfiles();
+    await push({ originSlug: SIGNALS, status: "on" });
+    const [list, other] = await listsOf(cto.id);
+    await setStatus(cto.id, "paused");
+    await setStatus(list.id, "paused");
+    await setStatus(cto.id, "active");
+    expect(await statusOf(list.id)).toBe("paused");
+    expect(await statusOf(other.id)).toBe("active");
+  });
+
+  it("a profile turned off only by the Apollo Cold Filters source still gets its signal lists (the source is off, not the profile)", async () => {
+    const { qa } = await seedProfiles();
+    await push({ originSlug: COLD, campaignId: COLD_CAMPAIGN, status: "off" });
+    expect(await statusOf(qa.id)).toBe("paused");
+    await push({ originSlug: SIGNALS, status: "on" });
+    const lists = await listsOf(qa.id);
+    expect(lists).toHaveLength(2);
+    expect(lists.every((l) => l.status === "active")).toBe(true);
   });
 });

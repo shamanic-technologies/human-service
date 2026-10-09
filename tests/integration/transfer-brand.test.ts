@@ -8,7 +8,7 @@ import {
   insertMethodology,
 } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
-import { audiences, humanMethodologies, sourceCampaignAudienceHolds, sourceCampaignStates } from "../../src/db/schema.js";
+import { audienceProfileHolds, audiences, humanMethodologies, sourceCampaignAudienceHolds, sourceCampaignStates } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
 
 const app = createTestApp();
@@ -67,6 +67,31 @@ describe("POST /internal/transfer-brand", () => {
     const [hold] = await db.select().from(sourceCampaignAudienceHolds);
     expect(state.orgId).toBe(TARGET_ORG);
     expect(hold.orgId).toBe(TARGET_ORG);
+  });
+
+  it("moves the brand's profile holds with it, the source list still pointing at its profile", async () => {
+    const OFFER = "c0000000-0000-4000-8000-000000000001";
+    const [profile] = await db
+      .insert(audiences)
+      .values({ orgId: SOURCE_ORG, brandId: BRAND_A, offerId: OFFER, name: "CTOs", status: "paused", provider: "apollo" })
+      .returning();
+    const [list] = await db
+      .insert(audiences)
+      .values({ orgId: SOURCE_ORG, brandId: BRAND_A, offerId: OFFER, name: "CTOs (Hiring now)", status: "paused", provider: "apollo", profileAudienceId: profile.id })
+      .returning();
+    await db.insert(audienceProfileHolds).values({ orgId: SOURCE_ORG, brandId: BRAND_A, profileAudienceId: profile.id, audienceId: list.id });
+
+    const res = await request(app)
+      .post("/internal/transfer-brand")
+      .set(apiKeyHeader)
+      .send({ sourceBrandId: BRAND_A, sourceOrgId: SOURCE_ORG, targetOrgId: TARGET_ORG });
+
+    expect(res.status).toBe(200);
+    expect(res.body.updatedTables).toEqual(expect.arrayContaining([{ tableName: "audience_profile_holds", count: 1 }]));
+    const [hold] = await db.select().from(audienceProfileHolds);
+    expect(hold.orgId).toBe(TARGET_ORG);
+    const [moved] = await db.select().from(audiences).where(eq(audiences.id, list.id));
+    expect(moved).toMatchObject({ orgId: TARGET_ORG, profileAudienceId: profile.id });
   });
 
   it("transfers solo-brand methodology rows to target org", async () => {

@@ -93,6 +93,7 @@ import {
 
 import { crmListUploads } from "../lib/crm-contacts.js";
 import { getAudiencePreview } from "../services/audience-preview.js";
+import { applyPersonStatusChange } from "../services/profile-sources.js";
 import {
   checkNextPreviewPerson,
   getPreviewEmailChecks,
@@ -613,6 +614,9 @@ router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) 
   // whatever offer it carries and including the offer-less ones, which is
   // exactly what this route returned before offers existed.
   if (offerFilter) conditions.push(eq(audiences.offerId, offerFilter));
+  if (parsedQuery.data.profileAudienceId) {
+    conditions.push(eq(audiences.profileAudienceId, parsedQuery.data.profileAudienceId));
+  }
   if (statusFilter) conditions.push(eq(audiences.status, statusFilter));
   // "deprecated" is an admin-only terminal state (retired apify audiences from
   // the apify→apollo migration). Hide it from the user dashboard by default —
@@ -786,6 +790,10 @@ router.patch(
     console.log(
       `[human-service] audience.status org=${orgId} audience=${updated.id} status=${updated.status}`
     );
+    // A person's choice wins over the automatic switches, and a profile's source
+    // lists follow it (profile-sources.ts). Before the response, so a read right
+    // after the flip already sees the lists paused / resumed.
+    await applyPersonStatusChange(updated);
     // Respond FIRST — the avatar must never block or fail the status flip.
     res.json({ audience: (await serializeAudiences([updated]))[0] });
 
@@ -1452,6 +1460,7 @@ function serializeAudience(
     offerId: row.offerId,
     status: row.status,
     source: row.source,
+    profileAudienceId: row.profileAudienceId,
     canonicalAudienceId: row.canonicalAudienceId,
     filters: row.filters,
     avatarUrl: row.avatarUrl,

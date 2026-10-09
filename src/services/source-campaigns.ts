@@ -14,13 +14,15 @@
 //           is resumed; if the offer holds none (archived aside), one is CREATED, done for
 //           the customer from what the platform already knows (never asks them anything):
 //             apollo_search         the offer's validated target, split (audience-split.ts)
-//             apollo_buying_signal  the offer's ICP, one audience per signal above threshold
-//                                   (audience-portfolio.ts)
-//             linkedin_engagement   competitors' LinkedIn pages brand-service found
-//                                   (competitor-engagement-audience.ts)
+//             apollo_buying_signal  per client profile of the offer, one list per signal
+//                                   above threshold (profile-sources.ts)
+//             linkedin_engagement   per client profile, competitors' LinkedIn pages
+//                                   brand-service found (competitor-engagement-audience.ts)
 //             crm_contacts          one audience per CRM file the brand uploaded
 //   - OFF = every active audience of that list under the offer is PAUSED, history kept,
 //           and HELD (source_campaign_audience_holds) so the next ON resumes exactly those.
+//   A list a person's profile pause holds (audience_profile_holds, profile-sources.ts)
+//   is never resumed by an ON: it runs again only once neither holds it.
 // The list an origin is comes from features-service's catalogue (sourcing-origin.ts).
 //
 // HOW ON/OFF REACHES US (both idempotent, both through applySourceCampaignState):
@@ -55,7 +57,7 @@ import { listKindOfOriginSlug, withSourcingOrigin, type AudienceListKind } from 
 import { fetchOfferSourceCampaigns } from "../lib/campaign-source-campaigns.js";
 import { crmListUploads } from "../lib/crm-contacts.js";
 import { ensureCompetitorEngagementAudience } from "./competitor-engagement-audience.js";
-import { buildBuyingSignalAudiencesForOffer } from "./audience-portfolio.js";
+import { ensureProfileSignalLists, profileHeldIds, profileListsDue } from "./profile-sources.js";
 import { confirmAudienceSplit, proposeAudienceSplit } from "./audience-split.js";
 import { dedupeSegmentNames, pickValidatedTarget } from "./audience-refill.js";
 import { ensureApolloPointer } from "./audiences.js";
@@ -338,12 +340,16 @@ async function firstSighting(args: ApplySourceArgs, list: AudienceListKind, resu
 
 async function turnOff(args: ApplySourceArgs, list: AudienceListKind, result: ApplySourceResult) {
   const scope = { orgId: args.orgId, brandId: args.brandId, offerId: args.offerId };
-  const active = (await listAudiences(scope, list)).filter((r) => r.status === "active");
-  if (active.length === 0) {
+  const rows = await listAudiences(scope, list);
+  const active = rows.filter((r) => r.status === "active");
+  // A list paused by its profile is held too, so resuming the profile while the
+  // source is still OFF does not revive it.
+  const profileHeld = await profileHeldIds(rows.filter((r) => r.status === "paused").map((r) => r.id));
+  const ids = [...active.map((r) => r.id), ...profileHeld];
+  if (ids.length === 0) {
     result.outcome = "none_active";
     return;
   }
-  const ids = active.map((r) => r.id);
   await db.transaction(async (tx) => {
     await tx
       .update(audiences)
@@ -361,7 +367,7 @@ async function turnOff(args: ApplySourceArgs, list: AudienceListKind, result: Ap
       )
       .onConflictDoNothing();
   });
-  result.outcome = "paused";
+  result.outcome = active.length > 0 ? "paused" : "none_active";
 }
 
 async function turnOn(args: ApplySourceArgs, list: AudienceListKind, result: ApplySourceResult) {
@@ -387,7 +393,9 @@ async function turnOn(args: ApplySourceArgs, list: AudienceListKind, result: App
     );
   let resumed = 0;
   if (holds.length > 0) {
-    const heldIds = holds.map((h) => h.audienceId);
+    // A list its profile's pause still holds stays paused (the profile's resume revives it).
+    const profileHeld = await profileHeldIds(holds.map((h) => h.audienceId));
+    const heldIds = holds.map((h) => h.audienceId).filter((id) => !profileHeld.has(id));
     await db.transaction(async (tx) => {
       const back = await tx
         .update(audiences)
@@ -402,6 +410,15 @@ async function turnOn(args: ApplySourceArgs, list: AudienceListKind, result: App
     });
   }
 
+  // A source built per client profile: every live profile still without its list
+  // gets one now (an offer still served by a whole-ICP list moves to per-profile
+  // lists here, the whole-ICP one retired).
+  if ((list === "apollo_buying_signal" || list === "linkedin_engagement") && (await profileListsDue(scope, list))) {
+    await createList(args, list, result);
+    if (result.outcome === "created" || result.outcome === "failed" || result.outcome === "not_computed") return;
+    result.reason = null;
+  }
+
   const rows = await listAudiences(scope, list);
   if (rows.some((r) => r.status === "active")) {
     result.outcome = resumed > 0 ? "resumed" : "active";
@@ -410,7 +427,8 @@ async function turnOn(args: ApplySourceArgs, list: AudienceListKind, result: App
 
   // 2. Nothing of the list is active: the customer turned the source ON, so the most
   // recent paused one serves again (a suggested / archived one is not theirs to revive).
-  const paused = rows.find((r) => r.status === "paused");
+  const profileHeld = await profileHeldIds(rows.filter((r) => r.status === "paused").map((r) => r.id));
+  const paused = rows.find((r) => r.status === "paused" && !profileHeld.has(r.id));
   if (paused) {
     await setStatus([paused.id], "active");
     result.outcome = "resumed";
@@ -509,18 +527,11 @@ async function createList(args: ApplySourceArgs, list: AudienceListKind, result:
 }
 
 async function createEngagement(args: ApplySourceArgs, userId: string, identity: Identity, result: ApplySourceResult) {
-  const target = await offerTarget(args);
-  if (!target) {
-    result.outcome = "no_target";
-    result.reason = "the offer has no validated target to screen engagers against";
-    return;
-  }
   const out = await ensureCompetitorEngagementAudience({
     orgId: args.orgId,
     userId,
     brandId: args.brandId,
     offerId: args.offerId,
-    target,
     identity,
     ignoreArchived: true,
     // The source is being turned ON: born active (its recorded state is written after).
@@ -528,10 +539,15 @@ async function createEngagement(args: ApplySourceArgs, userId: string, identity:
   });
   if (out.outcome === "created") {
     result.outcome = "created";
-  } else if (out.outcome === "exists" && out.audienceId) {
-    // Born or left inactive: the source is ON, so it serves.
-    await setStatus([out.audienceId], "active");
+  } else if (out.outcome === "exists" && out.audienceIds.length > 0) {
+    // Born or left inactive: the source is ON, so they serve (a profile a person
+    // paused keeps its list paused).
+    const profileHeld = await profileHeldIds(out.audienceIds);
+    await setStatus(out.audienceIds.filter((id) => !profileHeld.has(id)), "active");
     result.outcome = "resumed";
+  } else if (out.outcome === "no_profile") {
+    result.outcome = "no_target";
+    result.reason = out.reason;
   } else if (out.outcome === "no_pages") {
     result.outcome = "no_target";
     result.reason = out.reason;
@@ -581,28 +597,28 @@ async function createColdFilters(args: ApplySourceArgs, userId: string, identity
 }
 
 async function createBuyingSignals(args: ApplySourceArgs, userId: string, identity: Identity, result: ApplySourceResult) {
-  const target = await offerTarget(args);
-  if (!target) {
-    result.outcome = "no_target";
-    result.reason = "the offer has no validated target to measure buying signals on";
-    return;
-  }
-  const outcomes = await buildBuyingSignalAudiencesForOffer({
+  const outcomes = await ensureProfileSignalLists({
     orgId: args.orgId,
-    userId,
     brandId: args.brandId,
     offerId: args.offerId,
-    icpText: target,
-    target,
+    userId,
     identity,
+    originSlug: args.originSlug,
+    // The source is being turned ON: born active (its recorded state is written after).
+    status: "active",
   });
+  if (outcomes.length === 0) {
+    result.outcome = "no_target";
+    result.reason = "the offer has no live client profile to find through buying signals";
+    return;
+  }
   if (outcomes.some((o) => o.outcome === "created")) {
     result.outcome = "created";
     return;
   }
   const failed = outcomes.filter((o) => o.outcome === "failed");
   result.outcome = failed.length > 0 && failed.length === outcomes.length ? "failed" : "no_target";
-  result.reason = outcomes.map((o) => `${o.type}:${o.outcome}${o.reason ? ` (${o.reason})` : ""}`).join("; ");
+  result.reason = outcomes.map((o) => `${o.profileName}/${o.type}:${o.outcome}${o.reason ? ` (${o.reason})` : ""}`).join("; ");
 }
 
 async function createCrmAudiences(args: ApplySourceArgs, userId: string, identity: Identity, result: ApplySourceResult) {
