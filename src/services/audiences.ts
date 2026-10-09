@@ -29,8 +29,10 @@ import {
   audiences,
   brandSuppressions,
   people,
+  personEmails,
   type Audience,
 } from "../db/schema.js";
+import { personIdsByEmail } from "./person-emails.js";
 import {
   partitionSuppressed,
   normalizeEmail,
@@ -272,10 +274,12 @@ export async function computeStats(
   const personIds = [...new Set(input.personIds ?? [])];
 
   // Resolve input identifiers to canonical people (scoped to the org).
+  // An email resolves through ANY address of its person (person-emails.ts).
+  const idsByEmail =
+    emailNorms.length > 0 ? await personIdsByEmail(db, orgId, emailNorms) : new Map<string, string>();
+  const resolvedIds = [...new Set([...personIds, ...idsByEmail.values()])];
   const idConds = [];
-  if (emailNorms.length > 0)
-    idConds.push(inArray(people.emailNorm, emailNorms));
-  if (personIds.length > 0) idConds.push(inArray(people.id, personIds));
+  if (resolvedIds.length > 0) idConds.push(inArray(people.id, resolvedIds));
 
   const matchedPeople =
     idConds.length > 0
@@ -383,15 +387,15 @@ export async function computeStats(
     ),
   }));
 
-  const matchedEmailSet = new Set(
-    matchedPeople.map((p) => p.emailNorm).filter((x): x is string => x !== null)
-  );
   const matchedIdSet = new Set(matchedIds);
 
   return {
     matched,
     unmatched: {
-      emails: emailNorms.filter((e) => !matchedEmailSet.has(e)),
+      emails: emailNorms.filter((e) => {
+        const id = idsByEmail.get(e);
+        return id === undefined || !matchedIdSet.has(id);
+      }),
       personIds: personIds.filter((id) => !matchedIdSet.has(id)),
     },
     byAudience: [...perAudience.values()].map((a) => ({
@@ -481,6 +485,16 @@ export async function computeAudienceContactability(
         inArray(audienceMembers.audienceId, audienceIds),
         or(
           inWindowSuppressionFor(brandSuppressions.emailNorm, people.emailNorm),
+          // Served at ANY address of the person (person-emails.ts) = served.
+          sql`exists (
+            select 1 from ${personEmails}
+            join ${brandSuppressions}
+              on ${brandSuppressions.emailNorm} = ${personEmails.emailNorm}
+             and ${brandSuppressions.orgId} = ${personEmails.orgId}
+            where ${personEmails.personId} = ${people.id}
+              and ${brandSuppressions.brandId} = ${audiences.brandId}
+              and ${brandSuppressions.lastServedAt} > ${windowCutoff()}
+          )`,
           and(
             isNotNull(people.linkedinUrlNorm),
             inWindowSuppressionFor(
@@ -736,10 +750,14 @@ export async function resolveAudiencesForBrand(
       [...emailToNorm.values()].filter((x): x is string => x !== null)
     ),
   ];
-  if (emailNorms.length > 0) {
+  // An email resolves through ANY address of its person (person-emails.ts).
+  const personOfNorm =
+    emailNorms.length > 0 ? await personIdsByEmail(db, orgId, emailNorms) : new Map<string, string>();
+  const resolvedPersonIds = [...new Set(personOfNorm.values())];
+  if (resolvedPersonIds.length > 0) {
     const rows = await db
       .select({
-        emailNorm: people.emailNorm,
+        personId: people.id,
         lastServedAt: audienceMembers.lastServedAt,
         ...baseAudienceCols,
       })
@@ -750,7 +768,7 @@ export async function resolveAudiencesForBrand(
       .where(
         and(
           eq(people.orgId, orgId),
-          inArray(people.emailNorm, emailNorms),
+          inArray(people.id, resolvedPersonIds),
           eq(audiences.brandId, brandId),
           // The card of a lead is the audience that SERVED it; an audience that
           // only found them while taken (multi-source) is not where it came from.
@@ -758,13 +776,13 @@ export async function resolveAudiencesForBrand(
         )
       );
 
-    // Pick the best membership per email_norm (rank, then recency).
+    // Pick the best membership per PERSON (rank, then recency).
     const best = new Map<
       string,
       { audience: ResolvedAudience; rank: number; lastServedAt: Date }
     >();
     for (const r of rows) {
-      const norm = r.emailNorm as string;
+      const key = r.personId;
       const eff = effectiveAudience(r);
       // Exclude never-chosen candidates and retired unlinked variants; a
       // canonical whose brand drifted is a defensive guard.
@@ -776,13 +794,13 @@ export async function resolveAudiencesForBrand(
         continue;
       }
       const rank = AUDIENCE_STATUS_RANK[eff.status] ?? 3;
-      const cur = best.get(norm);
+      const cur = best.get(key);
       if (
         !cur ||
         rank < cur.rank ||
         (rank === cur.rank && r.lastServedAt > cur.lastServedAt)
       ) {
-        best.set(norm, {
+        best.set(key, {
           audience: { id: eff.id, name: eff.name, avatarUrl: eff.avatarUrl },
           rank,
           lastServedAt: r.lastServedAt,
@@ -791,10 +809,9 @@ export async function resolveAudiencesForBrand(
     }
 
     for (const [raw, norm] of emailToNorm) {
-      if (norm !== null) {
-        const hit = best.get(norm);
-        if (hit) byEmail[raw] = hit.audience;
-      }
+      const personId = norm !== null ? personOfNorm.get(norm) : undefined;
+      const hit = personId ? best.get(personId) : undefined;
+      if (hit) byEmail[raw] = hit.audience;
     }
   }
 

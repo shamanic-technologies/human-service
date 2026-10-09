@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { emailsOfPersons } from "../services/person-emails.js";
 import { EmailVerificationError } from "../lib/email-verification.js";
 import { and, asc, count, desc, eq, isNotNull, ne, sql } from "drizzle-orm";
 import {
@@ -1367,10 +1368,16 @@ router.get(
       db.select({ value: count() }).from(audienceMembers).where(whereClause),
     ]);
 
+    // Every address of each member (person-emails.ts), primary first.
+    const emailsByPerson = await emailsOfPersons(
+      db,
+      rows.map((r) => r.personId)
+    );
     res.json({
       members: rows.map((r) => ({
         personId: r.personId,
         emailNorm: r.emailNorm,
+        emails: emailsByPerson.get(r.personId) ?? [],
         linkedinUrlNorm: r.linkedinUrlNorm,
         firstName: r.firstName,
         lastName: r.lastName,
