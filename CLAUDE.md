@@ -401,17 +401,21 @@ honours it before anyone pays. `src/lib/instantly-optouts.ts` is the client;
   `tests/unit/opt-outs.test.ts` and
   `tests/integration/audiences-opt-out.test.ts`.
 
-### Won people — "this brand already sold to them"
+### Never cold-contact — "this person booked, met or bought with the brand"
 
-A brand must never cold-contact a person it has already WON (a paying client).
-Before this, the only guard was the per-brand 3-month suppression, which knows
-nothing about outcomes: a closed client became servable again once their window
-lapsed. `src/lib/lead-won.ts` is the client; the gate lives beside the opt-out
+A brand must never cold-contact a person who booked a meeting with it, attended
+one, or bought (owner 2026-10-10: a booked meeting blocks cold re-contact by that
+brand FOREVER; Doc Dinners' fernanda@chirohealthspa.com booked 2026-10-07 and
+would have lapsed back into the pool). Before, the only guard was the per-brand
+3-month suppression, which knows nothing about outcomes. The code still says
+"won" (it read sales only until 2026-10-10). `src/lib/lead-won.ts` is the client; the gate lives beside the opt-out
 one in `src/services/opt-outs.ts` (`loadServeExclusions`,
 `isEmailWonForRequest`).
 
-- **lead-service OWNS the fact** (`GET /orgs/brands/{brandId}/won-leads`, and
-  `?email=` for one address): a live, attributed `sale` on its outcome ledger,
+- **lead-service OWNS the fact** (`GET /orgs/brands/{brandId}/never-cold-contact`,
+  and `?email=` for one address; NOT `/won-leads`, which stays paying clients
+  only): a live, attributed `meeting_booked` / `meeting_attended` / `sale` on its
+  outcome ledger,
   whoever observed it. Read LIVE on every serve, never stored or reconstructed
   here — a sale withdrawn upstream stops being reported and the person is
   servable again on the next serve, with nothing to invalidate.

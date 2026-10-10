@@ -17,8 +17,10 @@ import { isWonLeadsUrl, setWonLeadsEnv, wonLeadsResponse } from "../helpers/won-
 import { db } from "../../src/db/index.js";
 import { brandSuppressions, people } from "../../src/db/schema.js";
 
-// A brand must never cold-contact a person it has already WON (a paying client).
-// lead-service owns the "won" fact; every test here is about what this gateway
+// A brand must never cold-contact a person who booked a meeting with it, attended
+// one, or bought (owner 2026-10-10: a booked meeting blocks cold re-contact by that
+// brand FOREVER). lead-service owns the fact (its never-cold-contact read; "won"
+// below is the older name); every test here is about what this gateway
 // does with it: exclude the person for THAT brand, permanently, at the point
 // where excluding them still avoids a paid reveal — and refuse to serve when the
 // won set cannot be read.
@@ -177,7 +179,7 @@ describe("a won person on the apollo serve path", () => {
     expect(res.body.person.email).toBe("prospect@acme.com");
     expect(calls.enriched).toEqual(["prospect"]);
     // Asked about THIS brand, with the org identity lead-service scopes on.
-    expect(wonCalls.every((u) => u.includes(`/orgs/brands/${BRAND_A}/won-leads`))).toBe(true);
+    expect(wonCalls.every((u) => u.includes(`/orgs/brands/${BRAND_A}/never-cold-contact`))).toBe(true);
   });
 
   it("is permanent — a suppression row older than 3 months changes nothing", async () => {

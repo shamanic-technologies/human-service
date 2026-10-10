@@ -1,5 +1,5 @@
-// Shared won-leads-source mock. The serve path reads, per brand, the people that
-// brand has already WON from lead-service on every serve that names a brand, and
+// Shared never-cold-contact-source mock (lead-service). The serve path reads, per
+// brand, the people that brand must never cold-contact (booked / attended / won) from lead-service on every serve that names a brand, and
 // fails loud when it cannot — so every suite that exercises a branded serve has to
 // answer this call, exactly as prod does.
 //
@@ -14,7 +14,7 @@ export function setWonLeadsEnv(): void {
 }
 
 export function isWonLeadsUrl(url: string): boolean {
-  return String(url).includes("/won-leads");
+  return String(url).includes("/never-cold-contact");
 }
 
 // The response lead-service would give for this URL, from a map of brandId → won
