@@ -1,10 +1,12 @@
-// Client for lead-service's won leads — the people a brand has already WON (a
-// paying client).
+// Client for lead-service's never-cold-contact read — the people a brand must
+// never cold-contact again: a live, attributed booked meeting, attended meeting
+// or sale with that brand (owner 2026-10-10: a booked meeting blocks cold
+// re-contact by that brand FOREVER). The "won" names below predate that widening.
 //
-// lead-service OWNS this fact: "won" is a live, attributed `sale` on its outcome
-// ledger, whoever observed it (a person's statement, the brand's tracker, the
+// lead-service OWNS this fact (`GET /orgs/brands/{brandId}/never-cold-contact`),
+// whoever observed it (a person's statement, the brand's tracker, the
 // customer's CRM). Nothing here reconstructs it from anything else and nothing
-// here stores a copy: the set is read live on every serve, so a sale withdrawn
+// here stores a copy: the set is read live on every serve, so a statement withdrawn
 // upstream puts the person back in the pool on the very next one.
 //
 // Two reads, mirroring the opt-out client beside it:
@@ -28,7 +30,7 @@ import {
 
 export class WonLeadsSourceError extends Error {
   constructor(public status: number, public body: string) {
-    super(`[lead] won-leads source responded ${status}: ${body.slice(0, 200)}`);
+    super(`[lead] never-cold-contact source responded ${status}: ${body.slice(0, 200)}`);
     this.name = "WonLeadsSourceError";
   }
 }
@@ -59,7 +61,7 @@ async function getWonEmails(
   let res: Response;
   try {
     res = await fetchWithConnectRetry(
-      `${url}/orgs/brands/${encodeURIComponent(brandId)}/won-leads${query}`,
+      `${url}/orgs/brands/${encodeURIComponent(brandId)}/never-cold-contact${query}`,
       { method: "GET", headers: downstreamHeaders(key, identity) }
     );
   } catch (err) {
@@ -75,7 +77,7 @@ async function getWonEmails(
   if (!Array.isArray(data.emails)) {
     throw new WonLeadsSourceError(
       res.status,
-      `won-leads body carries no emails array for brand ${brandId}`
+      `never-cold-contact body carries no emails array for brand ${brandId}`
     );
   }
   return [
