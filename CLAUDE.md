@@ -1798,6 +1798,29 @@ the features-service catalogue read backwards (`listKindOfOriginSlug`).
   build); an offer whose sources are not campaigns yet keeps "born active".
 - Both tables are in the brand transfer. Tests: `tests/integration/source-campaigns.test.ts`.
 
+### Lead Sourcing — the sourcing channel that PICKS its sources (`src/services/lead-sourcing.ts`, owner 2026-10-11)
+
+A sales funnel names ONE channel on Start -> Lead found: one origin, or `lead-sourcing`, where THIS service
+decides which origins the brand uses. Decision per (org, brand, offer) in `lead_sourcing_choices` (+ append-only
+`lead_sourcing_choice_changes`, migration 0041, both in the brand transfer):
+- **Universe** (in line with the brand): the origins whose recorded state was ON when Lead Sourcing was first seen
+  ON (the owner's migration: a funnel on 2-3 sources keeps exactly them, nothing changes for the client; basis
+  `sources_on_at_switch`), else every origin features-service lets it use (`leadSourcing.mayUseByChannel` on
+  `/public/sourcing-origins`, `fetchLeadSourcingOrigins`; basis `every_origin`). Lists are built per client
+  profile and lead-service qualifies on the ICP before paying, so an origin that fits nothing never serves.
+- **By ROI** (`decideLeadSourcing`, pure): features-service `GET /offers/:id/sourcing?pricing=net` per origin
+  (`FEATURES_SERVICE_API_KEY`, needs the caller's user + run). An origin that spent >= 3x the best origin's cost
+  per positive reply with NONE is dropped; never below one; which kept origin serves each run stays
+  campaign-service's picker (owner: "let the picker decide"). Re-read at most hourly (`EVIDENCE_TTL_MS`), only
+  from `GET /orgs/lead-sourcing/sources` with `x-user-id` + `x-run-id` (lead-service's serve); unreadable = the
+  last decision stands, logged loud.
+- **Applied by the reconcile**: while the Lead Sourcing campaign is ON, a chosen origin is ON as if its own
+  campaign were (lists active, held under the Lead Sourcing campaign id); Lead Sourcing itself is never applied
+  (no list). Choice unreadable = that offer is skipped this pass (`read_failed`), never turned OFF.
+- **Read**: `GET /orgs/lead-sourcing/sources?brandId&offerId` (x-org-id) = `chosenOriginSlugs` + per origin
+  reason and evidence; lead-service files a serve under Lead Sourcing only for a chosen origin. Spends nothing.
+  Tests: `tests/unit/lead-sourcing-decision.test.ts`, `tests/integration/lead-sourcing.test.ts`.
+
 ### Profile x source — a paused profile is contacted through NO source (`src/services/profile-sources.ts`)
 
 Owner 2026-10-09. A client PROFILE = WHO: a cold `apollo_search` audience the client keeps or pauses on

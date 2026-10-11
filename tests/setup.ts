@@ -41,5 +41,10 @@ vi.mock("../src/lib/features-sourcing.js", async (importOriginal) => {
         ["apify_search", "sourcing-apify-search"],
       ])
     ),
+    // Lead Sourcing (owner 2026-10-11): the origins it may choose among, as features-service ships them.
+    fetchLeadSourcingOrigins: vi.fn(async () => ({
+      slug: "lead-sourcing",
+      origins: ["sourcing-apollo-buying-signals", "sourcing-apollo-cold-filters", "sourcing-linkedin-engagement-signals"],
+    })),
   };
 });
