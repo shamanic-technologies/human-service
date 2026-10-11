@@ -288,6 +288,13 @@
       "when": 1771587974399,
       "tag": "0040_add_person_emails",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1771674374399,
+      "tag": "0041_add_lead_sourcing_choices",
+      "breakpoints": true
     }
   ]
 }

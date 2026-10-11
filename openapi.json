@@ -6615,6 +6615,117 @@
           "status"
         ]
       },
+      "LeadSourcingSourcesResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "offerId": {
+            "type": "string"
+          },
+          "leadSourcingOn": {
+            "type": "boolean",
+            "description": "The offer's Lead Sourcing campaign is ON (campaign-service)."
+          },
+          "decided": {
+            "type": "boolean",
+            "description": "False = Lead Sourcing never ran for this offer: no choice yet."
+          },
+          "basis": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "sources_on_at_switch",
+              "every_origin",
+              null
+            ]
+          },
+          "chosenOriginSlugs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The origins Lead Sourcing uses for this brand now (a serve filed under it must come from one)."
+          },
+          "universeOriginSlugs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The origins it may choose among."
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "originSlug": {
+                  "type": "string"
+                },
+                "chosen": {
+                  "type": "boolean"
+                },
+                "reason": {
+                  "type": "string",
+                  "description": "best_cost_per_positive_reply | positive_replies_measured | still_learning | no_measured_source_yet | no_evidence_read | spent_without_positive_reply"
+                },
+                "evidence": {
+                  "type": "object",
+                  "nullable": true,
+                  "properties": {
+                    "leadsServed": {
+                      "type": "number"
+                    },
+                    "positiveReplies": {
+                      "type": "number"
+                    },
+                    "endToEndCostUsd": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "leadsServed",
+                    "positiveReplies",
+                    "endToEndCostUsd"
+                  ]
+                },
+                "bestCostPerPositiveReplyUsd": {
+                  "type": "number",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "originSlug",
+                "chosen",
+                "reason",
+                "evidence",
+                "bestCostPerPositiveReplyUsd"
+              ]
+            }
+          },
+          "decidedAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "evidenceAt": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "brandId",
+          "offerId",
+          "leadSourcingOn",
+          "decided",
+          "basis",
+          "chosenOriginSlugs",
+          "universeOriginSlugs",
+          "sources",
+          "decidedAt",
+          "evidenceAt"
+        ]
+      },
       "SourceCampaignReconcileResponse": {
         "type": "object",
         "properties": {
@@ -13133,6 +13244,68 @@
           },
           "401": {
             "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/orgs/lead-sourcing/sources": {
+      "get": {
+        "summary": "Lead Sourcing: which sources this brand uses (owner 2026-10-11). The universe is the sources the brand had ON when it moved to Lead Sourcing (else every source Lead Sourcing may use); within it, a source that spent 3x the best source's cost per positive reply with none is dropped (measured ROI, features-service). Created on first read while Lead Sourcing is ON; re-decided at most hourly when the caller states x-user-id + x-run-id. Spends nothing.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            },
+            "required": true,
+            "name": "offerId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The decision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeadSourcingSourcesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing / invalid query or x-org-id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "campaign-service or features-service unreadable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }

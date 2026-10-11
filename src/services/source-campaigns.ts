@@ -66,6 +66,7 @@ import { ensureTargetText } from "./audience-target-text.js";
 import { completeRun, createRun } from "./runs.js";
 import type { Identity } from "./people-providers.js";
 import { getMigrationState } from "../lib/migration-state.js";
+import { ensureLeadSourcingChoice, LEAD_SOURCING_SLUG } from "./lead-sourcing.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
 
@@ -736,10 +737,27 @@ export async function runSourceCampaignReconcile(
           )
         );
       const byOrigin = new Map(recorded.map((r) => [r.originSlug, r]));
+      // LEAD SOURCING (owner 2026-10-11, src/services/lead-sourcing.ts): while it is ON, every origin it CHOSE for
+      // the brand is ON exactly as if that origin's own source campaign were (its lists active, held under the
+      // Lead Sourcing campaign). It is no list of its own, so it is never applied itself.
+      const leadSourcing = sources.find((x) => x.featureSlug === LEAD_SOURCING_SLUG && x.running && x.campaignId) ?? null;
+      let chosen = new Set<string>();
+      if (leadSourcing) {
+        try {
+          chosen = new Set((await ensureLeadSourcingChoice(scope, leadSourcing.campaignId)).chosenOriginSlugs);
+        } catch (err) {
+          // Nothing is moved for this offer this pass: turning its origins OFF on a failed read would stop its leads.
+          entries.push({ ...scope, originSlug: LEAD_SOURCING_SLUG, action: "read_failed", status: "on", reason: err instanceof Error ? err.message : String(err) });
+          continue;
+        }
+      }
       for (const src of sources) {
+        if (src.featureSlug === LEAD_SOURCING_SLUG) continue;
+        const viaLeadSourcing = leadSourcing !== null && !src.running && chosen.has(src.featureSlug);
         // No campaign = never turned on: nothing to keep in step (and nothing applied yet).
-        if (!src.campaignId && !byOrigin.has(src.featureSlug)) continue;
-        const status: SourceState = src.running ? "on" : "off";
+        if (!src.campaignId && !viaLeadSourcing && !byOrigin.has(src.featureSlug)) continue;
+        const status: SourceState = src.running || viaLeadSourcing ? "on" : "off";
+        const campaignId = viaLeadSourcing ? leadSourcing!.campaignId : src.campaignId;
         const prior = byOrigin.get(src.featureSlug) ?? null;
         if (prior && prior.status === status) continue;
         if (dryRun) {
@@ -750,7 +768,7 @@ export async function runSourceCampaignReconcile(
           const r = await applySourceCampaignState({
             ...scope,
             originSlug: src.featureSlug,
-            campaignId: src.campaignId,
+            campaignId,
             status,
             mode: prior ? "transition" : "first_sighting",
           });

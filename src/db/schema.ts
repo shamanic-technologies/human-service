@@ -1094,3 +1094,42 @@ export const audienceProfileHolds = pgTable(
     uniqueIndex("idx_audience_profile_holds_open").on(table.audienceId).where(sql`released_at IS NULL`),
   ]
 );
+
+// LEAD SOURCING (migration 0041, owner 2026-10-11): which origins the sourcing channel that PICKS its origins
+// uses for one (org, brand, offer). src/services/lead-sourcing.ts.
+export const leadSourcingChoices = pgTable(
+  "lead_sourcing_choices",
+  {
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    offerId: uuid("offer_id").notNull(),
+    campaignId: text("campaign_id"),
+    // "sources_on_at_switch" (the origins the brand had ON when it moved to Lead Sourcing) | "every_origin"
+    basis: text("basis").notNull(),
+    universeOriginSlugs: text("universe_origin_slugs").array().notNull(),
+    chosenOriginSlugs: text("chosen_origin_slugs").array().notNull(),
+    reasons: jsonb("reasons").notNull(),
+    evidenceAt: timestamp("evidence_at", { withTimezone: true }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ name: "lead_sourcing_choices_pk", columns: [table.orgId, table.brandId, table.offerId] })]
+);
+
+export type LeadSourcingChoice = typeof leadSourcingChoices.$inferSelect;
+
+export const leadSourcingChoiceChanges = pgTable(
+  "lead_sourcing_choice_changes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    offerId: uuid("offer_id").notNull(),
+    fromOriginSlugs: text("from_origin_slugs").array(),
+    toOriginSlugs: text("to_origin_slugs").array().notNull(),
+    reasons: jsonb("reasons").notNull(),
+    changedAt: timestamp("changed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_lead_sourcing_choice_changes_scope").on(table.orgId, table.brandId, table.offerId, table.changedAt)]
+);
