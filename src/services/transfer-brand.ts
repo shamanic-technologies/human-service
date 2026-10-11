@@ -80,6 +80,8 @@ const TABLES = [
   "source_campaign_states",
   "source_campaign_audience_holds",
   "audience_profile_holds",
+  "lead_sourcing_choices",
+  "lead_sourcing_choice_changes",
   "lists",
   "list_members",
 ] as const;
@@ -119,6 +121,12 @@ export async function transferBrand(
       add("source_campaign_states", await moveSourceCampaignStates(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
       add("source_campaign_audience_holds", await moveSourceCampaignHolds(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
       add("audience_profile_holds", await moveProfileHolds(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
+      add("lead_sourcing_choices", await moveLeadSourcingChoices(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
+      add(
+        "lead_sourcing_choice_changes",
+        (await tx`UPDATE lead_sourcing_choice_changes SET org_id = ${targetOrgId}, brand_id = ${targetBrandId}
+                  WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`).length
+      );
       if (await tableExists(tx, "lists")) {
         add("lists", await moveBrandKeyed(tx, "lists", fromOrg, fromBrand, targetOrgId, targetBrandId));
       }
@@ -277,6 +285,23 @@ async function moveSourceCampaignStates(
                            RETURNING s.id`;
   const moved = await tx`UPDATE source_campaign_states SET org_id = ${toOrg}, brand_id = ${toBrand}, updated_at = now()
                          WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`;
+  return dropped.length + moved.length;
+}
+
+async function moveLeadSourcingChoices(
+  tx: Tx,
+  fromOrg: string,
+  fromBrand: string,
+  toOrg: string,
+  toBrand: string
+): Promise<number> {
+  // One decision per (org, brand, offer) (Lead Sourcing, owner 2026-10-11): the target's own is kept.
+  const dropped = await tx`DELETE FROM lead_sourcing_choices s USING lead_sourcing_choices t
+                           WHERE s.org_id = ${fromOrg} AND s.brand_id = ${fromBrand}
+                             AND t.org_id = ${toOrg} AND t.brand_id = ${toBrand} AND t.offer_id = s.offer_id
+                           RETURNING s.offer_id`;
+  const moved = await tx`UPDATE lead_sourcing_choices SET org_id = ${toOrg}, brand_id = ${toBrand}, updated_at = now()
+                         WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING offer_id`;
   return dropped.length + moved.length;
 }
 

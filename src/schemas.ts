@@ -4216,6 +4216,50 @@ export const SourceCampaignReconcileQuerySchema = z.object({
   offerId: z.string().regex(LAX_UUID_REGEX, "offerId must be a valid UUID").optional(),
 });
 
+// LEAD SOURCING (owner 2026-10-11, src/services/lead-sourcing.ts): which origins the sourcing channel that picks
+// its own sources uses for one brand x offer, and why.
+export const LeadSourcingSourcesQuerySchema = z.object({
+  brandId: z.string().regex(LAX_UUID_REGEX, "brandId must be a valid UUID"),
+  offerId: z.string().regex(LAX_UUID_REGEX, "offerId must be a valid UUID"),
+});
+
+export const LeadSourcingSourcesResponseSchema = z
+  .object({
+    brandId: z.string(),
+    offerId: z.string(),
+    leadSourcingOn: z.boolean().openapi({ description: "The offer's Lead Sourcing campaign is ON (campaign-service)." }),
+    decided: z.boolean().openapi({ description: "False = Lead Sourcing never ran for this offer: no choice yet." }),
+    basis: z.enum(["sources_on_at_switch", "every_origin"]).nullable(),
+    chosenOriginSlugs: z.array(z.string()).openapi({ description: "The origins Lead Sourcing uses for this brand now (a serve filed under it must come from one)." }),
+    universeOriginSlugs: z.array(z.string()).openapi({ description: "The origins it may choose among." }),
+    sources: z.array(
+      z.object({
+        originSlug: z.string(),
+        chosen: z.boolean(),
+        reason: z.string().openapi({ description: "best_cost_per_positive_reply | positive_replies_measured | still_learning | no_measured_source_yet | no_evidence_read | spent_without_positive_reply" }),
+        evidence: z.object({ leadsServed: z.number(), positiveReplies: z.number(), endToEndCostUsd: z.number() }).nullable(),
+        bestCostPerPositiveReplyUsd: z.number().nullable(),
+      })
+    ),
+    decidedAt: z.string().nullable(),
+    evidenceAt: z.string().nullable(),
+  })
+  .openapi("LeadSourcingSourcesResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/lead-sourcing/sources",
+  summary:
+    "Lead Sourcing: which sources this brand uses (owner 2026-10-11). The universe is the sources the brand had ON when it moved to Lead Sourcing (else every source Lead Sourcing may use); within it, a source that spent 3x the best source's cost per positive reply with none is dropped (measured ROI, features-service). Created on first read while Lead Sourcing is ON; re-decided at most hourly when the caller states x-user-id + x-run-id. Spends nothing.",
+  security: [{ apiKey: [] }],
+  request: { query: LeadSourcingSourcesQuerySchema },
+  responses: {
+    200: { description: "The decision", content: { "application/json": { schema: LeadSourcingSourcesResponseSchema } } },
+    400: { description: "Missing / invalid query or x-org-id", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "campaign-service or features-service unreadable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 export const SourceCampaignReconcileResponseSchema = z
   .object({
     dryRun: z.boolean(),
