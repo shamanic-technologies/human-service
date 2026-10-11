@@ -15,7 +15,8 @@ const router = Router();
 // GET /orgs/lead-sourcing/sources?brandId&offerId — which origins Lead Sourcing uses for the brand
 // (src/services/lead-sourcing.ts). Read by lead-service before filing a serve under Lead Sourcing, and by a
 // workflow on the Lead Sourcing pipe. Created on first read while Lead Sourcing is ON; re-decided on the
-// measured ROI (at most hourly) when the caller states its user and run.
+// measured ROI (at most hourly, BEHIND the answer: never inside a serve's budget) when the caller states its user
+// and run.
 router.get("/orgs/lead-sourcing/sources", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsed = LeadSourcingSourcesQuerySchema.safeParse(req.query);
   if (!parsed.success) {
@@ -27,10 +28,17 @@ router.get("/orgs/lead-sourcing/sources", requireApiKey, requireOrgIdOnly, async
     const sources = await fetchOfferSourceCampaigns(scope);
     const ls = sources.find((s) => s.featureSlug === LEAD_SOURCING_SLUG) ?? null;
     const on = !!ls?.running && !!ls.campaignId;
-    let choice = on ? await ensureLeadSourcingChoice(scope, ls!.campaignId) : await readLeadSourcingChoice(scope);
+    const choice = on ? await ensureLeadSourcingChoice(scope, ls!.campaignId) : await readLeadSourcingChoice(scope);
     const userId = res.locals.userId as string | undefined;
     const runId = res.locals.runId as string | undefined;
-    if (choice && on && userId && runId) choice = await refreshLeadSourcingChoice(scope, { userId, runId });
+    // Re-deciding on the measured ROI reads features-service's per-origin money (seconds); it never holds this
+    // answer: lead-service asks inside a serve (10s budget). It runs BEHIND the answer (at most hourly) and the next
+    // read serves what it decided.
+    if (choice && on && userId && runId) {
+      void refreshLeadSourcingChoice(scope, { userId, runId }).catch((err) =>
+        console.error(`[human-service] lead_sourcing.refresh_failed org=${scope.orgId} offer=${scope.offerId}:`, err)
+      );
+    }
     const reasons = (choice?.reasons ?? {}) as Record<string, OriginDecision>;
     res.json({
       brandId: scope.brandId,
