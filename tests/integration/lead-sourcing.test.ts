@@ -149,7 +149,12 @@ describe("Lead Sourcing", () => {
       .get(`/orgs/lead-sourcing/sources?brandId=${BRAND}&offerId=${OFFER}`)
       .set({ "x-api-key": "test-api-key", "x-org-id": ORG, "x-user-id": USER, "x-run-id": "run-1" });
     expect(withRun.status).toBe(200);
-    expect(withRun.body.chosenOriginSlugs).toEqual([COLD]);
+    // The re-decision runs BEHIND the answer (never inside a serve's budget): this answer is the decision as it was.
+    expect(withRun.body.chosenOriginSlugs).toEqual([SIGNALS, COLD]);
+    await vi.waitFor(async () => expect((await db.select().from(leadSourcingChoices))[0].chosenOriginSlugs).toEqual([COLD]));
+    const next = await request(app).get(`/orgs/lead-sourcing/sources?brandId=${BRAND}&offerId=${OFFER}`).set({ "x-api-key": "test-api-key", "x-org-id": ORG });
+    expect(next.body.chosenOriginSlugs).toEqual([COLD]);
+    Object.assign(withRun, { body: next.body });
     expect(withRun.body.sources.find((s: { originSlug: string }) => s.originSlug === SIGNALS)).toMatchObject({ chosen: false, reason: "spent_without_positive_reply" });
     expect(vi.mocked(fetchOfferSourcingEvidence)).toHaveBeenCalledWith(expect.objectContaining({ orgId: ORG, brandId: BRAND, offerId: OFFER, userId: USER, runId: "run-1" }));
     expect(await db.select().from(leadSourcingChoiceChanges)).toHaveLength(2);
