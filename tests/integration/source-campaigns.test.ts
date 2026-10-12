@@ -9,7 +9,8 @@ import request from "supertest";
 import { and, eq } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
-import { db } from "../../src/db/index.js";
+import { db, sql as rawSql } from "../../src/db/index.js";
+import { readFileSync } from "node:fs";
 import { audiences, sourceCampaignAudienceHolds, sourceCampaignStates } from "../../src/db/schema.js";
 import {
   createApolloLinkedinEngagementAudience,
@@ -610,5 +611,22 @@ describe("a pause a PERSON made is never undone by a product path", () => {
     await db.update(audiences).set({ statusSetBy: null, statusSetReason: null }).where(eq(audiences.id, list.id));
     await setStatus(profile.id, "active");
     expect(await statusOf(list.id)).toBe("paused");
+  });
+
+  it("migration 0044 marks a paused row an OPEN hold holds as a system pause, and nothing else", async () => {
+    const held = await insertAudience({ name: "Owners", status: "paused" });
+    const released = await insertAudience({ name: "Managers", status: "paused" });
+    const free = await insertAudience({ name: "Founders", status: "paused" });
+    const scope = { orgId: ORG, brandId: BRAND, offerId: OFFER, originSlug: COLD, campaignId: COLD_CAMPAIGN };
+    await db.insert(sourceCampaignAudienceHolds).values([
+      { ...scope, audienceId: held.id },
+      { ...scope, audienceId: released.id, releasedAt: new Date() },
+    ]);
+    const file = readFileSync(new URL("../../drizzle/0044_add_audience_status_origin.sql", import.meta.url), "utf8");
+    for (const stmt of file.split("--> statement-breakpoint")) await rawSql.unsafe(stmt);
+    expect((await rowOf(held.id)).statusSetBy).toBe("system");
+    expect((await rowOf(held.id)).statusSetReason).toBe("source_campaign_off");
+    expect((await rowOf(released.id)).statusSetBy).toBeNull();
+    expect((await rowOf(free.id)).statusSetBy).toBeNull();
   });
 });
