@@ -2943,6 +2943,36 @@
           "person"
         ]
       },
+      "ServeNextRequest": {
+        "type": "object",
+        "properties": {
+          "reachableBy": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "phone",
+                  "email"
+                ]
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "phone",
+                    "email"
+                  ]
+                },
+                "minItems": 1,
+                "maxItems": 2
+              }
+            ],
+            "description": "The contact channel(s) the SERVING PIPE writes on, all required (phone for WhatsApp / SMS / calls, email for email). A person without them is never served, revealed or marked served for this call, so a pipe that can reach them still gets them. crm pushes it down to crm-service; a provider whose people cannot carry it (apollo / apify: no phone) answers exhausted before any search or reveal. Omitted = unchanged.",
+            "example": "phone"
+          }
+        }
+      },
       "NextCandidateResponse": {
         "type": "object",
         "properties": {
@@ -2962,9 +2992,10 @@
             "type": "string",
             "enum": [
               "pool_exhausted",
-              "yield_exhausted"
+              "yield_exhausted",
+              "unreachable_by_provider"
             ],
-            "description": "On 'exhausted' only. pool_exhausted = the provider has nobody new. yield_exhausted = over the last 1,000 decisions under the latest `basis`, fewer than 3 were reveals."
+            "description": "On 'exhausted' only. pool_exhausted = the provider has nobody new. yield_exhausted = over the last 1,000 decisions under the latest `basis`, fewer than 3 were reveals. unreachable_by_provider = the request's `reachableBy` names a channel this provider's people never carry (nothing popped or offered)."
           },
           "target": {
             "type": "object",
@@ -10114,6 +10145,16 @@
             "in": "header"
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServeNextRequest"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Next person, or an exhausted signal",
@@ -10214,6 +10255,16 @@
             "in": "header"
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServeNextRequest"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "A candidate, exhausted or pending",
