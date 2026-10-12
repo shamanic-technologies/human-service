@@ -10,6 +10,7 @@ import transferBrandRoutes from "./routes/transfer-brand.js";
 import backfillRoutes from "./routes/backfill.js";
 import audienceRefillRoutes from "./routes/audience-refill.js";
 import competitorEngagementRoutes from "./routes/competitor-engagement.js";
+import sendSuppressionSyncRoutes from "./routes/send-suppression-sync.js";
 import sourceCampaignRoutes from "./routes/source-campaigns.js";
 import leadSourcingRoutes from "./routes/lead-sourcing.js";
 import listsRoutes from "./routes/lists.js";
@@ -25,6 +26,7 @@ import { startOfferAttributionSweep } from "./services/offer-attribution-sweep.j
 import { startAudienceRefillSweep } from "./services/audience-refill.js";
 import { startCompetitorEngagementSweep } from "./services/competitor-engagement-audience.js";
 import { startSourceCampaignReconcile } from "./services/source-campaigns.js";
+import { startSendSuppressionSync } from "./services/send-suppression-sync.js";
 
 // Process-level safety net: a single request must NEVER crash-loop the whole
 // service. Before this, an unawaited async rejection (e.g. a bad `uuid` param →
@@ -66,6 +68,7 @@ app.use(competitorEngagementRoutes);
 app.use(sourceCampaignRoutes);
 app.use(leadSourcingRoutes);
 app.use(suppressionRecoveryRoutes);
+app.use(sendSuppressionSyncRoutes);
 app.use(listsRoutes);
 app.use(personEmailRoutes);
 app.use(peopleRoutes);
@@ -116,6 +119,10 @@ if (process.env.NODE_ENV !== "test") {
   // Source campaigns (owner 2026-10-07): keep each offer's audiences in step with the
   // on/off of its source campaigns in campaign-service. Timers only.
   startSourceCampaignReconcile();
+
+  // RECONTACT-LOOP-1011: the per-brand re-contact window runs from the last
+  // real EMAIL (instantly-service fact feed), not only the last serve. Timers only.
+  startSendSuppressionSync();
 }
 
 export default app;
