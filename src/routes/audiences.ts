@@ -65,6 +65,7 @@ import {
   getAudienceInOrg,
   refreshAudienceCounts,
   refreshAudienceCountIfStale,
+  refreshCrmPeopleStats,
   suggestAudiences,
   serveNextPerson,
   ensureApolloPointer,
@@ -93,7 +94,7 @@ import {
   BounceSourceError,
 } from "../lib/instantly-bounces.js";
 
-import { crmListUploads } from "../lib/crm-contacts.js";
+import { crmListUploads, crmPeopleServeStats, type CrmServeStats } from "../lib/crm-contacts.js";
 import { getAudiencePreview } from "../services/audience-preview.js";
 import { applyPersonStatusChange } from "../services/profile-sources.js";
 import {
@@ -228,6 +229,19 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
   const orgId = res.locals.orgId as string;
   const userId = (res.locals.userId as string | undefined) ?? null;
 
+  // A people binding is a crm audience's, and never beside a file binding
+  // (crm-service refuses both at once). Checked before any downstream call.
+  if (parsed.data.crmPeople) {
+    if (parsed.data.provider !== "crm") {
+      res.status(400).json({ error: "crmPeople requires provider 'crm'." });
+      return;
+    }
+    if (parsed.data.crmUploadId) {
+      res.status(400).json({ error: "crmPeople and crmUploadId are exclusive: an audience draws from one pool." });
+      return;
+    }
+  }
+
   // Source binding — the audience represents ONE of the brand's imported CRM
   // files. Validate the pointer against crm-service BEFORE persisting: a binding
   // to an upload that is not this brand's would silently serve nobody forever
@@ -250,6 +264,26 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
     }
   }
 
+  // People binding — the audience draws from crm-service's merged PEOPLE under a
+  // filter instead of from a file. Only a crm audience can carry it, never with a
+  // file binding (crm-service refuses both at once). The filter is proved against
+  // crm-service's read-only serve-stats BEFORE persisting (burns nobody): a
+  // crm-service that cannot answer it would serve nobody, and its counts become
+  // the audience's Size / Remaining. Fail loud: an outage is a 502, never a row.
+  let crmPeopleStats: CrmServeStats | null = null;
+  if (parsed.data.crmPeople) {
+    try {
+      crmPeopleStats = await crmPeopleServeStats(
+        parsed.data.brandId,
+        parsed.data.crmPeople,
+        buildIdentity(res)
+      );
+    } catch (err) {
+      sendProviderError(res, err);
+      return;
+    }
+  }
+
   let audience;
   try {
     [audience] = await db
@@ -261,6 +295,8 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
         provider: parsed.data.provider ?? null,
         apolloAudienceId: parsed.data.apolloAudienceId ?? null,
         crmUploadId: parsed.data.crmUploadId ?? null,
+        crmPeopleFilter: parsed.data.crmPeople ?? null,
+        crmPeopleStats,
         // The offer this audience belongs to. Stored verbatim — brand-service
         // owns the entity, human-service defines no offer semantics and does
         // not resolve the id (same treatment as brandId; crmUploadId is
@@ -273,7 +309,8 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
         apifyCount: parsed.data.apifyCount ?? null,
         countedAt:
           parsed.data.apolloCount !== undefined ||
-          parsed.data.apifyCount !== undefined
+          parsed.data.apifyCount !== undefined ||
+          crmPeopleStats !== null
             ? new Date()
             : null,
         createdByUserId: userId,
@@ -863,6 +900,12 @@ router.post(
     try {
       // Pointer model: an apollo audience re-counts via apollo-service by its
       // stored pointer; a legacy/neutral audience keeps the dual free dry-run.
+      // A people-bound CRM audience re-counts at crm-service (serve-stats).
+      if (audience.crmPeopleFilter) {
+        const updated = await refreshCrmPeopleStats(audience, buildIdentity(res));
+        res.json({ audience: (await serializeAudiences([updated]))[0] });
+        return;
+      }
       const counts = await refreshAudienceCounts(audience, buildIdentity(res));
       const [updated] = await db
         .update(audiences)
@@ -1470,6 +1513,7 @@ function serializeAudience(
     provider: row.provider,
     apolloAudienceId: row.apolloAudienceId,
     crmUploadId: row.crmUploadId,
+    crmPeople: row.crmPeopleFilter ?? null,
     offerId: row.offerId,
     status: row.status,
     source: row.source,

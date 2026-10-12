@@ -159,7 +159,7 @@ export async function loadBrandPools(opts: { brandId?: string } = {}): Promise<B
     }
     // A CRM audience has no provider count, so its Remaining reads 0 whatever
     // the file holds: the pool is unknown, never "empty".
-    if (active.some((a) => a.provider === "crm" || a.crmUploadId)) {
+    if (active.some((a) => a.provider === "crm" || a.crmUploadId || a.crmPeopleFilter)) {
       pools.push({ ...base, remaining: 0, low: false, unmeasurable: "crm_audience" });
       continue;
     }
