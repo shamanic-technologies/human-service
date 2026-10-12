@@ -61,6 +61,7 @@ section — the port binds first).
 | Internal | `POST /internal/recover-suppressions/revert` | apiKey | Undo a recovery: restore every archived suppression row carrying `reason` verbatim + drop the ledger rows. A person re-suppressed by a fresh serve keeps the newer row |
 | Internal | `POST /internal/backfill-sent-suppressions` | apiKey | One-time data repair (the INVERSE of the recovery above): for a caller-supplied set of `{orgId, brandId, email, sentAt}`, create the missing `brand_suppressions` row dated from the REAL send, so people actually EMAILED before per-brand suppression existed (2026-06-15) stop being re-served and re-bought for the remainder of their own window. Idempotent (reversible `suppression_backfills` ledger keyed on `reason`), `?dryRun=true`. Dedicated **25 MB** body parser. NOT a sweep — the set is supplied, never inferred, and never derived from bare serves |
 | Internal | `POST /internal/backfill-sent-suppressions/revert` | apiKey | Undo a backfill: delete exactly the suppression rows that `reason` created + drop the ledger rows. A row re-served since (its `last_served_at` moved) records a real emission and is kept |
+| Internal | `POST /internal/sync-send-suppressions` | apiKey | Run the send -> suppression sync now (also every 2 min): copy every real email instantly-service sent onto the brand's suppression window. See "Window runs from the EMAIL" |
 | Internal | `POST /internal/backfill-audience-target-texts` | apiKey | One-time data fix: write every pre-0033 audience's own text (`targetText`), by the one rule in "Audience text" below (idempotent, `?dryRun=true`, `?async=true`, `?brandId=`, platform-billed) |
 | Internal | `POST /internal/audience-refill` | apiKey | Run the audience refill now (`?dryRun=true` reports who WOULD be refilled, spending nothing; `?brandId=` narrows). Per-brand `action`: `refilled` (inside the validated target) / `widening_proposed` / `would_refill` / `skipped`. See "Audience refill" below |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/widening-proposals` | apiKey + `x-org-id` | The refill's widening proposals (`?brandId=`, `?status=pending\|accepted\|declined`), newest first |
@@ -614,6 +615,28 @@ pre-guard with no suppression row, of which **10,020 (brand, email) pairs across
   a network failure even though the write is one atomic transaction that leaves
   no partial state. Post the repair in chunks (1,500 entries ran comfortably);
   idempotency makes a chunked re-run of an aborted batch free.
+
+### Window runs from the EMAIL — `src/services/send-suppression-sync.ts` (RECONTACT-LOOP-1011)
+
+The 3-month window was anchored on the SERVE, but lead-service's sending queue
+emails people days to weeks later (Perky: served 07-01..07-11, emailed 07-16).
+instantly-service refuses a send inside 3 months of the previous SEND (409
+`recent_brand_contact`), so between serve+3mo and send+3mo this gateway re-served
+people nobody can email and the campaign looped on them (2026-10-11). Measured
+2026-10-12: all 35,715 (brand, person) pairs emailed in the last 3 months HAD a
+row (owner's "missed pre-guard / other path" hypothesis refuted), but 35,649
+were anchored before their send and **4,613 were servable again**.
+
+- **Sync**: every 2 min (first tick 60s after boot, timers only,
+  `SEND_SUPPRESSION_SYNC_INTERVAL_MS=0` off) + `POST /internal/sync-send-suppressions`.
+  Reads instantly-service `GET /internal/outreach-facts` by cursor
+  (`suppression_send_sync_state`, migration `0042`), keeps `email_sent` facts
+  inside the window, per (org, atomic brand, email): `last_sent_at` = the send,
+  `last_served_at` (THE anchor every read uses) = `GREATEST(last_served_at, send)`.
+  Emailed but never served here ⟹ row created, dated from the send. Cursor moves
+  in the page's own transaction; feed failure = 502 / logged, cursor kept.
+- No read path changed: one window, one anchor. Env: `INSTANTLY_SERVICE_URL`,
+  `INSTANTLY_SERVICE_API_KEY`. Tests: `tests/integration/send-suppression-sync.test.ts`.
 
 ### Brand transfer — `POST /internal/transfer-brand`
 
@@ -2532,6 +2555,9 @@ returns 404, never 403, to avoid leaking existence.
 - **`audience_portfolios`** (launch record): `org_id` / `brand_id` / `offer_id`
   uuid; `icp_text` / `target` / `status` / `icp_apollo_audience_id` text;
   `cold_audience_ids` / `signals` jsonb.
+- **`brand_suppressions.last_sent_at`** timestamptz (nullable): latest real email
+  copied from instantly-service; **`suppression_send_sync_state`** `feed` text PK,
+  `cursor` bigint.
 - **`suppression_backfills`** (reversible backfill ledger): `org_id` / `brand_id` /
   `suppression_id` uuid; `reason` / `email_norm` text; `sent_at` timestamptz (the
   real send the row was dated from).

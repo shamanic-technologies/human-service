@@ -19,6 +19,7 @@ import audiencesRoutes from "../../src/routes/audiences.js";
 import internalAudiencesRoutes from "../../src/routes/internal-audiences.js";
 import suppressionRecoveryRoutes from "../../src/routes/suppression-recovery.js";
 import suppressionBackfillRoutes from "../../src/routes/suppression-backfill.js";
+import sendSuppressionSyncRoutes from "../../src/routes/send-suppression-sync.js";
 
 export function createTestApp() {
   const app = express();
@@ -43,6 +44,7 @@ export function createTestApp() {
   app.use(sourceCampaignRoutes);
   app.use(leadSourcingRoutes);
   app.use(suppressionRecoveryRoutes);
+  app.use(sendSuppressionSyncRoutes);
   app.use(listsRoutes);
   app.use(personEmailRoutes);
   app.use(peopleRoutes);

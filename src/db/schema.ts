@@ -7,6 +7,7 @@ import {
   jsonb,
   boolean,
   doublePrecision,
+  bigint,
   index,
   uniqueIndex,
   primaryKey,
@@ -262,6 +263,10 @@ export const brandSuppressions = pgTable(
     lastServedAt: timestamp("last_served_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    // Latest REAL email instantly-service sent this person for the brand,
+    // copied by send-suppression-sync.ts. last_served_at (the window anchor)
+    // is moved to GREATEST(last_served_at, last_sent_at) by the same write.
+    lastSentAt: timestamp("last_sent_at", { withTimezone: true }),
   },
   (table) => [
     uniqueIndex("idx_brand_suppressions_unique").on(
@@ -1133,3 +1138,11 @@ export const leadSourcingChoiceChanges = pgTable(
   },
   (table) => [index("idx_lead_sourcing_choice_changes_scope").on(table.orgId, table.brandId, table.offerId, table.changedAt)]
 );
+
+// Cursor of the instantly-service outreach fact feed copied into
+// brand_suppressions (send-suppression-sync.ts). One row per feed.
+export const suppressionSendSyncState = pgTable("suppression_send_sync_state", {
+  feed: text("feed").primaryKey(),
+  cursor: bigint("cursor", { mode: "number" }).notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
