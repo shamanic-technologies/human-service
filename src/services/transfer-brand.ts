@@ -203,6 +203,7 @@ async function moveSuppressions(
     UPDATE brand_suppressions t SET
       first_served_at = LEAST(t.first_served_at, s.first_served_at),
       last_served_at = GREATEST(t.last_served_at, s.last_served_at),
+      last_sent_at = GREATEST(t.last_sent_at, s.last_sent_at),
       linkedin_url_norm = COALESCE(t.linkedin_url_norm, s.linkedin_url_norm),
       provider_person_id = COALESCE(t.provider_person_id, s.provider_person_id),
       last_provider = CASE WHEN s.last_served_at > t.last_served_at THEN s.last_provider ELSE t.last_provider END

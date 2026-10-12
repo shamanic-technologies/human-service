@@ -2986,6 +2986,36 @@ registry.registerPath({
   },
 });
 
+// --- Internal: send -> suppression sync (RECONTACT-LOOP-1011) ---
+export const SendSuppressionSyncResponseSchema = z
+  .object({
+    fromCursor: z.string(),
+    toCursor: z.string(),
+    pages: z.number().int(),
+    facts: z.number().int(),
+    sends: z.number().int(),
+    applied: z.number().int(),
+    created: z.number().int(),
+    skippedOutsideWindow: z.number().int(),
+    skippedUnattributed: z.number().int(),
+    hasMore: z.boolean(),
+  })
+  .openapi("SendSuppressionSyncResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/sync-send-suppressions",
+  summary:
+    "Copy every real email instantly-service sent (its outreach fact feed, from the stored cursor) onto the brand's suppression window, so a person emailed for a brand is not served again within 3 months of the EMAIL, not only of the serve. Idempotent. Also runs every 2 minutes.",
+  security: [{ apiKey: [] }],
+  responses: {
+    200: { description: "Sync result", content: { "application/json": { schema: SendSuppressionSyncResponseSchema } } },
+    401: { description: "Unauthorized" },
+    409: { description: "Already running or migrations not ready", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "instantly-service fact feed unreadable or not configured", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 // --- Internal: bulk audience resolver for lead-service (by id and/or email) ---
 //
 // Server-to-server, service-auth, NO browser body cap (dedicated 25 MB parser).

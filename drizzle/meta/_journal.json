@@ -295,6 +295,13 @@
       "when": 1771674374399,
       "tag": "0041_add_lead_sourcing_choices",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1771674375399,
+      "tag": "0042_add_suppression_send_sync",
+      "breakpoints": true
     }
   ]
 }

@@ -4442,6 +4442,53 @@
           "entries"
         ]
       },
+      "SendSuppressionSyncResponse": {
+        "type": "object",
+        "properties": {
+          "fromCursor": {
+            "type": "string"
+          },
+          "toCursor": {
+            "type": "string"
+          },
+          "pages": {
+            "type": "integer"
+          },
+          "facts": {
+            "type": "integer"
+          },
+          "sends": {
+            "type": "integer"
+          },
+          "applied": {
+            "type": "integer"
+          },
+          "created": {
+            "type": "integer"
+          },
+          "skippedOutsideWindow": {
+            "type": "integer"
+          },
+          "skippedUnattributed": {
+            "type": "integer"
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "fromCursor",
+          "toCursor",
+          "pages",
+          "facts",
+          "sends",
+          "applied",
+          "created",
+          "skippedOutsideWindow",
+          "skippedUnattributed",
+          "hasMore"
+        ]
+      },
       "ResolveAudiencesResponse": {
         "type": "object",
         "properties": {
@@ -11820,6 +11867,51 @@
           },
           "409": {
             "description": "Already running or migrations not ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/sync-send-suppressions": {
+      "post": {
+        "summary": "Copy every real email instantly-service sent (its outreach fact feed, from the stored cursor) onto the brand's suppression window, so a person emailed for a brand is not served again within 3 months of the EMAIL, not only of the serve. Idempotent. Also runs every 2 minutes.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sync result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendSuppressionSyncResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "Already running or migrations not ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "instantly-service fact feed unreadable or not configured",
             "content": {
               "application/json": {
                 "schema": {
