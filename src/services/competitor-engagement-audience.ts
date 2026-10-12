@@ -228,6 +228,7 @@ async function ensureOnce(args: EnsureEngagementArgs): Promise<CompetitorEngagem
           name,
           nlPrompt: ready.text,
           status: born.status,
+          statusSetBy: "system",
           windowDays: COMPETITOR_ENGAGEMENT_WINDOW_DAYS,
           competitorPages: pages,
           baseFilters: {},

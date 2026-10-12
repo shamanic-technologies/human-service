@@ -29,6 +29,7 @@
 // profile's Apollo audience is the one serve-next would build anyway; the profile
 // text is drafted once (chat-service, org-billed) if it was not written yet.
 
+import { systemResumable, systemStatus } from "./audience-status-origin.js";
 import { and, eq, inArray, isNull, notInArray } from "drizzle-orm";
 import { db } from "../db/index.js";
 import {
@@ -251,7 +252,10 @@ export async function retireWholeIcpLists(scope: OfferScope, key: SourceKey): Pr
   );
   if (rows.length === 0) return [];
   const ids = rows.map((r) => r.id);
-  await db.update(audiences).set({ status: "archived", updatedAt: new Date() }).where(inArray(audiences.id, ids));
+  await db
+    .update(audiences)
+    .set({ status: "archived", updatedAt: new Date(), ...systemStatus("whole_icp_retired") })
+    .where(inArray(audiences.id, ids));
   console.log(
     `[human-service] profile_sources.whole_icp_retired org=${scope.orgId} brand=${scope.brandId} offer=${scope.offerId} source=${key} audiences=${ids.join(",")}`
   );
@@ -460,6 +464,7 @@ async function createSignalList(input: {
       apolloCount: apollo.count,
       countedAt: new Date(),
       status: born.status,
+      ...systemStatus("born"),
       source: PROFILE_SIGNAL_SOURCE,
       profileAudienceId: profile.id,
       createdByUserId: args.userId,
@@ -515,7 +520,7 @@ export async function applyPersonStatusChange(row: AudienceRow): Promise<{ pause
         if (running.length > 0) {
           await tx
             .update(audiences)
-            .set({ status: "paused", updatedAt: now })
+            .set({ status: "paused", updatedAt: now, ...systemStatus("profile_paused") })
             .where(and(inArray(audiences.id, running), eq(audiences.status, "active")));
         }
       });
@@ -539,8 +544,10 @@ export async function applyPersonStatusChange(row: AudienceRow): Promise<{ pause
     resumed = (
       await db
         .update(audiences)
-        .set({ status: "active", updatedAt: now })
-        .where(and(inArray(audiences.id, resumable), eq(audiences.status, "paused")))
+        .set({ status: "active", updatedAt: now, ...systemStatus("profile_resumed") })
+        // Only what the cascade (or another product path) paused: a list a person
+        // paused stays paused (LEAK-1012).
+        .where(systemResumable(resumable))
         .returning({ id: audiences.id })
     ).map((r) => r.id);
   }
