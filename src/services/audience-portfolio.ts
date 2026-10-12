@@ -49,6 +49,7 @@
 // coverage read and the signal audience's size estimate are free Apollo teaser
 // searches on apollo-service's side.
 
+import { systemStatus } from "./audience-status-origin.js";
 import { ensureProfileAvatar } from "./audience-avatar.js";
 import { and, eq, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -330,7 +331,7 @@ async function buildColdAudiences(
     const ids = adoptable.map((a) => a.id);
     await db
       .update(audiences)
-      .set({ status: "active", nlPrompt: target, updatedAt: new Date() })
+      .set({ status: "active", nlPrompt: target, updatedAt: new Date(), ...systemStatus("portfolio_adopted") })
       .where(inArray(audiences.id, ids));
     console.log(
       `[human-service] audience_portfolio.cold_adopted org=${args.orgId} brand=${args.brandId} offer=${args.offerId} adopted=${ids.length} target=${shared ? "kept" : "redrafted"}`

@@ -564,6 +564,16 @@ export const audiences = pgTable(
       (): AnyPgColumn => audiences.id,
       { onDelete: "set null" }
     ),
+    // WHO set the current status (migration 0044, LEAK-1012): 'person' (an explicit
+    // act on THIS audience: PATCH /status, a create naming its status) | 'system' (a
+    // product path: source campaign OFF, profile cascade, born paused, retirement).
+    // NULL = not recorded (rows written before the column, unless a hold proved the
+    // system paused them). An automatic path resumes ONLY a 'system' pause; NULL is
+    // treated as a person's (src/services/audience-status-origin.ts).
+    statusSetBy: text("status_set_by"),
+    statusSetReason: text("status_set_reason"),
+    statusSetByUserId: uuid("status_set_by_user_id"),
+    statusSetAt: timestamp("status_set_at", { withTimezone: true }),
     // Neutral PeopleSearchFilters shape (maps to both providers).
     filters: jsonb("filters").$type<Record<string, unknown>>(),
     // Hosted avatar URL.

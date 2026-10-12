@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { personStatus } from "../services/audience-status-origin.js";
 import { ensureAvatar, ensureProfileAvatar } from "../services/audience-avatar.js";
 import { emailsOfPersons } from "../services/person-emails.js";
 import { EmailVerificationError } from "../lib/email-verification.js";
@@ -657,6 +658,7 @@ router.post(
         name: parsed.data.name,
         nlPrompt: parsed.data.nlPrompt,
         status: parsed.data.status ?? "active",
+        statusSetBy: "person",
         windowDays: parsed.data.signal.windowDays,
         competitorPages: parsed.data.signal.competitorPages,
         baseFilters: parsed.data.filters ?? {},
@@ -869,7 +871,12 @@ router.patch(
     // prevents a user from re-enabling a retired apify audience.
     const [updated] = await db
       .update(audiences)
-      .set({ status: parsed.data.status, updatedAt: new Date() })
+      // A PERSON set it (LEAK-1012): no product path ever resumes a pause recorded here.
+      .set({
+        status: parsed.data.status,
+        updatedAt: new Date(),
+        ...personStatus((res.locals.userId as string | undefined) ?? null),
+      })
       .where(
         and(
           eq(audiences.id, req.params.id),

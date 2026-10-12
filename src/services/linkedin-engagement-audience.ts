@@ -9,6 +9,7 @@
 // exist for it: no Apollo count, dry-run or preview (see the guards on
 // isLinkedinEngagementFilters across the count / preview / refill paths).
 
+import { personStatus, systemStatus, type StatusSetBy } from "./audience-status-origin.js";
 import { db } from "../db/index.js";
 import { audiences, type Audience } from "../db/schema.js";
 import { createApolloLinkedinEngagementAudience } from "../lib/apollo-audiences.js";
@@ -25,6 +26,8 @@ export async function createLinkedinEngagementAudience(args: {
   name?: string;
   nlPrompt: string;
   status: "active" | "paused";
+  /** Who chose that status: a person creating it (route), or a product path (born). */
+  statusSetBy: StatusSetBy;
   windowDays: number;
   competitorPages: string[];
   baseFilters: Record<string, unknown>;
@@ -61,6 +64,7 @@ export async function createLinkedinEngagementAudience(args: {
       apolloCount: null,
       countedAt: null,
       status: args.status,
+      ...(args.statusSetBy === "person" ? personStatus(args.userId) : systemStatus("born")),
       source: LINKEDIN_ENGAGEMENT_SOURCE,
       profileAudienceId: args.profileAudienceId ?? null,
       createdByUserId: args.userId,

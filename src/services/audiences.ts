@@ -1870,6 +1870,11 @@ export async function migrateApifyAudienceToApollo(
         provider: "apollo",
         apolloAudienceId: built.apolloAudienceId,
         status: row.status,
+        // The status carries over with WHO set it (a person's pause stays a person's).
+        statusSetBy: row.statusSetBy,
+        statusSetReason: row.statusSetReason,
+        statusSetByUserId: row.statusSetByUserId,
+        statusSetAt: row.statusSetAt,
         source: MIGRATED_FROM_APIFY_SOURCE,
         filters: built.filters as Record<string, unknown>,
         apolloCount: built.count,
