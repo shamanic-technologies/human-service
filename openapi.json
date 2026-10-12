@@ -6999,6 +6999,90 @@
           "applied",
           "entries"
         ]
+      },
+      "AudienceStillFitsResponse": {
+        "type": "object",
+        "properties": {
+          "fits": {
+            "type": "boolean",
+            "description": "true = the person still belongs to the audience right now."
+          },
+          "reason": {
+            "type": "string",
+            "description": "fits=false only: why, in plain words for a staff dashboard (e.g. \"Has written to the brand on WhatsApp\")."
+          },
+          "basis": {
+            "type": "string",
+            "enum": [
+              "crm_people_pool",
+              "crm_list",
+              "found_by_search"
+            ],
+            "description": "How the audience's kind decided: crm_people_pool / crm_list = crm-service judged its pool rule today; found_by_search = a search audience (apollo/apify, criteria or signal) answering from what it holds (found by it, not screened out since), since re-deciding would mean a paid re-search."
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "reason"
+              ]
+            },
+            "description": "fits=false only: every rule the person fails."
+          }
+        },
+        "required": [
+          "fits",
+          "basis"
+        ]
+      },
+      "AudienceStillFitsRequest": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "description": "Internal org UUID the audience belongs to."
+          },
+          "audienceId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "description": "The audience the person was found for."
+          },
+          "brandId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "description": "The audience's brand (a mismatch is a 404)."
+          },
+          "email": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 320,
+            "pattern": "@",
+            "description": "The person's address (any address of the person resolves them)."
+          },
+          "personId": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "description": "The personId serve-next returned at find time, when there was one."
+          }
+        },
+        "required": [
+          "orgId",
+          "audienceId",
+          "brandId",
+          "email"
+        ]
       }
     },
     "parameters": {}
@@ -13625,6 +13709,81 @@
           },
           "409": {
             "description": "Already running or migrations not ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/audiences/still-fits": {
+      "post": {
+        "summary": "Does this person STILL belong to this audience, right now? A question, never a serve: nothing bought, marked or suppressed.",
+        "description": "Server-to-server (lead-service at stock handover). Each audience kind answers its own way: CRM audiences ask crm-service to judge its pool rule today; search audiences answer from membership + screen verdicts. 404 = unknown audience for this org/brand; 422 = the person cannot be judged (unknown to the audience's owner): never read as fits; 502 = crm-service unreachable.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AudienceStillFitsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The verdict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudienceStillFitsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience not found for this org and brand",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The person cannot be judged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "crm-service failed",
             "content": {
               "application/json": {
                 "schema": {
