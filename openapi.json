@@ -842,6 +842,10 @@
           },
           "buyingSignal": {
             "$ref": "#/components/schemas/BuyingSignal"
+          },
+          "phone": {
+            "type": "string",
+            "description": "The person's phone number in E.164 (e.g. '+33612345678'), as the provider holds it — what a phone channel (WhatsApp, SMS) writes to. ABSENT when the provider holds none: only crm-service serves one today (its contact's phoneE164), so apollo / apify persons never carry the key."
           }
         },
         "required": [
@@ -1793,6 +1797,26 @@
             "nullable": true,
             "description": "The ONE imported CRM source (crm-service upload id) this audience is bound to. When set, every CRM serve made under this audience is restricted to the people that came from that file, so several CRM audiences can coexist for one brand and each behaves as its own audience. null = unbound ⟹ the serve covers the brand's whole imported list (the pre-existing behaviour)."
           },
+          "crmPeople": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "signedUp": {
+                "type": "boolean"
+              },
+              "replied": {
+                "type": "boolean"
+              },
+              "reachableBy": {
+                "type": "string",
+                "enum": [
+                  "phone",
+                  "email"
+                ]
+              }
+            },
+            "description": "The PEOPLE-pool filter this CRM audience is bound to: every serve draws from the brand's merged people (everyone its connected tools know, one row per human) who match it, instead of from imported files. null = not people-bound (file-bound via crmUploadId, or the whole imported list)."
+          },
           "offerId": {
             "type": "string",
             "nullable": true,
@@ -1900,6 +1924,7 @@
           "provider",
           "apolloAudienceId",
           "crmUploadId",
+          "crmPeople",
           "offerId",
           "status",
           "source",
@@ -2030,6 +2055,9 @@
             "format": "uuid",
             "description": "Bind this audience to ONE imported CRM source (a crm-service upload id of the same brand). Every CRM serve made under this audience is then restricted to the people of that file, so several bound audiences can coexist for one brand and each is independently pausable + independently costed. Validated against the brand's uploads at creation (400 if it is not one of them). Omit to keep the whole-brand behaviour. Immutable afterwards."
           },
+          "crmPeople": {
+            "$ref": "#/components/schemas/CrmPeopleFilter"
+          },
           "offerId": {
             "type": "string",
             "format": "uuid",
@@ -2052,6 +2080,29 @@
           "name",
           "brandId"
         ]
+      },
+      "CrmPeopleFilter": {
+        "type": "object",
+        "properties": {
+          "signedUp": {
+            "type": "boolean",
+            "description": "true = only people who signed up to the brand's product (a signup on its auth provider); false = only people who did not."
+          },
+          "replied": {
+            "type": "boolean",
+            "description": "false = only people who NEVER wrote to the brand on any conversation channel (email, WhatsApp, LinkedIn, an answer to our outreach); true = only people who did."
+          },
+          "reachableBy": {
+            "type": "string",
+            "enum": [
+              "phone",
+              "email"
+            ],
+            "description": "Only people holding a phone / an email. A phone channel (WhatsApp, SMS) wants 'phone': a person served without one is burned for nothing."
+          }
+        },
+        "additionalProperties": false,
+        "description": "Bind this CRM audience to the brand's merged PEOPLE matching a filter (e.g. {signedUp: true, replied: false} = product signups who never answered) instead of to an imported file. Requires provider 'crm'; exclusive with crmUploadId. Every serve passes the filter to crm-service (same brand-wide no-re-serve forever); each served person carries its phone when crm-service holds one. Validated against crm-service's serve-stats at creation (its counts become the audience's Size / Remaining). Immutable afterwards."
       },
       "CreateLinkedinEngagementAudienceRequest": {
         "type": "object",

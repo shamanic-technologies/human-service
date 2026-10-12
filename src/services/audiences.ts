@@ -79,7 +79,7 @@ import {
 import { chooseAudienceCandidate, buildChooserTrace } from "./audience-chooser.js";
 import { createRun, completeRun } from "./runs.js";
 import { audienceSourcingOriginSlug, isCrmSourcedFeature, withSourcingOrigin } from "./sourcing-origin.js";
-import { crmServeNext, normalizeCrmContact } from "../lib/crm-contacts.js";
+import { crmPeopleServeStats, crmServeNext, normalizeCrmContact } from "../lib/crm-contacts.js";
 import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
 
 // Tag served contacts as members of an audience (provenance membership). Upserts
@@ -187,6 +187,13 @@ export async function refreshAudienceCountIfStale(
   audience: Audience,
   identity: Identity
 ): Promise<void> {
+  // A people-bound CRM audience: its Size / Remaining is crm-service's own count
+  // of the filter (serve-stats, read-only, free), same TTL.
+  if (audience.crmPeopleFilter) {
+    if (audience.countedAt && Date.now() - audience.countedAt.getTime() < COUNT_REFRESH_TTL_MS) return;
+    await refreshCrmPeopleStats(audience, identity);
+    return;
+  }
   if (audience.provider !== "apollo" && audience.provider !== "apify") return;
   // No Apollo count exists for a linkedin_engagement audience.
   if (isLinkedinEngagementFilters(audience.filters)) return;
@@ -208,6 +215,22 @@ export async function refreshAudienceCountIfStale(
     .where(
       and(eq(audiences.id, audience.id), eq(audiences.orgId, identity.orgId))
     );
+}
+
+// Re-read crm-service's count of a people-bound CRM audience's filter and store it
+// (Size / Remaining). Fail loud; the caller decides whether that fails its request.
+export async function refreshCrmPeopleStats(
+  audience: Audience,
+  identity: Identity
+): Promise<Audience> {
+  if (!audience.crmPeopleFilter) return audience;
+  const stats = await crmPeopleServeStats(audience.brandId, audience.crmPeopleFilter, identity);
+  const [updated] = await db
+    .update(audiences)
+    .set({ crmPeopleStats: stats, countedAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(audiences.id, audience.id), eq(audiences.orgId, audience.orgId)))
+    .returning();
+  return updated ?? audience;
 }
 
 // When serve-next EXHAUSTS an apollo/apify audience we have just walked the ENTIRE
@@ -543,6 +566,24 @@ export async function computeAudienceContactability(
       }
       const size = row.reachableCount;
       const available = Math.max(0, size - suppressedHere);
+      result.set(row.id, {
+        sizeCount: size,
+        availableToContactCount: available,
+        availableToContactPct: size === 0 ? 0 : Math.min(100, Math.round((available / size) * 100)),
+      });
+      continue;
+    }
+    // A people-bound CRM audience: crm-service's own count of the filter is the
+    // truth (it owns the no-re-serve), so Size = its sendable total and Remaining
+    // = what it has not served yet. Never read yet ⟹ UNKNOWN, never 0.
+    if (row.crmPeopleFilter) {
+      const stats = row.crmPeopleStats;
+      if (!stats) {
+        result.set(row.id, null);
+        continue;
+      }
+      const size = Math.max(0, stats.totalSendable);
+      const available = Math.min(size, Math.max(0, stats.remainingSendable));
       result.set(row.id, {
         sizeCount: size,
         availableToContactCount: available,
@@ -2215,7 +2256,7 @@ async function serveNextCrmContact(
       audience.brandId,
       1,
       crmIdentity,
-      audience.crmUploadId
+      { uploadId: audience.crmUploadId, people: audience.crmPeopleFilter }
     );
     const contact = contacts[0] ?? null;
     if (!contact) {

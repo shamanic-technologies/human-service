@@ -277,6 +277,10 @@ export interface Person {
   // from a signal audience, on a free search teaser (only the reveal carries
   // it), and for apify / crm — never defaulted, never inferred.
   buyingSignal: BuyingSignal | null;
+  // The person's phone in E.164, as the provider holds it. ABSENT (not null) when
+  // the provider serves none: only crm-service carries one today, so every other
+  // provider's served bytes are unchanged. Read by phone channels (WhatsApp, SMS).
+  phone?: string;
 }
 
 export interface BuyingSignal {
