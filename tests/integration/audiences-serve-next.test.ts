@@ -951,6 +951,208 @@ describe("CRM audience source binding", () => {
   });
 });
 
+// A CRM audience bound to crm-service's PEOPLE pool under a filter (product
+// signups who never answered...): validated against serve-stats at creation, every
+// serve passes the filter, and the served person carries crm's phone.
+const PEOPLE_STATS = { served: 3, remainingSendable: 12, totalSendable: 15 };
+
+function crmPerson(id: string, email: string, phone: string | null) {
+  return {
+    ...crmContact(id, email, "Signup Person"),
+    phoneE164: phone,
+    sourceUploadId: null,
+    sourceRowId: null,
+    pool: "people",
+    personId: "7f3c1d2e-4b5a-4c6d-8e9f-0a1b2c3d4e5f",
+    emails: [email],
+    phones: phone ? [phone] : [],
+    phoneSources: phone ? [{ phone, source: "clerk", via: null }] : [],
+    sources: ["clerk"],
+  };
+}
+
+describe("CRM audience bound to the people pool", () => {
+  it("creates with a people filter: proved against serve-stats, stored, returned, and sized from it", async () => {
+    const statsUrls: string[] = [];
+    fetchSpy.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/orgs/contacts/serve-stats")) {
+        statsUrls.push(u);
+        return ok(PEOPLE_STATS);
+      }
+      throw new Error("unexpected url " + u);
+    });
+    const res = await request(app)
+      .post("/orgs/audiences")
+      .set(getAuthHeaders())
+      .send({
+        name: "Product signups who never answered",
+        brandId: BRAND,
+        provider: "crm",
+        crmPeople: { signedUp: true, replied: false },
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.audience.crmPeople).toEqual({ signedUp: true, replied: false });
+    expect(res.body.audience.crmUploadId).toBeNull();
+    expect(statsUrls).toHaveLength(1);
+    const q = new URL(statsUrls[0]).searchParams;
+    expect(q.get("brandId")).toBe(BRAND);
+    expect(q.get("pool")).toBe("people");
+    expect(q.get("signedUp")).toBe("true");
+    expect(q.get("replied")).toBe("false");
+    expect(q.has("reachableBy")).toBe(false);
+
+    const list = await request(app).get(`/orgs/audiences?brandId=${BRAND}`).set(getAuthHeaders());
+    const row = list.body.audiences.find((a: { id: string }) => a.id === res.body.audience.id);
+    expect(row.crmPeople).toEqual({ signedUp: true, replied: false });
+    expect(row.sizeCount).toBe(15);
+    expect(row.availableToContactCount).toBe(12);
+    expect(row.availableToContactPct).toBe(80);
+  });
+
+  it("every serve passes the filter to crm-service and hands back the person's phone", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.includes("/orgs/contacts/serve-stats")) return ok(PEOPLE_STATS);
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({
+          contacts: [crmPerson("p1", "signup@product.com", "+33612345678")],
+          served: 1,
+          exhausted: false,
+        });
+      }
+      throw new Error("unexpected url " + u);
+    });
+    const create = await request(app)
+      .post("/orgs/audiences")
+      .set(getAuthHeaders())
+      .send({
+        name: "Signups by phone",
+        brandId: BRAND,
+        provider: "crm",
+        crmPeople: { signedUp: true, replied: false, reachableBy: "phone" },
+      });
+    expect(create.status).toBe(201);
+
+    const res = await serveNext(create.body.audience.id);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.email).toBe("signup@product.com");
+    expect(res.body.person.phone).toBe("+33612345678");
+    expect(res.body.person.provider).toBe("crm");
+    expect(bodies).toEqual([
+      { brandId: BRAND, limit: 1, people: { signedUp: true, replied: false, reachableBy: "phone" } },
+    ]);
+  });
+
+  it("the CRM sourcing feature serve of a people-bound audience passes the filter too", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.includes("/orgs/contacts/serve-stats")) return ok(PEOPLE_STATS);
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({ contacts: [crmPerson("p2", "two@product.com", null)], served: 1, exhausted: false });
+      }
+      throw new Error("unexpected url " + u);
+    });
+    const create = await request(app)
+      .post("/orgs/audiences")
+      .set(getAuthHeaders())
+      .send({ name: "Signups any channel", brandId: BRAND, provider: "crm", crmPeople: { signedUp: true } });
+    expect(create.status).toBe(201);
+    const res = await serveNextForFeature(create.body.audience.id, "sourcing-crm-contacts");
+    expect(res.status).toBe(200);
+    expect(res.body.person.email).toBe("two@product.com");
+    // No phone held ⟹ no key (never null, never invented).
+    expect("phone" in res.body.person).toBe(false);
+    expect(bodies).toEqual([{ brandId: BRAND, limit: 1, people: { signedUp: true } }]);
+  });
+
+  it("a per-file CRM contact keeps the exact outbound body and gains its phone only when it has one", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.includes("/orgs/contacts/uploads")) return mockUploadsList();
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({
+          contacts: [{ ...crmContact("f1", "file@crm.com"), phoneE164: "+14155550100" }],
+          served: 1,
+          exhausted: false,
+        });
+      }
+      throw new Error("unexpected url " + u);
+    });
+    const created = await createBoundCrmAudience("CRM File With Phones", UPLOAD_A);
+    expect((created as { crmPeople?: unknown }).crmPeople).toBeNull();
+    const res = await serveNext(created.id);
+    expect(res.status).toBe(200);
+    expect(res.body.person.phone).toBe("+14155550100");
+    expect(bodies).toEqual([{ brandId: BRAND, limit: 1, uploadIds: [UPLOAD_A] }]);
+  });
+
+  it("refuses a people filter off a crm audience, beside a file, or empty (400) without calling crm-service", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      throw new Error("unexpected url " + url);
+    });
+    const bad = [
+      { provider: "apollo", filters: { titles: ["CEO"] }, crmPeople: { signedUp: true } },
+      { provider: "crm", crmUploadId: UPLOAD_A, crmPeople: { signedUp: true } },
+      { provider: "crm", crmPeople: {} },
+      { provider: "crm", crmPeople: { reachableBy: "fax" } },
+      { provider: "crm", crmPeople: { signedUp: true, everyone: true } },
+    ];
+    for (const [i, extra] of bad.entries()) {
+      const res = await request(app)
+        .post("/orgs/audiences")
+        .set(getAuthHeaders())
+        .send({ name: `Bad ${i}`, brandId: BRAND, ...extra });
+      expect(res.status, JSON.stringify(extra)).toBe(400);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("a crm-service that cannot count the filter fails the create loud (502) and writes no row", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).includes("/orgs/contacts/serve-stats")) {
+        return { ok: false, status: 500, json: async () => ({}), text: async () => "boom" };
+      }
+      throw new Error("unexpected url " + url);
+    });
+    const res = await request(app)
+      .post("/orgs/audiences")
+      .set(getAuthHeaders())
+      .send({ name: "Down", brandId: BRAND, provider: "crm", crmPeople: { signedUp: true } });
+    expect(res.status).toBe(502);
+    const list = await request(app).get(`/orgs/audiences?brandId=${BRAND}`).set(getAuthHeaders());
+    expect(list.body.audiences.some((a: { name: string }) => a.name === "Down")).toBe(false);
+  });
+
+  it("refresh-count re-reads crm-service's count of the filter", async () => {
+    let stats = PEOPLE_STATS;
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).includes("/orgs/contacts/serve-stats")) return ok(stats);
+      throw new Error("unexpected url " + url);
+    });
+    const create = await request(app)
+      .post("/orgs/audiences")
+      .set(getAuthHeaders())
+      .send({ name: "Refreshing", brandId: BRAND, provider: "crm", crmPeople: { replied: false } });
+    expect(create.status).toBe(201);
+    stats = { served: 5, remainingSendable: 10, totalSendable: 15 };
+    const res = await request(app)
+      .post(`/orgs/audiences/${create.body.audience.id}/refresh-count`)
+      .set(getAuthHeaders());
+    expect(res.status).toBe(200);
+    const list = await request(app).get(`/orgs/audiences?brandId=${BRAND}`).set(getAuthHeaders());
+    const row = list.body.audiences.find((a: { id: string }) => a.id === create.body.audience.id);
+    expect(row.availableToContactCount).toBe(10);
+  });
+});
+
 // The person a serve hands back carries the language(s) they plausibly do business
 // in, ORDERED most plausible first — content-generation-service writes the email in
 // that language instead of re-deriving it from geography on every generation.

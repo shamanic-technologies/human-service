@@ -27,7 +27,8 @@ Backend service that owns two distinct concerns:
    owns its OWN no-re-serve (human-service does no crm suppression). Such an
    audience may be **bound to ONE imported CRM source** (`crm_upload_id`) so each
    uploaded file is its own audience — independently pausable, independently
-   costed. See below.
+   costed — OR **bound to crm-service's PEOPLE pool under a filter**
+   (`crm_people_filter`, e.g. product signups who never answered). See below.
 
 Stack: Express + Drizzle (Postgres) + Zod + zod-to-openapi. Deployed as a Docker
 container (`Dockerfile`) on the Hetzner box — a 5-minute cron runs
@@ -1656,6 +1657,35 @@ audiences may coexist for one brand.
   does not let an already-served person come back through another file: a person in
   two files is sendable once for the brand. human-service records no crm
   suppression, unchanged. **No cost** declared here either.
+
+### CRM people binding — "the brand's signups who never answered" (migration `0043`)
+
+crm-service (v0.39.0) serves a second pool beside imported files: the brand's
+merged PEOPLE (everyone its connected tools know, one row per human), filtered by
+WHO they are. `audiences.crm_people_filter` (jsonb `{signedUp?, replied?,
+reachableBy?: phone|email}`) binds a CRM audience to it. Same words for every
+brand and channel: no per-brand / per-channel case.
+
+- **Create**: `POST /orgs/audiences {provider: "crm", crmPeople: {...}}`. 400 when
+  the provider is not `crm`, beside `crmUploadId` (crm-service refuses both), empty,
+  or carrying an unknown key / value (strict). Proved first against crm-service's
+  READ-ONLY `GET /orgs/contacts/serve-stats?pool=people&…` (burns nobody): an
+  outage = 502, no row. Immutable; returned as `crmPeople` on every read.
+- **Serve**: `crmServeNext` sends `people: <filter>` on serve-next (exactly the
+  stored filter); a file-bound audience still sends `uploadIds`, an unbound one
+  neither (bytes unchanged, tested). Feature-identity serves (`sourcing-crm-contacts`
+  / `sales-crm-email-outreach`) go through the same `serveNextCrmContact`.
+- **Phone**: a served CRM person carries `person.phone` (crm's `phoneE164`, E.164)
+  ONLY when crm-service holds one; the key is absent everywhere else, so apollo /
+  apify bytes are unchanged. A phone channel must bind `reachableBy: "phone"`:
+  crm-service burns every person it serves, brand-wide, forever.
+- **Size / Remaining** = crm-service's own count (`crm_people_stats`
+  `{served, remainingSendable, totalSendable}`), stored at creation and re-read
+  when the audience is exercised (1 h TTL, `counted_at`) or on `refresh-count`.
+  The list stays a pure DB read; never read ⟹ `null` (unknown), never 0.
+- Refill treats it like any CRM audience (`crm_audience`, unmeasurable). The
+  per-file auto-creation (`createCrmAudiences`) only looks at `crm_upload_id`, so a
+  people-bound audience never blocks nor duplicates a file's audience.
 
 ### ICP portfolio at launch — `POST /orgs/audiences/portfolio`
 

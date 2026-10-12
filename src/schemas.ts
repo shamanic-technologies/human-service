@@ -829,6 +829,10 @@ export const PersonSchema = z
       description:
         "The buying signal this person's audience matched (the company is hiring, the person just changed jobs, the company just raised), with its date and a one-line fact the email writer can reference. Present only on a revealed person served from a buying-signal audience; null otherwise (free search teasers, apify, crm, and any person the provider holds no dated evidence for). Never defaulted or invented.",
     }),
+    phone: z.string().optional().openapi({
+      description:
+        "The person's phone number in E.164 (e.g. '+33612345678'), as the provider holds it — what a phone channel (WhatsApp, SMS) writes to. ABSENT when the provider holds none: only crm-service serves one today (its contact's phoneE164), so apollo / apify persons never carry the key.",
+    }),
   })
   .openapi("Person");
 
@@ -1075,6 +1079,28 @@ export const AudienceChannelSchema = z
   })
   .openapi("AudienceChannel");
 
+// The PEOPLE-pool filter of a CRM audience (crm-service serve-next `people`).
+export const CrmPeopleFilterSchema = z
+  .object({
+    signedUp: z.boolean().optional().openapi({
+      description:
+        "true = only people who signed up to the brand's product (a signup on its auth provider); false = only people who did not.",
+    }),
+    replied: z.boolean().optional().openapi({
+      description:
+        "false = only people who NEVER wrote to the brand on any conversation channel (email, WhatsApp, LinkedIn, an answer to our outreach); true = only people who did.",
+    }),
+    reachableBy: z.enum(["phone", "email"]).optional().openapi({
+      description:
+        "Only people holding a phone / an email. A phone channel (WhatsApp, SMS) wants 'phone': a person served without one is burned for nothing.",
+    }),
+  })
+  .strict()
+  .refine((f) => Object.keys(f).length > 0, {
+    message: "crmPeople needs at least one of signedUp, replied, reachableBy",
+  })
+  .openapi("CrmPeopleFilter");
+
 export const AudienceSchema = z
   .object({
     id: z.string().uuid(),
@@ -1095,6 +1121,17 @@ export const AudienceSchema = z
       description:
         "The ONE imported CRM source (crm-service upload id) this audience is bound to. When set, every CRM serve made under this audience is restricted to the people that came from that file, so several CRM audiences can coexist for one brand and each behaves as its own audience. null = unbound ⟹ the serve covers the brand's whole imported list (the pre-existing behaviour).",
     }),
+    crmPeople: z
+      .object({
+        signedUp: z.boolean().optional(),
+        replied: z.boolean().optional(),
+        reachableBy: z.enum(["phone", "email"]).optional(),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "The PEOPLE-pool filter this CRM audience is bound to: every serve draws from the brand's merged people (everyone its connected tools know, one row per human) who match it, instead of from imported files. null = not people-bound (file-bound via crmUploadId, or the whole imported list).",
+      }),
     offerId: z.string().uuid().nullable().openapi({
       description:
         "The offer (Org > Brand > Offer > Campaign) this audience belongs to — an id owned by brand-service. An audience is assembled for one distinct thing the brand sells, so it is scoped to that offer rather than to every offer of the brand. null = no offer stated ⟹ the audience is brand-wide, the pre-existing behaviour.",
@@ -1168,6 +1205,10 @@ export const CreateAudienceRequestSchema = z
     crmUploadId: z.string().uuid().optional().openapi({
       description:
         "Bind this audience to ONE imported CRM source (a crm-service upload id of the same brand). Every CRM serve made under this audience is then restricted to the people of that file, so several bound audiences can coexist for one brand and each is independently pausable + independently costed. Validated against the brand's uploads at creation (400 if it is not one of them). Omit to keep the whole-brand behaviour. Immutable afterwards.",
+    }),
+    crmPeople: CrmPeopleFilterSchema.optional().openapi({
+      description:
+        "Bind this CRM audience to the brand's merged PEOPLE matching a filter (e.g. {signedUp: true, replied: false} = product signups who never answered) instead of to an imported file. Requires provider 'crm'; exclusive with crmUploadId. Every serve passes the filter to crm-service (same brand-wide no-re-serve forever); each served person carries its phone when crm-service holds one. Validated against crm-service's serve-stats at creation (its counts become the audience's Size / Remaining). Immutable afterwards.",
     }),
     offerId: z.string().uuid().optional().openapi({
       description:

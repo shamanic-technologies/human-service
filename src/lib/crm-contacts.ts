@@ -42,6 +42,31 @@ export interface CrmContact {
   lastName: string | null;
 }
 
+// The PEOPLE pool of crm-service (contract live since crm-service v0.39.0): the
+// brand's merged persons (every tool the brand connected, one row per human),
+// filtered by WHO they are, in the same words for every brand and channel.
+// `signedUp` = holds a signup on the brand's auth provider; `replied` = ever wrote
+// to the brand on any conversation channel; `reachableBy` = holds a phone / an
+// email. Exclusive with the per-file `uploadIds` restriction.
+export interface CrmPeopleFilter {
+  signedUp?: boolean;
+  replied?: boolean;
+  reachableBy?: "phone" | "email";
+}
+
+// WHICH pool a CRM serve draws from. `uploadId` = one imported file; `people` = the
+// brand's merged people under a filter; neither = the brand's whole imported list.
+export interface CrmServeScope {
+  uploadId?: string | null;
+  people?: CrmPeopleFilter | null;
+}
+
+export interface CrmServeStats {
+  served: number;
+  remainingSendable: number;
+  totalSendable: number;
+}
+
 export interface CrmServeNextResult {
   contacts: CrmContact[];
   served: number;
@@ -100,13 +125,18 @@ export async function crmListUploads(
 // the whole brand. The brand-wide no-re-serve guarantee is crm-service's and is
 // unaffected by the restriction: a person present in two files is still served at
 // most once for the brand.
+//
+// `scope.people` switches the serve to crm-service's PEOPLE pool under that
+// filter (`people: {...}` on the body). Same brand-wide no-re-serve forever.
 export async function crmServeNext(
   brandId: string,
   limit: number,
   identity: Identity,
-  uploadId?: string | null
+  scope: CrmServeScope = {}
 ): Promise<CrmServeNextResult> {
   const { url, key } = requireCrm();
+  const uploadId = scope.uploadId ?? null;
+  const people = scope.people ?? null;
   let res: Response;
   try {
     res = await fetchWithConnectRetry(`${url}/orgs/contacts/serve-next`, {
@@ -116,6 +146,7 @@ export async function crmServeNext(
         brandId,
         limit,
         ...(uploadId ? { uploadIds: [uploadId] } : {}),
+        ...(people ? { people } : {}),
       }),
     });
   } catch (err) {
@@ -137,9 +168,50 @@ export async function crmServeNext(
   };
 }
 
+// How many people a PEOPLE-pool filter holds for the brand, read-only (crm-service
+// GET /orgs/contacts/serve-stats?pool=people&...). Burns nobody, so it is what
+// validates a filter at audience creation and what feeds the audience's Size /
+// Remaining. Fail loud like every crm call (ProviderError → 502 at the route).
+export async function crmPeopleServeStats(
+  brandId: string,
+  filter: CrmPeopleFilter,
+  identity: Identity
+): Promise<CrmServeStats> {
+  const { url, key } = requireCrm();
+  const q = new URLSearchParams({ brandId, pool: "people" });
+  if (filter.signedUp !== undefined) q.set("signedUp", String(filter.signedUp));
+  if (filter.replied !== undefined) q.set("replied", String(filter.replied));
+  if (filter.reachableBy !== undefined) q.set("reachableBy", filter.reachableBy);
+  let res: Response;
+  try {
+    res = await fetchWithConnectRetry(`${url}/orgs/contacts/serve-stats?${q.toString()}`, {
+      method: "GET",
+      headers: downstreamHeaders(key, identity),
+    });
+  } catch (err) {
+    throw new ProviderError("crm", 0, String(err));
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ProviderError("crm", res.status, text);
+  }
+  const data = (await res.json()) as Partial<CrmServeStats>;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const served = num(data.served);
+  const remainingSendable = num(data.remainingSendable);
+  const totalSendable = num(data.totalSendable);
+  if (served === null || remainingSendable === null || totalSendable === null) {
+    throw new ProviderError("crm", res.status, `serve-stats answered without counts: ${JSON.stringify(data)}`);
+  }
+  return { served, remainingSendable, totalSendable };
+}
+
 // Map a crm-service contact to the neutral Person shape the serve-next contract
 // returns (field names mirror lead-service FullLead). crm carries only identity +
-// email — no title/seniority/company/social — so those are null.
+// email + phone — no title/seniority/company/social — so those are null. The
+// phone (crm's `phoneE164`) rides as `phone`, present ONLY when crm-service holds
+// one: a channel that writes on WhatsApp / SMS reads it, and every other
+// provider's served bytes stay unchanged (the key is absent there).
 export function normalizeCrmContact(c: CrmContact): Person {
   const name =
     c.fullName ??
@@ -172,5 +244,6 @@ export function normalizeCrmContact(c: CrmContact): Person {
     employmentHistory: null,
     // a client's uploaded contact carries no buying signal.
     buyingSignal: null,
+    ...(c.phoneE164 ? { phone: c.phoneE164 } : {}),
   };
 }

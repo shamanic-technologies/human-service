@@ -499,6 +499,25 @@ export const audiences = pgTable(
     // pointer, not a filter — an imported-source id is a provider resource handle
     // (mirrors apollo_audience_id), not a search predicate.
     crmUploadId: text("crm_upload_id"),
+    // The PEOPLE-pool binding (migration 0043): a CRM audience whose serves draw
+    // from crm-service's merged people under this filter
+    // ({signedUp?, replied?, reachableBy?}) instead of from imported files.
+    // Exclusive with crm_upload_id, provider 'crm' only, immutable (a new filter =
+    // a new audience). NULL = not people-bound ⟹ the file / whole-list behaviour.
+    crmPeopleFilter: jsonb("crm_people_filter").$type<{
+      signedUp?: boolean;
+      replied?: boolean;
+      reachableBy?: "phone" | "email";
+    }>(),
+    // crm-service's own count of that filter ({served, remainingSendable,
+    // totalSendable}, serve-stats), snapshotted at creation and re-read when the
+    // audience is exercised (TTL, like the provider counts; `counted_at`). The
+    // list's Size / Remaining read it, so the list stays a pure DB read.
+    crmPeopleStats: jsonb("crm_people_stats").$type<{
+      served: number;
+      remainingSendable: number;
+      totalSendable: number;
+    }>(),
     // The OFFER this audience belongs to (Org > Brand > Offer > Campaign).
     // brand-service owns the offer entity; human-service stores ONLY the id and
     // defines no offer semantics — an audience is chosen for one distinct thing
