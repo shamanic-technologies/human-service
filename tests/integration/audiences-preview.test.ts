@@ -109,7 +109,7 @@ describe("GET /orgs/audiences/:id/preview", () => {
   });
 
   it("an apollo audience with no pointer yet is unavailable (not_built_yet), not cached, no provider call", async () => {
-    const id = await createAudience({ name: "Unbuilt", provider: "apollo", filters: { personTitles: ["CEO"] } });
+    const id = await createAudience({ name: "Unbuilt", provider: "apollo", filters: { titles: ["CEO"] } });
 
     const res = await request(app).get(`/orgs/audiences/${id}/preview`).set(getAuthHeaders());
 

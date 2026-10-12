@@ -215,7 +215,7 @@ describe("audience preview email checks", () => {
     const res0 = await request(app)
       .post("/orgs/audiences")
       .set(getAuthHeaders())
-      .send({ brandId: BRAND, name: "Unbuilt", provider: "apollo", filters: { personTitles: ["CEO"] } });
+      .send({ brandId: BRAND, name: "Unbuilt", provider: "apollo", filters: { titles: ["CEO"] } });
     const res = await next(res0.body.audience.id);
     expect(res.body).toMatchObject({ status: "unavailable", reason: "not_built_yet" });
     expect(fetchSpy).not.toHaveBeenCalled();

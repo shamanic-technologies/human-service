@@ -75,8 +75,10 @@ import {
   generateAvatar,
   buildAvatarPrompt,
   AudienceNotServableError,
+  hasApolloNativeFilters,
 } from "../services/audiences.js";
 import {
+  dryRun,
   ProviderError,
   ProviderConfigError,
   ProviderUnsupportedError,
@@ -292,6 +294,43 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
     }
   }
 
+  // An apollo audience written with its native filters and no count: count it
+  // now (free dry-run on exactly those filters), so it is born with its real
+  // Size instead of 0, and filters apollo-service refuses never become a row.
+  // apollo-service needs x-user-id for key resolution; without one the count
+  // waits for the first serve / refresh-count. Fail loud: an outage is a 502.
+  let bornApolloCount: number | null = null;
+  const nativeFilters = parsed.data.filters;
+  if (
+    nativeFilters &&
+    parsed.data.apolloCount === undefined &&
+    hasApolloNativeFilters({
+      provider: parsed.data.provider ?? null,
+      apolloAudienceId: parsed.data.apolloAudienceId ?? null,
+      filters: nativeFilters,
+    }) &&
+    !parsed.data.apolloAudienceId &&
+    !isLinkedinEngagementFilters(nativeFilters) &&
+    userId
+  ) {
+    try {
+      const counted = await dryRun({
+        provider: "apollo",
+        filters: {},
+        apolloSearchParams: nativeFilters,
+        identity: buildIdentity(res),
+      });
+      bornApolloCount = counted.totalEntries;
+    } catch (err) {
+      if (err instanceof ProviderError && err.status === 400) {
+        res.status(400).json({ error: `apollo-service refused filters: ${err.body}`, provider: "apollo" });
+        return;
+      }
+      sendProviderError(res, err);
+      return;
+    }
+  }
+
   let audience;
   try {
     [audience] = await db
@@ -313,10 +352,11 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
         nlPrompt: parsed.data.nlPrompt ?? null,
         ...audienceTargetFields(parsed.data.nlPrompt),
         filters: parsed.data.filters ?? null,
-        apolloCount: parsed.data.apolloCount ?? null,
+        apolloCount: parsed.data.apolloCount ?? bornApolloCount,
         apifyCount: parsed.data.apifyCount ?? null,
         countedAt:
           parsed.data.apolloCount !== undefined ||
+          bornApolloCount !== null ||
           parsed.data.apifyCount !== undefined ||
           crmPeopleStats !== null
             ? new Date()
