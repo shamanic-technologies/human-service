@@ -254,6 +254,60 @@ export async function crmPeopleServeStats(
   return { served, remainingSendable, totalSendable, byStage };
 }
 
+// Does ONE person still belong to a crm-service pool, right now? (crm-service
+// POST /orgs/contacts/still-fits, the SAME rule its serve applies.) A question:
+// crm-service marks nobody. `null` = crm-service holds nobody at this address
+// (its 404). Anything else non-2xx / unreadable fails loud (ProviderError → 502).
+export interface CrmStillFitsScope {
+  people?: CrmPeopleFilter;
+  uploadIds?: string[];
+}
+
+export type CrmStillFits =
+  | { fits: true }
+  | { fits: false; reason: string; failed: { code: string; reason: string }[] };
+
+export async function crmStillFits(
+  brandId: string,
+  email: string,
+  scope: CrmStillFitsScope,
+  identity: Identity
+): Promise<CrmStillFits | null> {
+  const { url, key } = requireCrm();
+  let res: Response;
+  try {
+    res = await fetchWithConnectRetry(`${url}/orgs/contacts/still-fits`, {
+      method: "POST",
+      headers: downstreamHeaders(key, identity),
+      body: JSON.stringify({
+        brandId,
+        email,
+        ...(scope.people ? { people: scope.people } : {}),
+        ...(scope.uploadIds && scope.uploadIds.length > 0 ? { uploadIds: scope.uploadIds } : {}),
+      }),
+    });
+  } catch (err) {
+    throw new ProviderError("crm", 0, String(err));
+  }
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ProviderError("crm", res.status, text);
+  }
+  const data = (await res.json()) as { fits?: unknown; reason?: unknown; failed?: unknown };
+  if (data.fits === true) return { fits: true };
+  if (data.fits === false && typeof data.reason === "string" && data.reason.length > 0) {
+    const failed = Array.isArray(data.failed)
+      ? data.failed.filter(
+          (f): f is { code: string; reason: string } =>
+            !!f && typeof (f as { code?: unknown }).code === "string" && typeof (f as { reason?: unknown }).reason === "string"
+        )
+      : [];
+    return { fits: false, reason: data.reason, failed };
+  }
+  throw new ProviderError("crm", res.status, `still-fits answered without a verdict: ${JSON.stringify(data)}`);
+}
+
 // Map a crm-service contact to the neutral Person shape the serve-next contract
 // returns (field names mirror lead-service FullLead). crm carries only identity +
 // email + phone — no title/seniority/company/social — so those are null. The
