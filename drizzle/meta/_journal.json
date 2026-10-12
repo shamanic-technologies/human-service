@@ -309,6 +309,13 @@
       "when": 1771674376399,
       "tag": "0043_add_audience_crm_people",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1771674377399,
+      "tag": "0044_add_audience_status_origin",
+      "breakpoints": true
     }
   ]
 }

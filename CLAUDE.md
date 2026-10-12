@@ -1859,8 +1859,16 @@ Owner 2026-10-07: `[Apollo Cold Filters] -> Lead found [On] [Up to $X/day]` per 
 offer + featureSlug = origin slug + legKey `start_to_lead_found`); this service keeps the offer's
 audiences in step, because campaigns serve the offer's ACTIVE audiences. The origin's list kind is
 the features-service catalogue read backwards (`listKindOfOriginSlug`).
-- **ON**: release the holds an earlier OFF left (only audiences still `paused`; a person who changed
-  one since wins); none of the list active ⟹ resume the newest paused one; none live (archived
+- **A pause a PERSON made is never undone by a product path** (LEAK-1012, owner 2026-10-12; prod: a
+  stopped funnel's source turned back on resumed a paused audience, 60 prospects into a signup campaign).
+  Every status write states WHO (`audiences.status_set_by` `person|system` + reason/user/at, migration
+  0044, `src/services/audience-status-origin.ts`): PATCH /status and `/orgs/audiences/signal` = person;
+  OFF, profile cascade, born, whole-ICP retirement, portfolio adopt = system. EVERY automatic resume (ON
+  holds, ON step 2, ON engagement `exists`, profile resume) goes through `systemResumable` (paused AND
+  `system`); NULL = unrecorded = a person's (0044 backfilled only rows an OPEN hold proved). A list a
+  person paused makes the ON answer `exists_inactive` and builds NOTHING beside it.
+- **ON**: release the holds an earlier OFF left (only audiences still `paused` by the system; a person who changed
+  one since wins); none of the list active ⟹ resume the newest SYSTEM-paused one; none live (archived
   aside) ⟹ CREATE, done for the customer: `apollo_search` = split of the offer's validated target
   (`pickValidatedTarget`, else its portfolio target; `source='source_campaign'`), `apollo_buying_signal`
   = `buildBuyingSignalAudiencesForOffer` (portfolio ICP pointer reused, same threshold),

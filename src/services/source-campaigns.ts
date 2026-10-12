@@ -23,6 +23,8 @@
 //           and HELD (source_campaign_audience_holds) so the next ON resumes exactly those.
 //   A list a person's profile pause holds (audience_profile_holds, profile-sources.ts)
 //   is never resumed by an ON: it runs again only once neither holds it.
+//   An ON NEVER resumes an audience a PERSON paused (or one whose pause nobody recorded):
+//   only a system pause is resumable (audience-status-origin.ts, LEAK-1012).
 // The list an origin is comes from features-service's catalogue (sourcing-origin.ts).
 //
 // HOW ON/OFF REACHES US (both idempotent, both through applySourceCampaignState):
@@ -67,6 +69,7 @@ import { completeRun, createRun } from "./runs.js";
 import type { Identity } from "./people-providers.js";
 import { getMigrationState } from "../lib/migration-state.js";
 import { ensureLeadSourcingChoice, LEAD_SOURCING_SLUG } from "./lead-sourcing.js";
+import { isSystemResumable, systemResumable, systemStatus } from "./audience-status-origin.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
 
@@ -198,13 +201,21 @@ function view(rows: AudienceRow[]): SourceAudienceView[] {
     .map((r) => ({ id: r.id, name: r.name, status: r.status }));
 }
 
-async function setStatus(ids: string[], status: "active" | "paused") {
-  if (ids.length === 0) return;
-  await db
+/**
+ * Resume what the SYSTEM paused among `ids` (a person's pause, or one nobody recorded,
+ * is never touched: LEAK-1012). Returns the ids resumed.
+ */
+async function resumeSystemPaused(ids: string[], tx: Pick<typeof db, "update"> = db): Promise<string[]> {
+  if (ids.length === 0) return [];
+  const back = await tx
     .update(audiences)
-    .set({ status, updatedAt: new Date() })
-    .where(and(inArray(audiences.id, ids), notInArray(audiences.status, ["deprecated"])));
+    .set({ status: "active", updatedAt: new Date(), ...systemStatus("source_campaign_on") })
+    .where(systemResumable(ids))
+    .returning({ id: audiences.id });
+  return back.map((r) => r.id);
 }
+
+const PERSON_PAUSED_REASON = "paused by a person (or by nobody we can name): only a person resumes it";
 
 /**
  * Apply one source campaign's on/off to the offer's audiences. Idempotent: the same
@@ -355,7 +366,7 @@ async function turnOff(args: ApplySourceArgs, list: AudienceListKind, result: Ap
   await db.transaction(async (tx) => {
     await tx
       .update(audiences)
-      .set({ status: "paused", updatedAt: new Date() })
+      .set({ status: "paused", updatedAt: new Date(), ...systemStatus("source_campaign_off") })
       .where(and(inArray(audiences.id, ids), eq(audiences.status, "active")));
     await tx
       .insert(sourceCampaignAudienceHolds)
@@ -380,7 +391,8 @@ async function turnOn(args: ApplySourceArgs, list: AudienceListKind, result: App
     return;
   }
 
-  // 1. Resume exactly what an OFF paused (still paused: a person who changed it since wins).
+  // 1. Resume exactly what an OFF paused (still paused BY THE SYSTEM: a person who changed
+  // it since wins, and their PATCH closed the hold anyway).
   const holds = await db
     .select()
     .from(sourceCampaignAudienceHolds)
@@ -399,12 +411,7 @@ async function turnOn(args: ApplySourceArgs, list: AudienceListKind, result: App
     const profileHeld = await profileHeldIds(holds.map((h) => h.audienceId));
     const heldIds = holds.map((h) => h.audienceId).filter((id) => !profileHeld.has(id));
     await db.transaction(async (tx) => {
-      const back = await tx
-        .update(audiences)
-        .set({ status: "active", updatedAt: new Date() })
-        .where(and(inArray(audiences.id, heldIds), eq(audiences.status, "paused")))
-        .returning({ id: audiences.id });
-      resumed = back.length;
+      resumed = (await resumeSystemPaused(heldIds, tx)).length;
       await tx
         .update(sourceCampaignAudienceHolds)
         .set({ releasedAt: new Date() })
@@ -427,13 +434,24 @@ async function turnOn(args: ApplySourceArgs, list: AudienceListKind, result: App
     return;
   }
 
-  // 2. Nothing of the list is active: the customer turned the source ON, so the most
-  // recent paused one serves again (a suggested / archived one is not theirs to revive).
-  const profileHeld = await profileHeldIds(rows.filter((r) => r.status === "paused").map((r) => r.id));
-  const paused = rows.find((r) => r.status === "paused" && !profileHeld.has(r.id));
+  // 2. Nothing of the list is active: the most recent SYSTEM-paused one serves again (a
+  // suggested / archived one is not theirs to revive). A list a PERSON paused (or whose
+  // pause nobody recorded) stays exactly as they set it, and nothing new is built beside
+  // it: the person decides (LEAK-1012, prod 2026-10-12: a stopped funnel's source turned
+  // back on resumed a paused audience that served 60 prospects into a signup campaign).
+  const pausedRows = rows.filter((r) => r.status === "paused");
+  const profileHeld = await profileHeldIds(pausedRows.map((r) => r.id));
+  const paused = pausedRows.find((r) => isSystemResumable(r) && !profileHeld.has(r.id));
   if (paused) {
-    await setStatus([paused.id], "active");
-    result.outcome = "resumed";
+    const back = await resumeSystemPaused([paused.id]);
+    if (back.length > 0) {
+      result.outcome = "resumed";
+      return;
+    }
+  }
+  if (pausedRows.some((r) => !isSystemResumable(r))) {
+    result.outcome = "exists_inactive";
+    result.reason = PERSON_PAUSED_REASON;
     return;
   }
 
@@ -542,11 +560,20 @@ async function createEngagement(args: ApplySourceArgs, userId: string, identity:
   if (out.outcome === "created") {
     result.outcome = "created";
   } else if (out.outcome === "exists" && out.audienceIds.length > 0) {
-    // Born or left inactive: the source is ON, so they serve (a profile a person
-    // paused keeps its list paused).
+    // Born or left inactive by the system: the source is ON, so they serve (a profile a
+    // person paused keeps its list paused; a list a person paused stays paused).
     const profileHeld = await profileHeldIds(out.audienceIds);
-    await setStatus(out.audienceIds.filter((id) => !profileHeld.has(id)), "active");
-    result.outcome = "resumed";
+    await resumeSystemPaused(out.audienceIds.filter((id) => !profileHeld.has(id)));
+    const now = await db
+      .select({ status: audiences.status })
+      .from(audiences)
+      .where(inArray(audiences.id, out.audienceIds));
+    if (now.some((r) => r.status === "active")) {
+      result.outcome = "resumed";
+    } else {
+      result.outcome = "exists_inactive";
+      result.reason = PERSON_PAUSED_REASON;
+    }
   } else if (out.outcome === "no_profile") {
     result.outcome = "no_target";
     result.reason = out.reason;

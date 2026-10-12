@@ -9,7 +9,8 @@ import request from "supertest";
 import { and, eq } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
-import { db } from "../../src/db/index.js";
+import { db, sql as rawSql } from "../../src/db/index.js";
+import { readFileSync } from "node:fs";
 import { audiences, sourceCampaignAudienceHolds, sourceCampaignStates } from "../../src/db/schema.js";
 import {
   createApolloLinkedinEngagementAudience,
@@ -508,5 +509,124 @@ describe("profile x source: pausing a profile stops every list of its people", (
     const lists = await listsOf(qa.id);
     expect(lists).toHaveLength(2);
     expect(lists.every((l) => l.status === "active")).toBe(true);
+  });
+});
+
+// LEAK-1012 (owner 2026-10-12): an audience a PERSON paused is never un-paused by a
+// product path. Prod: a stopped funnel's Apollo source turned back on resumed a paused
+// audience, which served 60 prospects into a signup-only campaign.
+describe("a pause a PERSON made is never undone by a product path", () => {
+  function setStatus(id: string, status: string) {
+    return request(app).patch(`/orgs/audiences/${id}/status`).set(getAuthHeaders()).send({ status });
+  }
+  async function rowOf(id: string) {
+    const [row] = await db.select().from(audiences).where(eq(audiences.id, id));
+    return row;
+  }
+
+  it("a person's PATCH records WHO paused it", async () => {
+    const a = await insertAudience({ name: "Owners" });
+    expect((await setStatus(a.id, "paused")).status).toBe(200);
+    const row = await rowOf(a.id);
+    expect(row.statusSetBy).toBe("person");
+    expect(row.statusSetByUserId).toBe(USER);
+    expect(row.statusSetAt).not.toBeNull();
+  });
+
+  it("source ON with nothing of the list active leaves the audience a PERSON paused paused, and builds nothing beside it", async () => {
+    const a = await insertAudience({ name: "Small teams 11-50" });
+    await setStatus(a.id, "paused");
+    const on = await push({ originSlug: COLD, campaignId: COLD_CAMPAIGN, status: "on" });
+    expect(on.status).toBe(200);
+    expect(on.body.outcome).toBe("exists_inactive");
+    expect(await statusOf(a.id)).toBe("paused");
+    expect(vi.mocked(proposeAudienceSplit)).not.toHaveBeenCalled();
+  });
+
+  it("a pause nobody recorded (written before provenance) counts as a person's: the ON leaves it paused", async () => {
+    const legacy = await insertAudience({ name: "Managers", status: "paused" });
+    expect((await rowOf(legacy.id)).statusSetBy).toBeNull();
+    const on = await push({ originSlug: COLD, campaignId: COLD_CAMPAIGN, status: "on" });
+    expect(on.body.outcome).toBe("exists_inactive");
+    expect(await statusOf(legacy.id)).toBe("paused");
+  });
+
+  it("a SYSTEM pause is still resumed by the ON (OFF then ON), and the ON records the system as who resumed it", async () => {
+    const a = await insertAudience({ name: "Owners" });
+    await push({ originSlug: COLD, campaignId: COLD_CAMPAIGN, status: "off" });
+    const paused = await rowOf(a.id);
+    expect(paused.status).toBe("paused");
+    expect(paused.statusSetBy).toBe("system");
+    expect(paused.statusSetReason).toBe("source_campaign_off");
+    const on = await push({ originSlug: COLD, campaignId: COLD_CAMPAIGN, status: "on" });
+    expect(on.body.outcome).toBe("resumed");
+    expect((await rowOf(a.id)).statusSetBy).toBe("system");
+    expect(await statusOf(a.id)).toBe("active");
+  });
+
+  it("a system pause whose hold is gone is still resumed by an ON (step 2), a person's next to it is not", async () => {
+    const sys = await insertAudience({ name: "Owners" });
+    const person = await insertAudience({ name: "Managers" });
+    await setStatus(person.id, "paused");
+    await db
+      .update(audiences)
+      .set({ status: "paused", statusSetBy: "system", statusSetReason: "born" })
+      .where(eq(audiences.id, sys.id));
+    const on = await push({ originSlug: COLD, campaignId: COLD_CAMPAIGN, status: "on" });
+    expect(on.body.outcome).toBe("resumed");
+    expect(await statusOf(sys.id)).toBe("active");
+    expect(await statusOf(person.id)).toBe("paused");
+  });
+
+  it("OFF held a list, then a person paused it: the next ON leaves it paused", async () => {
+    const a = await insertAudience({ name: "Owners" });
+    await push({ originSlug: COLD, campaignId: COLD_CAMPAIGN, status: "off" });
+    await setStatus(a.id, "paused");
+    const on = await push({ originSlug: COLD, campaignId: COLD_CAMPAIGN, status: "on" });
+    expect(on.body.outcome).toBe("exists_inactive");
+    expect(await statusOf(a.id)).toBe("paused");
+  });
+
+  it("a profile's engagement list a PERSON paused stays paused when LinkedIn is turned ON again", async () => {
+    const profile = await insertAudience({ name: "Heads of QA" });
+    await db.update(audiences).set({ targetText: "Heads of QA" }).where(eq(audiences.id, profile.id));
+    await push({ originSlug: LINKEDIN, status: "on" });
+    const [list] = await db.select().from(audiences).where(eq(audiences.profileAudienceId, profile.id));
+    expect(list.status).toBe("active");
+    await push({ originSlug: LINKEDIN, status: "off" });
+    await setStatus(list.id, "paused");
+    const on = await push({ originSlug: LINKEDIN, status: "on" });
+    expect(on.body.outcome).toBe("exists_inactive");
+    expect(await statusOf(list.id)).toBe("paused");
+  });
+
+  it("a profile resume never revives a list a person paused, even one the cascade had held", async () => {
+    const profile = await insertAudience({ name: "CTOs" });
+    await db.update(audiences).set({ targetText: "CTOs" }).where(eq(audiences.id, profile.id));
+    await push({ originSlug: LINKEDIN, status: "on" });
+    const [list] = await db.select().from(audiences).where(eq(audiences.profileAudienceId, profile.id));
+    await setStatus(profile.id, "paused");
+    expect((await rowOf(list.id)).statusSetReason).toBe("profile_paused");
+    // A legacy pause the cascade cannot prove it made (no provenance): left paused.
+    await db.update(audiences).set({ statusSetBy: null, statusSetReason: null }).where(eq(audiences.id, list.id));
+    await setStatus(profile.id, "active");
+    expect(await statusOf(list.id)).toBe("paused");
+  });
+
+  it("migration 0044 marks a paused row an OPEN hold holds as a system pause, and nothing else", async () => {
+    const held = await insertAudience({ name: "Owners", status: "paused" });
+    const released = await insertAudience({ name: "Managers", status: "paused" });
+    const free = await insertAudience({ name: "Founders", status: "paused" });
+    const scope = { orgId: ORG, brandId: BRAND, offerId: OFFER, originSlug: COLD, campaignId: COLD_CAMPAIGN };
+    await db.insert(sourceCampaignAudienceHolds).values([
+      { ...scope, audienceId: held.id },
+      { ...scope, audienceId: released.id, releasedAt: new Date() },
+    ]);
+    const file = readFileSync(new URL("../../drizzle/0044_add_audience_status_origin.sql", import.meta.url), "utf8");
+    for (const stmt of file.split("--> statement-breakpoint")) await rawSql.unsafe(stmt);
+    expect((await rowOf(held.id)).statusSetBy).toBe("system");
+    expect((await rowOf(held.id)).statusSetReason).toBe("source_campaign_off");
+    expect((await rowOf(released.id)).statusSetBy).toBeNull();
+    expect((await rowOf(free.id)).statusSetBy).toBeNull();
   });
 });
