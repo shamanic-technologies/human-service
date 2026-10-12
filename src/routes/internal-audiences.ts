@@ -11,12 +11,19 @@
 import express, { Router } from "express";
 import { requireApiKey } from "../middleware/auth.js";
 import {
+  AudienceStillFitsRequestSchema,
   BrandMembershipsByEmailRequestSchema,
   BrandSnapshotParamsSchema,
   ResolveAudiencesRequestSchema,
 } from "../schemas.js";
 import { resolveAudiencesForBrand } from "../services/audiences.js";
 import { brandMembershipsByEmail } from "../services/audience-memberships.js";
+import {
+  audienceStillFits,
+  CannotJudgeError,
+  StillFitsAudienceNotFoundError,
+} from "../services/audience-still-fits.js";
+import { ProviderConfigError, ProviderError } from "../services/people-providers.js";
 
 const router = Router();
 
@@ -71,6 +78,37 @@ router.post(
         body.data.emails
       )
     );
+  }
+);
+
+// Does this person STILL belong to this audience, right now? (lead-service at
+// stock handover, src/services/audience-still-fits.ts). A question: nothing
+// bought, marked or suppressed. Unknown person = 422, never a silent fits.
+router.post(
+  "/internal/audiences/still-fits",
+  express.json(),
+  requireApiKey,
+  async (req, res) => {
+    const parsed = AudienceStillFitsRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message ?? "Invalid request" });
+      return;
+    }
+    try {
+      res.json(await audienceStillFits({ ...parsed.data, personId: parsed.data.personId ?? null }));
+    } catch (err) {
+      if (err instanceof StillFitsAudienceNotFoundError) {
+        res.status(404).json({ error: err.message, code: "audience_not_found" });
+      } else if (err instanceof CannotJudgeError) {
+        res.status(422).json({ error: err.message, code: err.code });
+      } else if (err instanceof ProviderError || err instanceof ProviderConfigError) {
+        console.error("[human-service] still-fits: crm-service failed", err);
+        res.status(502).json({ error: err.message, code: "crm_unavailable" });
+      } else {
+        console.error("[human-service] still-fits failed", err);
+        res.status(500).json({ error: "still-fits read failed" });
+      }
+    }
   }
 );
 

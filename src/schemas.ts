@@ -4409,3 +4409,44 @@ registry.registerPath({
     409: { description: "Already running or migrations not ready", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
+
+// --- Internal: does this person STILL fit this audience, right now? (STILL-FITS-1012) ---
+
+export const AudienceStillFitsRequestSchema = z
+  .object({
+    orgId: z.string().regex(LAX_UUID_REGEX, "orgId must be a valid UUID").openapi({ description: "Internal org UUID the audience belongs to." }),
+    audienceId: z.string().regex(LAX_UUID_REGEX, "audienceId must be a valid UUID").openapi({ description: "The audience the person was found for." }),
+    brandId: z.string().regex(LAX_UUID_REGEX, "brandId must be a valid UUID").openapi({ description: "The audience's brand (a mismatch is a 404)." }),
+    email: z.string().trim().min(3).max(320).regex(/@/, "email must be an address").openapi({ description: "The person's address (any address of the person resolves them)." }),
+    personId: z.string().regex(LAX_UUID_REGEX).nullable().optional().openapi({ description: "The personId serve-next returned at find time, when there was one." }),
+  })
+  .openapi("AudienceStillFitsRequest");
+
+export const AudienceStillFitsResponseSchema = z
+  .object({
+    fits: z.boolean().openapi({ description: "true = the person still belongs to the audience right now." }),
+    reason: z.string().optional().openapi({ description: "fits=false only: why, in plain words for a staff dashboard (e.g. \"Has written to the brand on WhatsApp\")." }),
+    basis: z.enum(["crm_people_pool", "crm_list", "found_by_search"]).openapi({
+      description: "How the audience's kind decided: crm_people_pool / crm_list = crm-service judged its pool rule today; found_by_search = a search audience (apollo/apify, criteria or signal) answering from what it holds (found by it, not screened out since), since re-deciding would mean a paid re-search.",
+    }),
+    failed: z.array(z.object({ code: z.string(), reason: z.string() })).optional().openapi({ description: "fits=false only: every rule the person fails." }),
+  })
+  .openapi("AudienceStillFitsResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/audiences/still-fits",
+  summary: "Does this person STILL belong to this audience, right now? A question, never a serve: nothing bought, marked or suppressed.",
+  description:
+    "Server-to-server (lead-service at stock handover). Each audience kind answers its own way: CRM audiences ask crm-service to judge its pool rule today; search audiences answer from membership + screen verdicts. 404 = unknown audience for this org/brand; 422 = the person cannot be judged (unknown to the audience's owner): never read as fits; 502 = crm-service unreachable.",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: AudienceStillFitsRequestSchema } } } },
+  responses: {
+    200: { description: "The verdict", content: { "application/json": { schema: AudienceStillFitsResponseSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    404: { description: "Audience not found for this org and brand", content: { "application/json": { schema: ErrorSchema } } },
+    422: { description: "The person cannot be judged", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "crm-service failed", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
