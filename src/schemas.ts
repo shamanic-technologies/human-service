@@ -5,6 +5,7 @@ import {
 } from "@asteasolutions/zod-to-openapi";
 import { LAX_UUID_REGEX } from "./lib/uuid.js";
 import { SPLIT_AXES, SPLIT_ICONS } from "./lib/audience-split-vocab.js";
+import { REACH_CHANNELS } from "./lib/reach.js";
 
 extendZodWithOpenApi(z);
 export const registry = new OpenAPIRegistry();
@@ -1476,7 +1477,19 @@ export const SuggestAudiencesResponseSchema = z
   })
   .openapi("SuggestAudiencesResponse");
 
-// --- POST /orgs/audiences/{id}/serve-next ---
+// --- POST /orgs/audiences/{id}/serve-next (and candidates/next): the serving pipe's reach ---
+export const ReachableByFieldSchema = z
+  .union([z.enum(REACH_CHANNELS), z.array(z.enum(REACH_CHANNELS)).min(1).max(2)])
+  .openapi({
+    description:
+      "The contact channel(s) the SERVING PIPE writes on, all required (phone for WhatsApp / SMS / calls, email for email). A person without them is never served, revealed or marked served for this call, so a pipe that can reach them still gets them. crm pushes it down to crm-service; a provider whose people cannot carry it (apollo / apify: no phone) answers exhausted before any search or reveal. Omitted = unchanged.",
+    example: "phone",
+  });
+
+export const ServeNextRequestSchema = z
+  .object({ reachableBy: ReachableByFieldSchema.optional() })
+  .openapi("ServeNextRequest");
+
 export const ServeNextResponseSchema = z
   .object({
     status: z.enum(["served", "exhausted", "pending"]).openapi({
@@ -1545,9 +1558,9 @@ export const NextCandidateResponseSchema = z
         "'candidate' ⟹ a free candidate, every free check applied (brand suppression, opt-outs, won people, own company, hard bounces, people already rejected for this audience); nothing billed. 'exhausted' ⟹ none left (`reason`). 'pending' ⟹ the per-call walk budget ran out; call again.",
     }),
     candidate: AudienceCandidateViewSchema.nullable(),
-    reason: z.enum(["pool_exhausted", "yield_exhausted"]).optional().openapi({
+    reason: z.enum(["pool_exhausted", "yield_exhausted", "unreachable_by_provider"]).optional().openapi({
       description:
-        "On 'exhausted' only. pool_exhausted = the provider has nobody new. yield_exhausted = over the last 1,000 decisions under the latest `basis`, fewer than 3 were reveals.",
+        "On 'exhausted' only. pool_exhausted = the provider has nobody new. yield_exhausted = over the last 1,000 decisions under the latest `basis`, fewer than 3 were reveals. unreachable_by_provider = the request's `reachableBy` names a channel this provider's people never carry (nothing popped or offered).",
     }),
     target: ScreenTargetSchema,
   })
@@ -2111,7 +2124,11 @@ registry.registerPath({
   summary:
     "Serve the next unserved person of an audience (real provider match on its stored filters; records the serve; never repeats)",
   security: [{ apiKey: [] }],
-  request: { headers: peopleHeaders, params: z.object({ id: z.string().uuid() }) },
+  request: {
+    headers: peopleHeaders,
+    params: z.object({ id: z.string().uuid() }),
+    body: { required: false, content: { "application/json": { schema: ServeNextRequestSchema } } },
+  },
   responses: {
     200: { description: "Next person, or an exhausted signal", content: { "application/json": { schema: ServeNextResponseSchema } } },
     404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
@@ -2129,7 +2146,11 @@ registry.registerPath({
   description:
     "For lead-service's pre-pay qualification. Nothing is screened and nothing is billed. Each person is offered once per audience; an offer not decided within 15 minutes is offered again. serve-next is unchanged.",
   security: [{ apiKey: [] }],
-  request: { headers: peopleHeaders, params: z.object({ id: z.string().uuid() }) },
+  request: {
+    headers: peopleHeaders,
+    params: z.object({ id: z.string().uuid() }),
+    body: { required: false, content: { "application/json": { schema: ServeNextRequestSchema } } },
+  },
   responses: {
     200: { description: "A candidate, exhausted or pending", content: { "application/json": { schema: NextCandidateResponseSchema } } },
     404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },

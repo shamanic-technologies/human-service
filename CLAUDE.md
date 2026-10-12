@@ -1207,6 +1207,25 @@ human-service here for the NEXT person of that audience. `requireOrgAndUser`
 - **No cost declared here** — apollo/apify own the billed reveal; crm-service owns
   its serve; the gateway only forwards `x-run-id` for downstream tracing.
 
+### Serving FOR a pipe — `reachableBy` (`src/lib/reach.ts`, owner 2026-10-12)
+
+serve-next and candidates/next take an optional body `reachableBy` (`phone` |
+`email` | a list, ALL required): the channel(s) the SERVING PIPE writes on
+(lead-service derives it from features-service `contactMethodsByChannel`). A
+person without them is never served, revealed or marked served for that call,
+so the pipe that can reach them still gets them. One rule for every provider:
+`PROVIDER_REACH` (apollo / apify: email only, crm: email + phone).
+- **crm** pushes it down as crm-service's top-level `reachableBy` (both pools),
+  ALWAYS with `email` added: served ⇒ usable email is LOCKED by lead-service, so a
+  phone-only person asked for a phone pipe would be burned by crm-service then
+  dropped here; asked this way crm-service keeps them unmarked.
+- **apollo / apify** cannot carry a phone: a phone requirement answers
+  `exhausted` (candidates: `reason: unreachable_by_provider`) BEFORE any search,
+  pop or reveal; no reachable count persisted (the audience is not drained).
+- Omitted / `{}` ⟹ every outbound byte unchanged (tests in
+  `audiences-serve-next.test.ts`). Audience Size / Remaining do NOT yet reflect
+  a pipe's reach (a crm count per audience per channel is not cheap).
+
 ### An audience belongs to ONE offer, not to a whole brand
 
 The platform inserts an **OFFER** level between Brand and Campaign

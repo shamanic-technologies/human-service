@@ -1508,3 +1508,93 @@ describe("serve-next under the sourcing-origin label", () => {
     resetSourcingOriginCache();
   });
 });
+
+describe("serve-next for a pipe: reachableBy (the channel the serving pipe writes on)", () => {
+  function serveNextReaching(id: string, reachableBy: unknown) {
+    return request(app).post(`/orgs/audiences/${id}/serve-next`).set(getAuthHeaders()).send({ reachableBy });
+  }
+
+  it("crm: a phone requirement is sent to crm-service as reachableBy (with the served contract's email), and the served person carries both", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({ contacts: [crmPerson("r1", "reach@product.com", "+33612345678")], served: 1, exhausted: false });
+      }
+      throw new Error("unexpected url " + u);
+    });
+    const id = await createCrmAudience("CRM reach phone");
+    const res = await serveNextReaching(id, "phone");
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.phone).toBe("+33612345678");
+    expect(bodies).toEqual([{ brandId: BRAND, limit: 1, reachableBy: ["email", "phone"] }]);
+  });
+
+  it("crm: no reachableBy keeps the outbound body byte-identical", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({ contacts: [crmContact("r2", "plain@crm.com")], served: 1, exhausted: false });
+      }
+      throw new Error("unexpected url " + u);
+    });
+    const id = await createCrmAudience("CRM no reach");
+    const res = await request(app).post(`/orgs/audiences/${id}/serve-next`).set(getAuthHeaders()).send({});
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("served");
+    expect(bodies).toEqual([{ brandId: BRAND, limit: 1 }]);
+  });
+
+  it("crm: an email requirement is sent as email only", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({ contacts: [crmContact("r3", "mail@crm.com")], served: 1, exhausted: false });
+      }
+      throw new Error("unexpected url " + u);
+    });
+    const id = await createCrmAudience("CRM reach email");
+    const res = await serveNextReaching(id, ["email"]);
+    expect(res.status).toBe(200);
+    expect(bodies).toEqual([{ brandId: BRAND, limit: 1, reachableBy: ["email"] }]);
+  });
+
+  it("apollo: a phone requirement answers exhausted before any search or reveal (nobody bought or burned)", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      throw new Error("unexpected url " + url);
+    });
+    const id = await createAudience("apollo", "Apollo phone pipe");
+    fetchSpy.mockClear();
+    const res = await serveNextReaching(id, "phone");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: "exhausted", person: null });
+    const providerCalls = fetchSpy.mock.calls.filter(([u]) => /\/(search\/next|enrich)$/.test(String(u)));
+    expect(providerCalls).toEqual([]);
+  });
+
+  it("candidates/next: a phone requirement on an apollo audience answers exhausted / unreachable_by_provider, nothing popped", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      throw new Error("unexpected url " + url);
+    });
+    const id = await createAudience("apollo", "Apollo phone candidates");
+    const res = await request(app)
+      .post(`/orgs/audiences/${id}/candidates/next`)
+      .set(getAuthHeaders())
+      .send({ reachableBy: "phone" });
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("exhausted");
+    expect(res.body.reason).toBe("unreachable_by_provider");
+  });
+
+  it("400 on a reachableBy outside the vocabulary", async () => {
+    const id = await createCrmAudience("CRM bad reach");
+    const res = await serveNextReaching(id, "fax");
+    expect(res.status).toBe(400);
+  });
+});
