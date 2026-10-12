@@ -70,6 +70,7 @@ import {
   exhaustOnScreenYield,
   hasUsableEmail,
   needsApolloPointerBuild,
+  hasApolloNativeFilters,
   persistReachableCountOnExhaustion,
   servedWithPersonId,
   SERVE_NEXT_BUDGET_MS,
@@ -347,8 +348,8 @@ export async function nextCandidate(
 
   const exclusions = await loadServeExclusions(identity);
   const ownCompany = await loadOwnCompany(identity.orgId, [audience.brandId]);
-  const apolloSearchParams = audience.apolloAudienceId ? storedFilters : undefined;
-  const apolloFilters = audience.apolloAudienceId ? {} : (storedFilters as PeopleSearchFilters);
+  const apolloSearchParams = hasApolloNativeFilters(audience) ? storedFilters : undefined;
+  const apolloFilters = hasApolloNativeFilters(audience) ? {} : (storedFilters as PeopleSearchFilters);
 
   let walked = 0;
   for (;;) {

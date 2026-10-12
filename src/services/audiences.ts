@@ -63,6 +63,7 @@ import {
   type Person,
   type PeopleSearchFilters,
 } from "./people-providers.js";
+import { PeopleSearchFiltersSchema } from "../schemas.js";
 import {
   completeJson,
   platformCompleteJson,
@@ -123,15 +124,37 @@ export async function tagAudienceServe(
   return personIds;
 }
 
+// An apollo audience's filters are Apollo-NATIVE (apollo-service's shape) when it
+// has a pointer, or when a caller wrote them verbatim without one
+// (POST /orgs/audiences {provider:"apollo", filters: {person_titles, ...}}).
+// Native filters are forwarded to apollo-service as-is: read as the neutral
+// PeopleSearchFilters, every native key is dropped and the audience counts and
+// searches with NO filter at all. A pointerless row whose keys are all neutral
+// vocabulary (the pre-pointer legacy shape) keeps the neutral remap. The test is
+// the vocabulary itself, never a guess: one key outside PeopleSearchFilters ⟹
+// native.
+const NEUTRAL_FILTER_KEYS = new Set(Object.keys(PeopleSearchFiltersSchema.shape));
+
+export function hasApolloNativeFilters(audience: {
+  provider: string | null;
+  apolloAudienceId: string | null;
+  filters: unknown;
+}): boolean {
+  if (audience.apolloAudienceId) return true;
+  if (audience.provider !== "apollo") return false;
+  const filters = (audience.filters ?? {}) as Record<string, unknown>;
+  return Object.keys(filters).some((k) => !NEUTRAL_FILTER_KEYS.has(k));
+}
+
 // Re-snapshot an audience's count via the free dry-run. Fail loud on provider
 // error. Returns the updated counts; persistence is the caller's job.
 //
-// Pointer model ("one filter vocabulary" Wave 2): an apollo audience counts by
-// POINTER — apollo-service owns the faithful filters, so we ask it to re-count
-// via POST /audiences/{id}/dry-run. Its apifyCount is not meaningful (the audience
-// committed to apollo), so it is left as stored. A legacy/neutral audience (apify,
-// or a pre-pointer apollo row) keeps the dual free dry-run on its stored NEUTRAL
-// filters (apollo /search/dry-run + apify /search/count).
+// Only the provider the audience USES is asked: an apollo audience never waits
+// on (or fails because of) apify, and the other provider's snapshot is left as
+// stored. A pointer row re-counts BY POINTER (apollo-service
+// POST /audiences/{id}/dry-run); a pointerless apollo row re-counts its native
+// filters verbatim (apollo /search/dry-run); an apify row asks apify; a neutral
+// (provider-less) row asks apollo on its neutral filters.
 export async function refreshAudienceCounts(
   audience: typeof audiences.$inferSelect,
   identity: Identity
@@ -161,13 +184,25 @@ export async function refreshAudienceCounts(
     };
   }
   const filters = (audience.filters ?? {}) as PeopleSearchFilters;
-  const [apollo, apify] = await Promise.all([
-    dryRun({ provider: "apollo", filters, identity }),
-    dryRun({ provider: "apify", filters, identity }),
-  ]);
+  if (audience.provider === "apify") {
+    const apify = await dryRun({ provider: "apify", filters, identity });
+    return {
+      apolloCount: audience.apolloCount,
+      apifyCount: apify.totalEntries,
+      countedAt: new Date(),
+    };
+  }
+  const apollo = await dryRun({
+    provider: "apollo",
+    filters,
+    ...(hasApolloNativeFilters(audience)
+      ? { apolloSearchParams: (audience.filters ?? {}) as Record<string, unknown> }
+      : {}),
+    identity,
+  });
   return {
     apolloCount: apollo.totalEntries,
-    apifyCount: apify.totalEntries,
+    apifyCount: audience.apifyCount,
     countedAt: new Date(),
   };
 }
@@ -2486,11 +2521,10 @@ export async function serveNextPerson(
   // buffer is empty. Without this the other ~99 teasers per page were discarded
   // and the cursor moved on for good, capping the audience at ~1% of its pool.
   //
-  // Pointer rows (apollo_audience_id set) store Apollo's FAITHFUL filter shape →
-  // forward it VERBATIM as the apollo search params (no neutral→apollo remap). A
-  // LEGACY pre-Wave-2 apollo row (no pointer) still holds the old NEUTRAL blob →
-  // let toApolloSearchParams remap it, so it keeps serving until the backfill
-  // gives it a pointer. Mirrors the same guard in refreshAudienceCounts.
+  // An apollo row stores Apollo's NATIVE filter shape (with or without a
+  // pointer) → forward it VERBATIM as the apollo search params (no
+  // neutral→apollo remap, which would drop every native key and search with no
+  // filter at all). Same rule as refreshAudienceCounts (hasApolloNativeFilters).
   // Standing opt-outs for the org + the people this brand has already WON, read
   // once for this serve (loadServeExclusions). A buffered teaser
   // may have been fetched before the person asked us to stop, so the check runs
@@ -2521,8 +2555,8 @@ export async function serveNextPerson(
     };
   }
 
-  const apolloSearchParams = audience.apolloAudienceId ? storedFilters : undefined;
-  const apolloFilters = audience.apolloAudienceId
+  const apolloSearchParams = hasApolloNativeFilters(audience) ? storedFilters : undefined;
+  const apolloFilters = hasApolloNativeFilters(audience)
     ? {}
     : (storedFilters as PeopleSearchFilters);
 
