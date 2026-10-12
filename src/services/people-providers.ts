@@ -1492,6 +1492,9 @@ export async function resolveEmail(args: {
 export async function dryRun(args: {
   provider?: Provider;
   filters: PeopleSearchFilters;
+  // Apollo-native params sent VERBATIM (an apollo audience's stored filters),
+  // same meaning as on peopleSearch. apollo-only; takes precedence over filters.
+  apolloSearchParams?: Record<string, unknown>;
   identity: Identity;
 }): Promise<{ provider: Provider; totalEntries: number }> {
   const provider = resolveProvider(args);
@@ -1515,7 +1518,7 @@ export async function dryRun(args: {
     url,
     key,
     "/search/dry-run",
-    toApolloSearchParams(args.filters),
+    args.apolloSearchParams ?? toApolloSearchParams(args.filters),
     args.identity
   )) as { totalEntries: number };
   return { provider, totalEntries: data.totalEntries };

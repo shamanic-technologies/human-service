@@ -711,16 +711,27 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
   different concept) — the API exposes its id as `personId`. The many-to-many is
   the **Kimball bridge** `audience_members` with effective dates (`joined_at` /
   `last_served_at`) for point-in-time membership.
-- **Counts: by pointer (apollo) or dual dry-run (legacy).** `apollo_count` +
-  `apify_count` are a snapshot. `POST /{id}/refresh-count` re-counts FOR FREE:
-  an apollo audience (has `apollo_audience_id`) re-counts **by pointer** via
-  apollo-service `POST /audiences/{id}/dry-run` (sets `apollo_count`; its
-  `apify_count` is not meaningful and is left as-is); a legacy/neutral audience
-  (apify, or a pre-Wave-2 row with no pointer) keeps the dual free dry-run on its
-  stored NEUTRAL filters (apollo `/search/dry-run` + apify `/search/count`).
-  `refreshAudienceCounts(audience, identity)` owns the branch. **No cost** —
-  dry-run is the free count path; refresh-count needs `x-user-id` (apollo/apify
-  key resolution), the CRUD routes use `requireOrgIdOnly`.
+- **Counts: ONLY the provider the audience uses.** `apollo_count` + `apify_count`
+  are a snapshot. `POST /{id}/refresh-count` re-counts FOR FREE and asks only
+  the audience's own provider (the other snapshot is left as stored; Apify is not
+  configured in prod, so an apollo refresh that also asked apify 502'd, NOVEMIQ
+  2026-10-12): a pointer row counts **by pointer** (apollo-service
+  `POST /audiences/{id}/dry-run`); a pointerless apollo row counts its filters on
+  apollo `/search/dry-run`; an apify row on apify `/search/count`; a
+  provider-less row on apollo. `refreshAudienceCounts(audience, identity)` owns
+  the branch. **No cost**; refresh-count needs `x-user-id` (key resolution).
+- **Native vs neutral filters (`hasApolloNativeFilters`).** An apollo row's
+  filters are Apollo-NATIVE when it has a pointer OR when any key is outside the
+  neutral `PeopleSearchFilters` vocabulary (a caller wrote
+  `POST /orgs/audiences {provider:"apollo", filters:{person_titles, buying_signal, ...}}`
+  with no pointer). Native filters go to apollo-service VERBATIM on count, serve
+  and candidates; the neutral remap would drop every native key and search with
+  NO filter. All-neutral keys keep the legacy remap.
+- **Born counted.** `POST /orgs/audiences` with native apollo filters, no pointer,
+  no `apolloCount` and an `x-user-id` counts them before insert (free dry-run),
+  so Size is real from creation, not 0. apollo-service refusing the filters ⟹
+  **400**, nothing written; an outage ⟹ 502. No `x-user-id` ⟹ counted at the
+  first serve / refresh-count.
 - **Auto-refresh Size on serve (1h TTL).** The `apollo_count` snapshot is refreshed
   OPPORTUNISTICALLY when an audience is exercised (a serve happens) and its
   `counted_at` is older than **1 hour** — so Size tracks the provider adding /
