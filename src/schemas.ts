@@ -1080,6 +1080,25 @@ export const AudienceChannelSchema = z
   })
   .openapi("AudienceChannel");
 
+// A SEGMENT of the brand's own CRM, in crm-service's own words (its
+// `PeopleSegment`). Passed through verbatim: crm-service validates it and
+// owns its vocabulary, human-service never re-models it.
+const CrmPeopleSegmentSchema = z
+  .record(z.string(), z.unknown())
+  .openapi({
+    description:
+      "A part of the brand's own CRM, as crm-service's PeopleSegment states it (passed through verbatim, validated by crm-service): dealStages [{stage, pipeline?}], dealStatuses, tags, reached / notReached (funnel steps), includeClients, includeOptedOut. Lists OR, keys AND; clients and opted-out people are out unless stated. Names come from crm-service GET /orgs/contacts/segments.",
+    example: { dealStages: [{ pipeline: "Sales Pipeline", stage: "Form Filled - No Appointment" }] },
+  });
+
+const CrmStageStatsSchema = z.object({
+  pipeline: z.string().nullable(),
+  stage: z.string(),
+  served: z.number().int(),
+  remainingSendable: z.number().int(),
+  totalSendable: z.number().int(),
+});
+
 // The PEOPLE-pool filter of a CRM audience (crm-service serve-next `people`).
 export const CrmPeopleFilterSchema = z
   .object({
@@ -1095,10 +1114,11 @@ export const CrmPeopleFilterSchema = z
       description:
         "Only people holding a phone / an email. A phone channel (WhatsApp, SMS) wants 'phone': a person served without one is burned for nothing.",
     }),
+    segment: CrmPeopleSegmentSchema.optional(),
   })
   .strict()
   .refine((f) => Object.keys(f).length > 0, {
-    message: "crmPeople needs at least one of signedUp, replied, reachableBy",
+    message: "crmPeople needs at least one of signedUp, replied, reachableBy, segment",
   })
   .openapi("CrmPeopleFilter");
 
@@ -1127,12 +1147,17 @@ export const AudienceSchema = z
         signedUp: z.boolean().optional(),
         replied: z.boolean().optional(),
         reachableBy: z.enum(["phone", "email"]).optional(),
+        segment: CrmPeopleSegmentSchema.optional(),
       })
       .nullable()
       .openapi({
         description:
           "The PEOPLE-pool filter this CRM audience is bound to: every serve draws from the brand's merged people (everyone its connected tools know, one row per human) who match it, instead of from imported files. null = not people-bound (file-bound via crmUploadId, or the whole imported list).",
       }),
+    crmPeopleByStage: z.array(CrmStageStatsSchema).nullable().optional().openapi({
+      description:
+        "A people-bound CRM audience whose segment names dealStages: crm-service's counts per stated stage (same snapshot as Size / Remaining). Entries overlap when a person holds deals at two of them. null otherwise.",
+    }),
     offerId: z.string().uuid().nullable().openapi({
       description:
         "The offer (Org > Brand > Offer > Campaign) this audience belongs to — an id owned by brand-service. An audience is assembled for one distinct thing the brand sells, so it is scoped to that offer rather than to every offer of the brand. null = no offer stated ⟹ the audience is brand-wide, the pre-existing behaviour.",
@@ -1209,7 +1234,7 @@ export const CreateAudienceRequestSchema = z
     }),
     crmPeople: CrmPeopleFilterSchema.optional().openapi({
       description:
-        "Bind this CRM audience to the brand's merged PEOPLE matching a filter (e.g. {signedUp: true, replied: false} = product signups who never answered) instead of to an imported file. Requires provider 'crm'; exclusive with crmUploadId. Every serve passes the filter to crm-service (same brand-wide no-re-serve forever); each served person carries its phone when crm-service holds one. Validated against crm-service's serve-stats at creation (its counts become the audience's Size / Remaining). Immutable afterwards.",
+        "Bind this CRM audience to the brand's merged PEOPLE matching a filter (e.g. {signedUp: true, replied: false} = product signups who never answered) instead of to an imported file, optionally scoped to a `segment` of the brand's own CRM (e.g. {segment: {dealStages: [{pipeline: 'Sales Pipeline', stage: 'Form Filled - No Appointment'}]}}). Requires provider 'crm'; exclusive with crmUploadId. A segment crm-service refuses is a 400 carrying its reason. Every serve passes the filter to crm-service (same brand-wide no-re-serve forever); each served person carries its phone when crm-service holds one. Validated against crm-service's serve-stats at creation (its counts become the audience's Size / Remaining). Immutable afterwards.",
     }),
     offerId: z.string().uuid().optional().openapi({
       description:
