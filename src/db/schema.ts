@@ -508,6 +508,8 @@ export const audiences = pgTable(
       signedUp?: boolean;
       replied?: boolean;
       reachableBy?: "phone" | "email";
+      // crm-service PeopleSegment, verbatim (a part of the brand's own CRM).
+      segment?: Record<string, unknown>;
     }>(),
     // crm-service's own count of that filter ({served, remainingSendable,
     // totalSendable}, serve-stats), snapshotted at creation and re-read when the
@@ -517,6 +519,13 @@ export const audiences = pgTable(
       served: number;
       remainingSendable: number;
       totalSendable: number;
+      byStage?: {
+        pipeline: string | null;
+        stage: string;
+        served: number;
+        remainingSendable: number;
+        totalSendable: number;
+      }[];
     }>(),
     // The OFFER this audience belongs to (Org > Brand > Offer > Campaign).
     // brand-service owns the offer entity; human-service stores ONLY the id and

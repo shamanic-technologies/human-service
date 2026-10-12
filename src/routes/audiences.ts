@@ -281,6 +281,12 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
         buildIdentity(res)
       );
     } catch (err) {
+      // crm-service refused the filter itself (a segment naming a bad key or
+      // value): the caller's mistake, relayed with crm-service's own reason.
+      if (err instanceof ProviderError && err.status === 400) {
+        res.status(400).json({ error: `crm-service refused crmPeople: ${err.body}`, source: "crm-service" });
+        return;
+      }
       sendProviderError(res, err);
       return;
     }
@@ -1537,6 +1543,7 @@ function serializeAudience(
     apolloAudienceId: row.apolloAudienceId,
     crmUploadId: row.crmUploadId,
     crmPeople: row.crmPeopleFilter ?? null,
+    crmPeopleByStage: row.crmPeopleStats?.byStage ?? null,
     offerId: row.offerId,
     status: row.status,
     source: row.source,
