@@ -63,6 +63,7 @@ import {
 import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import { ensureTargetText, screenTarget } from "./audience-target-text.js";
 import { isCrmSourcedFeature } from "./sourcing-origin.js";
+import { providerCanReach, type Reach } from "../lib/reach.js";
 import {
   AudienceNotServableError,
   ensureApolloPointer,
@@ -119,7 +120,7 @@ export type NextCandidateResult =
   | {
       status: "exhausted";
       candidate: null;
-      reason: "pool_exhausted" | "yield_exhausted";
+      reason: "pool_exhausted" | "yield_exhausted" | "unreachable_by_provider";
       target: { text: string; field: "target_text" | "nl_prompt" } | null;
     }
   | {
@@ -306,11 +307,20 @@ async function passesFreeChecks(
 export async function nextCandidate(
   audienceIn: AudienceRow,
   identityIn: Identity,
-  budgetMs: number = SERVE_NEXT_BUDGET_MS
+  budgetMs: number = SERVE_NEXT_BUDGET_MS,
+  reach: readonly Reach[] = []
 ): Promise<NextCandidateResult> {
   const deadline = Date.now() + budgetMs;
   let audience = audienceIn;
   assertCandidateProvider(audience, identityIn);
+  // The serving pipe writes on a channel apollo's people never carry (src/lib/reach.ts):
+  // nothing is popped or offered, so nobody is bought or burned for it.
+  if (!providerCanReach("apollo", reach)) {
+    console.log(
+      `[human-service] reach.provider_cannot_reach org=${identityIn.orgId} audience=${audience.id} provider=apollo reach=${reach.join(",")} path=candidates`
+    );
+    return { status: "exhausted", candidate: null, reason: "unreachable_by_provider", target: null };
+  }
   if (needsApolloPointerBuild(audience)) {
     audience = await ensureApolloPointer(audience, identityIn);
   }

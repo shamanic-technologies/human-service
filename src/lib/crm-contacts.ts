@@ -20,6 +20,7 @@ import {
   type Identity,
   type Person,
 } from "../services/people-providers.js";
+import type { Reach } from "./reach.js";
 
 function requireCrm(): { url: string; key: string } {
   // Read at call time (not boot) so a missing var fails the request loudly
@@ -59,6 +60,11 @@ export interface CrmPeopleFilter {
 export interface CrmServeScope {
   uploadId?: string | null;
   people?: CrmPeopleFilter | null;
+  // The channel(s) the SERVING PIPE writes on (src/lib/reach.ts), sent top-level as
+  // crm-service's `reachableBy` (both pools): a person without them is skipped and NOT
+  // marked served, so the pipe that can reach them still gets them. Empty / absent =
+  // no key on the wire (bytes unchanged).
+  reachableBy?: readonly Reach[] | null;
 }
 
 export interface CrmServeStats {
@@ -137,6 +143,7 @@ export async function crmServeNext(
   const { url, key } = requireCrm();
   const uploadId = scope.uploadId ?? null;
   const people = scope.people ?? null;
+  const reachableBy = scope.reachableBy && scope.reachableBy.length > 0 ? [...scope.reachableBy] : null;
   let res: Response;
   try {
     res = await fetchWithConnectRetry(`${url}/orgs/contacts/serve-next`, {
@@ -147,6 +154,7 @@ export async function crmServeNext(
         limit,
         ...(uploadId ? { uploadIds: [uploadId] } : {}),
         ...(people ? { people } : {}),
+        ...(reachableBy ? { reachableBy } : {}),
       }),
     });
   } catch (err) {

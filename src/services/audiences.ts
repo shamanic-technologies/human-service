@@ -80,6 +80,7 @@ import { chooseAudienceCandidate, buildChooserTrace } from "./audience-chooser.j
 import { createRun, completeRun } from "./runs.js";
 import { audienceSourcingOriginSlug, isCrmSourcedFeature, withSourcingOrigin } from "./sourcing-origin.js";
 import { crmPeopleServeStats, crmServeNext, normalizeCrmContact } from "../lib/crm-contacts.js";
+import { normalizeReach, personReaches, providerCanReach, type Reach } from "../lib/reach.js";
 import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
 
 // Tag served contacts as members of an audience (provenance membership). Upserts
@@ -2233,10 +2234,20 @@ export function hasUsableEmail(p: Person): boolean {
 // `x-audience-id` from the AUDIENCE ROW rather than trusting the inbound header —
 // same reasoning as brandIds at the route: the caller serves "the next person of
 // THIS audience", so the audience identity is the row's, not a header's.
+//
+// REACH: `reach` = the channel(s) the serving pipe writes on (src/lib/reach.ts). It is
+// pushed down to crm-service as `reachableBy`, so a person the pipe cannot reach is
+// skipped there and NOT burned. The served contract (served ⇒ usable email, LOCKED by
+// lead-service) is itself a reach requirement, so a stated reach always carries
+// `email` too: a phone-only person would be dropped below after crm-service burned
+// them; asked this way crm-service keeps them for a pipe that can take them. No reach
+// stated ⟹ no key on the wire, bytes unchanged.
 async function serveNextCrmContact(
   audience: typeof audiences.$inferSelect,
-  identity: Identity
+  identity: Identity,
+  reach: readonly Reach[] = []
 ): Promise<ServeNextResult> {
+  const crmReach: Reach[] = reach.length > 0 ? normalizeReach([...reach, "email"]) : [];
   const crmIdentity: Identity = {
     ...identity,
     workflowTracking: {
@@ -2256,7 +2267,7 @@ async function serveNextCrmContact(
       audience.brandId,
       1,
       crmIdentity,
-      { uploadId: audience.crmUploadId, people: audience.crmPeopleFilter }
+      { uploadId: audience.crmUploadId, people: audience.crmPeopleFilter, reachableBy: crmReach }
     );
     const contact = contacts[0] ?? null;
     if (!contact) {
@@ -2295,6 +2306,15 @@ async function serveNextCrmContact(
     // sendable email is not servable via the cold-email funnel; crm-service has
     // already permanently suppressed it, so drop it and ask for the next one.
     if (!hasUsableEmail(person)) {
+      if (exhausted) return { status: "exhausted", person: null };
+      continue;
+    }
+    // crm-service filtered on the reach already; a person that still misses it is a
+    // producer contract break (already burned there): never hand it to the pipe.
+    if (!personReaches(person, crmReach)) {
+      console.error(
+        `[human-service] reach.crm_contract_break org=${identity.orgId} audience=${audience.id} reach=${crmReach.join(",")}: crm-service served a person without it`
+      );
       if (exhausted) return { status: "exhausted", person: null };
       continue;
     }
@@ -2366,10 +2386,16 @@ export async function exhaustOnScreenYield(
 //
 // The caller (route) MUST pass identity.brandIds = [audience.brandId] — that is
 // what drives suppression. The audience is assumed already org-validated.
+//
+// `reach` (src/lib/reach.ts): the channel(s) the serving pipe writes on. crm pushes it
+// down; a provider whose people cannot carry it (apollo / apify hold no phone) answers
+// `exhausted` BEFORE any search or reveal, so nobody is bought or burned for a pipe
+// that cannot write to them. Empty = unchanged.
 export async function serveNextPerson(
   audience: typeof audiences.$inferSelect,
   identity: Identity,
-  budgetMs: number = SERVE_NEXT_BUDGET_MS
+  budgetMs: number = SERVE_NEXT_BUDGET_MS,
+  reach: readonly Reach[] = []
 ): Promise<ServeNextResult> {
   const deadline = Date.now() + budgetMs;
   const provider = audience.provider;
@@ -2400,13 +2426,21 @@ export async function serveNextPerson(
   // route here; any other origin slug leaves the audience's provider in charge,
   // exactly as the cold outreach channel does.
   if (isCrmSourcedFeature(featureSlug) || provider === "crm") {
-    return serveNextCrmContact(audience, identity);
+    return serveNextCrmContact(audience, identity, reach);
   }
 
   if (provider !== "apollo" && provider !== "apify") {
     throw new AudienceNotServableError(
       "Audience has no committed provider — cannot serve people."
     );
+  }
+  if (!providerCanReach(provider, reach)) {
+    // Not exhaustion of the audience (its Remaining is untouched): this pipe cannot
+    // write to anyone it holds. Nothing searched, revealed, or recorded.
+    console.log(
+      `[human-service] reach.provider_cannot_reach org=${identity.orgId} audience=${audience.id} provider=${provider} reach=${reach.join(",")}`
+    );
+    return { status: "exhausted", person: null };
   }
   // Stored filters are OPAQUE here: apollo rows hold the faithful Apollo filter
   // object (apollo-service's shape); apify rows hold the neutral PeopleSearchFilters.

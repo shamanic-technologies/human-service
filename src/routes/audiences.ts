@@ -34,7 +34,9 @@ import {
   RevealCandidateRequestSchema,
   DeclineCandidateRequestSchema,
   ListScreeningsQuerySchema,
+  ServeNextRequestSchema,
 } from "../schemas.js";
+import { normalizeReach, type Reach } from "../lib/reach.js";
 import {
   CandidateNotFoundError,
   CandidateStateError,
@@ -1081,6 +1083,16 @@ router.post(
   }
 );
 
+// The serving pipe's reach (src/lib/reach.ts), read off the serve body. A body that
+// states nothing (lead-service sent `{}` until now) is today's serve, unchanged.
+function parseServeReach(body: unknown): { ok: true; reach: Reach[] } | { ok: false; error: string } {
+  const parsed = ServeNextRequestSchema.safeParse(body ?? {});
+  if (!parsed.success) {
+    return { ok: false, error: "reachableBy must be phone, email, or a list of them" };
+  }
+  return { ok: true, reach: normalizeReach(parsed.data.reachableBy) };
+}
+
 // --- POST /orgs/audiences/:id/serve-next ---
 // The per-iteration lead primitive: return the NEXT unserved person of the
 // audience (real provider match on its STORED canonical filters + provider),
@@ -1121,8 +1133,14 @@ router.post(
       )
     );
 
+    const reachParse = parseServeReach(req.body);
+    if (!reachParse.ok) {
+      res.status(400).json({ error: reachParse.error });
+      return;
+    }
+
     try {
-      const result = await serveNextPerson(audience, identity);
+      const result = await serveNextPerson(audience, identity, undefined, reachParse.reach);
       console.log(
         `[human-service] audience.serve_next org=${orgId} audience=${audience.id} provider=${audience.provider} status=${result.status}`
       );
@@ -1161,8 +1179,13 @@ router.post(
         err
       )
     );
+    const reachParse = parseServeReach(req.body);
+    if (!reachParse.ok) {
+      res.status(400).json({ error: reachParse.error });
+      return;
+    }
     try {
-      const result = await nextCandidate(audience, identity);
+      const result = await nextCandidate(audience, identity, undefined, reachParse.reach);
       console.log(
         `[human-service] audience.candidate_next org=${orgId} audience=${audience.id} status=${result.status}`
       );
