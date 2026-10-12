@@ -1813,9 +1813,57 @@
                   "phone",
                   "email"
                 ]
+              },
+              "segment": {
+                "type": "object",
+                "additionalProperties": {
+                  "nullable": true
+                },
+                "description": "A part of the brand's own CRM, as crm-service's PeopleSegment states it (passed through verbatim, validated by crm-service): dealStages [{stage, pipeline?}], dealStatuses, tags, reached / notReached (funnel steps), includeClients, includeOptedOut. Lists OR, keys AND; clients and opted-out people are out unless stated. Names come from crm-service GET /orgs/contacts/segments.",
+                "example": {
+                  "dealStages": [
+                    {
+                      "pipeline": "Sales Pipeline",
+                      "stage": "Form Filled - No Appointment"
+                    }
+                  ]
+                }
               }
             },
             "description": "The PEOPLE-pool filter this CRM audience is bound to: every serve draws from the brand's merged people (everyone its connected tools know, one row per human) who match it, instead of from imported files. null = not people-bound (file-bound via crmUploadId, or the whole imported list)."
+          },
+          "crmPeopleByStage": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "object",
+              "properties": {
+                "pipeline": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "stage": {
+                  "type": "string"
+                },
+                "served": {
+                  "type": "integer"
+                },
+                "remainingSendable": {
+                  "type": "integer"
+                },
+                "totalSendable": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "pipeline",
+                "stage",
+                "served",
+                "remainingSendable",
+                "totalSendable"
+              ]
+            },
+            "description": "A people-bound CRM audience whose segment names dealStages: crm-service's counts per stated stage (same snapshot as Size / Remaining). Entries overlap when a person holds deals at two of them. null otherwise."
           },
           "offerId": {
             "type": "string",
@@ -2099,10 +2147,25 @@
               "email"
             ],
             "description": "Only people holding a phone / an email. A phone channel (WhatsApp, SMS) wants 'phone': a person served without one is burned for nothing."
+          },
+          "segment": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            },
+            "description": "A part of the brand's own CRM, as crm-service's PeopleSegment states it (passed through verbatim, validated by crm-service): dealStages [{stage, pipeline?}], dealStatuses, tags, reached / notReached (funnel steps), includeClients, includeOptedOut. Lists OR, keys AND; clients and opted-out people are out unless stated. Names come from crm-service GET /orgs/contacts/segments.",
+            "example": {
+              "dealStages": [
+                {
+                  "pipeline": "Sales Pipeline",
+                  "stage": "Form Filled - No Appointment"
+                }
+              ]
+            }
           }
         },
         "additionalProperties": false,
-        "description": "Bind this CRM audience to the brand's merged PEOPLE matching a filter (e.g. {signedUp: true, replied: false} = product signups who never answered) instead of to an imported file. Requires provider 'crm'; exclusive with crmUploadId. Every serve passes the filter to crm-service (same brand-wide no-re-serve forever); each served person carries its phone when crm-service holds one. Validated against crm-service's serve-stats at creation (its counts become the audience's Size / Remaining). Immutable afterwards."
+        "description": "Bind this CRM audience to the brand's merged PEOPLE matching a filter (e.g. {signedUp: true, replied: false} = product signups who never answered) instead of to an imported file, optionally scoped to a `segment` of the brand's own CRM (e.g. {segment: {dealStages: [{pipeline: 'Sales Pipeline', stage: 'Form Filled - No Appointment'}]}}). Requires provider 'crm'; exclusive with crmUploadId. A segment crm-service refuses is a 400 carrying its reason. Every serve passes the filter to crm-service (same brand-wide no-re-serve forever); each served person carries its phone when crm-service holds one. Validated against crm-service's serve-stats at creation (its counts become the audience's Size / Remaining). Immutable afterwards."
       },
       "CreateLinkedinEngagementAudienceRequest": {
         "type": "object",

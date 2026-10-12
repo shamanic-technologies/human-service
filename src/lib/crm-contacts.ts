@@ -53,6 +53,23 @@ export interface CrmPeopleFilter {
   signedUp?: boolean;
   replied?: boolean;
   reachableBy?: "phone" | "email";
+  // A SEGMENT of the brand's own CRM (crm-service `PeopleSegment`: dealStages,
+  // dealStatuses, tags, reached / notReached, includeClients, includeOptedOut).
+  // crm-service owns the vocabulary and validates it (400 on a bad one); it rides
+  // here verbatim, never re-modelled. Absent ⟹ no key on the wire.
+  segment?: CrmPeopleSegment;
+}
+
+export type CrmPeopleSegment = Record<string, unknown>;
+
+// crm-service's per-stage counts of a segment naming dealStages (serve-stats
+// `byStage`). Entries overlap when a person holds deals at two stages.
+export interface CrmStageStats {
+  pipeline: string | null;
+  stage: string;
+  served: number;
+  remainingSendable: number;
+  totalSendable: number;
 }
 
 // WHICH pool a CRM serve draws from. `uploadId` = one imported file; `people` = the
@@ -71,6 +88,8 @@ export interface CrmServeStats {
   served: number;
   remainingSendable: number;
   totalSendable: number;
+  // Present only when the filter's segment names dealStages (crm-service adds it).
+  byStage?: CrmStageStats[];
 }
 
 export interface CrmServeNextResult {
@@ -190,6 +209,7 @@ export async function crmPeopleServeStats(
   if (filter.signedUp !== undefined) q.set("signedUp", String(filter.signedUp));
   if (filter.replied !== undefined) q.set("replied", String(filter.replied));
   if (filter.reachableBy !== undefined) q.set("reachableBy", filter.reachableBy);
+  if (filter.segment !== undefined) q.set("segment", JSON.stringify(filter.segment));
   let res: Response;
   try {
     res = await fetchWithConnectRetry(`${url}/orgs/contacts/serve-stats?${q.toString()}`, {
@@ -203,7 +223,7 @@ export async function crmPeopleServeStats(
     const text = await res.text().catch(() => "");
     throw new ProviderError("crm", res.status, text);
   }
-  const data = (await res.json()) as Partial<CrmServeStats>;
+  const data = (await res.json()) as Partial<CrmServeStats> & { byStage?: unknown };
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
   const served = num(data.served);
   const remainingSendable = num(data.remainingSendable);
@@ -211,7 +231,27 @@ export async function crmPeopleServeStats(
   if (served === null || remainingSendable === null || totalSendable === null) {
     throw new ProviderError("crm", res.status, `serve-stats answered without counts: ${JSON.stringify(data)}`);
   }
-  return { served, remainingSendable, totalSendable };
+  if (data.byStage === undefined) return { served, remainingSendable, totalSendable };
+  if (!Array.isArray(data.byStage)) {
+    throw new ProviderError("crm", res.status, `serve-stats byStage is not a list: ${JSON.stringify(data.byStage)}`);
+  }
+  const byStage = data.byStage.map((raw) => {
+    const e = raw as Partial<CrmStageStats>;
+    const s = num(e.served);
+    const r = num(e.remainingSendable);
+    const t = num(e.totalSendable);
+    if (typeof e.stage !== "string" || s === null || r === null || t === null) {
+      throw new ProviderError("crm", res.status, `serve-stats byStage entry without counts: ${JSON.stringify(raw)}`);
+    }
+    return {
+      pipeline: typeof e.pipeline === "string" ? e.pipeline : null,
+      stage: e.stage,
+      served: s,
+      remainingSendable: r,
+      totalSendable: t,
+    };
+  });
+  return { served, remainingSendable, totalSendable, byStage };
 }
 
 // Map a crm-service contact to the neutral Person shape the serve-next contract

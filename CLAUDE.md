@@ -1682,7 +1682,7 @@ audiences may coexist for one brand.
 crm-service (v0.39.0) serves a second pool beside imported files: the brand's
 merged PEOPLE (everyone its connected tools know, one row per human), filtered by
 WHO they are. `audiences.crm_people_filter` (jsonb `{signedUp?, replied?,
-reachableBy?: phone|email}`) binds a CRM audience to it. Same words for every
+reachableBy?: phone|email, segment?}`) binds a CRM audience to it. Same words for every
 brand and channel: no per-brand / per-channel case.
 
 - **Create**: `POST /orgs/audiences {provider: "crm", crmPeople: {...}}`. 400 when
@@ -1702,6 +1702,14 @@ brand and channel: no per-brand / per-channel case.
   `{served, remainingSendable, totalSendable}`), stored at creation and re-read
   when the audience is exercised (1 h TTL, `counted_at`) or on `refresh-count`.
   The list stays a pure DB read; never read ⟹ `null` (unknown), never 0.
+- **Segment** (crm-service v0.x, `PeopleSegment`): `crmPeople.segment` scopes the
+  audience to a part of the brand's own CRM (deal stages / statuses, tags, funnel
+  steps; e.g. Doc Dinners' warm GHL stages). Passed through VERBATIM (a free
+  record here, never re-modelled): JSON on serve-stats `segment=`, inside `people`
+  on serve-next. crm-service validates; its 400 is relayed as a **400** with its
+  reason at create. `byStage` (when the segment names dealStages) is stored in
+  `crm_people_stats` and read back as `crmPeopleByStage`. No segment ⟹ no key on
+  the wire (tested).
 - Refill treats it like any CRM audience (`crm_audience`, unmeasurable). The
   per-file auto-creation (`createCrmAudiences`) only looks at `crm_upload_id`, so a
   people-bound audience never blocks nor duplicates a file's audience.

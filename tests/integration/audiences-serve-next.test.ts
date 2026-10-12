@@ -1001,6 +1001,7 @@ describe("CRM audience bound to the people pool", () => {
     expect(q.get("signedUp")).toBe("true");
     expect(q.get("replied")).toBe("false");
     expect(q.has("reachableBy")).toBe(false);
+    expect(q.has("segment")).toBe(false);
 
     const list = await request(app).get(`/orgs/audiences?brandId=${BRAND}`).set(getAuthHeaders());
     const row = list.body.audiences.find((a: { id: string }) => a.id === res.body.audience.id);
@@ -1150,6 +1151,93 @@ describe("CRM audience bound to the people pool", () => {
     const list = await request(app).get(`/orgs/audiences?brandId=${BRAND}`).set(getAuthHeaders());
     const row = list.body.audiences.find((a: { id: string }) => a.id === create.body.audience.id);
     expect(row.availableToContactCount).toBe(10);
+  });
+
+  // A segment of the brand's own CRM (crm-service PeopleSegment), passed through
+  // verbatim on the count and on every serve.
+  const SEGMENT = { dealStages: [{ pipeline: "Sales Pipeline", stage: "Form Filled - No Appointment" }] };
+  const SEGMENT_STATS = {
+    served: 2,
+    remainingSendable: 80,
+    totalSendable: 82,
+    byStage: [
+      { pipeline: "Sales Pipeline", stage: "Form Filled - No Appointment", served: 2, remainingSendable: 80, totalSendable: 82 },
+    ],
+  };
+
+  it("creates with a segment: counted at crm-service with the segment, sized from it, per-stage counts on the read", async () => {
+    const statsUrls: string[] = [];
+    fetchSpy.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/orgs/contacts/serve-stats")) {
+        statsUrls.push(u);
+        return ok(SEGMENT_STATS);
+      }
+      throw new Error("unexpected url " + u);
+    });
+    const res = await request(app)
+      .post("/orgs/audiences")
+      .set(getAuthHeaders())
+      .send({ name: "Warm form fills", brandId: BRAND, provider: "crm", crmPeople: { segment: SEGMENT } });
+    expect(res.status).toBe(201);
+    expect(res.body.audience.crmPeople).toEqual({ segment: SEGMENT });
+    expect(statsUrls).toHaveLength(1);
+    const q = new URL(statsUrls[0]).searchParams;
+    expect(q.get("pool")).toBe("people");
+    expect(JSON.parse(q.get("segment") ?? "null")).toEqual(SEGMENT);
+    expect(q.has("signedUp")).toBe(false);
+
+    const list = await request(app).get(`/orgs/audiences?brandId=${BRAND}`).set(getAuthHeaders());
+    const row = list.body.audiences.find((a: { id: string }) => a.id === res.body.audience.id);
+    expect(row.crmPeople).toEqual({ segment: SEGMENT });
+    expect(row.sizeCount).toBe(82);
+    expect(row.availableToContactCount).toBe(80);
+    expect(row.crmPeopleByStage).toEqual(SEGMENT_STATS.byStage);
+  });
+
+  it("a sourcing-crm-contacts serve of a segment audience sends the segment to crm-service", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.includes("/orgs/contacts/serve-stats")) return ok(SEGMENT_STATS);
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({ contacts: [crmPerson("s1", "warm@clinic.com", null)], served: 1, exhausted: false });
+      }
+      throw new Error("unexpected url " + u);
+    });
+    const create = await request(app)
+      .post("/orgs/audiences")
+      .set(getAuthHeaders())
+      .send({ name: "Warm form fills serve", brandId: BRAND, provider: "crm", crmPeople: { segment: SEGMENT } });
+    expect(create.status).toBe(201);
+    const res = await serveNextForFeature(create.body.audience.id, "sourcing-crm-contacts");
+    expect(res.status).toBe(200);
+    expect(res.body.person.email).toBe("warm@clinic.com");
+    expect(bodies).toEqual([{ brandId: BRAND, limit: 1, people: { segment: SEGMENT } }]);
+  });
+
+  it("a segment crm-service refuses is a 400 carrying its reason, and no row", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).includes("/orgs/contacts/serve-stats")) {
+        return {
+          ok: false,
+          status: 400,
+          json: async () => ({}),
+          text: async () => '{"type":"validation","error":"segment invalid: dealStages Array must contain at least 1 element(s)"}',
+        };
+      }
+      throw new Error("unexpected url " + url);
+    });
+    const res = await request(app)
+      .post("/orgs/audiences")
+      .set(getAuthHeaders())
+      .send({ name: "Bad segment", brandId: BRAND, provider: "crm", crmPeople: { segment: { dealStages: [] } } });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("segment invalid: dealStages");
+    expect(res.body.source).toBe("crm-service");
+    const list = await request(app).get(`/orgs/audiences?brandId=${BRAND}`).set(getAuthHeaders());
+    expect(list.body.audiences.some((a: { name: string }) => a.name === "Bad segment")).toBe(false);
   });
 });
 
