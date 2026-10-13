@@ -8,6 +8,7 @@ import {
   boolean,
   doublePrecision,
   bigint,
+  bigserial,
   index,
   uniqueIndex,
   primaryKey,
@@ -402,6 +403,9 @@ export const people = pgTable(
     companyDomain: text("company_domain"),
     companyName: text("company_name"),
     title: text("title"),
+    // The fleet-wide human this org's person is (migration 0046). Nullable until
+    // the people link sweep reaches the row (src/services/human-identity-people.ts).
+    humanId: uuid("human_id").references((): AnyPgColumn => humanIdentities.id),
     firstSeenAt: timestamp("first_seen_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -410,6 +414,7 @@ export const people = pgTable(
       .defaultNow(),
   },
   (table) => [
+    index("idx_people_human").on(table.humanId),
     uniqueIndex("idx_people_org_email").on(table.orgId, table.emailNorm),
     index("idx_people_org_linkedin").on(table.orgId, table.linkedinUrlNorm),
     index("idx_people_org_apollo").on(table.orgId, table.apolloPersonId),
@@ -1213,3 +1218,108 @@ export const suppressionSendSyncState = pgTable("suppression_send_sync_state", {
   cursor: bigint("cursor", { mode: "number" }).notNull().default(0),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// --- One human across the fleet (migration 0046, src/services/human-identity.ts) ---
+//
+// `people` is one person PER ORG; a human identity is the real human behind them,
+// shared by every org and service. Atomic rows, never rewritten: merges and
+// splits are `human_links` statements, and the human an org sees is the
+// connected component of the links visible to it, named by its oldest member.
+
+export const humanIdentities = pgTable("human_identities", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  createdBy: text("created_by").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .default(sql`clock_timestamp()`),
+});
+
+// Fleet-wide keys, unique: email | phone (PROOF) | linkedin_url |
+// apollo_person_id | apify_person_id (resolve only).
+export const humanIdentityKeys = pgTable(
+  "human_identity_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    humanId: uuid("human_id")
+      .notNull()
+      .references(() => humanIdentities.id),
+    kind: text("kind").notNull(),
+    valueNorm: text("value_norm").notNull(),
+    source: text("source").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_human_identity_keys_kind_value").on(table.kind, table.valueNorm),
+    index("idx_human_identity_keys_human").on(table.humanId),
+  ]
+);
+
+// Merge ('same') / split ('distinct') statements, a < b, scope fleet | org.
+export const humanLinks = pgTable(
+  "human_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    relation: text("relation").notNull(),
+    scope: text("scope").notNull(),
+    orgId: uuid("org_id"),
+    aHumanId: uuid("a_human_id")
+      .notNull()
+      .references(() => humanIdentities.id),
+    bHumanId: uuid("b_human_id")
+      .notNull()
+      .references(() => humanIdentities.id),
+    basis: text("basis").notNull(),
+    proofKind: text("proof_kind"),
+    proofValueNorm: text("proof_value_norm"),
+    judgedBy: text("judged_by").notNull(),
+    statedBy: text("stated_by").notNull(),
+    evidence: text("evidence").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    withdrawnAt: timestamp("withdrawn_at", { withTimezone: true }),
+    withdrawnBy: text("withdrawn_by"),
+    withdrawReason: text("withdraw_reason"),
+  },
+  (table) => [
+    index("idx_human_links_a").on(table.aHumanId).where(sql`withdrawn_at IS NULL`),
+    index("idx_human_links_b").on(table.bHumanId).where(sql`withdrawn_at IS NULL`),
+  ]
+);
+
+export type HumanLink = typeof humanLinks.$inferSelect;
+
+// Facts about the human wherever they work: opt_out | do_not_contact.
+export const humanFacts = pgTable(
+  "human_facts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    humanId: uuid("human_id")
+      .notNull()
+      .references(() => humanIdentities.id),
+    kind: text("kind").notNull(),
+    statedByOrgId: uuid("stated_by_org_id"),
+    source: text("source").notNull(),
+    evidence: text("evidence").notNull(),
+    statedAt: timestamp("stated_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    withdrawnAt: timestamp("withdrawn_at", { withTimezone: true }),
+    withdrawnBy: text("withdrawn_by"),
+    withdrawReason: text("withdraw_reason"),
+  },
+  (table) => [index("idx_human_facts_human").on(table.humanId)]
+);
+
+export type HumanFact = typeof humanFacts.$inferSelect;
+
+// Append-only feed (cursor = id). org_id NULL = fleet event.
+export const humanIdentityEvents = pgTable(
+  "human_identity_events",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    type: text("type").notNull(),
+    orgId: uuid("org_id"),
+    humanIds: uuid("human_ids").array().notNull(),
+    data: jsonb("data").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_human_identity_events_org").on(table.orgId, table.id)]
+);

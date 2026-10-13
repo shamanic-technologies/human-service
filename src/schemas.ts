@@ -4068,6 +4068,9 @@ export const PersonWithEmailsSchema = z
     lastName: z.string().nullable(),
     primaryEmail: z.string().nullable(),
     emails: PersonEmailsField,
+    humanId: z.string().uuid().nullable().openapi({
+      description: "The fleet-wide human this person is, in this org's view (GET /internal/human-identities/{humanId}). null = not linked yet (the link sweep runs every 2 min).",
+    }),
   })
   .openapi("PersonWithEmails");
 
@@ -4475,5 +4478,303 @@ registry.registerPath({
     404: { description: "Audience not found for this org and brand", content: { "application/json": { schema: ErrorSchema } } },
     422: { description: "The person cannot be judged", content: { "application/json": { schema: ErrorSchema } } },
     502: { description: "crm-service failed", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+// --- Internal: ONE human across the fleet (src/services/human-identity.ts) ---
+//
+// One id per real human for every service and every org. human-service alone
+// decides "same human?": a merge proven by a shared email or phone holds for the
+// whole fleet (made by resolve); a judgment merge (a person, Jev) holds only for
+// the org that stated it. Merges and splits are withdrawable statements.
+
+const OrgIdField = z.string().regex(LAX_UUID_REGEX, "orgId must be a valid UUID");
+
+export const HumanIdParamsSchema = z.object({ humanId: z.string().uuid() });
+
+export const ResolveHumanRequestSchema = z
+  .object({
+    orgId: OrgIdField.optional().openapi({
+      description: "The org asking. Its own judgment merges/splits apply to the answer. Omitted = the fleet view.",
+    }),
+    emails: z.array(z.string().min(1)).max(50).optional().openapi({ description: "PROOF keys: an address held by another human merges the two, fleet-wide." }),
+    phones: z.array(z.string().min(1)).max(50).optional().openapi({ description: "PROOF keys, E.164 (+<country><number>); 400 otherwise." }),
+    linkedinUrls: z.array(z.string().min(1)).max(10).optional().openapi({ description: "Resolve only: never merges." }),
+    providerPersonIds: z
+      .array(z.object({ provider: z.enum(["apollo", "apify"]), id: z.string().min(1) }))
+      .max(10)
+      .optional()
+      .openapi({ description: "Resolve only: never merges." }),
+    source: z.string().min(1).openapi({ description: "The service stating these keys are ONE contact (e.g. crm-service)." }),
+    create: z.boolean().openapi({
+      description: "true = create the human if nobody holds a key, attach the keys nobody holds, merge on a shared proof key. false = read only.",
+    }),
+  })
+  .openapi("ResolveHumanRequest");
+
+export const ResolveHumanResponseSchema = z
+  .object({
+    humanId: z.string().uuid().nullable().openapi({ description: "The human in the asking org's view; null only with create=false and no key known." }),
+    atomicHumanId: z.string().uuid().nullable().openapi({ description: "The atomic human the keys sit on (stable even when a merge renames the human)." }),
+    created: z.boolean(),
+    mergedHumanIds: z.array(z.string().uuid()).openapi({ description: "Humans this call merged in, fleet-wide, on a shared proof key." }),
+    separatedHumanIds: z.array(z.string().uuid()).openapi({ description: "Humans sharing a proof key that a split statement keeps apart (no merge made)." }),
+  })
+  .openapi("ResolveHumanResponse");
+
+const HumanLinkSchema = z
+  .object({
+    linkId: z.string().uuid(),
+    relation: z.enum(["same", "distinct"]).openapi({ description: "same = merge, distinct = split." }),
+    scope: z.enum(["fleet", "org"]),
+    orgId: z.string().nullable(),
+    humanIds: z.array(z.string().uuid()).openapi({ description: "The two atomic humans the statement joins or separates." }),
+    basis: z.string().openapi({ description: "shared_email | shared_phone (proof) | judgment." }),
+    judgedBy: z.string(),
+    statedBy: z.string(),
+    evidence: z.string(),
+    createdAt: z.string(),
+  })
+  .openapi("HumanLink");
+
+export const HumanViewSchema = z
+  .object({
+    humanId: z.string().uuid().openapi({ description: "The id the human goes by in this view (oldest atomic member)." }),
+    memberHumanIds: z.array(z.string().uuid()).openapi({ description: "Every atomic human that is this human in this view." }),
+    emails: z.array(z.string()),
+    phones: z.array(z.string()),
+    linkedinUrls: z.array(z.string()),
+    providerPersonIds: z.array(z.object({ provider: z.enum(["apollo", "apify"]), id: z.string() })),
+    facts: z.array(
+      z.object({
+        factId: z.string().uuid(),
+        humanId: z.string().uuid(),
+        kind: z.string(),
+        statedByOrgId: z.string().nullable(),
+        source: z.string(),
+        evidence: z.string(),
+        statedAt: z.string(),
+      })
+    ).openapi({ description: "Active facts carried on the human (opt_out, do_not_contact), whoever stated them." }),
+    people: z.array(z.object({ orgId: z.string(), personId: z.string().uuid() })).openapi({
+      description: "The asking org's per-org person rows that are this human ([] without orgId).",
+    }),
+    links: z.array(HumanLinkSchema).openapi({ description: "Active merge/split statements visible in this view touching the human." }),
+  })
+  .openapi("HumanView");
+
+export const HumanViewQuerySchema = z.object({
+  orgId: OrgIdField.optional().openapi({ description: "View of this org (its judgment links apply). Omitted = fleet view." }),
+});
+
+export const StateHumanLinkRequestSchema = z
+  .object({
+    orgId: OrgIdField.optional().openapi({
+      description: "The org stating it; the statement holds for that org only. Omitted = fleet, allowed for a split only (a fleet merge needs proof: resolve both keys together).",
+    }),
+    relation: z.enum(["same", "distinct"]),
+    humanIds: z.array(z.string().uuid()).length(2),
+    judgedBy: z.string().min(1).openapi({ description: "Who judged: 'person:<userId>', 'jev', a service name." }),
+    statedBy: z.string().min(1).openapi({ description: "The service recording it." }),
+    evidence: z.string().min(1),
+  })
+  .openapi("StateHumanLinkRequest");
+
+export const StateHumanLinkResponseSchema = z
+  .object({
+    changed: z.boolean().openapi({ description: "false = already one human in this view (merge), nothing written." }),
+    link: HumanLinkSchema.nullable(),
+    humanIds: z.array(z.string().uuid()).openapi({ description: "The resulting human(s) in this view: one after a merge, two after a split." }),
+  })
+  .openapi("StateHumanLinkResponse");
+
+export const HumanLinkIdParamsSchema = z.object({ linkId: z.string().uuid() });
+
+export const WithdrawHumanLinkRequestSchema = z
+  .object({
+    orgId: OrgIdField.optional().openapi({ description: "Required for an org statement (only its org withdraws it); omitted for a fleet one." }),
+    withdrawnBy: z.string().min(1),
+    reason: z.string().min(1),
+  })
+  .openapi("WithdrawHumanLinkRequest");
+
+export const WithdrawHumanLinkResponseSchema = z
+  .object({ changed: z.boolean(), link: HumanLinkSchema })
+  .openapi("WithdrawHumanLinkResponse");
+
+export const StateHumanFactRequestSchema = z
+  .object({
+    kind: z.enum(["opt_out", "do_not_contact"]),
+    statedByOrgId: OrgIdField.optional().openapi({ description: "The org the human said it to, when known." }),
+    source: z.string().min(1).openapi({ description: "Service recording it (e.g. instantly-service)." }),
+    evidence: z.string().min(1),
+    statedAt: z.string().datetime().optional().openapi({ description: "When the human said it; omitted = now." }),
+  })
+  .openapi("StateHumanFactRequest");
+
+const HumanFactSchema = z
+  .object({
+    factId: z.string().uuid(),
+    humanId: z.string().uuid(),
+    kind: z.string(),
+    statedByOrgId: z.string().nullable(),
+    source: z.string(),
+    evidence: z.string(),
+    statedAt: z.string(),
+    withdrawnAt: z.string().nullable(),
+  })
+  .openapi("HumanFact");
+
+export const HumanFactResponseSchema = z.object({ changed: z.boolean(), fact: HumanFactSchema }).openapi("HumanFactResponse");
+
+export const HumanFactIdParamsSchema = z.object({ factId: z.string().uuid() });
+
+export const WithdrawHumanFactRequestSchema = z
+  .object({ withdrawnBy: z.string().min(1), reason: z.string().min(1) })
+  .openapi("WithdrawHumanFactRequest");
+
+export const HumanEventsQuerySchema = z.object({
+  after: z.coerce.number().int().min(0).optional().openapi({ description: "Cursor: events after this id. Omitted = from the start." }),
+  limit: z.coerce.number().int().min(1).max(1000).optional().openapi({ description: "Default 500, max 1000." }),
+  orgId: OrgIdField.optional().openapi({ description: "Fleet events + this org's own. Omitted = every event (each names its orgId)." }),
+});
+
+export const HumanEventsResponseSchema = z
+  .object({
+    events: z.array(
+      z.object({
+        id: z.string(),
+        type: z.enum([
+          "human.created",
+          "human.keys_attached",
+          "human.linked",
+          "human.separated",
+          "human.link_withdrawn",
+          "human.fact_stated",
+          "human.fact_withdrawn",
+        ]),
+        orgId: z.string().nullable().openapi({ description: "null = fleet event (every org); set = applies to that org only." }),
+        humanIds: z.array(z.string().uuid()),
+        data: z.record(z.string(), z.unknown()),
+        createdAt: z.string(),
+      })
+    ),
+    nextCursor: z.string(),
+    hasMore: z.boolean(),
+  })
+  .openapi("HumanEventsResponse");
+
+export const LinkPeopleQuerySchema = z.object({
+  dryRun: z.enum(["true", "false"]).optional(),
+  async: z.enum(["true", "false"]).optional(),
+});
+
+const humanErrors = {
+  400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+  401: { description: "Unauthorized" },
+};
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/human-identities/resolve",
+  summary: "Who is this? Resolve emails / phones / LinkedIn / provider ids to ONE fleet-wide human id (create on demand).",
+  description:
+    "The keys given together are one contact. A shared email or phone merges two humans for the whole fleet, unless a split keeps them apart. Same email from two orgs = same humanId.",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: ResolveHumanRequestSchema } } } },
+  responses: {
+    200: { description: "The human", content: { "application/json": { schema: ResolveHumanResponseSchema } } },
+    ...humanErrors,
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/human-identities/{humanId}",
+  summary: "One human: every address, phone, profile, provider id, fact, and the asking org's person rows. A merged-away id answers with the human it is now.",
+  security: [{ apiKey: [] }],
+  request: { params: HumanIdParamsSchema, query: HumanViewQuerySchema },
+  responses: {
+    200: { description: "The human", content: { "application/json": { schema: HumanViewSchema } } },
+    ...humanErrors,
+    404: { description: "Unknown human", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/human-identities/links",
+  summary: "State a merge (same) or a split (distinct) of two humans. With orgId: holds for that org only (judgment). Without: fleet split only.",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: StateHumanLinkRequestSchema } } } },
+  responses: {
+    200: { description: "Recorded", content: { "application/json": { schema: StateHumanLinkResponseSchema } } },
+    ...humanErrors,
+    404: { description: "Unknown human", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Split leaves them one human through other links, or a merge crosses a split", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/human-identities/links/{linkId}/withdraw",
+  summary: "Withdraw a merge or split statement (the undo). Idempotent.",
+  security: [{ apiKey: [] }],
+  request: { params: HumanLinkIdParamsSchema, body: { content: { "application/json": { schema: WithdrawHumanLinkRequestSchema } } } },
+  responses: {
+    200: { description: "Withdrawn", content: { "application/json": { schema: WithdrawHumanLinkResponseSchema } } },
+    ...humanErrors,
+    404: { description: "Unknown link in this scope", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/human-identities/{humanId}/facts",
+  summary: "State a fact carried on the human wherever they work (opt_out, do_not_contact).",
+  security: [{ apiKey: [] }],
+  request: { params: HumanIdParamsSchema, body: { content: { "application/json": { schema: StateHumanFactRequestSchema } } } },
+  responses: {
+    200: { description: "Stated", content: { "application/json": { schema: HumanFactResponseSchema } } },
+    ...humanErrors,
+    404: { description: "Unknown human", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/human-identities/facts/{factId}/withdraw",
+  summary: "Withdraw a fact (e.g. the human asked to hear from us again). Idempotent.",
+  security: [{ apiKey: [] }],
+  request: { params: HumanFactIdParamsSchema, body: { content: { "application/json": { schema: WithdrawHumanFactRequestSchema } } } },
+  responses: {
+    200: { description: "Withdrawn", content: { "application/json": { schema: HumanFactResponseSchema } } },
+    ...humanErrors,
+    404: { description: "Unknown fact", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/human-identities/events",
+  summary: "Feed of identity changes (created, keys attached, merged, split, withdrawn, facts) by cursor, so consumers follow merges and splits.",
+  security: [{ apiKey: [] }],
+  request: { query: HumanEventsQuerySchema },
+  responses: {
+    200: { description: "A page of events", content: { "application/json": { schema: HumanEventsResponseSchema } } },
+    ...humanErrors,
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/human-identities/link-people",
+  summary: "Link every per-org person to its fleet human now (also every 2 min). ?dryRun=true counts, ?async=true answers 202.",
+  security: [{ apiKey: [] }],
+  request: { query: LinkPeopleQuerySchema },
+  responses: {
+    200: { description: "Counts", content: { "application/json": { schema: z.record(z.string(), z.unknown()) } } },
+    202: { description: "Started" },
+    ...humanErrors,
   },
 });
