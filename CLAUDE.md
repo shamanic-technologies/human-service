@@ -30,6 +30,12 @@ Backend service that owns two distinct concerns:
    costed — OR **bound to crm-service's PEOPLE pool under a filter**
    (`crm_people_filter`, e.g. product signups who never answered). See below.
 
+4. **Fleet-wide human identity** (LEAD-REFONTE-1013) — the ONE place every
+   service asks "who is this?": one `humanId` per real human across every org
+   and tool, with merge / split as first-class statements. See "One human across
+   the fleet" below. It never says what a human IS to anyone (client, prospect):
+   crm-service owns the relation, lead-service the funnel position.
+
 Stack: Express + Drizzle (Postgres) + Zod + zod-to-openapi. Deployed as a Docker
 container (`Dockerfile`) on the Hetzner box — a 5-minute cron runs
 `./deploy.sh --all`, health-checks the new container and rolls back
@@ -75,6 +81,13 @@ section — the port binds first).
 | Internal | `POST /internal/brands/{brandId}/memberships/by-email` | apiKey | Same memberships keyed by EMAIL (body `{orgId, emails[]}`, 25 MB parser, mounted before the global json) → `byEmail[raw] = {personId, memberships[]} \| null`. For lead-service's lead pages / whole-brand walks |
 | POST | `/internal/audiences/still-fits` | apiKey | Does ONE person STILL fit an audience right now (STILL-FITS-1012; lead-service at stock handover). Body `{orgId, audienceId, brandId, email, personId?}` -> 200 `{fits, reason?, basis, failed?}`. CRM audiences ask crm-service `POST /orgs/contacts/still-fits` (the SAME clauses its serve applies, never re-implemented here); search audiences answer from membership + screen verdicts (no paid re-search). A question: nothing marked, bought or suppressed. 404 unknown audience; 422 person cannot be judged (never read as fits); 502 crm-service down. |
 | Internal | `GET /internal/brands/{brandId}/audience-overlap` (`?orgId`) | apiKey | Per audience: members, served vs found-while-taken, how many another audience / list found too, + brand multi-source counts |
+| Internal | `POST /internal/human-identities/resolve` | apiKey | Emails / phones / LinkedIn / provider ids -> ONE fleet `humanId` (`create` true/false). Shared email or phone merges fleet-wide. See "One human across the fleet" |
+| Internal | `GET /internal/human-identities/{humanId}` (`?orgId`) | apiKey | The human in that org's view: every key, active facts, the org's person rows, visible links |
+| Internal | `POST /internal/human-identities/links` | apiKey | State a merge (`same`) or split (`distinct`); `orgId` = that org only; no `orgId` = fleet split only (fleet merge = 400) |
+| Internal | `POST /internal/human-identities/links/{linkId}/withdraw` | apiKey | Undo a merge / split statement (org statement: same `orgId` only) |
+| Internal | `POST /internal/human-identities/{humanId}/facts` + `POST .../facts/{factId}/withdraw` | apiKey | Facts carried on the human: `opt_out`, `do_not_contact` |
+| Internal | `GET /internal/human-identities/events` (`?after&limit&orgId`) | apiKey | Cursor feed of created / keys_attached / linked / separated / link_withdrawn / fact_* |
+| Internal | `POST /internal/human-identities/link-people` (`?dryRun&async`) | apiKey | Link every per-org person to its human now (also every 2 min) |
 | Internal | `GET /internal/people/by-email` (`?orgId&email`) | apiKey | The person holding ANY of their addresses → `{person: {personId, primaryEmail, emails[]} \| null}`. See "One person, several addresses" |
 | Internal | `GET /internal/people/{personId}` (`?orgId`) | apiKey | One person with every address they hold |
 | Internal | `POST /internal/people/{personId}/emails` | apiKey | Attach an extra address (explicit act, `evidence` + `attachedBy` required). Idempotent; 409 when another person holds it |
@@ -828,6 +841,56 @@ address and answered from her own practice's.
 - Brand transfer copies a moved person's addresses. Tests:
   `tests/integration/person-emails.test.ts`; unit suites that mock
   `suppression.js` mock `person-emails.js` too.
+
+### One human across the fleet (`src/services/human-identity.ts`, LEAD-REFONTE-1013)
+
+Owner 2026-10-13: the person lives here, the company in brand-service, the lead
+(human x company) in lead-service. human-service is the ONLY service deciding
+"same human?" (dedup, merge, split). `people` stays one row PER ORG and every
+existing read is unchanged; `people.human_id` (migration `0046`) names the human.
+
+- **Model**: `human_identities` = atomic humans, never rewritten or deleted.
+  `human_identity_keys` = fleet-unique keys: `email`, `phone` (E.164, else 400)
+  are PROOF; `linkedin_url`, `apollo_person_id`, `apify_person_id` only resolve
+  (a conflict never merges). `human_links` = statements between two atomic humans
+  (`a < b`): `same` (merge) / `distinct` (split), scope `fleet` | `org`, with
+  basis (`shared_email` | `shared_phone` | `judgment`), judgedBy, statedBy,
+  evidence, withdrawable. The human an org sees = connected component of the
+  `same` links visible to it (fleet + its own), minus pairs a visible `distinct`
+  cuts, named by its OLDEST member (`created_at` = `clock_timestamp()`). So a
+  merged-away id keeps answering (GET returns the human it is now) and every
+  merge / split is a row, not a data move.
+- **Scope rule (owner)**: a merge proven by a shared email / phone is automatic
+  and fleet-wide: `resolve` with keys held by different humans links them (keys
+  given together = one contact, per the caller's `source`). A judgment merge (a
+  person, Jev) is `POST /links` WITH `orgId` and holds for that org only; a fleet
+  `same` from a caller is refused (400). A fleet `distinct` (staff) separates a
+  proven merge and blocks the automatic re-merge until withdrawn; an org
+  `distinct` cuts it for that org only. A `distinct` that leaves the pair joined
+  through other links is a 409 (name the atomic humans the links join).
+- **Resolve** returns `humanId` (in the asking org's view), `atomicHumanId`
+  (where the keys sit; stable), `created`, `mergedHumanIds`, `separatedHumanIds`.
+  `create:false` is read-only. Same email from two orgs = same `humanId`.
+- **Facts** (`opt_out`, `do_not_contact`) sit on the human wherever they work,
+  with `statedByOrgId` + source + evidence; read on the whole component; what
+  they mean is the consumer's call. Existing opt-out / won gates are unchanged
+  (instantly-service / lead-service still own those records).
+- **Feed** `GET /internal/human-identities/events`: bigserial cursor; `orgId`
+  NULL = fleet event, set = that org's only (`?orgId` returns fleet + that org's;
+  omitted = all). Consumers follow merges / splits from it.
+- **People link sweep** (`src/services/human-identity-people.ts`): the ONLY
+  writer of `people.human_id`, off the serve path (the serve cannot fail on
+  identity). Every 2 min, first tick 60s after boot, timers only,
+  `HUMAN_IDENTITY_LINK_INTERVAL_MS=0` off; batches of 200 people per tx. A
+  person brings its primary + SERVED addresses (proof), LinkedIn + provider ids
+  (resolve); an ATTACHED address (an org's statement) gets its own human and an
+  org-scoped `same` link. Also revisits linked people holding an address no human
+  holds yet. Brand transfer copies `human_id` with a copied person.
+- **Concurrency**: every write takes one advisory xact lock
+  (`human-identity-writes`); reads take none.
+- **Reads carrying it (additive)**: `GET /internal/people/{id}` and
+  `/by-email` answer `humanId` (org view, null until linked).
+- Tests: `tests/integration/human-identities.test.ts`.
 
 ### Multi-source provenance — a person carries EVERY source that found them
 

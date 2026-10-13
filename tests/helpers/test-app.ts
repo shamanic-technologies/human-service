@@ -14,6 +14,7 @@ import sourceCampaignRoutes from "../../src/routes/source-campaigns.js";
 import leadSourcingRoutes from "../../src/routes/lead-sourcing.js";
 import listsRoutes from "../../src/routes/lists.js";
 import personEmailRoutes from "../../src/routes/people-emails.js";
+import humanIdentityRoutes from "../../src/routes/human-identities.js";
 import peopleRoutes from "../../src/routes/people.js";
 import audiencesRoutes from "../../src/routes/audiences.js";
 import internalAudiencesRoutes from "../../src/routes/internal-audiences.js";
@@ -47,6 +48,7 @@ export function createTestApp() {
   app.use(sendSuppressionSyncRoutes);
   app.use(listsRoutes);
   app.use(personEmailRoutes);
+  app.use(humanIdentityRoutes);
   app.use(peopleRoutes);
   app.use(audiencesRoutes);
 
