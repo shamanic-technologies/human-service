@@ -2999,6 +2999,13 @@
             "type": "string",
             "format": "uuid",
             "description": "human-service's canonical person id for the served person: the same `personId` GET /orgs/audiences/{id}/members returns for them. Durable across providers (never a provider id). Present on every 'served' answer; omitted when 'exhausted'."
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "no_recent_posts"
+            ],
+            "description": "On 'exhausted' only, when it is NOT exhaustion of the pool. no_recent_posts = a linkedin_engagement audience whose competitor pages hold no post inside its window (the pages were read): the audience fills as soon as a competitor posts. Absent on every other answer."
           }
         },
         "required": [
@@ -3056,9 +3063,10 @@
             "enum": [
               "pool_exhausted",
               "yield_exhausted",
-              "unreachable_by_provider"
+              "unreachable_by_provider",
+              "no_recent_posts"
             ],
-            "description": "On 'exhausted' only. pool_exhausted = the provider has nobody new. yield_exhausted = over the last 1,000 decisions under the latest `basis`, fewer than 3 were reveals. unreachable_by_provider = the request's `reachableBy` names a channel this provider's people never carry (nothing popped or offered)."
+            "description": "On 'exhausted' only. pool_exhausted = the provider has nobody new. yield_exhausted = over the last 1,000 decisions under the latest `basis`, fewer than 3 were reveals. unreachable_by_provider = the request's `reachableBy` names a channel this provider's people never carry (nothing popped or offered). no_recent_posts = a linkedin_engagement audience whose competitor pages hold no post inside its window (the pages were read): NOT exhaustion, the audience fills as soon as a competitor posts."
           },
           "target": {
             "type": "object",

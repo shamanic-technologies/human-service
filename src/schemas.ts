@@ -1529,6 +1529,10 @@ export const ServeNextResponseSchema = z
       description:
         "human-service's canonical person id for the served person: the same `personId` GET /orgs/audiences/{id}/members returns for them. Durable across providers (never a provider id). Present on every 'served' answer; omitted when 'exhausted'.",
     }),
+    reason: z.enum(["no_recent_posts"]).optional().openapi({
+      description:
+        "On 'exhausted' only, when it is NOT exhaustion of the pool. no_recent_posts = a linkedin_engagement audience whose competitor pages hold no post inside its window (the pages were read): the audience fills as soon as a competitor posts. Absent on every other answer.",
+    }),
   })
   .openapi("ServeNextResponse");
 
@@ -1583,9 +1587,9 @@ export const NextCandidateResponseSchema = z
         "'candidate' ⟹ a free candidate, every free check applied (brand suppression, opt-outs, won people, own company, hard bounces, people already rejected for this audience); nothing billed. 'exhausted' ⟹ none left (`reason`). 'pending' ⟹ the per-call walk budget ran out; call again.",
     }),
     candidate: AudienceCandidateViewSchema.nullable(),
-    reason: z.enum(["pool_exhausted", "yield_exhausted", "unreachable_by_provider"]).optional().openapi({
+    reason: z.enum(["pool_exhausted", "yield_exhausted", "unreachable_by_provider", "no_recent_posts"]).optional().openapi({
       description:
-        "On 'exhausted' only. pool_exhausted = the provider has nobody new. yield_exhausted = over the last 1,000 decisions under the latest `basis`, fewer than 3 were reveals. unreachable_by_provider = the request's `reachableBy` names a channel this provider's people never carry (nothing popped or offered).",
+        "On 'exhausted' only. pool_exhausted = the provider has nobody new. yield_exhausted = over the last 1,000 decisions under the latest `basis`, fewer than 3 were reveals. unreachable_by_provider = the request's `reachableBy` names a channel this provider's people never carry (nothing popped or offered). no_recent_posts = a linkedin_engagement audience whose competitor pages hold no post inside its window (the pages were read): NOT exhaustion, the audience fills as soon as a competitor posts.",
     }),
     target: ScreenTargetSchema,
   })

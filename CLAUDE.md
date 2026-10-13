@@ -1803,6 +1803,14 @@ owns the criterion, the harvest, the per-audience no-repeat and the spend.
   `engagement` block (only on this kind; the other three keep no such key).
   serve-next stamps `x-audience-id` = THIS audience on the apollo calls, because
   apollo-service keys the no-repeat on it. `done` ⟹ exhausted.
+- **"Done" is not always exhaustion** (LI-ENGAGEMENT-NEVER-STARTED-1013): apollo-service
+  (v0.39.50) says WHY on a done answer, `doneReason` = `no_recent_posts` | `no_engagers` |
+  `all_served`. `no_recent_posts` (the competitor pages hold no post in the window; they WERE
+  read) ⟹ serve-next and candidates/next answer `exhausted` + `reason: "no_recent_posts"`,
+  NO `reachable_count` persisted (size stays unknown), lead-service names it instead of
+  `audience_exhausted` (campaign not stopped). The other two stay honest exhaustion. Prod
+  2026-10-13: Doc Dinners' ChiroCandy / MaxLiving pages have zero posts (scrapecreators and
+  harvestapi agree).
 - **No Apollo count / dry-run / preview exists** (named 400 there): refresh-count
   and the stale refresh skip it, previews answer `provider_not_previewable`,
   refill treats it as unmeasurable. The list OMITS `sizeCount` /
