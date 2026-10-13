@@ -21,6 +21,11 @@ import {
   sourceCampaignAudienceHolds,
   suppressionSendSyncState,
   catchAllRereaches,
+  humanIdentities,
+  humanIdentityKeys,
+  humanLinks,
+  humanFacts,
+  humanIdentityEvents,
 } from "../../src/db/schema.js";
 import { sql } from "../../src/db/index.js";
 
@@ -46,6 +51,11 @@ export async function cleanTestData() {
   await db.delete(sourceCampaignStates);
   await db.delete(audiences);
   await db.delete(people);
+  await db.delete(humanIdentityEvents);
+  await db.delete(humanFacts);
+  await db.delete(humanLinks);
+  await db.delete(humanIdentityKeys);
+  await db.delete(humanIdentities);
 }
 
 export async function closeDb() {

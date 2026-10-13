@@ -25,6 +25,7 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { people, personEmails } from "../db/schema.js";
 import { normalizeEmail } from "./suppression.js";
+import { humanIdOfPerson } from "./human-identity.js";
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type Exec = typeof db | Tx;
@@ -174,6 +175,7 @@ export interface PersonWithEmails {
   lastName: string | null;
   primaryEmail: string | null;
   emails: PersonEmailView[];
+  humanId: string | null;
 }
 
 export async function getPersonWithEmails(
@@ -195,6 +197,7 @@ export async function getPersonWithEmails(
     lastName: p.lastName,
     primaryEmail: p.emailNorm,
     emails,
+    humanId: await humanIdOfPerson(db, orgId, p.humanId),
   };
 }
 

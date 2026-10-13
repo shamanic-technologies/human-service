@@ -15,6 +15,7 @@ import sourceCampaignRoutes from "./routes/source-campaigns.js";
 import leadSourcingRoutes from "./routes/lead-sourcing.js";
 import listsRoutes from "./routes/lists.js";
 import personEmailRoutes from "./routes/people-emails.js";
+import humanIdentityRoutes from "./routes/human-identities.js";
 import peopleRoutes from "./routes/people.js";
 import audiencesRoutes from "./routes/audiences.js";
 import internalAudiencesRoutes from "./routes/internal-audiences.js";
@@ -27,6 +28,7 @@ import { startAudienceRefillSweep } from "./services/audience-refill.js";
 import { startCompetitorEngagementSweep } from "./services/competitor-engagement-audience.js";
 import { startSourceCampaignReconcile } from "./services/source-campaigns.js";
 import { startSendSuppressionSync } from "./services/send-suppression-sync.js";
+import { startHumanLinkSweep } from "./services/human-identity-people.js";
 
 // Process-level safety net: a single request must NEVER crash-loop the whole
 // service. Before this, an unawaited async rejection (e.g. a bad `uuid` param →
@@ -71,6 +73,7 @@ app.use(suppressionRecoveryRoutes);
 app.use(sendSuppressionSyncRoutes);
 app.use(listsRoutes);
 app.use(personEmailRoutes);
+app.use(humanIdentityRoutes);
 app.use(peopleRoutes);
 app.use(audiencesRoutes);
 
@@ -123,6 +126,10 @@ if (process.env.NODE_ENV !== "test") {
   // RECONTACT-LOOP-1011: the per-brand re-contact window runs from the last
   // real EMAIL (instantly-service fact feed), not only the last serve. Timers only.
   startSendSuppressionSync();
+
+  // LEAD-REFONTE-1013: every per-org person hangs off ONE fleet-wide human
+  // (people.human_id), linked here, off the serve path. Timers only.
+  startHumanLinkSweep();
 }
 
 export default app;

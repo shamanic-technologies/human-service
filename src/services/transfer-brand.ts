@@ -420,10 +420,10 @@ async function movePeopleAndMembers(
   const copiedPeople = await tx`
     INSERT INTO people (id, org_id, email_norm, linkedin_url_norm, apollo_person_id,
       apify_person_id, first_name, last_name, full_name, company_domain, company_name,
-      title, first_seen_at, last_seen_at)
+      title, human_id, first_seen_at, last_seen_at)
     SELECT m.new_id, ${toOrg}, p.email_norm, p.linkedin_url_norm, p.apollo_person_id,
       p.apify_person_id, p.first_name, p.last_name, p.full_name, p.company_domain,
-      p.company_name, p.title, p.first_seen_at, p.last_seen_at
+      p.company_name, p.title, p.human_id, p.first_seen_at, p.last_seen_at
     FROM transfer_person_map m JOIN people p ON p.id = m.old_id
     WHERE NOT m.matched AND m.shared
     RETURNING id`;
