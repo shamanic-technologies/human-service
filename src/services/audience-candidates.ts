@@ -72,6 +72,7 @@ import {
   needsApolloPointerBuild,
   hasApolloNativeFilters,
   persistReachableCountOnExhaustion,
+  noRecentPostsAnswer,
   servedWithPersonId,
   SERVE_NEXT_BUDGET_MS,
 } from "./audiences.js";
@@ -121,7 +122,7 @@ export type NextCandidateResult =
   | {
       status: "exhausted";
       candidate: null;
-      reason: "pool_exhausted" | "yield_exhausted" | "unreachable_by_provider";
+      reason: "pool_exhausted" | "yield_exhausted" | "unreachable_by_provider" | "no_recent_posts";
       target: { text: string; field: "target_text" | "nl_prompt" } | null;
     }
   | {
@@ -370,6 +371,10 @@ export async function nextCandidate(
         identity,
       });
       if (search.people.length === 0) {
+        if (search.noRecentPosts) {
+          noRecentPostsAnswer(identity.orgId, audience.id, "candidates");
+          return { status: "exhausted", candidate: null, reason: "no_recent_posts", target };
+        }
         await persistReachableCountOnExhaustion(identity.orgId, audience.id);
         return { status: "exhausted", candidate: null, reason: "pool_exhausted", target };
       }

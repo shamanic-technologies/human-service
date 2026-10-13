@@ -1240,7 +1240,7 @@ router.post(
     try {
       const result = await nextCandidate(audience, identity, undefined, reachParse.reach);
       console.log(
-        `[human-service] audience.candidate_next org=${orgId} audience=${audience.id} status=${result.status}`
+        `[human-service] audience.candidate_next org=${orgId} audience=${audience.id} status=${result.status}${"reason" in result ? ` reason=${result.reason}` : ""}`
       );
       res.json(result);
     } catch (err) {

@@ -2225,6 +2225,29 @@ export interface ServeNextResult {
   // returns as `personId`. Present on every `served` answer, OMITTED on
   // `exhausted` (that body stays byte-identical to before).
   personId?: string;
+  // On `exhausted` only, and only when it is NOT exhaustion of the pool:
+  // `no_recent_posts` = a linkedin_engagement audience whose competitor pages
+  // hold no post in its window (apollo-service looked). Absent otherwise, so
+  // every other exhausted body is byte-identical to before.
+  reason?: "no_recent_posts";
+}
+
+/**
+ * A linkedin_engagement audience whose competitor pages have no post in the
+ * window: apollo-service read them and found nothing to take engagers from.
+ * That is a fact about the competitors TODAY, not a walked-out pool, so no
+ * reachable ceiling is persisted (Remaining stays unknown, never 0) and the
+ * answer names it.
+ */
+export function noRecentPostsAnswer(
+  orgId: string,
+  audienceId: string,
+  path: "serve_next" | "candidates"
+): { status: "exhausted"; person: null; reason: "no_recent_posts" } {
+  console.log(
+    `[human-service] audience.no_recent_posts org=${orgId} audience=${audienceId} path=${path}`
+  );
+  return { status: "exhausted", person: null, reason: "no_recent_posts" };
 }
 
 // Tag the served person as an audience member and answer `served` carrying the
@@ -2609,6 +2632,7 @@ export async function serveNextPerson(
         identity,
       });
       if (search.people.length === 0) {
+        if (search.noRecentPosts) return noRecentPostsAnswer(identity.orgId, audience.id, "serve_next");
         await persistReachableCountOnExhaustion(identity.orgId, audience.id);
         return { status: "exhausted", person: null };
       }
