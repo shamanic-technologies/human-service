@@ -315,6 +315,11 @@ export interface PeopleSearchResult {
   total: number;
   // apify offset cursor for the next page (null when done / apollo cursor-based).
   nextOffset: number | null;
+  // Set only when apollo answered `done` for a linkedin_engagement audience
+  // whose competitor pages hold NO post inside its window: nobody was there to
+  // read engagers from. Not exhaustion (the pool fills when the competitor
+  // posts), so callers name it instead of persisting a reachable ceiling.
+  noRecentPosts?: true;
 }
 
 // Why a reveal handed nobody back. Internal: the candidate API names it on
@@ -1022,6 +1027,22 @@ function normalizeApifyLead(l: ApifyLead): Person {
 
 // --- Public operations ---
 
+/**
+ * Did apollo-service say its linkedin_engagement serve is done because the
+ * competitor pages hold no post inside the audience's window (rather than
+ * because every engager was served)? apollo-service owns the harvest and states
+ * it; we only read the statement, never infer it from a zero count.
+ */
+export function apolloSaysNoRecentPosts(data: unknown): boolean {
+  const d = data as Record<string, unknown> | null;
+  return d?.[APOLLO_DONE_REASON_FIELD] === APOLLO_DONE_NO_RECENT_POSTS;
+}
+// apollo-service v0.39.50: `doneReason` on a linkedin_engagement /search/next
+// answer (`no_recent_posts` | `no_engagers` | `all_served`). Only the first is
+// "nobody was there to look at"; the other two stay honest exhaustion.
+const APOLLO_DONE_REASON_FIELD = "doneReason";
+const APOLLO_DONE_NO_RECENT_POSTS = "no_recent_posts";
+
 export async function peopleSearch(args: {
   provider?: Provider;
   need?: "verified_email";
@@ -1068,6 +1089,7 @@ export async function peopleSearch(args: {
     const collected: Person[] = [];
     let total = 0;
     let done = false;
+    let noRecentPosts = false;
 
     // Standing opt-outs — ORG-wide and permanent, so this is loaded even when
     // the request names no brand, and it is read live from instantly-service so
@@ -1130,6 +1152,7 @@ export async function peopleSearch(args: {
       // True pool exhaustion (Apollo) → terminal.
       if (data.done) {
         done = true;
+        noRecentPosts = apolloSaysNoRecentPosts(data);
         break;
       }
       // Got fresh (non-suppressed, non-opted-out) leads, or nothing is being
@@ -1143,7 +1166,14 @@ export async function peopleSearch(args: {
       // the next free page.
     }
 
-    return { provider, people: collected, done, total, nextOffset: null };
+    return {
+      provider,
+      people: collected,
+      done,
+      total,
+      nextOffset: null,
+      ...(noRecentPosts ? { noRecentPosts: true as const } : {}),
+    };
   }
 
   // apify — offset-based pagination (apify-service#6). totalMatched / hasMore /

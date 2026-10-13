@@ -153,7 +153,11 @@ const EVIDENCE = {
   },
 };
 
-function mockServe(opts: { pages: { id: string; title: string }[][]; verdicts: Record<string, number> }) {
+// apollo-service's statement of WHY a linkedin_engagement serve is done (v0.39.50).
+const NO_RECENT_POSTS_DONE = { doneReason: "no_recent_posts" };
+const SERVED_OUT_DONE = { doneReason: "all_served" };
+
+function mockServe(opts: { pages: { id: string; title: string }[][]; verdicts: Record<string, number>; doneBody?: Record<string, unknown> }) {
   const titleToId = new Map<string, string>();
   for (const p of opts.pages) for (const t of p) titleToId.set(t.title, t.id);
   let page = 0;
@@ -171,7 +175,8 @@ function mockServe(opts: { pages: { id: string; title: string }[][]; verdicts: R
       calls.searchAudienceHeaders.push(init.headers?.["x-audience-id"]);
       const people = (opts.pages[page] ?? []).map((t) => engager(t.id, t.title));
       page += 1;
-      return ok({ people, done: page >= opts.pages.length && people.length === 0, totalEntries: 3, source: "linkedin_engagement" });
+      const done = page >= opts.pages.length && people.length === 0;
+      return ok({ people, done, totalEntries: 3, source: "linkedin_engagement", ...(done ? opts.doneBody ?? {} : {}) });
     }
     if (u.endsWith("/orgs/judgments")) {
       const body = JSON.parse(init.body ?? "{}") as { state: { candidate: { title: string; headline: string; name: string } } };
@@ -332,6 +337,39 @@ describe("serve-next on a linkedin_engagement audience", () => {
     const item = list.body.audiences.find((x: { id: string }) => x.id === audience.id);
     expect(item.sizeCount).toBe(1);
     expect(item.availableToContactCount).toBe(0);
+  });
+
+  it("names no_recent_posts when the competitor pages hold no post in the window, and never persists a ceiling", async () => {
+    const audience = await createAudience();
+    const calls = mockServe({ pages: [[]], verdicts: {}, doneBody: NO_RECENT_POSTS_DONE });
+    const res = await request(app).post(`/orgs/audiences/${audience.id}/serve-next`).set(getAuthHeaders());
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: "exhausted", person: null, reason: "no_recent_posts" });
+    expect(calls.enriched).toEqual([]);
+
+    // Not a walked-out pool: Size stays unknown (omitted), never 0.
+    const [row] = await db.select().from(audiences).where(eq(audiences.id, audience.id));
+    expect(row.reachableCount).toBeNull();
+    const list = await request(app).get(`/orgs/audiences?brandId=${BRAND}`).set(getAuthHeaders());
+    const item = list.body.audiences.find((x: { id: string }) => x.id === audience.id);
+    expect(item.sizeCount).toBeUndefined();
+  });
+
+  it("candidates/next names no_recent_posts too, and a plain done stays pool_exhausted", async () => {
+    const quiet = await createAudience();
+    mockServe({ pages: [[]], verdicts: {}, doneBody: NO_RECENT_POSTS_DONE });
+    const res = await request(app).post(`/orgs/audiences/${quiet.id}/candidates/next`).set(getAuthHeaders());
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("exhausted");
+    expect(res.body.reason).toBe("no_recent_posts");
+    const [row] = await db.select().from(audiences).where(eq(audiences.id, quiet.id));
+    expect(row.reachableCount).toBeNull();
+
+    const walked = await createAudience({ name: "Walked out engagers" });
+    mockServe({ pages: [[]], verdicts: {}, doneBody: SERVED_OUT_DONE });
+    const out = await request(app).post(`/orgs/audiences/${walked.id}/candidates/next`).set(getAuthHeaders());
+    expect(out.body.status).toBe("exhausted");
+    expect(out.body.reason).toBe("pool_exhausted");
   });
 
   it("is not previewable (no Apollo sample exists for it)", async () => {
