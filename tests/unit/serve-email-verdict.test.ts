@@ -124,3 +124,50 @@ describe("serve gate on the provider's email verification", () => {
     await expect(resolveEmail({ providerPersonId: "a1", identity })).resolves.toBeDefined();
   });
 });
+
+describe("acceptedEmails: the caller widens the gate to catch_all only", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.stubGlobal("fetch", fetchSpy);
+    process.env.APOLLO_SERVICE_URL = "http://apollo:8080";
+    process.env.APOLLO_SERVICE_API_KEY = "apollo-key";
+    supp.claimServe.mockResolvedValue(true);
+  });
+
+  it("valid_and_catch_all serves a catch_all address and names its verdict", async () => {
+    fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com", verdict("catch_all", false)));
+    const r = await resolveEmail({
+      providerPersonId: "a1",
+      identity: { ...identity, acceptedEmails: "valid_and_catch_all" as const },
+    });
+    expect(r.person?.email).toBe("jane@acme.com");
+    expect(r.emailVerdict).toBe("catch_all");
+    expect(supp.claimServe.mock.calls[0][3]).toMatchObject({ emailVerdict: "catch_all" });
+  });
+
+  it.each(["invalid", "unknown", "risky"])(
+    "valid_and_catch_all still drops %s",
+    async (v) => {
+      fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com", verdict(v, false)));
+      const r = await resolveEmail({
+        providerPersonId: "a1",
+        identity: { ...identity, acceptedEmails: "valid_and_catch_all" as const },
+      });
+      expect(r.person).toBeNull();
+      expect(r.blocked).toEqual({ reason: "not_deliverable", verdict: v });
+    }
+  );
+
+  it.each([undefined, "valid_only" as const])("%s drops catch_all exactly as before", async (accepted) => {
+    fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com", verdict("catch_all", false)));
+    const r = await resolveEmail({ providerPersonId: "a1", identity: { ...identity, acceptedEmails: accepted } });
+    expect(r.person).toBeNull();
+    expect(r.blocked).toEqual({ reason: "not_deliverable", verdict: "catch_all" });
+  });
+
+  it("a valid serve names its verdict", async () => {
+    fetchSpy.mockResolvedValueOnce(enriched("jane@acme.com", verdict("valid", true)));
+    const r = await resolveEmail({ providerPersonId: "a1", identity });
+    expect(r.emailVerdict).toBe("valid");
+  });
+});

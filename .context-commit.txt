@@ -1,0 +1,12 @@
+feat(serve): acceptedEmails lets a serve hand out catch-all addresses (CATCHALL-SERVE-OPTION-1013)
+
+serve-next, candidates/next and candidates/{id}/reveal accept
+`acceptedEmails: "valid_only" | "valid_and_catch_all"`. Absent = valid only,
+byte-identical body. With valid_and_catch_all a catch_all verdict is served
+(unknown/invalid/risky never), and each audience first re-reaches the
+catch-all people it already revealed and dropped for the brand, rebuilt from
+the stored serve + teaser: no reveal, no verification, no charge, once per
+(org, brand, address) via the catch_all_rereaches ledger (migration 0045).
+Stating the option adds top-level `emailVerdict` to every served answer.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>

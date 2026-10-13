@@ -82,6 +82,8 @@ import { createRun, completeRun } from "./runs.js";
 import { audienceSourcingOriginSlug, isCrmSourcedFeature, withSourcingOrigin } from "./sourcing-origin.js";
 import { crmPeopleServeStats, crmServeNext, normalizeCrmContact } from "../lib/crm-contacts.js";
 import { normalizeReach, personReaches, providerCanReach, type Reach } from "../lib/reach.js";
+import type { EmailVerdict } from "../lib/email-verification.js";
+import { takeRereachForServe } from "./catch-all-rereach.js";
 import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
 
 // Tag served contacts as members of an audience (provenance membership). Upserts
@@ -2230,6 +2232,12 @@ export interface ServeNextResult {
   // hold no post in its window (apollo-service looked). Absent otherwise, so
   // every other exhausted body is byte-identical to before.
   reason?: "no_recent_posts";
+  // The verification verdict of the address handed out (valid, catch_all), null
+  // when the serve ran no verification (crm, apify). Internal until the route
+  // shapes the answer: on the wire ONLY when the caller stated `acceptedEmails`
+  // (src/lib/serve-email-policy.ts), so a caller that states nothing reads the
+  // byte-identical body it always did.
+  emailVerdict?: EmailVerdict | null;
 }
 
 /**
@@ -2256,12 +2264,13 @@ export function noRecentPostsAnswer(
 export async function servedWithPersonId(
   orgId: string,
   audienceId: string,
-  person: Person
+  person: Person,
+  emailVerdict: EmailVerdict | null = null
 ): Promise<ServeNextResult> {
   const [personId] = await tagAudienceServe(orgId, audienceId, [
     toServedContact(person),
   ]);
-  return { status: "served", person, personId };
+  return { status: "served", person, personId, emailVerdict };
 }
 
 // serve-next's LOCKED consumer contract (lead-service): status="served" MUST mean
@@ -2597,6 +2606,17 @@ export async function serveNextPerson(
   // Screen yield: an audience whose recent verdicts are nearly all rejections
   // is exhausted for the screen, whatever Apollo still has (see above). Read
   // before the walk, so a dead audience pops and screens nobody.
+  // A caller asking for catch-all addresses first gets the catch-all people
+  // this audience already revealed, verified and dropped for the brand: paid
+  // for once, handed from what we stored, each once (catch-all-rereach.ts).
+  // Before the yield read: they cost nothing and were already judged.
+  if (identity.acceptedEmails === "valid_and_catch_all") {
+    const rereach = await takeRereachForServe(identity, audience.brandId, audience.id);
+    if (rereach) {
+      return servedWithPersonId(identity.orgId, audience.id, rereach.person, "catch_all");
+    }
+  }
+
   const yieldAtStart = await readScreenYield(audience);
   if (yieldAtStart?.spent) return exhaustOnScreenYield(identity, audience, yieldAtStart);
 
@@ -2726,7 +2746,12 @@ export async function serveNextPerson(
     // no-email reveal is simply dropped and we pop the next teaser (never wasting
     // it on a re-enrich).
     if (revealed.person && hasUsableEmail(revealed.person)) {
-      return servedWithPersonId(identity.orgId, audience.id, revealed.person);
+      return servedWithPersonId(
+        identity.orgId,
+        audience.id,
+        revealed.person,
+        revealed.emailVerdict ?? null
+      );
     }
     // Reveal yielded no usable email, or was post-pay suppressed → drop, pop the
     // next buffered teaser.

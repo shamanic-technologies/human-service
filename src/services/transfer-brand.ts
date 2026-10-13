@@ -16,6 +16,7 @@ import { sql } from "../db/index.js";
  * Tables and how each one is tied to the brand:
  *  - brand-keyed (org_id + brand_id): `audiences`, `lead_serves`,
  *    `brand_suppressions`, `suppression_recoveries`, `suppression_backfills`,
+ *    `catch_all_rereaches` (the target's own re-reach of an address wins),
  *    `audience_portfolios` (a launch the target already holds for the same
  *    offer wins: one portfolio per (org, brand, offer)),
  *    `source_campaign_states` (the target's own applied state per (offer, origin)
@@ -76,6 +77,7 @@ const TABLES = [
   "brand_suppressions",
   "suppression_recoveries",
   "suppression_backfills",
+  "catch_all_rereaches",
   "audience_portfolios",
   "source_campaign_states",
   "source_campaign_audience_holds",
@@ -117,6 +119,7 @@ export async function transferBrand(
       add("brand_suppressions", await moveSuppressions(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
       add("suppression_recoveries", await moveLedger(tx, "suppression_recoveries", fromOrg, fromBrand, targetOrgId, targetBrandId));
       add("suppression_backfills", await moveLedger(tx, "suppression_backfills", fromOrg, fromBrand, targetOrgId, targetBrandId));
+      add("catch_all_rereaches", await moveRereaches(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
       add("audience_portfolios", await movePortfolios(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
       add("source_campaign_states", await moveSourceCampaignStates(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
       add("source_campaign_audience_holds", await moveSourceCampaignHolds(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
@@ -250,6 +253,24 @@ async function moveLedger(
                  WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`
       : await tx`UPDATE suppression_backfills SET org_id = ${toOrg}, brand_id = ${toBrand}
                  WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`;
+  return dropped.length + moved.length;
+}
+
+// One catch-all re-reach per (org, brand, address): the target's own is kept.
+async function moveRereaches(
+  tx: Tx,
+  fromOrg: string,
+  fromBrand: string,
+  toOrg: string,
+  toBrand: string
+): Promise<number> {
+  const dropped = await tx`DELETE FROM catch_all_rereaches s USING catch_all_rereaches t
+                           WHERE s.org_id = ${fromOrg} AND s.brand_id = ${fromBrand}
+                             AND t.org_id = ${toOrg} AND t.brand_id = ${toBrand}
+                             AND t.email_norm = s.email_norm AND t.id <> s.id
+                           RETURNING s.id`;
+  const moved = await tx`UPDATE catch_all_rereaches SET org_id = ${toOrg}, brand_id = ${toBrand}
+                         WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`;
   return dropped.length + moved.length;
 }
 

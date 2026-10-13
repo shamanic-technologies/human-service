@@ -114,6 +114,8 @@ import {
   PreviewCompanyRowError,
 } from "../services/audience-preview-companies.js";
 
+import type { AcceptedEmails } from "../lib/email-verification.js";
+import { shapeEmailVerdict } from "../lib/serve-email-policy.js";
 const router = Router();
 
 const DEFAULT_LIMIT = 50;
@@ -1138,12 +1140,26 @@ router.post(
 
 // The serving pipe's reach (src/lib/reach.ts), read off the serve body. A body that
 // states nothing (lead-service sent `{}` until now) is today's serve, unchanged.
-function parseServeReach(body: unknown): { ok: true; reach: Reach[] } | { ok: false; error: string } {
+// `acceptedEmails` (CATCHALL-SERVE-OPTION-1013) rides the same body: absent =
+// valid only, today's serve.
+function parseServeReach(
+  body: unknown
+): { ok: true; reach: Reach[]; acceptedEmails?: AcceptedEmails } | { ok: false; error: string } {
   const parsed = ServeNextRequestSchema.safeParse(body ?? {});
   if (!parsed.success) {
-    return { ok: false, error: "reachableBy must be phone, email, or a list of them" };
+    const onAccepted = parsed.error.issues.some((i) => i.path[0] === "acceptedEmails");
+    return {
+      ok: false,
+      error: onAccepted
+        ? "acceptedEmails must be valid_only or valid_and_catch_all"
+        : "reachableBy must be phone, email, or a list of them",
+    };
   }
-  return { ok: true, reach: normalizeReach(parsed.data.reachableBy) };
+  return {
+    ok: true,
+    reach: normalizeReach(parsed.data.reachableBy),
+    ...(parsed.data.acceptedEmails ? { acceptedEmails: parsed.data.acceptedEmails } : {}),
+  };
 }
 
 // --- POST /orgs/audiences/:id/serve-next ---
@@ -1191,13 +1207,14 @@ router.post(
       res.status(400).json({ error: reachParse.error });
       return;
     }
+    if (reachParse.acceptedEmails) identity.acceptedEmails = reachParse.acceptedEmails;
 
     try {
       const result = await serveNextPerson(audience, identity, undefined, reachParse.reach);
       console.log(
-        `[human-service] audience.serve_next org=${orgId} audience=${audience.id} provider=${audience.provider} status=${result.status}`
+        `[human-service] audience.serve_next org=${orgId} audience=${audience.id} provider=${audience.provider} status=${result.status}${reachParse.acceptedEmails ? ` acceptedEmails=${reachParse.acceptedEmails} emailVerdict=${result.emailVerdict ?? "none"}` : ""}`
       );
-      res.json(result);
+      res.json(shapeEmailVerdict(result, reachParse.acceptedEmails));
     } catch (err) {
       if (err instanceof AudienceNotServableError) {
         res.status(422).json({ error: err.message });
@@ -1237,6 +1254,7 @@ router.post(
       res.status(400).json({ error: reachParse.error });
       return;
     }
+    if (reachParse.acceptedEmails) identity.acceptedEmails = reachParse.acceptedEmails;
     try {
       const result = await nextCandidate(audience, identity, undefined, reachParse.reach);
       console.log(
@@ -1269,11 +1287,19 @@ router.post(
       res.status(404).json({ error: audience ? "Candidate not found" : "Audience not found" });
       return;
     }
-    const identity: Identity = { ...buildIdentity(res), brandIds: [audience.brandId] };
+    const identity: Identity = {
+      ...buildIdentity(res),
+      brandIds: [audience.brandId],
+      ...(parsed.data.acceptedEmails ? { acceptedEmails: parsed.data.acceptedEmails } : {}),
+    };
     try {
-      res.json(
-        await revealCandidate(audience, identity, req.params.candidateId, parsed.data.basis ?? null)
+      const result = await revealCandidate(
+        audience,
+        identity,
+        req.params.candidateId,
+        parsed.data.basis ?? null
       );
+      res.json(shapeEmailVerdict(result, parsed.data.acceptedEmails));
     } catch (err) {
       if (err instanceof CandidateNotFoundError) {
         res.status(404).json({ error: err.message });

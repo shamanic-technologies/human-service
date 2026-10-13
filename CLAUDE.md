@@ -650,7 +650,8 @@ when given. `src/services/transfer-brand.ts` owns it.
 
 - **ONE transaction** — a failure moves nothing (500 says so).
 - **Tables**: brand-keyed `audiences`, `lead_serves`, `brand_suppressions`,
-  `suppression_recoveries`, `suppression_backfills`, `audience_portfolios`
+  `suppression_recoveries`, `suppression_backfills`, `catch_all_rereaches`
+  (the target's own re-reach of an address wins), `audience_portfolios`
   (the target's own launch for the same offer wins), `lists` (brand lists only;
   org-wide `brand_id IS NULL` lists stay); through an audience of the brand
   `audience_members`, `audience_teaser_buffer`, `audience_teaser_screenings`,
@@ -1408,6 +1409,42 @@ human-service only ACTS on the answer, in `finalizeResolved`
 - Guarded by `tests/unit/email-verification.test.ts` (the reader) and
   `tests/unit/serve-email-verdict.test.ts` (the gate). Every other serve-path
   suite mocks `readEmailVerification` to deliverable.
+
+#### The caller may accept catch-all — `acceptedEmails` (CATCHALL-SERVE-OPTION-1013)
+
+- **Request**: body `acceptedEmails: "valid_only" | "valid_and_catch_all"` on
+  serve-next, candidates/next AND candidates/{id}/reveal (lead-service sends the
+  workflow's choice on all three). Absent = `valid_only` = today, byte for byte
+  (no response field, no re-reach). `valid_and_catch_all` serves a `catch_all`
+  verdict too (`isVerdictAccepted`, `src/lib/email-verification.ts`); unknown,
+  invalid, risky never. apollo-service still verifies and owns `deliverable`; the
+  policy rides `Identity.acceptedEmails`, never serialized downstream.
+- **Response**: stating the option (either value) adds top-level
+  `emailVerdict` (`valid` | `catch_all` | null = no verification: crm, apify)
+  beside `personId` on every `served` answer of serve-next and reveal
+  (`shapeEmailVerdict`, `src/lib/serve-email-policy.ts`); never on other
+  statuses. A replayed pre-option served reveal reads `valid` (only valid was
+  ever served).
+- **Re-reach** (`src/services/catch-all-rereach.ts`, ledger `catch_all_rereaches`,
+  migration 0045): with `valid_and_catch_all`, an audience FIRST hands out the
+  catch-all people IT revealed and dropped for the brand (bronze `lead_serves`
+  verdict `catch_all`, no `served` membership of the person under any audience of
+  the brand, no later non-catch-all verdict on the address, not screened out),
+  rebuilt from the bronze serve + the stored teaser: NO provider call (no reveal,
+  no verification, no charge). Once per (org, brand, address), unique index;
+  live post-reveal gates (opt-out, won, own company, bounce) else `blocked` for
+  good; the hand-out restarts the brand claim's window, tags membership, writes
+  no second bronze row. Candidates: re-offered in place (the revealed
+  `not_served` row reopens) or as a new candidate from the teaser; its reveal
+  without the option gives the person back; a decline closes it. timezone,
+  employment history and buying signal are null on a re-reached person (only a
+  reveal carries them). Prod 2026-10-13: Doc Dinners holds 346 such people over
+  17 audiences.
+- **Known limit**: apollo-service's reveal domain gate skips a reveal on a domain
+  already known catch-all (`provider_skipped`, `catch_all_domain`) whatever the
+  caller accepts; fresh catch-all serves therefore come mostly from domains not
+  yet judged. Tests: `tests/integration/audiences-catch-all.test.ts`,
+  `tests/unit/serve-email-policy.test.ts`, `tests/unit/serve-email-verdict.test.ts`.
 
 ### Pre-pay teaser screening — is this person actually in the audience?
 
