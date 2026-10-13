@@ -64,6 +64,19 @@ import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import { ensureTargetText, screenTarget } from "./audience-target-text.js";
 import { isCrmSourcedFeature } from "./sourcing-origin.js";
 import { providerCanReach, type Reach } from "../lib/reach.js";
+import type { EmailVerdict } from "../lib/email-verification.js";
+import {
+  claimRereach,
+  markRereach,
+  markRereachOfCandidate,
+  recordRereachHandout,
+  releaseRereach,
+  rereachBlock,
+  rereachOfCandidate,
+  rereachPerson,
+  selectRereachable,
+  setRereachCandidate,
+} from "./catch-all-rereach.js";
 import {
   AudienceNotServableError,
   ensureApolloPointer,
@@ -338,6 +351,14 @@ export async function nextCandidate(
   const target = screenTarget(audience);
   const identity = apolloIdentity(audience, identityIn);
 
+  // A caller asking for catch-all addresses is first offered the catch-all
+  // people this audience already revealed, verified and dropped for the brand
+  // (catch-all-rereach.ts): their reveal on this candidate costs nothing.
+  if (identity.acceptedEmails === "valid_and_catch_all") {
+    const rereach = await offerRereach(audience, identity);
+    if (rereach) return { status: "candidate", candidate: toView(rereach), target };
+  }
+
   const yieldNow = await readCandidateYield(audience.id);
   if (yieldNow?.spent) {
     await exhaustOnScreenYield(identity, audience, yieldNow);
@@ -407,6 +428,73 @@ export async function nextCandidate(
   }
 }
 
+// Offer the next re-reachable catch-all person of this audience as a candidate:
+// the candidate row the audience already holds for them (a revealed
+// `not_served`) is re-opened in place, else one is written from the stored
+// teaser. Each person once per brand (the re-reach ledger).
+async function offerRereach(
+  audience: AudienceRow,
+  identity: Identity
+): Promise<AudienceCandidate | null> {
+  for (;;) {
+    const page = await selectRereachable(identity.orgId, audience.brandId, audience.id);
+    if (page.length === 0) return null;
+    for (const serve of page) {
+      if (!(await claimRereach(identity.orgId, audience.brandId, audience.id, serve, "candidates", "offered"))) {
+        continue;
+      }
+      const block = await rereachBlock(identity, audience.brandId, rereachPerson(serve));
+      if (block) {
+        await markRereach(identity.orgId, audience.brandId, serve.emailNorm, "blocked", block);
+        console.log(
+          `[human-service] catch_all_rereach.blocked org=${identity.orgId} audience=${audience.id} reason=${block} path=candidates`
+        );
+        continue;
+      }
+      let row: AudienceCandidate | undefined;
+      let previous: unknown = null;
+      if (serve.candidateId) {
+        const [before] = await db
+          .select({ revealResult: audienceCandidates.revealResult })
+          .from(audienceCandidates)
+          .where(eq(audienceCandidates.id, serve.candidateId));
+        previous = before?.revealResult ?? null;
+        [row] = await db
+          .update(audienceCandidates)
+          .set({ status: "offered", offeredAt: new Date(), decidedAt: null, basis: null, revealResult: null })
+          .where(and(eq(audienceCandidates.id, serve.candidateId), eq(audienceCandidates.status, "revealed")))
+          .returning();
+      } else {
+        [row] = await db
+          .insert(audienceCandidates)
+          .values({
+            orgId: identity.orgId,
+            audienceId: audience.id,
+            providerPersonId: serve.providerPersonId,
+            linkedinUrl: serve.linkedinUrl,
+            teaser: serve.teaser,
+            organizationDomain: serve.teaserDomain ?? serve.companyDomain,
+          })
+          .onConflictDoNothing({
+            target: [audienceCandidates.audienceId, audienceCandidates.providerPersonId],
+          })
+          .returning();
+      }
+      if (!row) {
+        // Taken by a concurrent offer between the read and the write: give the
+        // re-reach back, the next read decides again.
+        await releaseRereach(identity.orgId, audience.brandId, serve.emailNorm);
+        continue;
+      }
+      await setRereachCandidate(identity.orgId, audience.brandId, serve.emailNorm, row.id, previous);
+      console.log(
+        `[human-service] catch_all_rereach.offered org=${identity.orgId} audience=${audience.id} candidate=${row.id} leadServe=${serve.leadServeId}`
+      );
+      return row;
+    }
+  }
+}
+
 async function loadCandidate(
   orgId: string,
   audienceId: string,
@@ -434,6 +522,9 @@ export interface RevealCandidateResult {
   status: "served" | "not_served";
   person: Person | null;
   personId?: string;
+  // On `served`: the verification verdict of the address handed (internal until
+  // the route shapes it; on the wire only when the caller stated acceptedEmails).
+  emailVerdict?: EmailVerdict | null;
   // On every `not_served`: why nobody came back. `provider_skipped` means the
   // provider declined to buy the reveal (no credit spent); every other reason
   // comes after a bought reveal. `no_email` = the reveal carried no address.
@@ -460,7 +551,7 @@ export async function revealCandidate(
   const identity = apolloIdentity(audienceIn, identityIn);
   const existing = await loadCandidate(identity.orgId, audienceIn.id, candidateId);
   if (existing.status === "revealed") {
-    return { ...(existing.revealResult as Omit<RevealCandidateResult, "replayed">), replayed: true };
+    return { ...storedReveal(existing.revealResult), replayed: true };
   }
   if (existing.status === "declined") {
     throw new CandidateStateError("Candidate was declined", existing.status);
@@ -483,36 +574,17 @@ export async function revealCandidate(
   if (!claimed) {
     const now = await loadCandidate(identity.orgId, audienceIn.id, candidateId);
     if (now.status === "revealed") {
-      return { ...(now.revealResult as Omit<RevealCandidateResult, "replayed">), replayed: true };
+      return { ...storedReveal(now.revealResult), replayed: true };
     }
     throw new CandidateStateError(`Candidate is ${now.status}`, now.status);
   }
 
   let result: Omit<RevealCandidateResult, "replayed">;
+  const rereach = await rereachOfCandidate(candidateId);
   try {
-    const revealed = await resolveEmail({
-      provider: "apollo",
-      providerPersonId: claimed.providerPersonId,
-      audienceId: audienceIn.id,
-      identity,
-    });
-    if (revealed.person && hasUsableEmail(revealed.person)) {
-      const served = await servedWithPersonId(identity.orgId, audienceIn.id, revealed.person);
-      result = { status: "served", person: served.person, personId: served.personId };
-    } else if (revealed.person) {
-      result = { status: "not_served", person: null, reason: "no_email" };
-    } else {
-      // person null ⟹ resolveEmail always names why; "no_person" is what a
-      // null person literally is.
-      const block = revealed.blocked;
-      result = {
-        status: "not_served",
-        person: null,
-        reason: block?.reason ?? "no_person",
-        ...(block?.verdict ? { verdict: block.verdict } : {}),
-        ...(block?.detail ? { detail: block.detail } : {}),
-      };
-    }
+    result = rereach
+      ? await revealRereach(audienceIn, identity, rereach)
+      : await revealFresh(audienceIn, identity, claimed.providerPersonId);
   } catch (err) {
     // Nothing recorded: hand the candidate back so a retry can reveal it.
     await db
@@ -529,6 +601,84 @@ export async function revealCandidate(
     `[human-service] audience.candidate_revealed org=${identity.orgId} audience=${audienceIn.id} candidate=${candidateId} status=${result.status}${result.reason ? ` reason=${result.reason}` : ""}`
   );
   return { ...result, replayed: false };
+}
+
+// The billed reveal of a fresh candidate, recorded as served exactly as
+// serve-next records it.
+async function revealFresh(
+  audience: AudienceRow,
+  identity: Identity,
+  providerPersonId: string
+): Promise<Omit<RevealCandidateResult, "replayed">> {
+  const revealed = await resolveEmail({
+    provider: "apollo",
+    providerPersonId: providerPersonId,
+    audienceId: audience.id,
+    identity,
+  });
+  if (revealed.person && hasUsableEmail(revealed.person)) {
+    const served = await servedWithPersonId(
+      identity.orgId,
+      audience.id,
+      revealed.person,
+      revealed.emailVerdict ?? null
+    );
+    return {
+      status: "served",
+      person: served.person,
+      personId: served.personId,
+      emailVerdict: served.emailVerdict ?? null,
+    };
+  } else if (revealed.person) {
+    return { status: "not_served", person: null, reason: "no_email" };
+  } else {
+    // person null ⟹ resolveEmail always names why; "no_person" is what a
+    // null person literally is.
+    const block = revealed.blocked;
+    return {
+      status: "not_served",
+      person: null,
+      reason: block?.reason ?? "no_person",
+      ...(block?.verdict ? { verdict: block.verdict } : {}),
+      ...(block?.detail ? { detail: block.detail } : {}),
+    };
+  }
+}
+
+// A stored reveal, replayed. Before acceptedEmails existed only a `valid`
+// address was ever served on this path (the provider's `deliverable`), so a
+// stored served answer without a verdict IS a valid one.
+function storedReveal(stored: unknown): Omit<RevealCandidateResult, "replayed"> {
+  const r = stored as Omit<RevealCandidateResult, "replayed">;
+  if (r.status === "served" && r.emailVerdict === undefined) return { ...r, emailVerdict: "valid" };
+  return r;
+}
+
+// The "reveal" of a re-offered catch-all person: nothing is bought, the
+// address and its verdict are the ones already paid for. Handed only to a
+// caller asking for catch-all; a valid-only reveal gives the person back
+// (re-reachable later) and answers exactly what the paid reveal answered.
+async function revealRereach(
+  audience: AudienceRow,
+  identity: Identity,
+  rereach: NonNullable<Awaited<ReturnType<typeof rereachOfCandidate>>>
+): Promise<Omit<RevealCandidateResult, "replayed">> {
+  if (identity.acceptedEmails !== "valid_and_catch_all") {
+    await releaseRereach(identity.orgId, audience.brandId, rereach.emailNorm);
+    return { status: "not_served", person: null, reason: "not_deliverable", verdict: "catch_all" };
+  }
+  const person = rereachPerson(rereach);
+  const block = await rereachBlock(identity, audience.brandId, person);
+  if (block) {
+    await markRereach(identity.orgId, audience.brandId, rereach.emailNorm, "blocked", block);
+    return { status: "not_served", person: null, reason: block };
+  }
+  await recordRereachHandout(identity.orgId, audience.brandId, rereach);
+  const served = await servedWithPersonId(identity.orgId, audience.id, person, "catch_all");
+  console.log(
+    `[human-service] catch_all_rereach.handed org=${identity.orgId} audience=${audience.id} leadServe=${rereach.leadServeId} path=candidates`
+  );
+  return { status: "served", person: served.person, personId: served.personId, emailVerdict: "catch_all" };
 }
 
 /**
@@ -581,6 +731,9 @@ export async function declineCandidate(
       `[human-service] audience.candidate_declined org=${orgId} audience=${audience.id} candidate=${candidateId}`
     );
     return { declined: true as const, replayed: false };
+  }).then(async (r) => {
+    if (!r.replayed) await markRereachOfCandidate(candidateId, "declined");
+    return r;
   });
 }
 

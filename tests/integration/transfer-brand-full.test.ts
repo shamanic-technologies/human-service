@@ -18,6 +18,7 @@ import {
   lists,
   people,
   suppressionBackfills,
+  catchAllRereaches,
   suppressionRecoveries,
 } from "../../src/db/schema.js";
 
@@ -89,6 +90,10 @@ async function seed() {
     { reason: "b1", suppressionId: supp.id, orgId: SRC, brandId: BRAND, emailNorm: "solo@x.com", sentAt: now },
     { reason: "b1", suppressionId: supp.id, orgId: SRC, brandId: OTHER_BRAND, emailNorm: "other@x.com", sentAt: now },
   ]);
+  await db.insert(catchAllRereaches).values([
+    { orgId: SRC, brandId: BRAND, audienceId: aud.id, emailNorm: "solo@x.com", providerPersonId: "p1", leadServeId: supp.id, path: "serve_next", status: "handed" },
+    { orgId: SRC, brandId: OTHER_BRAND, audienceId: otherAud.id, emailNorm: "other@x.com", providerPersonId: "p2", leadServeId: supp.id, path: "serve_next", status: "handed" },
+  ]);
   const [list] = await db.insert(lists).values({ orgId: SRC, brandId: BRAND, name: "VIPs" }).returning();
   const [otherList] = await db.insert(lists).values({ orgId: SRC, brandId: OTHER_BRAND, name: "Other" }).returning();
   const [orgList] = await db.insert(lists).values({ orgId: SRC, brandId: null, name: "Org-wide" }).returning();
@@ -132,6 +137,7 @@ describe("POST /internal/transfer-brand — every table", () => {
       { tableName: "brand_suppressions", count: 1 },
       { tableName: "suppression_recoveries", count: 1 },
       { tableName: "suppression_backfills", count: 1 },
+      { tableName: "catch_all_rereaches", count: 1 },
       { tableName: "lists", count: 1 },
       { tableName: "list_members", count: 1 },
     ]);
@@ -171,7 +177,7 @@ describe("POST /internal/transfer-brand — every table", () => {
     for (const m of members) expect(byId.get(m.personId)).toBe(m.orgId);
 
     // brand-keyed tables
-    for (const t of [leadServes, brandSuppressions, suppressionRecoveries, suppressionBackfills]) {
+    for (const t of [leadServes, brandSuppressions, suppressionRecoveries, suppressionBackfills, catchAllRereaches]) {
       const rows = await db.select().from(t);
       expect(rows.filter((r) => r.orgId === SRC && r.brandId === BRAND)).toEqual([]);
       expect(rows.filter((r) => r.orgId === TGT).map((r) => r.brandId)).toEqual([NEW_BRAND]);

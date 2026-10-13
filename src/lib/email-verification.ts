@@ -53,3 +53,23 @@ export function readEmailVerification(
   }
   return { verdict: v.verdict as EmailVerdict, deliverable: v.deliverable };
 }
+
+// Which verdicts a serve may hand out, as the caller's workflow states it
+// (CATCHALL-SERVE-OPTION-1013). `valid_only` is the default and what every
+// caller that states nothing gets. `valid_and_catch_all` also hands out a
+// catch_all address (~7% bounce measured, vs ~15% unknown, ~40% invalid), so a
+// market that ran out of confirmed mailboxes keeps reaching people. unknown,
+// invalid and risky are never deliverable, whatever the caller asks.
+export const ACCEPTED_EMAILS = ["valid_only", "valid_and_catch_all"] as const;
+export type AcceptedEmails = (typeof ACCEPTED_EMAILS)[number];
+
+// Apply the caller's policy to the provider's verdict. The provider's own
+// `deliverable` (valid only) stays the default; the caller can only widen it to
+// catch_all.
+export function isVerdictAccepted(
+  verification: EmailVerification,
+  accepted: AcceptedEmails | undefined
+): boolean {
+  if (verification.deliverable) return true;
+  return accepted === "valid_and_catch_all" && verification.verdict === "catch_all";
+}
