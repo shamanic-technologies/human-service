@@ -24,7 +24,13 @@ import {
 } from "./suppression.js";
 import { deriveBusinessLanguages } from "./business-languages.js";
 import { tagFoundAlreadyTaken } from "./audience-provenance.js";
-import { readEmailVerification, type EmailVerification } from "../lib/email-verification.js";
+import {
+  isVerdictAccepted,
+  readEmailVerification,
+  type AcceptedEmails,
+  type EmailVerdict,
+  type EmailVerification,
+} from "../lib/email-verification.js";
 import {
   filterOptedOut,
   isPersonOptedOut,
@@ -346,6 +352,10 @@ export interface ResolveEmailResult {
   provider: Provider;
   person: Person | null;
   blocked?: RevealBlock;
+  // The provider's verification verdict of the address handed back (internal:
+  // the serve answers carry it as `emailVerdict` when the caller stated
+  // `acceptedEmails`). Set only when a person is returned; null = no verdict.
+  emailVerdict?: EmailVerdict | null;
 }
 
 export interface Identity {
@@ -357,6 +367,10 @@ export interface Identity {
   // suppression. Empty / absent ⟹ no suppression (nothing to scope against).
   brandIds?: string[];
   workflowTracking?: WorkflowTrackingHeaders;
+  // Which verification verdicts this serve may hand out (the caller's body
+  // `acceptedEmails`). Absent = valid only (the provider's `deliverable`).
+  // Never serialized downstream: apollo-service keeps verifying as it does.
+  acceptedEmails?: AcceptedEmails;
 }
 
 // Map a normalized neutral Person to the suppression/membership contact shape.
@@ -1304,7 +1318,7 @@ async function finalizeResolved(
   // (apollo-service owns verification + its policy); we act on `deliverable`.
   // A person with no address is left to the caller's own no-email drop.
   const emailVerdict = verification?.verdict;
-  const servable = verification === null || verification.deliverable;
+  const servable = verification === null || isVerdictAccepted(verification, identity.acceptedEmails);
   // Already served for the brand ⟹ never handed back. The check and the record
   // are ONE atomic claim: two concurrent serves of the same person (e.g. under
   // two audiences of the brand, which overlap by construction in a launch
@@ -1369,7 +1383,7 @@ async function finalizeResolved(
       blocked: { reason: "not_deliverable", ...(emailVerdict ? { verdict: emailVerdict } : {}) },
     };
   }
-  return { provider, person };
+  return { provider, person, emailVerdict: emailVerdict ?? null };
 }
 
 export async function resolveEmail(args: {

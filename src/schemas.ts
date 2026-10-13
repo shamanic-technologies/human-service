@@ -6,6 +6,7 @@ import {
 import { LAX_UUID_REGEX } from "./lib/uuid.js";
 import { SPLIT_AXES, SPLIT_ICONS } from "./lib/audience-split-vocab.js";
 import { REACH_CHANNELS } from "./lib/reach.js";
+import { ACCEPTED_EMAILS } from "./lib/email-verification.js";
 
 extendZodWithOpenApi(z);
 export const registry = new OpenAPIRegistry();
@@ -1511,9 +1512,28 @@ export const ReachableByFieldSchema = z
     example: "phone",
   });
 
+// Which verification verdicts a serve may hand out (CATCHALL-SERVE-OPTION-1013).
+export const AcceptedEmailsFieldSchema = z.enum(ACCEPTED_EMAILS).openapi({
+  description:
+    "Which email verification verdicts this serve may hand out, as the calling workflow states it. 'valid_only' (the default when omitted) = only an address the verifier confirmed (verdict valid, <1% bounce). 'valid_and_catch_all' = also an address on a catch-all domain (verdict catch_all, ~7% bounce), so a market that ran out of confirmed mailboxes keeps reaching people. unknown, invalid and risky are never handed out. With 'valid_and_catch_all', the catch-all people this audience already revealed, verified and dropped for the brand are handed out FIRST, from what is stored: no new reveal, no new verification, no second charge, each person once. Accepted on serve-next, candidates/next and candidates/{candidateId}/reveal (send the same value on all three). Stating it (either value) also adds `emailVerdict` to every served answer. Providers without verification (crm, apify): no effect.",
+  example: "valid_and_catch_all",
+});
+
 export const ServeNextRequestSchema = z
-  .object({ reachableBy: ReachableByFieldSchema.optional() })
+  .object({
+    reachableBy: ReachableByFieldSchema.optional(),
+    acceptedEmails: AcceptedEmailsFieldSchema.optional(),
+  })
   .openapi("ServeNextRequest");
+
+const EmailVerdictFieldSchema = z
+  .enum(["valid", "catch_all"])
+  .nullable()
+  .optional()
+  .openapi({
+    description:
+      "On 'served' only, and only when the request stated `acceptedEmails`: the verification verdict of the address handed out (valid, or catch_all when the request accepted it). null = this serve ran no verification (crm, apify). Absent when the request did not state `acceptedEmails` (that body is unchanged).",
+  });
 
 export const ServeNextResponseSchema = z
   .object({
@@ -1533,6 +1553,7 @@ export const ServeNextResponseSchema = z
       description:
         "On 'exhausted' only, when it is NOT exhaustion of the pool. no_recent_posts = a linkedin_engagement audience whose competitor pages hold no post inside its window (the pages were read): the audience fills as soon as a competitor posts. Absent on every other answer.",
     }),
+    emailVerdict: EmailVerdictFieldSchema,
   })
   .openapi("ServeNextResponse");
 
@@ -1601,6 +1622,7 @@ export const RevealCandidateRequestSchema = z
       description:
         "Name of the question your qualification asked (e.g. a criteria version). The yield window is keyed on the latest basis: a new basis starts a new window.",
     }),
+    acceptedEmails: AcceptedEmailsFieldSchema.optional(),
   })
   .strict()
   .openapi("RevealCandidateRequest");
@@ -1615,6 +1637,7 @@ export const RevealCandidateResponseSchema = z
     personId: z.string().uuid().optional().openapi({
       description: "Canonical human-service person id, present on 'served' (same as serve-next).",
     }),
+    emailVerdict: EmailVerdictFieldSchema,
     reason: z
       .enum([
         "provider_skipped",

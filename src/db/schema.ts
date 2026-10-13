@@ -919,6 +919,35 @@ export const audienceCandidates = pgTable(
 
 export type AudienceCandidate = typeof audienceCandidates.$inferSelect;
 
+// Re-reach ledger of catch-all people already paid for (migration 0045,
+// src/services/catch-all-rereach.ts). A serve asking `valid_and_catch_all`
+// hands out a person whose reveal verified catch_all and was dropped, from the
+// stored serve: ONE row per (org, brand, address) = each person once.
+// status: claimed | offered | handed | blocked | declined.
+export const catchAllRereaches = pgTable(
+  "catch_all_rereaches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    audienceId: uuid("audience_id").notNull(),
+    emailNorm: text("email_norm").notNull(),
+    providerPersonId: text("provider_person_id").notNull(),
+    leadServeId: uuid("lead_serve_id").notNull(),
+    path: text("path").notNull(),
+    status: text("status").notNull(),
+    blockReason: text("block_reason"),
+    candidateId: uuid("candidate_id"),
+    previousRevealResult: jsonb("previous_reveal_result"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("idx_catch_all_rereaches_unique").on(table.orgId, table.brandId, table.emailNorm),
+    index("idx_catch_all_rereaches_candidate").on(table.candidateId),
+  ]
+);
+
 export type AudienceScreenedOut = typeof audienceScreenedOut.$inferSelect;
 export type NewAudienceScreenedOut = typeof audienceScreenedOut.$inferInsert;
 
