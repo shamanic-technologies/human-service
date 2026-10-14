@@ -141,7 +141,12 @@ async function createAudience() {
 
 // A person revealed, verified catch_all and dropped by an earlier serve-next:
 // the bronze serve + the brand claim + the teaser the screen judged.
-async function seedDroppedCatchAll(audienceId: string, id: string, servedAt = new Date("2026-10-01T00:00:00Z")) {
+async function seedDroppedCatchAll(
+  audienceId: string,
+  id: string,
+  servedAt = new Date("2026-10-01T00:00:00Z"),
+  emailVerdict = "catch_all"
+) {
   await db.insert(leadServes).values({
     orgId: ORG,
     brandId: BRAND,
@@ -153,7 +158,7 @@ async function seedDroppedCatchAll(audienceId: string, id: string, servedAt = ne
     linkedinUrl: `linkedin.com/in/${id}`,
     companyDomain: `${id}.example`,
     audienceId,
-    emailVerdict: "catch_all",
+    emailVerdict,
     servedAt,
   });
   await db.insert(brandSuppressions).values({ orgId: ORG, brandId: BRAND, emailNorm: `${id}@x.com`, providerPersonId: id });
@@ -193,6 +198,7 @@ const decline = (id: string, c: string) =>
   request(app).post(`/orgs/audiences/${id}/candidates/${c}/decline`).set(getAuthHeaders()).send({ reason: "no" });
 
 const CATCH_ALL = { acceptedEmails: "valid_and_catch_all" };
+const UNKNOWN = { acceptedEmails: "valid_catch_all_and_unknown" };
 
 describe("acceptedEmails — validation", () => {
   it("400s an unknown value on every route", async () => {
@@ -388,12 +394,75 @@ describe("candidates — re-reach of catch-all people already paid for", () => {
   });
 });
 
+describe("valid_catch_all_and_unknown (UNKNOWN-EMAILS-OPTION-1014)", () => {
+  it("serve-next re-reaches dropped unknown AND catch-all people, each with their own verdict, no reveal", async () => {
+    const id = await createAudience();
+    await seedDroppedCatchAll(id, "u1", new Date("2026-10-01T00:00:00Z"), "unknown");
+    await seedDroppedCatchAll(id, "c1", new Date("2026-10-02T00:00:00Z"));
+    const fleet = mockApollo([[]]);
+
+    const first = await serveNext(id, UNKNOWN);
+    expect(first.body).toMatchObject({ status: "served", emailVerdict: "unknown" });
+    expect(first.body.person).toMatchObject({ email: "u1@x.com", catchAll: null });
+    const second = await serveNext(id, UNKNOWN);
+    expect(second.body).toMatchObject({ status: "served", emailVerdict: "catch_all" });
+    expect(second.body.person).toMatchObject({ email: "c1@x.com", catchAll: true });
+    expect(fleet.enriched).toEqual([]);
+    expect((await serveNext(id, UNKNOWN)).body).toMatchObject({ status: "exhausted" });
+  });
+
+  it("valid_and_catch_all never re-reaches an unknown person (today's behaviour)", async () => {
+    const id = await createAudience();
+    await seedDroppedCatchAll(id, "u1", undefined, "unknown");
+    mockApollo([[]]);
+    expect((await serveNext(id, CATCH_ALL)).body).toMatchObject({ status: "exhausted" });
+    expect(await db.select().from(catchAllRereaches)).toHaveLength(0);
+  });
+
+  it("a later verdict on the address decides: unknown then valid-only-dropped invalid is never re-reached", async () => {
+    const id = await createAudience();
+    await seedDroppedCatchAll(id, "u1", undefined, "unknown");
+    await db.insert(leadServes).values({
+      orgId: ORG, brandId: BRAND, provider: "apollo", providerPersonId: "u1",
+      email: "u1@x.com", audienceId: id, emailVerdict: "invalid", servedAt: new Date("2026-10-05T00:00:00Z"),
+    });
+    mockApollo([[]]);
+    expect((await serveNext(id, UNKNOWN)).body).toMatchObject({ status: "exhausted" });
+  });
+
+  it("fresh reveal: unknown served under the option; invalid and risky never", async () => {
+    const id = await createAudience();
+    mockApollo([["p1", "p2", "p3"]], { p1: "unknown", p2: "invalid", p3: "risky" });
+    const c1 = (await next(id, UNKNOWN)).body.candidate.candidateId;
+    expect((await reveal(id, c1, UNKNOWN)).body).toMatchObject({ status: "served", emailVerdict: "unknown" });
+    const [serve] = await db.select().from(leadServes);
+    expect(serve.emailVerdict).toBe("unknown");
+    for (const verdict of ["invalid", "risky"]) {
+      const c = (await next(id, UNKNOWN)).body.candidate.candidateId;
+      expect((await reveal(id, c, UNKNOWN)).body).toMatchObject({ status: "not_served", reason: "not_deliverable", verdict });
+    }
+  });
+
+  it("candidates: a re-offered unknown person is handed only to a caller asking for unknown", async () => {
+    const id = await createAudience();
+    await seedDroppedCatchAll(id, "u1", undefined, "unknown");
+    mockApollo([[]]);
+    const offered = (await next(id, UNKNOWN)).body.candidate;
+    expect(offered.providerPersonId).toBe("u1");
+    expect((await reveal(id, offered.candidateId, CATCH_ALL)).body).toMatchObject({
+      status: "not_served", reason: "not_deliverable", verdict: "unknown",
+    });
+    const again = (await next(id, UNKNOWN)).body.candidate;
+    expect((await reveal(id, again.candidateId, UNKNOWN)).body).toMatchObject({ status: "served", emailVerdict: "unknown" });
+  });
+});
+
 describe("openapi", () => {
   it("documents acceptedEmails and emailVerdict on the served routes", async () => {
     const res = await request(app).get("/openapi.json");
     const schemas = res.body.components.schemas;
-    expect(schemas.ServeNextRequest.properties.acceptedEmails.enum).toEqual(["valid_only", "valid_and_catch_all"]);
-    expect(schemas.RevealCandidateRequest.properties.acceptedEmails.enum).toEqual(["valid_only", "valid_and_catch_all"]);
+    expect(schemas.ServeNextRequest.properties.acceptedEmails.enum).toEqual(["valid_only", "valid_and_catch_all", "valid_catch_all_and_unknown"]);
+    expect(schemas.RevealCandidateRequest.properties.acceptedEmails.enum).toEqual(["valid_only", "valid_and_catch_all", "valid_catch_all_and_unknown"]);
     expect(schemas.ServeNextResponse.properties).toHaveProperty("emailVerdict");
     expect(schemas.RevealCandidateResponse.properties).toHaveProperty("emailVerdict");
   });
