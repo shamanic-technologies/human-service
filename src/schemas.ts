@@ -7,6 +7,8 @@ import { LAX_UUID_REGEX } from "./lib/uuid.js";
 import { SPLIT_AXES, SPLIT_ICONS } from "./lib/audience-split-vocab.js";
 import { REACH_CHANNELS } from "./lib/reach.js";
 import { ACCEPTED_EMAILS } from "./lib/email-verification.js";
+import { RELATIONSHIP_POLICIES } from "./lib/relationship-policy.js";
+import { MESSAGING_NETWORKS } from "./lib/messaging-networks.js";
 
 extendZodWithOpenApi(z);
 export const registry = new OpenAPIRegistry();
@@ -1519,10 +1521,18 @@ export const AcceptedEmailsFieldSchema = z.enum(ACCEPTED_EMAILS).openapi({
   example: "valid_and_catch_all",
 });
 
+// The serving pipe's relationship policy (RELATIONSHIP-TAGS-1014).
+export const RelationshipsFieldSchema = z.enum(RELATIONSHIP_POLICIES).openapi({
+  description:
+    "Who the SERVING PIPE may hand out, by the person's relationship with the brand (tags owned by lead-service). 'business_only' = nobody tagged personal, investor, supplier, team, partner or advisor, and nobody whose thread was never judged. Pushed down to crm-service on a CRM-sourced serve (a CRM audience, or the CRM feature identity), which decides and does NOT mark a refused person served, so another pipe still gets them. No effect on a search-provider audience (apollo / apify: strangers). Omitted = unchanged.",
+  example: "business_only",
+});
+
 export const ServeNextRequestSchema = z
   .object({
     reachableBy: ReachableByFieldSchema.optional(),
     acceptedEmails: AcceptedEmailsFieldSchema.optional(),
+    relationships: RelationshipsFieldSchema.optional(),
   })
   .openapi("ServeNextRequest");
 
@@ -4505,6 +4515,15 @@ export const ResolveHumanRequestSchema = z
       .max(10)
       .optional()
       .openapi({ description: "Resolve only: never merges." }),
+    messagingHandles: z
+      .array(z.object({ network: z.enum(MESSAGING_NETWORKS), id: z.string().min(1).max(300) }))
+      .max(10)
+      .optional()
+      .openapi({
+        description:
+          "A person seen only through a messaging network (e.g. a WhatsApp member known by its LID, no phone visible; a LinkedIn member seen through the bridge). `id` = the network's own id for that member, verbatim (case kept). Resolve only: a handle held by another human never merges anything; only an org judgment link (POST /internal/human-identities/links with orgId) makes it one human with someone else.",
+        example: [{ network: "whatsapp", id: "83932385144839@lid" }],
+      }),
     source: z.string().min(1).openapi({ description: "The service stating these keys are ONE contact (e.g. crm-service)." }),
     create: z.boolean().openapi({
       description: "true = create the human if nobody holds a key, attach the keys nobody holds, merge on a shared proof key. false = read only.",
@@ -4545,6 +4564,9 @@ export const HumanViewSchema = z
     phones: z.array(z.string()),
     linkedinUrls: z.array(z.string()),
     providerPersonIds: z.array(z.object({ provider: z.enum(["apollo", "apify"]), id: z.string() })),
+    messagingHandles: z.array(z.object({ network: z.string(), id: z.string() })).openapi({
+      description: "Messaging handles (network + id) the human is known by.",
+    }),
     facts: z.array(
       z.object({
         factId: z.string().uuid(),

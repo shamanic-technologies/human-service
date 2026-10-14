@@ -1686,3 +1686,51 @@ describe("serve-next for a pipe: reachableBy (the channel the serving pipe write
     expect(res.status).toBe(400);
   });
 });
+
+describe("serve-next for a pipe: relationships (RELATIONSHIP-TAGS-1014)", () => {
+  function captureCrm(bodies: Array<Record<string, unknown>>, email: string) {
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({ contacts: [crmContact(email, email)], served: 1, exhausted: false });
+      }
+      throw new Error("unexpected url " + u);
+    });
+  }
+
+  it("crm: business_only reaches crm-service as top-level relationships", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    captureCrm(bodies, "biz@crm.com");
+    const id = await createCrmAudience("CRM business only");
+    const res = await request(app)
+      .post(`/orgs/audiences/${id}/serve-next`)
+      .set(getAuthHeaders())
+      .send({ relationships: "business_only" });
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("served");
+    expect(bodies).toEqual([{ brandId: BRAND, limit: 1, relationships: "business_only" }]);
+  });
+
+  it("crm: carried beside reachableBy", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    captureCrm(bodies, "both@crm.com");
+    const id = await createCrmAudience("CRM business only reach");
+    const res = await request(app)
+      .post(`/orgs/audiences/${id}/serve-next`)
+      .set(getAuthHeaders())
+      .send({ relationships: "business_only", reachableBy: "email" });
+    expect(res.status).toBe(200);
+    expect(bodies).toEqual([{ brandId: BRAND, limit: 1, reachableBy: ["email"], relationships: "business_only" }]);
+  });
+
+  it("400 on a relationships value outside the vocabulary", async () => {
+    const id = await createCrmAudience("CRM bad relationships");
+    const res = await request(app)
+      .post(`/orgs/audiences/${id}/serve-next`)
+      .set(getAuthHeaders())
+      .send({ relationships: "friends_only" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("relationships must be business_only");
+  });
+});

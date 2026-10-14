@@ -31,6 +31,7 @@ import {
   type EmailVerdict,
   type EmailVerification,
 } from "../lib/email-verification.js";
+import type { RelationshipPolicy } from "../lib/relationship-policy.js";
 import {
   filterOptedOut,
   isPersonOptedOut,
@@ -371,6 +372,10 @@ export interface Identity {
   // `acceptedEmails`). Absent = valid only (the provider's `deliverable`).
   // Never serialized downstream: apollo-service keeps verifying as it does.
   acceptedEmails?: AcceptedEmails;
+  // The serving pipe's relationship policy (body `relationships`). Pushed down to
+  // crm-service on a CRM serve only (src/lib/relationship-policy.ts); never sent to
+  // a search provider.
+  relationships?: RelationshipPolicy;
 }
 
 // Map a normalized neutral Person to the suppression/membership contact shape.

@@ -2339,7 +2339,12 @@ async function serveNextCrmContact(
       audience.brandId,
       1,
       crmIdentity,
-      { uploadId: audience.crmUploadId, people: audience.crmPeopleFilter, reachableBy: crmReach }
+      {
+        uploadId: audience.crmUploadId,
+        people: audience.crmPeopleFilter,
+        reachableBy: crmReach,
+        relationships: identity.relationships ?? null,
+      }
     );
     const contact = contacts[0] ?? null;
     if (!contact) {

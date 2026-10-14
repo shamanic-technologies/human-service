@@ -115,6 +115,7 @@ import {
 } from "../services/audience-preview-companies.js";
 
 import type { AcceptedEmails } from "../lib/email-verification.js";
+import type { RelationshipPolicy } from "../lib/relationship-policy.js";
 import { shapeEmailVerdict } from "../lib/serve-email-policy.js";
 const router = Router();
 
@@ -1144,21 +1145,27 @@ router.post(
 // valid only, today's serve.
 function parseServeReach(
   body: unknown
-): { ok: true; reach: Reach[]; acceptedEmails?: AcceptedEmails } | { ok: false; error: string } {
+):
+  | { ok: true; reach: Reach[]; acceptedEmails?: AcceptedEmails; relationships?: RelationshipPolicy }
+  | { ok: false; error: string } {
   const parsed = ServeNextRequestSchema.safeParse(body ?? {});
   if (!parsed.success) {
-    const onAccepted = parsed.error.issues.some((i) => i.path[0] === "acceptedEmails");
+    const field = parsed.error.issues[0]?.path[0];
     return {
       ok: false,
-      error: onAccepted
-        ? "acceptedEmails must be valid_only or valid_and_catch_all"
-        : "reachableBy must be phone, email, or a list of them",
+      error:
+        field === "acceptedEmails"
+          ? "acceptedEmails must be valid_only or valid_and_catch_all"
+          : field === "relationships"
+            ? "relationships must be business_only"
+            : "reachableBy must be phone, email, or a list of them",
     };
   }
   return {
     ok: true,
     reach: normalizeReach(parsed.data.reachableBy),
     ...(parsed.data.acceptedEmails ? { acceptedEmails: parsed.data.acceptedEmails } : {}),
+    ...(parsed.data.relationships ? { relationships: parsed.data.relationships } : {}),
   };
 }
 
@@ -1208,6 +1215,7 @@ router.post(
       return;
     }
     if (reachParse.acceptedEmails) identity.acceptedEmails = reachParse.acceptedEmails;
+    if (reachParse.relationships) identity.relationships = reachParse.relationships;
 
     try {
       const result = await serveNextPerson(audience, identity, undefined, reachParse.reach);
