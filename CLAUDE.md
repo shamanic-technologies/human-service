@@ -81,7 +81,7 @@ section — the port binds first).
 | Internal | `POST /internal/brands/{brandId}/memberships/by-email` | apiKey | Same memberships keyed by EMAIL (body `{orgId, emails[]}`, 25 MB parser, mounted before the global json) → `byEmail[raw] = {personId, memberships[]} \| null`. For lead-service's lead pages / whole-brand walks |
 | POST | `/internal/audiences/still-fits` | apiKey | Does ONE person STILL fit an audience right now (STILL-FITS-1012; lead-service at stock handover). Body `{orgId, audienceId, brandId, email, personId?}` -> 200 `{fits, reason?, basis, failed?}`. CRM audiences ask crm-service `POST /orgs/contacts/still-fits` (the SAME clauses its serve applies, never re-implemented here); search audiences answer from membership + screen verdicts (no paid re-search). A question: nothing marked, bought or suppressed. 404 unknown audience; 422 person cannot be judged (never read as fits); 502 crm-service down. |
 | Internal | `GET /internal/brands/{brandId}/audience-overlap` (`?orgId`) | apiKey | Per audience: members, served vs found-while-taken, how many another audience / list found too, + brand multi-source counts |
-| Internal | `POST /internal/human-identities/resolve` | apiKey | Emails / phones / LinkedIn / provider ids -> ONE fleet `humanId` (`create` true/false). Shared email or phone merges fleet-wide. See "One human across the fleet" |
+| Internal | `POST /internal/human-identities/resolve` | apiKey | Emails / phones / LinkedIn / provider ids / messaging handles -> ONE fleet `humanId` (`create` true/false). Shared email or phone merges fleet-wide. See "One human across the fleet" |
 | Internal | `GET /internal/human-identities/{humanId}` (`?orgId`) | apiKey | The human in that org's view: every key, active facts, the org's person rows, visible links |
 | Internal | `POST /internal/human-identities/links` | apiKey | State a merge (`same`) or split (`distinct`); `orgId` = that org only; no `orgId` = fleet split only (fleet merge = 400) |
 | Internal | `POST /internal/human-identities/links/{linkId}/withdraw` | apiKey | Undo a merge / split statement (org statement: same `orgId` only) |
@@ -851,8 +851,8 @@ existing read is unchanged; `people.human_id` (migration `0046`) names the human
 
 - **Model**: `human_identities` = atomic humans, never rewritten or deleted.
   `human_identity_keys` = fleet-unique keys: `email`, `phone` (E.164, else 400)
-  are PROOF; `linkedin_url`, `apollo_person_id`, `apify_person_id` only resolve
-  (a conflict never merges). `human_links` = statements between two atomic humans
+  are PROOF; `linkedin_url`, `apollo_person_id`, `apify_person_id`,
+  `messaging_handle` only resolve (a conflict never merges). `human_links` = statements between two atomic humans
   (`a < b`): `same` (merge) / `distinct` (split), scope `fleet` | `org`, with
   basis (`shared_email` | `shared_phone` | `judgment`), judgedBy, statedBy,
   evidence, withdrawable. The human an org sees = connected component of the
@@ -871,6 +871,13 @@ existing read is unchanged; `people.human_id` (migration `0046`) names the human
 - **Resolve** returns `humanId` (in the asking org's view), `atomicHumanId`
   (where the keys sit; stable), `created`, `mergedHumanIds`, `separatedHumanIds`.
   `create:false` is read-only. Same email from two orgs = same `humanId`.
+- **Messaging handles** (RELATIONSHIP-TAGS-1014): a person seen only on a
+  messaging network (WhatsApp member known by its LID, no phone; LinkedIn member
+  through the bridge) is a human: resolve `messagingHandles: [{network, id}]`
+  (`whatsapp|linkedin|telegram|signal|instagram|messenger`, id verbatim, stored
+  `<network>:<id>`). Resolve only: given beside an email already held elsewhere it
+  stays on its own human; only an org `same` link makes "Yulia (WA)" = Yuliia,
+  withdrawing it is the undo. View carries `messagingHandles`.
 - **Facts** (`opt_out`, `do_not_contact`) sit on the human wherever they work,
   with `statedByOrgId` + source + evidence; read on the whole component; what
   they mean is the consumer's call. Existing opt-out / won gates are unchanged
@@ -1299,7 +1306,12 @@ so the pipe that can reach them still gets them. One rule for every provider:
   `exhausted` (candidates: `reason: unreachable_by_provider`) BEFORE any search,
   pop or reveal; no reachable count persisted (the audience is not drained).
 - Omitted / `{}` ⟹ every outbound byte unchanged (tests in
-  `audiences-serve-next.test.ts`). Audience Size / Remaining do NOT yet reflect
+  `audiences-serve-next.test.ts`).
+- **`relationships: "business_only"`** (RELATIONSHIP-TAGS-1014, same body): the
+  pipe's relationship policy (tags owned by lead-service). Pushed down VERBATIM as
+  crm-service's top-level `relationships` on every CRM-sourced serve (crm audience
+  or CRM feature identity); crm-service decides and does not burn a refused
+  person. No effect on apollo / apify (strangers). Absent ⟹ no key on the wire. Audience Size / Remaining do NOT yet reflect
   a pipe's reach (a crm count per audience per channel is not cheap).
 
 ### An audience belongs to ONE offer, not to a whole brand

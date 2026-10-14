@@ -10,8 +10,8 @@
 // Model:
 //   human_identities     atomic humans. Never rewritten, never deleted.
 //   human_identity_keys  fleet-wide unique keys: email | phone are PROOF;
-//                        linkedin_url | apollo_person_id | apify_person_id only
-//                        resolve.
+//                        linkedin_url | apollo_person_id | apify_person_id |
+//                        messaging_handle only resolve.
 //   human_links          merge ('same') / split ('distinct') statements between
 //                        two atomic humans, scope 'fleet' or 'org'.
 //   human_facts          facts carried on the human (opt_out, do_not_contact).
@@ -43,6 +43,7 @@ import {
   type HumanLink,
 } from "../db/schema.js";
 import { normalizeEmail, normalizeLinkedinUrl } from "./suppression.js";
+import type { MessagingNetwork } from "../lib/messaging-networks.js";
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type Exec = typeof db | Tx;
@@ -53,9 +54,28 @@ export const KEY_KINDS = [
   "linkedin_url",
   "apollo_person_id",
   "apify_person_id",
+  "messaging_handle",
 ] as const;
 export type KeyKind = (typeof KEY_KINDS)[number];
 const PROOF_KINDS = new Set<KeyKind>(["email", "phone"]);
+
+// A person seen only through a messaging network (a WhatsApp member known by its
+// LID, no phone visible; a LinkedIn member seen through the bridge) is a human
+// too (RELATIONSHIP-TAGS-1014): resolvable and creatable on that handle, so a
+// judged merge ("Yulia (WA)" = Yuliia Siletska) can be stated here. A handle is
+// a RESOLVE key, never proof: it never merges two humans by itself, only an
+// org-scoped judgment link does. Stored as `<network>:<id>`, id verbatim (case
+// kept: LinkedIn member ids are case-sensitive).
+export function messagingHandleKey(network: MessagingNetwork, rawId: string): IdentityKey {
+  const id = rawId.trim();
+  if (!id) throw new InvalidIdentityKeyError(`${network} handle is blank`);
+  return { kind: "messaging_handle", valueNorm: `${network}:${id}` };
+}
+
+function parseMessagingHandle(valueNorm: string): { network: string; id: string } {
+  const i = valueNorm.indexOf(":");
+  return { network: valueNorm.slice(0, i), id: valueNorm.slice(i + 1) };
+}
 
 export const FACT_KINDS = ["opt_out", "do_not_contact"] as const;
 export type FactKind = (typeof FACT_KINDS)[number];
@@ -606,6 +626,7 @@ export interface HumanView {
   phones: string[];
   linkedinUrls: string[];
   providerPersonIds: Array<{ provider: "apollo" | "apify"; id: string }>;
+  messagingHandles: Array<{ network: string; id: string }>;
   facts: Array<{
     factId: string;
     humanId: string;
@@ -686,6 +707,7 @@ export async function getHumanView(humanId: string, orgId: string | null): Promi
       ...of("apollo_person_id").map((id) => ({ provider: "apollo" as const, id })),
       ...of("apify_person_id").map((id) => ({ provider: "apify" as const, id })),
     ],
+    messagingHandles: of("messaging_handle").map(parseMessagingHandle),
     facts: facts.map((f) => ({
       factId: f.id,
       humanId: f.humanId,

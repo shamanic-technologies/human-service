@@ -21,6 +21,7 @@ import {
   type Person,
 } from "../services/people-providers.js";
 import type { Reach } from "./reach.js";
+import type { RelationshipPolicy } from "./relationship-policy.js";
 
 function requireCrm(): { url: string; key: string } {
   // Read at call time (not boot) so a missing var fails the request loudly
@@ -82,6 +83,10 @@ export interface CrmServeScope {
   // marked served, so the pipe that can reach them still gets them. Empty / absent =
   // no key on the wire (bytes unchanged).
   reachableBy?: readonly Reach[] | null;
+  // The serving pipe's relationship policy (src/lib/relationship-policy.ts), sent
+  // top-level as crm-service's `relationships` (both pools): crm-service skips the
+  // people it refuses and does NOT mark them served. Absent = no key on the wire.
+  relationships?: RelationshipPolicy | null;
 }
 
 export interface CrmServeStats {
@@ -174,6 +179,7 @@ export async function crmServeNext(
         ...(uploadId ? { uploadIds: [uploadId] } : {}),
         ...(people ? { people } : {}),
         ...(reachableBy ? { reachableBy } : {}),
+        ...(scope.relationships ? { relationships: scope.relationships } : {}),
       }),
     });
   } catch (err) {
