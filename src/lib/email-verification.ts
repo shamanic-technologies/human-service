@@ -58,18 +58,33 @@ export function readEmailVerification(
 // (CATCHALL-SERVE-OPTION-1013). `valid_only` is the default and what every
 // caller that states nothing gets. `valid_and_catch_all` also hands out a
 // catch_all address (~7% bounce measured, vs ~15% unknown, ~40% invalid), so a
-// market that ran out of confirmed mailboxes keeps reaching people. unknown,
-// invalid and risky are never deliverable, whatever the caller asks.
-export const ACCEPTED_EMAILS = ["valid_only", "valid_and_catch_all"] as const;
+// market that ran out of confirmed mailboxes keeps reaching people.
+// `valid_catch_all_and_unknown` (UNKNOWN-EMAILS-OPTION-1014, owner 2026-10-14)
+// also hands out an address the verifier could not judge (verdict unknown,
+// ~15% bounce), chosen knowingly to keep a client's market spending. invalid
+// and risky are never deliverable, whatever the caller asks.
+export const ACCEPTED_EMAILS = ["valid_only", "valid_and_catch_all", "valid_catch_all_and_unknown"] as const;
 export type AcceptedEmails = (typeof ACCEPTED_EMAILS)[number];
+
+// The verdicts beyond `valid` each option also hands out: what a fresh reveal
+// may serve, and what the re-reach of people already paid for looks for.
+const WIDENED_VERDICTS: Record<AcceptedEmails, readonly EmailVerdict[]> = {
+  valid_only: [],
+  valid_and_catch_all: ["catch_all"],
+  valid_catch_all_and_unknown: ["catch_all", "unknown"],
+};
+
+export function widenedVerdicts(accepted: AcceptedEmails | undefined): readonly EmailVerdict[] {
+  return WIDENED_VERDICTS[accepted ?? "valid_only"];
+}
 
 // Apply the caller's policy to the provider's verdict. The provider's own
 // `deliverable` (valid only) stays the default; the caller can only widen it to
-// catch_all.
+// catch_all (and unknown).
 export function isVerdictAccepted(
   verification: EmailVerification,
   accepted: AcceptedEmails | undefined
 ): boolean {
   if (verification.deliverable) return true;
-  return accepted === "valid_and_catch_all" && verification.verdict === "catch_all";
+  return widenedVerdicts(accepted).includes(verification.verdict);
 }

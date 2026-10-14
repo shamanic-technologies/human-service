@@ -82,7 +82,7 @@ import { createRun, completeRun } from "./runs.js";
 import { audienceSourcingOriginSlug, isCrmSourcedFeature, withSourcingOrigin } from "./sourcing-origin.js";
 import { crmPeopleServeStats, crmServeNext, normalizeCrmContact } from "../lib/crm-contacts.js";
 import { normalizeReach, personReaches, providerCanReach, type Reach } from "../lib/reach.js";
-import type { EmailVerdict } from "../lib/email-verification.js";
+import { widenedVerdicts, type EmailVerdict } from "../lib/email-verification.js";
 import { takeRereachForServe } from "./catch-all-rereach.js";
 import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
 
@@ -2615,10 +2615,10 @@ export async function serveNextPerson(
   // this audience already revealed, verified and dropped for the brand: paid
   // for once, handed from what we stored, each once (catch-all-rereach.ts).
   // Before the yield read: they cost nothing and were already judged.
-  if (identity.acceptedEmails === "valid_and_catch_all") {
+  if (widenedVerdicts(identity.acceptedEmails).length > 0) {
     const rereach = await takeRereachForServe(identity, audience.brandId, audience.id);
     if (rereach) {
-      return servedWithPersonId(identity.orgId, audience.id, rereach.person, "catch_all");
+      return servedWithPersonId(identity.orgId, audience.id, rereach.person, rereach.serve.verdict);
     }
   }
 

@@ -64,7 +64,7 @@ import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import { ensureTargetText, screenTarget } from "./audience-target-text.js";
 import { isCrmSourcedFeature } from "./sourcing-origin.js";
 import { providerCanReach, type Reach } from "../lib/reach.js";
-import type { EmailVerdict } from "../lib/email-verification.js";
+import { widenedVerdicts, type EmailVerdict } from "../lib/email-verification.js";
 import {
   claimRereach,
   markRereach,
@@ -354,7 +354,7 @@ export async function nextCandidate(
   // A caller asking for catch-all addresses is first offered the catch-all
   // people this audience already revealed, verified and dropped for the brand
   // (catch-all-rereach.ts): their reveal on this candidate costs nothing.
-  if (identity.acceptedEmails === "valid_and_catch_all") {
+  if (widenedVerdicts(identity.acceptedEmails).length > 0) {
     const rereach = await offerRereach(audience, identity);
     if (rereach) return { status: "candidate", candidate: toView(rereach), target };
   }
@@ -437,7 +437,12 @@ async function offerRereach(
   identity: Identity
 ): Promise<AudienceCandidate | null> {
   for (;;) {
-    const page = await selectRereachable(identity.orgId, audience.brandId, audience.id);
+    const page = await selectRereachable(
+      identity.orgId,
+      audience.brandId,
+      audience.id,
+      widenedVerdicts(identity.acceptedEmails)
+    );
     if (page.length === 0) return null;
     for (const serve of page) {
       if (!(await claimRereach(identity.orgId, audience.brandId, audience.id, serve, "candidates", "offered"))) {
@@ -663,9 +668,9 @@ async function revealRereach(
   identity: Identity,
   rereach: NonNullable<Awaited<ReturnType<typeof rereachOfCandidate>>>
 ): Promise<Omit<RevealCandidateResult, "replayed">> {
-  if (identity.acceptedEmails !== "valid_and_catch_all") {
+  if (!widenedVerdicts(identity.acceptedEmails).includes(rereach.verdict)) {
     await releaseRereach(identity.orgId, audience.brandId, rereach.emailNorm);
-    return { status: "not_served", person: null, reason: "not_deliverable", verdict: "catch_all" };
+    return { status: "not_served", person: null, reason: "not_deliverable", verdict: rereach.verdict };
   }
   const person = rereachPerson(rereach);
   const block = await rereachBlock(identity, audience.brandId, person);
@@ -674,11 +679,11 @@ async function revealRereach(
     return { status: "not_served", person: null, reason: block };
   }
   await recordRereachHandout(identity.orgId, audience.brandId, rereach);
-  const served = await servedWithPersonId(identity.orgId, audience.id, person, "catch_all");
+  const served = await servedWithPersonId(identity.orgId, audience.id, person, rereach.verdict);
   console.log(
     `[human-service] catch_all_rereach.handed org=${identity.orgId} audience=${audience.id} leadServe=${rereach.leadServeId} path=candidates`
   );
-  return { status: "served", person: served.person, personId: served.personId, emailVerdict: "catch_all" };
+  return { status: "served", person: served.person, personId: served.personId, emailVerdict: rereach.verdict };
 }
 
 /**

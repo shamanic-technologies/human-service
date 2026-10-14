@@ -16,6 +16,15 @@ describe("isVerdictAccepted", () => {
     expect(isVerdictAccepted(v("catch_all"), "valid_only")).toBe(false);
     expect(isVerdictAccepted(v("catch_all"), "valid_and_catch_all")).toBe(true);
   });
+
+  it("valid_catch_all_and_unknown adds unknown; invalid / risky never (UNKNOWN-EMAILS-OPTION-1014)", () => {
+    const v = (verdict: "valid" | "catch_all" | "unknown" | "invalid" | "risky") => ({
+      verdict,
+      deliverable: verdict === "valid",
+    });
+    for (const ok of ["valid", "catch_all", "unknown"] as const) expect(isVerdictAccepted(v(ok), "valid_catch_all_and_unknown")).toBe(true);
+    for (const bad of ["invalid", "risky"] as const) expect(isVerdictAccepted(v(bad), "valid_catch_all_and_unknown")).toBe(false);
+  });
 });
 
 describe("shapeEmailVerdict", () => {

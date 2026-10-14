@@ -1155,7 +1155,7 @@ function parseServeReach(
       ok: false,
       error:
         field === "acceptedEmails"
-          ? "acceptedEmails must be valid_only or valid_and_catch_all"
+          ? "acceptedEmails must be valid_only, valid_and_catch_all or valid_catch_all_and_unknown"
           : field === "relationships"
             ? "relationships must be business_only"
             : "reachableBy must be phone, email, or a list of them",
