@@ -1,4 +1,7 @@
 // Re-reach of catch-all people already paid for (CATCHALL-SERVE-OPTION-1013).
+// Same for unknown-verdict people under `valid_catch_all_and_unknown`
+// (UNKNOWN-EMAILS-OPTION-1014): the verdicts looked for are the caller's
+// `widenedVerdicts`, and each person is handed with their OWN verdict.
 //
 // WHY. Until a caller could ask for catch-all addresses, every revealed person
 // whose address verified `catch_all` was CLAIMED for the brand (bronze
@@ -47,6 +50,7 @@ import { isEmailWonForRequest, isPersonOptedOut } from "./opt-outs.js";
 import { isOwnCompanyPerson, loadOwnCompany } from "./own-company.js";
 import { isEmailBounced } from "./bounces.js";
 import { normalizeEmail } from "./suppression.js";
+import { widenedVerdicts, type EmailVerdict } from "../lib/email-verification.js";
 
 export type RereachPath = "serve_next" | "candidates";
 export type RereachStatus = "claimed" | "offered" | "handed" | "blocked" | "declined";
@@ -65,6 +69,8 @@ export interface RereachableServe {
   // The audience's candidate row for this person, when the candidate path saw
   // them before (a revealed `not_served` row): re-offered in place.
   candidateId: string | null;
+  // The verdict the paid verification gave this address (catch_all, unknown).
+  verdict: EmailVerdict;
 }
 
 interface RereachRow {
@@ -78,6 +84,7 @@ interface RereachRow {
   teaser: TeaserSnapshot | null;
   teaser_domain: string | null;
   candidate_id: string | null;
+  email_verdict: EmailVerdict;
 }
 
 // How many rows one read takes: a claim can lose a race or a gate can block,
@@ -91,11 +98,13 @@ const REREACH_PAGE = 20;
 export async function selectRereachable(
   orgId: string,
   brandId: string,
-  audienceId: string
+  audienceId: string,
+  verdicts: readonly EmailVerdict[]
 ): Promise<RereachableServe[]> {
+  if (verdicts.length === 0) return [];
   const rows = await pg<RereachRow[]>`
     SELECT ls.id AS lead_serve_id, ls.provider_person_id, ls.first_name, ls.last_name,
-           ls.email, ls.linkedin_url, ls.company_domain,
+           ls.email, ls.linkedin_url, ls.company_domain, ls.email_verdict,
            COALESCE(ac.teaser, (
              SELECT s.teaser FROM audience_teaser_screenings s
               WHERE s.audience_id = ls.audience_id AND s.provider_person_id = ls.provider_person_id
@@ -108,7 +117,7 @@ export async function selectRereachable(
         ON ac.audience_id = ls.audience_id AND ac.provider_person_id = ls.provider_person_id
      WHERE ls.org_id = ${orgId}::uuid AND ls.brand_id = ${brandId}::uuid
        AND ls.audience_id = ${audienceId}::uuid
-       AND ls.email_verdict = 'catch_all' AND ls.provider = 'apollo'
+       AND ls.email_verdict IN ${pg(verdicts as EmailVerdict[])} AND ls.provider = 'apollo'
        AND ls.provider_person_id IS NOT NULL
        AND ls.email IS NOT NULL AND btrim(ls.email) <> ''
        AND (ac.id IS NULL OR ac.status = 'revealed')
@@ -119,7 +128,7 @@ export async function selectRereachable(
        AND NOT EXISTS (
          SELECT 1 FROM lead_serves o
           WHERE o.org_id = ls.org_id AND o.brand_id = ls.brand_id
-            AND o.email_verdict IS NOT NULL AND o.email_verdict <> 'catch_all'
+            AND o.email_verdict IS NOT NULL AND o.email_verdict <> ls.email_verdict
             AND lower(btrim(o.email)) = lower(btrim(ls.email))
             AND o.served_at > ls.served_at)
        AND NOT EXISTS (
@@ -150,6 +159,7 @@ export async function selectRereachable(
     teaser: r.teaser,
     teaserDomain: r.teaser_domain,
     candidateId: r.candidate_id,
+    verdict: r.email_verdict,
   }));
 }
 
@@ -219,7 +229,7 @@ export async function releaseRereach(orgId: string, brandId: string, emailNorm: 
 export async function rereachOfCandidate(candidateId: string): Promise<RereachableServe | null> {
   const rows = await pg<RereachRow[]>`
     SELECT ls.id AS lead_serve_id, ls.provider_person_id, ls.first_name, ls.last_name,
-           ls.email, ls.linkedin_url, ls.company_domain,
+           ls.email, ls.linkedin_url, ls.company_domain, ls.email_verdict,
            COALESCE(ac.teaser, (
              SELECT s.teaser FROM audience_teaser_screenings s
               WHERE s.audience_id = ac.audience_id AND s.provider_person_id = ac.provider_person_id
@@ -246,6 +256,7 @@ export async function rereachOfCandidate(candidateId: string): Promise<Rereachab
     teaser: r.teaser,
     teaserDomain: r.teaser_domain,
     candidateId: r.candidate_id,
+    verdict: r.email_verdict,
   };
 }
 
@@ -264,8 +275,8 @@ export function rereachPerson(serve: RereachableServe): Person {
     seniority: t.seniority ?? null,
     email: serve.email,
     emailStatus: null,
-    // The verifier said so: the domain accepts every address.
-    catchAll: true,
+    // The verifier said so: the domain accepts every address (unknown: it could not tell).
+    catchAll: serve.verdict === "catch_all" ? true : null,
     inferred: null,
     linkedinUrl: serve.linkedinUrl,
     photoUrl: null,
@@ -358,7 +369,7 @@ export async function takeRereachForServe(
   audienceId: string
 ): Promise<{ person: Person; serve: RereachableServe } | null> {
   for (;;) {
-    const page = await selectRereachable(identity.orgId, brandId, audienceId);
+    const page = await selectRereachable(identity.orgId, brandId, audienceId, widenedVerdicts(identity.acceptedEmails));
     if (page.length === 0) return null;
     for (const serve of page) {
       if (!(await claimRereach(identity.orgId, brandId, audienceId, serve, "serve_next", "claimed"))) continue;
