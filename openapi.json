@@ -3059,6 +3059,14 @@
             ],
             "description": "Which email verification verdicts this serve may hand out, as the calling workflow states it. 'valid_only' (the default when omitted) = only an address the verifier confirmed (verdict valid, <1% bounce). 'valid_and_catch_all' = also an address on a catch-all domain (verdict catch_all, ~7% bounce), so a market that ran out of confirmed mailboxes keeps reaching people. unknown, invalid and risky are never handed out. With 'valid_and_catch_all', the catch-all people this audience already revealed, verified and dropped for the brand are handed out FIRST, from what is stored: no new reveal, no new verification, no second charge, each person once. Accepted on serve-next, candidates/next and candidates/{candidateId}/reveal (send the same value on all three). Stating it (either value) also adds `emailVerdict` to every served answer. Providers without verification (crm, apify): no effect.",
             "example": "valid_and_catch_all"
+          },
+          "relationships": {
+            "type": "string",
+            "enum": [
+              "business_only"
+            ],
+            "description": "Who the SERVING PIPE may hand out, by the person's relationship with the brand (tags owned by lead-service). 'business_only' = nobody tagged personal, investor, supplier, team, partner or advisor, and nobody whose thread was never judged. Pushed down to crm-service on a CRM-sourced serve (a CRM audience, or the CRM feature identity), which decides and does NOT mark a refused person served, so another pipe still gets them. No effect on a search-provider audience (apollo / apify: strangers). Omitted = unchanged.",
+            "example": "business_only"
           }
         }
       },
@@ -7240,6 +7248,42 @@
             "maxItems": 10,
             "description": "Resolve only: never merges."
           },
+          "messagingHandles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "network": {
+                  "type": "string",
+                  "enum": [
+                    "whatsapp",
+                    "linkedin",
+                    "telegram",
+                    "signal",
+                    "instagram",
+                    "messenger"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                }
+              },
+              "required": [
+                "network",
+                "id"
+              ]
+            },
+            "maxItems": 10,
+            "description": "A person seen only through a messaging network (e.g. a WhatsApp member known by its LID, no phone visible; a LinkedIn member seen through the bridge). `id` = the network's own id for that member, verbatim (case kept). Resolve only: a handle held by another human never merges anything; only an org judgment link (POST /internal/human-identities/links with orgId) makes it one human with someone else.",
+            "example": [
+              {
+                "network": "whatsapp",
+                "id": "83932385144839@lid"
+              }
+            ]
+          },
           "source": {
             "type": "string",
             "minLength": 1,
@@ -7310,6 +7354,25 @@
                 "id"
               ]
             }
+          },
+          "messagingHandles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "network": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "network",
+                "id"
+              ]
+            },
+            "description": "Messaging handles (network + id) the human is known by."
           },
           "facts": {
             "type": "array",
@@ -7388,6 +7451,7 @@
           "phones",
           "linkedinUrls",
           "providerPersonIds",
+          "messagingHandles",
           "facts",
           "people",
           "links"

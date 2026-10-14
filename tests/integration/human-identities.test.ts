@@ -272,3 +272,68 @@ describe("per-org people hang off the human", () => {
     expect(after.humanId).not.toBeNull();
   });
 });
+
+describe("messaging handles (RELATIONSHIP-TAGS-1014)", () => {
+  const YULIA_LID = { network: "whatsapp", id: "83932385144839@lid" };
+  const YULIIA = "lusenko.julija@gmail.com";
+
+  it("a WhatsApp handle with no phone resolves to a human, and resolves again to the same one", async () => {
+    const miss = await resolve({ orgId: ORG_A, messagingHandles: [YULIA_LID], create: false });
+    expect(miss.status).toBe(200);
+    expect(miss.body.humanId).toBeNull();
+
+    const a = await resolve({ orgId: ORG_A, messagingHandles: [YULIA_LID] });
+    expect(a.status).toBe(200);
+    expect(a.body.created).toBe(true);
+    const again = await resolve({ orgId: ORG_B, messagingHandles: [{ network: "whatsapp", id: " 83932385144839@lid " }] });
+    expect(again.body.created).toBe(false);
+    expect(again.body.humanId).toBe(a.body.humanId);
+
+    const v = await view(a.body.humanId, ORG_A);
+    expect(v.body.messagingHandles).toEqual([YULIA_LID]);
+    expect(v.body.emails).toEqual([]);
+  });
+
+  it("a handle never merges by itself; an org judgment link makes one human in that org only, and is undoable", async () => {
+    const yuliia = await resolve({ orgId: ORG_A, emails: [YULIIA] });
+    const ghost = await resolve({ orgId: ORG_A, messagingHandles: [YULIA_LID] });
+    expect(ghost.body.humanId).not.toBe(yuliia.body.humanId);
+
+    // The handle given beside her email on one contact: it is already held, so it
+    // stays with the ghost human: no automatic merge.
+    const both = await resolve({ orgId: ORG_A, emails: [YULIIA], messagingHandles: [YULIA_LID] });
+    expect(both.body.humanId).toBe(yuliia.body.humanId);
+    expect(both.body.mergedHumanIds).toEqual([]);
+    const stillGhost = await resolve({ orgId: ORG_A, messagingHandles: [YULIA_LID], create: false });
+    expect(stillGhost.body.humanId).toBe(ghost.body.humanId);
+
+    const merged = await link({ orgId: ORG_A, relation: "same", humanIds: [yuliia.body.humanId, ghost.body.humanId] });
+    expect(merged.status).toBe(200);
+    expect(merged.body.changed).toBe(true);
+    const inA = await resolve({ orgId: ORG_A, messagingHandles: [YULIA_LID], create: false });
+    const inB = await resolve({ orgId: ORG_B, messagingHandles: [YULIA_LID], create: false });
+    expect(inA.body.humanId).toBe(merged.body.humanIds[0]);
+    expect(inA.body.humanId).toBe(
+      (await resolve({ orgId: ORG_A, emails: [YULIIA], create: false })).body.humanId
+    );
+    // Org B never stated the merge: there they stay two humans.
+    expect(inB.body.humanId).toBe(ghost.body.humanId);
+    expect((await resolve({ orgId: ORG_B, emails: [YULIIA], create: false })).body.humanId).toBe(yuliia.body.humanId);
+    const vA = await view(inA.body.humanId, ORG_A);
+    expect(vA.body.emails).toEqual([YULIIA]);
+    expect(vA.body.messagingHandles).toEqual([YULIA_LID]);
+
+    const undo = await request(app)
+      .post(`/internal/human-identities/links/${merged.body.link.linkId}/withdraw`)
+      .set(H)
+      .send({ orgId: ORG_A, withdrawnBy: "person:u1", reason: "not her" });
+    expect(undo.status).toBe(200);
+    const after = await resolve({ orgId: ORG_A, messagingHandles: [YULIA_LID], create: false });
+    expect(after.body.humanId).toBe(ghost.body.humanId);
+  });
+
+  it("400 on an unknown network or a blank id", async () => {
+    expect((await resolve({ messagingHandles: [{ network: "fax", id: "1" }] })).status).toBe(400);
+    expect((await resolve({ messagingHandles: [{ network: "whatsapp", id: "   " }] })).status).toBe(400);
+  });
+});

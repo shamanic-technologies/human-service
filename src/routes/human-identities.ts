@@ -25,6 +25,7 @@ import {
   StillOneHumanError,
   getHumanView,
   listEvents,
+  messagingHandleKey,
   normalizeKey,
   resolveIdentity,
   stateFact,
@@ -106,9 +107,12 @@ router.post("/internal/human-identities/resolve", requireApiKey, async (req: Req
         kind: p.provider === "apollo" ? ("apollo_person_id" as const) : ("apify_person_id" as const),
         valueNorm: normalizeKey("apollo_person_id", p.id),
       })),
+      ...(b.messagingHandles ?? []).map((h) => messagingHandleKey(h.network, h.id)),
     ];
     if (keys.length === 0) {
-      res.status(400).json({ error: "at least one email, phone, linkedinUrl or providerPersonId is required" });
+      res.status(400).json({
+        error: "at least one email, phone, linkedinUrl, providerPersonId or messagingHandle is required",
+      });
       return;
     }
     res.json(await resolveIdentity({ orgId: b.orgId ?? null, keys, source: b.source, create: b.create }));
