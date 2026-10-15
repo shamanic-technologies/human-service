@@ -1528,11 +1528,25 @@ export const RelationshipsFieldSchema = z.enum(RELATIONSHIP_POLICIES).openapi({
   example: "business_only",
 });
 
+// The serving pipe's CRM step filter (CRM-WARM-NURTURE-1015). Passed verbatim.
+export const StepFilterFieldSchema = z
+  .object({
+    reached: z.array(z.string()).optional(),
+    notReached: z.array(z.string()).optional(),
+  })
+  .passthrough()
+  .openapi({
+    description:
+      "Which funnel steps the person reached in the brand's own tools, as the SERVING PIPE's play states it (e.g. reached a form or a meeting, never a sale, never disqualified). Vocabulary and validation are crm-service's: forwarded VERBATIM, top-level, to crm-service on every CRM-sourced serve (a CRM audience, or the CRM feature identity), ANDed there with the audience's own pool filter; crm-service refusing it is relayed as a 400, never an unfiltered serve. A search-provider audience (apollo / apify) cannot honour it: the serve is refused (422). Omitted = unchanged.",
+    example: { reached: ["form_submission", "meeting_booked"], notReached: ["sale", "disqualified"] },
+  });
+
 export const ServeNextRequestSchema = z
   .object({
     reachableBy: ReachableByFieldSchema.optional(),
     acceptedEmails: AcceptedEmailsFieldSchema.optional(),
     relationships: RelationshipsFieldSchema.optional(),
+    stepFilter: StepFilterFieldSchema.optional(),
   })
   .openapi("ServeNextRequest");
 
@@ -4459,6 +4473,10 @@ export const AudienceStillFitsRequestSchema = z
     brandId: z.string().regex(LAX_UUID_REGEX, "brandId must be a valid UUID").openapi({ description: "The audience's brand (a mismatch is a 404)." }),
     email: z.string().trim().min(3).max(320).regex(/@/, "email must be an address").openapi({ description: "The person's address (any address of the person resolves them)." }),
     personId: z.string().regex(LAX_UUID_REGEX).nullable().optional().openapi({ description: "The personId serve-next returned at find time, when there was one." }),
+    stepFilter: StepFilterFieldSchema.optional().openapi({
+      description:
+        "The pipe's CRM step filter (same value as on serve-next), forwarded verbatim to crm-service's still-fits for a CRM audience, ANDed with its pool rule. A search audience cannot judge it: 422 `step_filter_needs_crm`. Omitted = unchanged.",
+    }),
   })
   .openapi("AudienceStillFitsRequest");
 
@@ -4486,7 +4504,7 @@ registry.registerPath({
     400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
     404: { description: "Audience not found for this org and brand", content: { "application/json": { schema: ErrorSchema } } },
-    422: { description: "The person cannot be judged", content: { "application/json": { schema: ErrorSchema } } },
+    422: { description: "The person cannot be judged, or a stepFilter was stated for a search audience", content: { "application/json": { schema: ErrorSchema } } },
     502: { description: "crm-service failed", content: { "application/json": { schema: ErrorSchema } } },
   },
 });

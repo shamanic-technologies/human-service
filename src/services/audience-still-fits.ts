@@ -27,6 +27,7 @@ import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audienceMembers, audiences, audienceScreenedOut, people } from "../db/schema.js";
 import { crmStillFits } from "../lib/crm-contacts.js";
+import type { StepFilter } from "../lib/step-filter.js";
 import { normalizeEmail } from "./suppression.js";
 import { emailsOfPersons, personIdsByEmail } from "./person-emails.js";
 
@@ -58,6 +59,8 @@ export interface StillFitsQuestion {
   audienceId: string;
   email: string;
   personId: string | null;
+  // The pipe's CRM step filter (src/lib/step-filter.ts), forwarded verbatim.
+  stepFilter?: StepFilter;
 }
 
 export async function audienceStillFits(q: StillFitsQuestion): Promise<StillFitsAnswer> {
@@ -70,6 +73,13 @@ export async function audienceStillFits(q: StillFitsQuestion): Promise<StillFits
 
   const isCrm = audience.provider === "crm" || !!audience.crmUploadId || !!audience.crmPeopleFilter;
   if (isCrm) return crmFit(q, audience);
+  // A search audience knows nothing of the brand's funnel: never "fits" a step filter.
+  if (q.stepFilter) {
+    throw new CannotJudgeError(
+      "step_filter_needs_crm",
+      "A stepFilter can only be judged by the brand's CRM; this is a search audience"
+    );
+  }
   return searchFit(q, audience.id);
 }
 
@@ -90,11 +100,14 @@ async function addressesToAsk(q: StillFitsQuestion): Promise<string[]> {
 
 async function crmFit(q: StillFitsQuestion, audience: typeof audiences.$inferSelect): Promise<StillFitsAnswer> {
   const basis: StillFitsBasis = audience.crmPeopleFilter ? "crm_people_pool" : "crm_list";
-  const scope = audience.crmPeopleFilter
-    ? { people: audience.crmPeopleFilter }
-    : audience.crmUploadId
-      ? { uploadIds: [audience.crmUploadId] }
-      : {};
+  const scope = {
+    ...(audience.crmPeopleFilter
+      ? { people: audience.crmPeopleFilter }
+      : audience.crmUploadId
+        ? { uploadIds: [audience.crmUploadId] }
+        : {}),
+    ...(q.stepFilter ? { stepFilter: q.stepFilter } : {}),
+  };
   for (const email of await addressesToAsk(q)) {
     const answer = await crmStillFits(audience.brandId, email, scope, { orgId: q.orgId });
     if (answer === null) continue; // crm-service holds nobody at this address: try the next one

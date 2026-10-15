@@ -22,6 +22,7 @@ import {
 } from "../services/people-providers.js";
 import type { Reach } from "./reach.js";
 import type { RelationshipPolicy } from "./relationship-policy.js";
+import type { StepFilter } from "./step-filter.js";
 
 function requireCrm(): { url: string; key: string } {
   // Read at call time (not boot) so a missing var fails the request loudly
@@ -87,6 +88,10 @@ export interface CrmServeScope {
   // top-level as crm-service's `relationships` (both pools): crm-service skips the
   // people it refuses and does NOT mark them served. Absent = no key on the wire.
   relationships?: RelationshipPolicy | null;
+  // The serving pipe's CRM step filter (src/lib/step-filter.ts), sent VERBATIM
+  // top-level as crm-service's `stepFilter` (both pools), ANDed there with the pool
+  // filter. Absent = no key on the wire.
+  stepFilter?: StepFilter | null;
 }
 
 export interface CrmServeStats {
@@ -180,6 +185,7 @@ export async function crmServeNext(
         ...(people ? { people } : {}),
         ...(reachableBy ? { reachableBy } : {}),
         ...(scope.relationships ? { relationships: scope.relationships } : {}),
+        ...(scope.stepFilter ? { stepFilter: scope.stepFilter } : {}),
       }),
     });
   } catch (err) {
@@ -267,6 +273,7 @@ export async function crmPeopleServeStats(
 export interface CrmStillFitsScope {
   people?: CrmPeopleFilter;
   uploadIds?: string[];
+  stepFilter?: StepFilter;
 }
 
 export type CrmStillFits =
@@ -290,6 +297,7 @@ export async function crmStillFits(
         email,
         ...(scope.people ? { people: scope.people } : {}),
         ...(scope.uploadIds && scope.uploadIds.length > 0 ? { uploadIds: scope.uploadIds } : {}),
+        ...(scope.stepFilter ? { stepFilter: scope.stepFilter } : {}),
       }),
     });
   } catch (err) {

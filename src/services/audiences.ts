@@ -2344,6 +2344,7 @@ async function serveNextCrmContact(
         people: audience.crmPeopleFilter,
         reachableBy: crmReach,
         relationships: identity.relationships ?? null,
+        stepFilter: identity.stepFilter ?? null,
       }
     );
     const contact = contacts[0] ?? null;
@@ -2504,6 +2505,14 @@ export async function serveNextPerson(
   // exactly as the cold outreach channel does.
   if (isCrmSourcedFeature(featureSlug) || provider === "crm") {
     return serveNextCrmContact(audience, identity, reach);
+  }
+  // A CRM step filter (the pipe's play: "reached a form, never a sale") can only be
+  // judged by crm-service. A search provider knows nothing of the brand's funnel,
+  // so serving here would hand out someone the play excluded: refuse, loud.
+  if (identity.stepFilter) {
+    throw new AudienceNotServableError(
+      `A stepFilter needs a CRM-sourced serve; audience provider '${provider ?? "none"}' cannot honour it.`
+    );
   }
 
   if (provider !== "apollo" && provider !== "apify") {
