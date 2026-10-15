@@ -1734,3 +1734,96 @@ describe("serve-next for a pipe: relationships (RELATIONSHIP-TAGS-1014)", () => 
     expect(res.body.error).toBe("relationships must be business_only");
   });
 });
+
+describe("serve-next for a pipe: CRM step filter (CRM-WARM-NURTURE-1015)", () => {
+  const STEP_FILTER = { reached: ["form_submission", "meeting_booked"], notReached: ["sale", "disqualified"] };
+
+  function captureCrm(bodies: Array<Record<string, unknown>>, email: string) {
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        bodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({ contacts: [crmContact(email, email)], served: 1, exhausted: false });
+      }
+      throw new Error("unexpected url " + u);
+    });
+  }
+
+  it("crm: the step filter reaches crm-service top-level, verbatim", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    captureCrm(bodies, "warm@crm.com");
+    const id = await createCrmAudience("CRM warm step filter");
+    const res = await request(app)
+      .post(`/orgs/audiences/${id}/serve-next`)
+      .set(getAuthHeaders())
+      .send({ stepFilter: STEP_FILTER, relationships: "business_only" });
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("served");
+    expect(bodies).toEqual([
+      { brandId: BRAND, limit: 1, relationships: "business_only", stepFilter: STEP_FILTER },
+    ]);
+  });
+
+  it("crm: an unknown step or key is passed as-is (crm-service owns the vocabulary)", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    captureCrm(bodies, "odd@crm.com");
+    const id = await createCrmAudience("CRM odd step filter");
+    const odd = { reached: ["some_future_step"], extra: true };
+    const res = await request(app).post(`/orgs/audiences/${id}/serve-next`).set(getAuthHeaders()).send({ stepFilter: odd });
+    expect(res.status).toBe(200);
+    expect(bodies[0].stepFilter).toEqual(odd);
+  });
+
+  it("crm: without it, the crm-service body carries no stepFilter key", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    captureCrm(bodies, "plain@crm.com");
+    const id = await createCrmAudience("CRM no step filter");
+    const res = await request(app).post(`/orgs/audiences/${id}/serve-next`).set(getAuthHeaders()).send({});
+    expect(res.status).toBe(200);
+    expect(bodies).toEqual([{ brandId: BRAND, limit: 1 }]);
+  });
+
+  it("crm: crm-service refusing the filter is relayed as a 400, nobody served", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.endsWith("/orgs/contacts/serve-next")) {
+        return new Response(JSON.stringify({ error: "unknown step 'x'" }), { status: 400, headers: { "content-type": "application/json" } });
+      }
+      throw new Error("unexpected url " + u);
+    });
+    const id = await createCrmAudience("CRM refused step filter");
+    const res = await request(app).post(`/orgs/audiences/${id}/serve-next`).set(getAuthHeaders()).send({ stepFilter: { reached: ["x"] } });
+    expect(res.status).toBe(400);
+    expect(res.body.source).toBe("crm-service");
+    expect(res.body.error).toContain("unknown step");
+  });
+
+  it("apollo: a step filter is refused (422) before any search or reveal", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      throw new Error("unexpected url " + url);
+    });
+    const id = await createAudience("apollo", "Apollo step filter");
+    fetchSpy.mockClear();
+    const res = await request(app).post(`/orgs/audiences/${id}/serve-next`).set(getAuthHeaders()).send({ stepFilter: STEP_FILTER });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain("stepFilter");
+    const providerCalls = fetchSpy.mock.calls.filter(([u]) => /\/(search\/next|enrich)$/.test(String(u)));
+    expect(providerCalls).toEqual([]);
+  });
+
+  it("candidates/next: a step filter is refused (422)", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      throw new Error("unexpected url " + url);
+    });
+    const id = await createAudience("apollo", "Apollo step filter candidates");
+    const res = await request(app).post(`/orgs/audiences/${id}/candidates/next`).set(getAuthHeaders()).send({ stepFilter: STEP_FILTER });
+    expect(res.status).toBe(422);
+  });
+
+  it("400 when stepFilter is not an object", async () => {
+    const id = await createCrmAudience("CRM bad step filter");
+    const res = await request(app).post(`/orgs/audiences/${id}/serve-next`).set(getAuthHeaders()).send({ stepFilter: "warm" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("stepFilter");
+  });
+});
