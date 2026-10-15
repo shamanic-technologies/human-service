@@ -116,6 +116,7 @@ import {
 
 import type { AcceptedEmails } from "../lib/email-verification.js";
 import type { RelationshipPolicy } from "../lib/relationship-policy.js";
+import type { StepFilter } from "../lib/step-filter.js";
 import { shapeEmailVerdict } from "../lib/serve-email-policy.js";
 const router = Router();
 
@@ -1146,7 +1147,13 @@ router.post(
 function parseServeReach(
   body: unknown
 ):
-  | { ok: true; reach: Reach[]; acceptedEmails?: AcceptedEmails; relationships?: RelationshipPolicy }
+  | {
+      ok: true;
+      reach: Reach[];
+      acceptedEmails?: AcceptedEmails;
+      relationships?: RelationshipPolicy;
+      stepFilter?: StepFilter;
+    }
   | { ok: false; error: string } {
   const parsed = ServeNextRequestSchema.safeParse(body ?? {});
   if (!parsed.success) {
@@ -1158,7 +1165,9 @@ function parseServeReach(
           ? "acceptedEmails must be valid_only, valid_and_catch_all or valid_catch_all_and_unknown"
           : field === "relationships"
             ? "relationships must be business_only"
-            : "reachableBy must be phone, email, or a list of them",
+            : field === "stepFilter"
+              ? "stepFilter must be an object ({reached?, notReached?})"
+              : "reachableBy must be phone, email, or a list of them",
     };
   }
   return {
@@ -1166,6 +1175,7 @@ function parseServeReach(
     reach: normalizeReach(parsed.data.reachableBy),
     ...(parsed.data.acceptedEmails ? { acceptedEmails: parsed.data.acceptedEmails } : {}),
     ...(parsed.data.relationships ? { relationships: parsed.data.relationships } : {}),
+    ...(parsed.data.stepFilter ? { stepFilter: parsed.data.stepFilter as StepFilter } : {}),
   };
 }
 
@@ -1216,6 +1226,7 @@ router.post(
     }
     if (reachParse.acceptedEmails) identity.acceptedEmails = reachParse.acceptedEmails;
     if (reachParse.relationships) identity.relationships = reachParse.relationships;
+    if (reachParse.stepFilter) identity.stepFilter = reachParse.stepFilter;
 
     try {
       const result = await serveNextPerson(audience, identity, undefined, reachParse.reach);
@@ -1226,6 +1237,12 @@ router.post(
     } catch (err) {
       if (err instanceof AudienceNotServableError) {
         res.status(422).json({ error: err.message });
+        return;
+      }
+      // crm-service refused the pipe's step filter: the caller's mistake, relayed
+      // with crm-service's own reason (never an unfiltered serve).
+      if (reachParse.stepFilter && err instanceof ProviderError && err.provider === "crm" && err.status === 400) {
+        res.status(400).json({ error: `crm-service refused stepFilter: ${err.body}`, source: "crm-service" });
         return;
       }
       sendProviderError(res, err);
@@ -1263,6 +1280,11 @@ router.post(
       return;
     }
     if (reachParse.acceptedEmails) identity.acceptedEmails = reachParse.acceptedEmails;
+    // Candidates are apollo-only: a CRM step filter cannot be honoured here.
+    if (reachParse.stepFilter) {
+      res.status(422).json({ error: "A stepFilter needs a CRM-sourced serve; candidates exist only for apollo audiences." });
+      return;
+    }
     try {
       const result = await nextCandidate(audience, identity, undefined, reachParse.reach);
       console.log(

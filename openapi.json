@@ -3068,6 +3068,37 @@
             ],
             "description": "Who the SERVING PIPE may hand out, by the person's relationship with the brand (tags owned by lead-service). 'business_only' = nobody tagged personal, investor, supplier, team, partner or advisor, and nobody whose thread was never judged. Pushed down to crm-service on a CRM-sourced serve (a CRM audience, or the CRM feature identity), which decides and does NOT mark a refused person served, so another pipe still gets them. No effect on a search-provider audience (apollo / apify: strangers). Omitted = unchanged.",
             "example": "business_only"
+          },
+          "stepFilter": {
+            "type": "object",
+            "properties": {
+              "reached": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "notReached": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": {
+              "nullable": true
+            },
+            "description": "Which funnel steps the person reached in the brand's own tools, as the SERVING PIPE's play states it (e.g. reached a form or a meeting, never a sale, never disqualified). Vocabulary and validation are crm-service's: forwarded VERBATIM, top-level, to crm-service on every CRM-sourced serve (a CRM audience, or the CRM feature identity), ANDed there with the audience's own pool filter; crm-service refusing it is relayed as a 400, never an unfiltered serve. A search-provider audience (apollo / apify) cannot honour it: the serve is refused (422). Omitted = unchanged.",
+            "example": {
+              "reached": [
+                "form_submission",
+                "meeting_booked"
+              ],
+              "notReached": [
+                "sale",
+                "disqualified"
+              ]
+            }
           }
         }
       },
@@ -7138,6 +7169,37 @@
             "nullable": true,
             "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
             "description": "The personId serve-next returned at find time, when there was one."
+          },
+          "stepFilter": {
+            "type": "object",
+            "properties": {
+              "reached": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "notReached": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": {
+              "nullable": true
+            },
+            "description": "The pipe's CRM step filter (same value as on serve-next), forwarded verbatim to crm-service's still-fits for a CRM audience, ANDed with its pool rule. A search audience cannot judge it: 422 `step_filter_needs_crm`. Omitted = unchanged.",
+            "example": {
+              "reached": [
+                "form_submission",
+                "meeting_booked"
+              ],
+              "notReached": [
+                "sale",
+                "disqualified"
+              ]
+            }
           }
         },
         "required": [
@@ -14505,7 +14567,7 @@
             }
           },
           "422": {
-            "description": "The person cannot be judged",
+            "description": "The person cannot be judged, or a stepFilter was stated for a search audience",
             "content": {
               "application/json": {
                 "schema": {

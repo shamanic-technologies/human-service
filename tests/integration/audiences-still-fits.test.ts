@@ -96,6 +96,28 @@ describe("POST /internal/audiences/still-fits", () => {
     expect(crmCalls[0].body).toEqual({ brandId: BRAND, email: "a@x.test", uploadIds: [UPLOAD] });
   });
 
+  it("CRM: the pipe's step filter is forwarded verbatim beside the pool filter", async () => {
+    const step = { reached: ["form_submission"], notReached: ["sale"] };
+    const r = await ask({ orgId: ORG, audienceId: CRM_PEOPLE, brandId: BRAND, email: "warm@x.test", stepFilter: step });
+    expect(r.status).toBe(200);
+    expect(crmCalls[0].body).toEqual({ brandId: BRAND, email: "warm@x.test", people: FILTER, stepFilter: step });
+  });
+
+  it("CRM: crm-service refusing the step filter is a 400", async () => {
+    crmAnswer = () => ({ status: 400, body: { error: "unknown step" } });
+    const r = await ask({ orgId: ORG, audienceId: CRM_FILE, brandId: BRAND, email: "a@x.test", stepFilter: { reached: ["x"] } });
+    expect(r.status).toBe(400);
+    expect(r.body.source).toBe("crm-service");
+  });
+
+  it("search audience + step filter = 422 step_filter_needs_crm, never fits", async () => {
+    await tagAudienceServe(ORG, APOLLO, [contact({ email: "founder@acme.test", providerPersonId: "ap-1" })]);
+    const r = await ask({ orgId: ORG, audienceId: APOLLO, brandId: BRAND, email: "founder@acme.test", stepFilter: { reached: ["signup"] } });
+    expect(r.status).toBe(422);
+    expect(r.body.code).toBe("step_filter_needs_crm");
+    expect(crmCalls).toHaveLength(0);
+  });
+
   it("CRM: nobody at the address = 422, never fits", async () => {
     crmAnswer = () => ({ status: 404, body: { type: "person_not_found" } });
     const r = await ask({ orgId: ORG, audienceId: CRM_PEOPLE, brandId: BRAND, email: "ghost@x.test" });

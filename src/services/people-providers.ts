@@ -32,6 +32,7 @@ import {
   type EmailVerification,
 } from "../lib/email-verification.js";
 import type { RelationshipPolicy } from "../lib/relationship-policy.js";
+import type { StepFilter } from "../lib/step-filter.js";
 import {
   filterOptedOut,
   isPersonOptedOut,
@@ -376,6 +377,10 @@ export interface Identity {
   // crm-service on a CRM serve only (src/lib/relationship-policy.ts); never sent to
   // a search provider.
   relationships?: RelationshipPolicy;
+  // The serving pipe's CRM step filter (body `stepFilter`, src/lib/step-filter.ts).
+  // Pushed down verbatim to crm-service on a CRM serve; a search-provider serve
+  // stating it is refused.
+  stepFilter?: StepFilter;
 }
 
 // Map a normalized neutral Person to the suppression/membership contact shape.

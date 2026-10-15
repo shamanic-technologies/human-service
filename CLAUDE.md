@@ -79,7 +79,7 @@ section — the port binds first).
 | Internal (staff) | `GET /internal/brands/{brandId}/audience-snapshot` (+ `/people`, `/companies`) | apiKey | What a brand HOLDS per list: people + companies stored (revealed / screened / waiting) and how many its target accepted; paginated people and company lists with source lists + accepting audiences. Pure DB read. See "Staff audience snapshot" |
 | Internal | `GET /internal/brands/{brandId}/memberships` (`?orgId&limit≤5000&offset`) | apiKey | Per person of a brand: every audience that FOUND them (`offerId`, `list`, `status`, `provenance` served\|found_taken). RAW membership, paged by person. See "Multi-source provenance" |
 | Internal | `POST /internal/brands/{brandId}/memberships/by-email` | apiKey | Same memberships keyed by EMAIL (body `{orgId, emails[]}`, 25 MB parser, mounted before the global json) → `byEmail[raw] = {personId, memberships[]} \| null`. For lead-service's lead pages / whole-brand walks |
-| POST | `/internal/audiences/still-fits` | apiKey | Does ONE person STILL fit an audience right now (STILL-FITS-1012; lead-service at stock handover). Body `{orgId, audienceId, brandId, email, personId?}` -> 200 `{fits, reason?, basis, failed?}`. CRM audiences ask crm-service `POST /orgs/contacts/still-fits` (the SAME clauses its serve applies, never re-implemented here); search audiences answer from membership + screen verdicts (no paid re-search). A question: nothing marked, bought or suppressed. 404 unknown audience; 422 person cannot be judged (never read as fits); 502 crm-service down. |
+| POST | `/internal/audiences/still-fits` | apiKey | Does ONE person STILL fit an audience right now (STILL-FITS-1012; lead-service at stock handover). Body `{orgId, audienceId, brandId, email, personId?, stepFilter?}` -> 200 `{fits, reason?, basis, failed?}`. CRM audiences ask crm-service `POST /orgs/contacts/still-fits` (the SAME clauses its serve applies, never re-implemented here); search audiences answer from membership + screen verdicts (no paid re-search). A question: nothing marked, bought or suppressed. 404 unknown audience; 422 person cannot be judged (never read as fits); 502 crm-service down. |
 | Internal | `GET /internal/brands/{brandId}/audience-overlap` (`?orgId`) | apiKey | Per audience: members, served vs found-while-taken, how many another audience / list found too, + brand multi-source counts |
 | Internal | `POST /internal/human-identities/resolve` | apiKey | Emails / phones / LinkedIn / provider ids / messaging handles -> ONE fleet `humanId` (`create` true/false). Shared email or phone merges fleet-wide. See "One human across the fleet" |
 | Internal | `GET /internal/human-identities/{humanId}` (`?orgId`) | apiKey | The human in that org's view: every key, active facts, the org's person rows, visible links |
@@ -1313,6 +1313,15 @@ so the pipe that can reach them still gets them. One rule for every provider:
   or CRM feature identity); crm-service decides and does not burn a refused
   person. No effect on apollo / apify (strangers). Absent ⟹ no key on the wire. Audience Size / Remaining do NOT yet reflect
   a pipe's reach (a crm count per audience per channel is not cheap).
+- **`stepFilter: {reached?, notReached?}`** (CRM-WARM-NURTURE-1015, same body,
+  `src/lib/step-filter.ts`): the funnel steps the person reached in the brand's own
+  tools, as the pipe's play states it (warm contacts: reached a form / meeting,
+  never a sale). Forwarded VERBATIM top-level as crm-service's `stepFilter` on every
+  CRM-sourced serve AND on `/internal/audiences/still-fits` for a CRM audience;
+  crm-service ANDs it with the pool filter and owns the step vocabulary (never
+  validated here; its 400 is relayed as a 400). An apollo / apify audience cannot
+  honour it: serve-next and candidates/next 422, still-fits 422
+  `step_filter_needs_crm`, before any search or reveal. Absent ⟹ no key on the wire.
 
 ### An audience belongs to ONE offer, not to a whole brand
 
