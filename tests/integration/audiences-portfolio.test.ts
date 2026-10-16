@@ -11,7 +11,7 @@ import { and, eq } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
-import { audiences } from "../../src/db/schema.js";
+import { audiences, audienceSources } from "../../src/db/schema.js";
 import { ensureTargetText } from "../../src/services/audience-target-text.js";
 import { draftAudienceTarget } from "../../src/services/audience-target.js";
 import { proposeAudienceSplit } from "../../src/services/audience-split.js";
@@ -128,7 +128,11 @@ describe("POST /orgs/audiences/portfolio", () => {
     const done = await launch();
     expect(done.body.status).toBe("ready");
     expect(done.body.replayed).toBe(true);
-    expect(done.body.audiences).toHaveLength(6);
+    // One audience per profile: the buying signals are SOURCES of each (channels[]).
+    expect(done.body.audiences).toHaveLength(2);
+    for (const a of done.body.audiences) {
+      expect(a.channels.map((c: { list: string }) => c.list)).toEqual(["apollo_search", "apollo_buying_signal", "apollo_buying_signal"]);
+    }
   });
 
   it("creates the cold split (the profiles) + per profile a signal list per signal reaching 20+ companies FOR THAT PROFILE", async () => {
@@ -137,33 +141,26 @@ describe("POST /orgs/audiences/portfolio", () => {
     expect(res.body.target).toBe(DRAFTED);
 
     const kinds = res.body.audiences.map((a: { name: string; kind: string }) => `${a.kind}:${a.name}`);
-    // Cold first (split order), then the signal lists (profiles share one created_at: any order).
-    expect(kinds.slice(0, 2)).toEqual(["cold:US SaaS founders", "cold:Europe SaaS founders"]);
-    expect(kinds.slice(2).sort()).toEqual([
-      "signal:Europe SaaS founders (Hiring now)",
-      "signal:Europe SaaS founders (New in role)",
-      "signal:US SaaS founders (Hiring now)",
-      "signal:US SaaS founders (New in role)",
-    ]);
+    // One audience per profile, never "<profile> (<source>)" rows.
+    expect(kinds).toEqual(["cold:US SaaS founders", "cold:Europe SaaS founders"]);
     const [us, eu] = res.body.audiences;
     for (const a of res.body.audiences) {
       expect(a.status).toBe("active");
       expect(a.offerId).toBe(OFFER);
       expect(a.brandId).toBe(BRAND);
     }
-    // The profiles share the split's target; each signal list screens on ITS profile's own text.
     expect(us.nlPrompt).toBe(DRAFTED);
     expect(us.profileAudienceId).toBeNull();
-    const hiring = res.body.audiences.find((a: { name: string }) => a.name === "US SaaS founders (Hiring now)");
-    expect(hiring.profileAudienceId).toBe(us.id);
-    expect(hiring.nlPrompt).toBe("Own text of US SaaS founders");
-    expect(hiring.targetText).toBe("Own text of US SaaS founders");
-    expect(hiring.signal).toEqual({ type: "hiring", windowDays: 30 });
-    expect(hiring.provider).toBe("apollo");
-    expect(hiring.apolloAudienceId).toBe("apollo-US SaaS founders/hiring");
-    expect(hiring.filters.buying_signal).toEqual({ type: "hiring", window_days: 30 });
-    const euList = res.body.audiences.find((a: { name: string }) => a.name === "Europe SaaS founders (New in role)");
-    expect(euList.profileAudienceId).toBe(eu.id);
+    // Each profile's signals are its SOURCES, built on ITS Apollo audience.
+    const hiring = us.channels.find((c: { signal: { type: string } | null }) => c.signal?.type === "hiring");
+    expect(hiring).toMatchObject({ list: "apollo_buying_signal", audienceId: us.id, name: "Hiring now", status: "active", signal: { type: "hiring", windowDays: 30 } });
+    const [usHiring] = await db.select().from(audienceSources).where(eq(audienceSources.id, hiring.sourceId));
+    expect(usHiring.apolloAudienceId).toBe("apollo-US SaaS founders/hiring");
+    expect(usHiring.filters).toMatchObject({ buying_signal: { type: "hiring", window_days: 30 } });
+    expect(eu.channels.map((c: { signal: { type: string } | null }) => c.signal?.type ?? null)).toEqual([null, "hiring", "job_change"]);
+    const created = res.body.signals.filter((s: { outcome: string }) => s.outcome === "created");
+    expect(created).toHaveLength(4);
+    for (const c of created) expect([us.id, eu.id]).toContain(c.audienceId);
 
     // funding reaches 7 companies (< 20) per profile: absent, its shortfall reported per profile.
     const funding = res.body.signals.filter((s: { type: string }) => s.type === "funding");
@@ -200,7 +197,8 @@ describe("POST /orgs/audiences/portfolio", () => {
     expect(a.body.portfolioId).toBe(b.body.portfolioId);
     await settlePortfolioBackground();
     expect(proposeAudienceSplit).toHaveBeenCalledTimes(1);
-    expect(await db.select().from(audiences)).toHaveLength(6);
+    expect(await db.select().from(audiences)).toHaveLength(2);
+    expect(await db.select().from(audienceSources)).toHaveLength(4);
   });
 
   it("ADOPTS the split a pre-payment flow already confirmed (suggested), activates it, never re-splits", async () => {
@@ -230,8 +228,9 @@ describe("POST /orgs/audiences/portfolio", () => {
     for (const a of res.body.audiences) expect(a.status).toBe("active");
     for (const a of cold) expect(a.nlPrompt).toBe(shared);
     expect(cold.every((a: { adopted: boolean }) => a.adopted)).toBe(true);
-    // 3 adopted profiles x (hiring, job_change) above threshold.
-    expect(res.body.audiences.filter((a: { kind: string }) => a.kind === "signal")).toHaveLength(6);
+    // 3 adopted profiles x (hiring, job_change) above threshold: sources, not audiences.
+    expect(res.body.audiences.filter((a: { kind: string }) => a.kind === "signal")).toHaveLength(0);
+    expect(await db.select().from(audienceSources)).toHaveLength(6);
   });
 
   it("adopted rows that disagree on nl_prompt are all given ONE fresh draft", async () => {
@@ -303,7 +302,7 @@ describe("POST /orgs/audiences/portfolio", () => {
     expect(await db.select().from(audiences)).toHaveLength(0);
     const retry = await launched();
     expect(retry.status).toBe(200);
-    expect(retry.body.audiences).toHaveLength(6);
+    expect(retry.body.audiences).toHaveLength(2);
   });
 
   it("a cold segment name already taken in the offer gets a date suffix, never a 409", async () => {
@@ -324,7 +323,7 @@ describe("POST /orgs/audiences/portfolio", () => {
       .select()
       .from(audiences)
       .where(and(eq(audiences.brandId, BRAND), eq(audiences.status, "active")));
-    expect(rows).toHaveLength(6);
+    expect(rows).toHaveLength(2);
   });
 
   it("400 on a missing ICP text", async () => {

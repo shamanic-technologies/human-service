@@ -40,7 +40,9 @@ export interface BufferedTeaser {
 export async function bufferTeasers(
   orgId: string,
   audienceId: string,
-  teasers: Person[]
+  teasers: Person[],
+  // The audience source whose search found them (null = the audience's own list).
+  sourceId: string | null = null
 ): Promise<number> {
   const withHandle = teasers.filter((t) => t.providerPersonId);
   // Drop the people this audience's screen already rejected, so a rejected
@@ -58,6 +60,7 @@ export async function bufferTeasers(
       linkedinUrl: t.linkedinUrl,
       teaser: toTeaserSnapshot(t),
       organizationDomain: t.organization?.domain ?? null,
+      sourceId,
     }));
   if (rows.length === 0) return 0;
   const inserted = await db
@@ -79,8 +82,11 @@ export async function bufferTeasers(
 // blocked on). Uses the raw postgres.js client for the locking subquery.
 export async function popTeaser(
   orgId: string,
-  audienceId: string
+  audienceId: string,
+  // Each source drains its own teasers (null = the audience's own list).
+  sourceId: string | null = null
 ): Promise<BufferedTeaser | null> {
+  const ofSource = sourceId ? pg`AND source_id = ${sourceId}` : pg`AND source_id IS NULL`;
   const rows = await pg<
     {
       provider_person_id: string;
@@ -92,7 +98,7 @@ export async function popTeaser(
     DELETE FROM audience_teaser_buffer
     WHERE id = (
       SELECT id FROM audience_teaser_buffer
-      WHERE org_id = ${orgId} AND audience_id = ${audienceId}
+      WHERE org_id = ${orgId} AND audience_id = ${audienceId} ${ofSource}
       ORDER BY created_at ASC
       FOR UPDATE SKIP LOCKED
       LIMIT 1

@@ -21,6 +21,11 @@
 //             crm_contacts          one audience per CRM file the brand uploaded
 //   - OFF = every active audience of that list under the offer is PAUSED, history kept,
 //           and HELD (source_campaign_audience_holds) so the next ON resumes exactly those.
+//   SOURCES (AUDIENCE-SOURCES-1016, audience-sources.ts): a buying signal / competitor
+//   engagement is a SOURCE of a profile audience, not an audience. ON/OFF of its origin
+//   flips the offer's source entries of that list; OFF of an audience's OWN list marks it
+//   off (`own_source_status`) and pauses the audience only when none of its sources is
+//   still ON. An audience runs while one of its sources is ON.
 //   A list a person's profile pause holds (audience_profile_holds, profile-sources.ts)
 //   is never resumed by an ON: it runs again only once neither holds it.
 //   An ON NEVER resumes an audience a PERSON paused (or one whose pause nobody recorded):
@@ -70,6 +75,7 @@ import type { Identity } from "./people-providers.js";
 import { getMigrationState } from "../lib/migration-state.js";
 import { ensureLeadSourcingChoice, LEAD_SOURCING_SLUG } from "./lead-sourcing.js";
 import { isSystemResumable, systemResumable, systemStatus } from "./audience-status-origin.js";
+import { isSourceOn, offerSources, ownListOn, setOfferSourcesStatus, sourcesOf, syncAudienceLiveness } from "./audience-sources.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
 
@@ -95,7 +101,10 @@ export type SourceOutcome =
 export interface SourceAudienceView {
   id: string;
   name: string;
+  /** The audience's status; for an audience reached through a SOURCE of the list, that source's. */
   status: string;
+  /** Set when the audience is reached through a source of the list (audience-sources.ts). */
+  sourceId?: string;
 }
 
 export interface ApplySourceResult {
@@ -195,10 +204,41 @@ async function listAudiences(a: { orgId: string; brandId: string; offerId: strin
   return rows.filter((r) => audienceListKind(r) === list);
 }
 
+/**
+ * The list is ON for the offer: an active audience whose own list it is (and on),
+ * or an active source of that list on an active audience.
+ */
+async function listRunning(scope: { orgId: string; brandId: string; offerId: string }, list: AudienceListKind, rows: AudienceRow[]): Promise<boolean> {
+  if (rows.some((r) => r.status === "active" && ownListOn(r))) return true;
+  const sources = (await offerSources(scope, list)).filter(isSourceOn);
+  if (sources.length === 0) return false;
+  const parents = await db
+    .select({ id: audiences.id })
+    .from(audiences)
+    .where(and(inArray(audiences.id, sources.map((s) => s.audienceId)), eq(audiences.status, "active")));
+  return parents.length > 0;
+}
+
 function view(rows: AudienceRow[]): SourceAudienceView[] {
   return rows
     .filter((r) => r.status !== "deprecated")
     .map((r) => ({ id: r.id, name: r.name, status: r.status }));
+}
+
+/** The offer's audiences of the list: those whose own list it is, then those reached through a source of it. */
+async function listView(scope: { orgId: string; brandId: string; offerId: string }, list: AudienceListKind): Promise<SourceAudienceView[]> {
+  const own = view(await listAudiences(scope, list));
+  const sources = (await offerSources(scope, list)).filter((s) => s.status !== "archived");
+  if (sources.length === 0) return own;
+  const parents = await db
+    .select({ id: audiences.id, name: audiences.name })
+    .from(audiences)
+    .where(inArray(audiences.id, sources.map((s) => s.audienceId)));
+  const names = new Map(parents.map((p) => [p.id, p.name]));
+  return [
+    ...own,
+    ...sources.map((s) => ({ id: s.audienceId, name: names.get(s.audienceId) ?? "", status: s.status, sourceId: s.id })),
+  ];
 }
 
 /**
@@ -248,7 +288,7 @@ async function applyLocked(args: ApplySourceArgs, list: AudienceListKind): Promi
   // Recorded already: nothing changed, nothing to move (a push repeating the reconcile).
   if (prior && prior.status === args.status && args.mode === "first_sighting") {
     result.outcome = "unchanged";
-    result.audiences = view(await listAudiences(scope, list));
+    result.audiences = await listView(scope, list);
     return result;
   }
 
@@ -264,7 +304,7 @@ async function applyLocked(args: ApplySourceArgs, list: AudienceListKind): Promi
     result.outcome = "failed";
     result.reason = err instanceof Error ? err.message : String(err);
   }
-  result.audiences = view(await listAudiences(scope, list));
+  result.audiences = await listView(scope, list);
   await recordState(args, list, result, prior);
 
   const line =
@@ -333,13 +373,13 @@ async function firstSighting(args: ApplySourceArgs, list: AudienceListKind, resu
     return;
   }
   const rows = await listAudiences(scope, list);
-  if (rows.some((r) => r.status === "active")) {
+  if (await listRunning(scope, list, rows)) {
     result.outcome = "active";
     return;
   }
   // The offer already holds this list (paused / suggested / archived by a person, or
   // exhausted): today's state, left exactly as it is.
-  if (rows.length > 0) {
+  if (rows.length > 0 || (await offerSources(scope, list)).length > 0) {
     result.outcome = "exists_inactive";
     return;
   }
@@ -354,13 +394,30 @@ async function firstSighting(args: ApplySourceArgs, list: AudienceListKind, resu
 async function turnOff(args: ApplySourceArgs, list: AudienceListKind, result: ApplySourceResult) {
   const scope = { orgId: args.orgId, brandId: args.brandId, offerId: args.offerId };
   const rows = await listAudiences(scope, list);
-  const active = rows.filter((r) => r.status === "active");
+  // The audiences whose OWN list this is: that list is off.
+  const own = rows.filter((r) => r.status !== "archived" && ownListOn(r));
+  if (own.length > 0) {
+    await db
+      .update(audiences)
+      .set({ ownSourceStatus: "paused" })
+      .where(inArray(audiences.id, own.map((r) => r.id)));
+  }
+  // The offer's SOURCES of that list: off. An audience whose last ON source this was
+  // pauses (held under this origin, so its ON resumes it).
+  const { changed } = await setOfferSourcesStatus(scope, list, "paused", "source_campaign_off");
+  const hold = { scope, originSlug: args.originSlug, campaignId: args.campaignId };
+  await syncAudienceLiveness(changed.map((s) => s.audienceId), hold);
+
+  // An audience still running through another source keeps running.
+  const withSources = await sourcesOf(rows.map((r) => r.id));
+  const keepsRunning = (r: AudienceRow) => (withSources.get(r.id) ?? []).some(isSourceOn);
+  const active = rows.filter((r) => r.status === "active" && !keepsRunning(r));
   // A list paused by its profile is held too, so resuming the profile while the
   // source is still OFF does not revive it.
   const profileHeld = await profileHeldIds(rows.filter((r) => r.status === "paused").map((r) => r.id));
   const ids = [...active.map((r) => r.id), ...profileHeld];
   if (ids.length === 0) {
-    result.outcome = "none_active";
+    result.outcome = changed.length > 0 || own.some((r) => r.status === "active") ? "paused" : "none_active";
     return;
   }
   await db.transaction(async (tx) => {
@@ -380,7 +437,7 @@ async function turnOff(args: ApplySourceArgs, list: AudienceListKind, result: Ap
       )
       .onConflictDoNothing();
   });
-  result.outcome = active.length > 0 ? "paused" : "none_active";
+  result.outcome = active.length > 0 || changed.length > 0 || own.some((r) => r.status === "active") ? "paused" : "none_active";
 }
 
 async function turnOn(args: ApplySourceArgs, list: AudienceListKind, result: ApplySourceResult) {
@@ -419,6 +476,20 @@ async function turnOn(args: ApplySourceArgs, list: AudienceListKind, result: App
     });
   }
 
+  // The audiences whose OWN list this is: on again. The offer's SOURCES of that list:
+  // on, and an audience a source campaign OFF paused runs again through them.
+  const ownRows = (await listAudiences(scope, list)).filter((r) => !ownListOn(r));
+  if (ownRows.length > 0) {
+    await db
+      .update(audiences)
+      .set({ ownSourceStatus: "active" })
+      .where(inArray(audiences.id, ownRows.map((r) => r.id)));
+  }
+  const { changed } = await setOfferSourcesStatus(scope, list, "active", "source_campaign_on");
+  resumed += (
+    await syncAudienceLiveness([...changed.map((s) => s.audienceId), ...ownRows.map((r) => r.id)])
+  ).resumed.length;
+
   // A source built per client profile: every live profile still without its list
   // gets one now (an offer still served by a whole-ICP list moves to per-profile
   // lists here, the whole-ICP one retired).
@@ -429,8 +500,8 @@ async function turnOn(args: ApplySourceArgs, list: AudienceListKind, result: App
   }
 
   const rows = await listAudiences(scope, list);
-  if (rows.some((r) => r.status === "active")) {
-    result.outcome = resumed > 0 ? "resumed" : "active";
+  if (await listRunning(scope, list, rows)) {
+    result.outcome = resumed > 0 || changed.length > 0 ? "resumed" : "active";
     return;
   }
 
@@ -561,9 +632,21 @@ async function createEngagement(args: ApplySourceArgs, userId: string, identity:
     result.outcome = "created";
   } else if (out.outcome === "exists" && out.audienceIds.length > 0) {
     // Born or left inactive by the system: the source is ON, so they serve (a profile a
-    // person paused keeps its list paused; a list a person paused stays paused).
-    const profileHeld = await profileHeldIds(out.audienceIds);
-    await resumeSystemPaused(out.audienceIds.filter((id) => !profileHeld.has(id)));
+    // person paused keeps its source unserved; a list a person paused stays paused).
+    const scope = { orgId: args.orgId, brandId: args.brandId, offerId: args.offerId };
+    await setOfferSourcesStatus(scope, "linkedin_engagement", "active", "source_campaign_on");
+    await syncAudienceLiveness(out.audienceIds);
+    // Legacy per-profile lists (rows of their own, pre-merge) resume as before.
+    const legacy = (
+      await db
+        .select({ id: audiences.id, profileAudienceId: audiences.profileAudienceId })
+        .from(audiences)
+        .where(inArray(audiences.id, out.audienceIds))
+    )
+      .filter((r) => r.profileAudienceId)
+      .map((r) => r.id);
+    const profileHeld = await profileHeldIds(legacy);
+    await resumeSystemPaused(legacy.filter((id) => !profileHeld.has(id)));
     const now = await db
       .select({ status: audiences.status })
       .from(audiences)

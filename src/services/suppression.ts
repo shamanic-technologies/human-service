@@ -85,6 +85,8 @@ export async function recordServe(
     audienceId?: string;
     // Pre-serve verification verdict, recorded on the bronze row only.
     emailVerdict?: string;
+    // The audience source that found them (audience_sources.id), bronze only.
+    audienceSourceId?: string | null;
   } = {}
 ): Promise<void> {
   if (brandIds.length === 0 || contacts.length === 0) return;
@@ -110,6 +112,7 @@ export async function recordServe(
         runId: ctx.runId ?? null,
         audienceId: ctx.audienceId ?? null,
         emailVerdict: ctx.emailVerdict ?? null,
+        audienceSourceId: ctx.audienceSourceId ?? null,
       });
 
       // 🥈 Silver — canonical row keyed on email_norm (the only stable
@@ -321,7 +324,7 @@ export async function claimServe(
   orgId: string,
   brandIds: string[],
   contact: ServedContact,
-  ctx: { campaignId?: string; runId?: string; audienceId?: string; emailVerdict?: string } = {}
+  ctx: { campaignId?: string; runId?: string; audienceId?: string; emailVerdict?: string; audienceSourceId?: string | null } = {}
 ): Promise<boolean> {
   if (brandIds.length === 0) return true;
   const emailNorm = normalizeEmail(contact.email);
@@ -377,6 +380,7 @@ export async function claimServe(
           runId: ctx.runId ?? null,
           audienceId: ctx.audienceId ?? null,
           emailVerdict: ctx.emailVerdict ?? null,
+          audienceSourceId: ctx.audienceSourceId ?? null,
         });
       }
     });

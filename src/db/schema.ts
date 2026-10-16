@@ -227,6 +227,9 @@ export const leadServes = pgTable(
     // serve before the gate shipped, and apify serves). Recorded for rejected
     // reveals too, so the bounce rate per verdict can be measured later.
     emailVerdict: text("email_verdict"),
+    // Which source of the audience found this person (audience_sources.id, 0047).
+    // NULL = the audience's own list, and every serve before sources existed.
+    audienceSourceId: uuid("audience_source_id"),
     servedAt: timestamp("served_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -579,6 +582,11 @@ export const audiences = pgTable(
     statusSetReason: text("status_set_reason"),
     statusSetByUserId: uuid("status_set_by_user_id"),
     statusSetAt: timestamp("status_set_at", { withTimezone: true }),
+    // Is the audience's OWN list (its own filters / pointer) one of its ON sources
+    // (migration 0047, AUDIENCE-SOURCES-1016)? 'paused' when the source campaign of
+    // that list is OFF while the audience keeps running through its other sources
+    // (audience_sources). 'active' otherwise.
+    ownSourceStatus: text("own_source_status").notNull().default("active"),
     // Neutral PeopleSearchFilters shape (maps to both providers).
     filters: jsonb("filters").$type<Record<string, unknown>>(),
     // Hosted avatar URL.
@@ -720,6 +728,109 @@ export const audienceMembers = pgTable(
 );
 
 export type AudienceMember = typeof audienceMembers.$inferSelect;
+
+// AUDIENCE-SOURCES-1016 (migration 0047, owner 2026-10-16): a SOURCE is WHERE we
+// look for an audience's people (a buying signal, competitor-post engagement),
+// never an audience of its own. One row per (audience, source kind); the
+// audience's OWN list stays on the audience row. Serving from a source buffers,
+// screens and records under the AUDIENCE, tagged with this id.
+// src/services/audience-sources.ts.
+export const audienceSources = pgTable(
+  "audience_sources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    offerId: uuid("offer_id"),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    // apollo_buying_signal | linkedin_engagement (the list kind, AUDIENCE_LIST_KINDS).
+    list: text("list").notNull(),
+    // hiring | job_change | funding (buying signals); NULL for engagement.
+    signalType: text("signal_type"),
+    windowDays: integer("window_days"),
+    // Display name of the source ("Hiring now").
+    name: text("name").notNull(),
+    // apollo-service's audience for this source (the base audience + the signal).
+    apolloAudienceId: text("apollo_audience_id"),
+    filters: jsonb("filters").$type<Record<string, unknown>>(),
+    apolloCount: integer("apollo_count"),
+    countedAt: timestamp("counted_at", { withTimezone: true }),
+    reachableCount: integer("reachable_count"),
+    // active | paused | archived. Written by product paths only (source campaign
+    // ON / OFF, born, merge): no person writes a source.
+    status: text("status").notNull().default("active"),
+    statusReason: text("status_reason"),
+    statusSetAt: timestamp("status_set_at", { withTimezone: true }),
+    // Last time a serve walked it out; a source exhausted recently is not picked
+    // while another ON source of the audience still has people.
+    exhaustedAt: timestamp("exhausted_at", { withTimezone: true }),
+    lastServedAt: timestamp("last_served_at", { withTimezone: true }),
+    // The per-source audience row this source replaced (one-time merge), if any.
+    legacyAudienceId: uuid("legacy_audience_id"),
+    createdByUserId: uuid("created_by_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_audience_sources_kind").on(table.audienceId, table.list, sql`coalesce(${table.signalType}, '')`),
+    uniqueIndex("idx_audience_sources_legacy").on(table.legacyAudienceId),
+    index("idx_audience_sources_scope").on(table.orgId, table.brandId, table.offerId),
+  ]
+);
+
+export type AudienceSource = typeof audienceSources.$inferSelect;
+
+// Per-source provenance (0047): every source of an audience that found a person.
+// source_id NULL = the audience's own list. Owner 2026-10-08: a person found by
+// several sources is a higher-intent lead, so each source keeps its row.
+export const audienceMemberSources = pgTable(
+  "audience_member_sources",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    personId: uuid("person_id")
+      .notNull()
+      .references(() => people.id, { onDelete: "cascade" }),
+    sourceId: uuid("source_id"),
+    provenance: text("provenance").notNull().default("served"),
+    firstFoundAt: timestamp("first_found_at", { withTimezone: true }).notNull().defaultNow(),
+    lastFoundAt: timestamp("last_found_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_audience_member_sources_unique").on(
+      table.audienceId,
+      table.personId,
+      sql`coalesce(${table.sourceId}, '00000000-0000-0000-0000-000000000000'::uuid)`
+    ),
+    index("idx_audience_member_sources_source").on(table.sourceId),
+  ]
+);
+
+// Reversible ledger of the one-time merge of per-source audience rows into their
+// target's sources (POST /internal/merge-source-audiences, 0047).
+export const audienceSourceMerges = pgTable("audience_source_merges", {
+  childAudienceId: uuid("child_audience_id").primaryKey(),
+  orgId: uuid("org_id").notNull(),
+  brandId: uuid("brand_id").notNull(),
+  targetAudienceId: uuid("target_audience_id").notNull(),
+  sourceId: uuid("source_id").notNull(),
+  priorStatus: text("prior_status").notNull(),
+  priorStatusSetBy: text("prior_status_set_by"),
+  priorStatusSetReason: text("prior_status_set_reason"),
+  priorStatusSetByUserId: uuid("prior_status_set_by_user_id"),
+  priorStatusSetAt: timestamp("prior_status_set_at", { withTimezone: true }),
+  priorCanonicalAudienceId: uuid("prior_canonical_audience_id"),
+  movedBuffer: integer("moved_buffer").notNull().default(0),
+  copiedScreenedOut: integer("copied_screened_out").notNull().default(0),
+  targetResumed: boolean("target_resumed").notNull().default(false),
+  releasedHoldIds: jsonb("released_hold_ids").$type<string[]>(),
+  mergedAt: timestamp("merged_at", { withTimezone: true }).notNull().defaultNow(),
+});
 export type NewAudienceMember = typeof audienceMembers.$inferInsert;
 
 // --- serve-next: apollo free-teaser drain buffer ---
@@ -760,6 +871,9 @@ export const audienceTeaserBuffer = pgTable(
     // snapshot is what the pre-pay screen judges, and that input must not move.
     // Read by the candidate API (lead-service qualifies the company on it).
     organizationDomain: text("organization_domain"),
+    // The source of the audience whose search found it (audience_sources.id,
+    // 0047). NULL = the audience's own list. Each source drains its own teasers.
+    sourceId: uuid("source_id"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -839,6 +953,8 @@ export const audienceTeaserScreenings = pgTable(
     reason: text("reason"),
     model: text("model").notNull(),
     promptVersion: text("prompt_version").notNull(),
+    // The source whose teaser was judged (audience_sources.id, 0047); NULL = own list.
+    sourceId: uuid("source_id"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -911,6 +1027,8 @@ export const audienceCandidates = pgTable(
     declineReason: text("decline_reason"),
     basis: text("basis"),
     revealResult: jsonb("reveal_result"),
+    // The source that offered this candidate (audience_sources.id, 0047); NULL = own list.
+    sourceId: uuid("source_id"),
     offeredAt: timestamp("offered_at", { withTimezone: true }).notNull().defaultNow(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
