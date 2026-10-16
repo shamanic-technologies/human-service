@@ -60,29 +60,18 @@ export function readEmailVerification(
 // catch_all address (~7% bounce measured, vs ~15% unknown, ~40% invalid), so a
 // market that ran out of confirmed mailboxes keeps reaching people.
 // `valid_catch_all_and_unknown` (UNKNOWN-EMAILS-OPTION-1014, owner 2026-10-14)
-// used to also hand out an address the verifier could not judge (verdict
-// unknown). SUPERSEDED on 2026-10-16 (CATCHALL-BOUNCE-1016): an `unknown` address
-// is never emailed, fleet-wide. Measured: unknown bounced 36.8% over 30 days
-// (vs catch_all 10.7%, valid 2.2%), and 4 of 5 on "Cold Follow-up Replies"; the
-// cold-email deliverability consensus agrees (LeadMagic: unknown is not
-// sequencer-ready for cold outbound; ZeroBounce: an unknown is retried after
-// 24-48 h, never sent as is). instantly-service refuses an unknown at send, so
-// serving one only made the brand pay a reveal nobody can email. The value is
-// DEPRECATED and still accepted (a caller sending it must not start failing):
-// it behaves exactly as `valid_and_catch_all`. invalid, risky and unknown are
-// never handed out, whatever the caller asks.
+// also hands out an address the verifier could not judge (verdict unknown,
+// ~15% bounce), chosen knowingly to keep a client's market spending. invalid
+// and risky are never deliverable, whatever the caller asks.
 export const ACCEPTED_EMAILS = ["valid_only", "valid_and_catch_all", "valid_catch_all_and_unknown"] as const;
 export type AcceptedEmails = (typeof ACCEPTED_EMAILS)[number];
 
 // The verdicts beyond `valid` each option also hands out: what a fresh reveal
 // may serve, and what the re-reach of people already paid for looks for.
-// `unknown` is in NO entry (CATCHALL-BOUNCE-1016): the deprecated value maps to
-// catch_all only, so no serve path (fresh reveal, re-reach, candidate reveal)
-// can hand out an unknown-verdict person.
 const WIDENED_VERDICTS: Record<AcceptedEmails, readonly EmailVerdict[]> = {
   valid_only: [],
   valid_and_catch_all: ["catch_all"],
-  valid_catch_all_and_unknown: ["catch_all"],
+  valid_catch_all_and_unknown: ["catch_all", "unknown"],
 };
 
 export function widenedVerdicts(accepted: AcceptedEmails | undefined): readonly EmailVerdict[] {
@@ -91,7 +80,7 @@ export function widenedVerdicts(accepted: AcceptedEmails | undefined): readonly 
 
 // Apply the caller's policy to the provider's verdict. The provider's own
 // `deliverable` (valid only) stays the default; the caller can only widen it to
-// catch_all (never unknown, CATCHALL-BOUNCE-1016).
+// catch_all (and unknown).
 export function isVerdictAccepted(
   verification: EmailVerification,
   accepted: AcceptedEmails | undefined

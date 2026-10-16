@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { shapeEmailVerdict } from "../../src/lib/serve-email-policy.js";
-import { ACCEPTED_EMAILS, isVerdictAccepted, widenedVerdicts } from "../../src/lib/email-verification.js";
+import { isVerdictAccepted } from "../../src/lib/email-verification.js";
 
 describe("isVerdictAccepted", () => {
   it("valid always; catch_all only when asked; never unknown / invalid / risky", () => {
@@ -17,26 +17,13 @@ describe("isVerdictAccepted", () => {
     expect(isVerdictAccepted(v("catch_all"), "valid_and_catch_all")).toBe(true);
   });
 
-  it("valid_catch_all_and_unknown is deprecated: behaves as valid_and_catch_all, never unknown (CATCHALL-BOUNCE-1016)", () => {
+  it("valid_catch_all_and_unknown adds unknown; invalid / risky never (UNKNOWN-EMAILS-OPTION-1014)", () => {
     const v = (verdict: "valid" | "catch_all" | "unknown" | "invalid" | "risky") => ({
       verdict,
       deliverable: verdict === "valid",
     });
-    for (const verdict of ["valid", "catch_all", "unknown", "invalid", "risky"] as const) {
-      expect(isVerdictAccepted(v(verdict), "valid_catch_all_and_unknown")).toBe(
-        isVerdictAccepted(v(verdict), "valid_and_catch_all")
-      );
-    }
-    for (const ok of ["valid", "catch_all"] as const) expect(isVerdictAccepted(v(ok), "valid_catch_all_and_unknown")).toBe(true);
-    for (const bad of ["unknown", "invalid", "risky"] as const) expect(isVerdictAccepted(v(bad), "valid_catch_all_and_unknown")).toBe(false);
-  });
-
-  it("no option ever widens to unknown (CATCHALL-BOUNCE-1016)", () => {
-    for (const accepted of [undefined, ...ACCEPTED_EMAILS]) {
-      expect(widenedVerdicts(accepted)).not.toContain("unknown");
-      expect(isVerdictAccepted({ verdict: "unknown", deliverable: false }, accepted)).toBe(false);
-    }
-    expect(widenedVerdicts("valid_catch_all_and_unknown")).toEqual(widenedVerdicts("valid_and_catch_all"));
+    for (const ok of ["valid", "catch_all", "unknown"] as const) expect(isVerdictAccepted(v(ok), "valid_catch_all_and_unknown")).toBe(true);
+    for (const bad of ["invalid", "risky"] as const) expect(isVerdictAccepted(v(bad), "valid_catch_all_and_unknown")).toBe(false);
   });
 });
 
