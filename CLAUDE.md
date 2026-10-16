@@ -1496,14 +1496,6 @@ human-service only ACTS on the answer, in `finalizeResolved`
 
 #### The caller may accept catch-all — `acceptedEmails` (CATCHALL-SERVE-OPTION-1013)
 
-- **Never `unknown` (CATCHALL-BOUNCE-1016, 2026-10-16)**: no value hands out a
-  verdict-`unknown` person (fresh reveal, re-reach, candidate reveal):
-  `widenedVerdicts` holds no `unknown` anywhere. The third value
-  `valid_catch_all_and_unknown` (UNKNOWN-EMAILS-OPTION-1014, 2026-10-14) is
-  DEPRECATED, still accepted (no caller 400s) and maps to exactly
-  `valid_and_catch_all`. Why: unknown bounced 36.8% fleet-wide over 30 days (vs
-  catch_all 10.7%, valid 2.2%) and instantly-service refuses it at send, so
-  serving it only billed the brand for unsendable reveals.
 - **Request**: body `acceptedEmails: "valid_only" | "valid_and_catch_all"` on
   serve-next, candidates/next AND candidates/{id}/reveal (lead-service sends the
   workflow's choice on all three). Absent = `valid_only` = today, byte for byte
@@ -1517,6 +1509,14 @@ human-service only ACTS on the answer, in `finalizeResolved`
   (`shapeEmailVerdict`, `src/lib/serve-email-policy.ts`); never on other
   statuses. A replayed pre-option served reveal reads `valid` (only valid was
   ever served).
+- **`valid_catch_all_and_unknown` (UNKNOWN-EMAILS-OPTION-1014, owner option
+  2026-10-14, REAFFIRMED by the owner 2026-10-16)**: serves `valid`, `catch_all`
+  AND `unknown` (fresh reveal, candidates, and the free re-reach of stored
+  unknown people); invalid/risky never. It is a live, supported value, NOT
+  deprecated: #432 (CATCHALL-BOUNCE-1016) collapsed it to `valid_and_catch_all`
+  and was reverted on the owner's order. Never narrow, alias or deprecate an
+  `acceptedEmails` value on bounce data alone: the caller's knowing choice wins;
+  bounce control belongs to the workflow picking the value.
 - **Re-reach** (`src/services/catch-all-rereach.ts`, ledger `catch_all_rereaches`,
   migration 0045): with `valid_and_catch_all`, an audience FIRST hands out the
   catch-all people IT revealed and dropped for the brand (bronze `lead_serves`
