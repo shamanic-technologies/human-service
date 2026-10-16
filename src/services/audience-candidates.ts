@@ -35,7 +35,7 @@
 // persisted and the refill asked, exactly as serve-next does. Computed here, not
 // stated by the caller, because the CONSEQUENCES (Remaining, refill) are ours.
 
-import { and, asc, desc, eq, isNotNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import { db, sql as pg } from "../db/index.js";
 import {
   audienceCandidates,
@@ -63,6 +63,14 @@ import {
 import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import { ensureTargetText, screenTarget } from "./audience-target-text.js";
 import { isCrmSourcedFeature } from "./sourcing-origin.js";
+import {
+  markSourceServed,
+  persistSourceExhaustion,
+  pickServeSource,
+  sourcesOf,
+  sourceView,
+  type AudienceSource,
+} from "./audience-sources.js";
 import { providerCanReach, type Reach } from "../lib/reach.js";
 import { widenedVerdicts, type EmailVerdict } from "../lib/email-verification.js";
 import {
@@ -102,6 +110,8 @@ export const CANDIDATE_REVEAL_CLAIM_TTL_MS = 5 * 60_000;
 export interface CandidateView {
   candidateId: string;
   audienceId: string;
+  // The audience source that found this candidate (null = the audience's own list).
+  sourceId: string | null;
   providerPersonId: string;
   linkedinUrl: string | null;
   offeredAt: string;
@@ -156,6 +166,7 @@ function toView(row: AudienceCandidate): CandidateView {
   return {
     candidateId: row.id,
     audienceId: row.audienceId,
+    sourceId: row.sourceId ?? null,
     providerPersonId: row.providerPersonId,
     linkedinUrl: row.linkedinUrl,
     offeredAt: row.offeredAt.toISOString(),
@@ -210,12 +221,15 @@ function apolloIdentity(audience: AudienceRow, identity: Identity): Identity {
  * basis. null ⟹ no decision yet.
  */
 export async function readCandidateYield(
-  audienceId: string
+  audienceId: string,
+  // Each source of an audience has its own window (null = the audience's own list).
+  sourceId: string | null = null
 ): Promise<{ screens: number; passes: number; spent: boolean } | null> {
+  const ofSource = sourceId ? eq(audienceCandidates.sourceId, sourceId) : isNull(audienceCandidates.sourceId);
   const [latest] = await db
     .select({ basis: audienceCandidates.basis })
     .from(audienceCandidates)
-    .where(and(eq(audienceCandidates.audienceId, audienceId), isNotNull(audienceCandidates.decidedAt)))
+    .where(and(eq(audienceCandidates.audienceId, audienceId), ofSource, isNotNull(audienceCandidates.decidedAt)))
     .orderBy(desc(audienceCandidates.decidedAt))
     .limit(1);
   if (!latest) return null;
@@ -225,6 +239,7 @@ export async function readCandidateYield(
     .where(
       and(
         eq(audienceCandidates.audienceId, audienceId),
+        ofSource,
         isNotNull(audienceCandidates.decidedAt),
         latest.basis === null
           ? sql`${audienceCandidates.basis} IS NULL`
@@ -242,15 +257,17 @@ export async function readCandidateYield(
 // Atomic + SKIP LOCKED so two callers never take the same one.
 async function retakeLapsedOffer(
   orgId: string,
-  audienceId: string
+  audienceId: string,
+  sourceId: string | null
 ): Promise<AudienceCandidate | null> {
   const cutoff = new Date(Date.now() - CANDIDATE_OFFER_TTL_MS);
+  const ofSource = sourceId ? pg`AND source_id = ${sourceId}` : pg`AND source_id IS NULL`;
   const rows = await pg<{ id: string }[]>`
     UPDATE audience_candidates SET offered_at = now()
     WHERE id = (
       SELECT id FROM audience_candidates
       WHERE org_id = ${orgId} AND audience_id = ${audienceId}
-        AND status = 'offered' AND offered_at < ${cutoff.toISOString()}::timestamptz
+        AND status = 'offered' AND offered_at < ${cutoff.toISOString()}::timestamptz ${ofSource}
       ORDER BY offered_at ASC
       FOR UPDATE SKIP LOCKED
       LIMIT 1
@@ -278,7 +295,7 @@ async function passesFreeChecks(
   // but this audience found them too (multi-source provenance, no spend).
   const { taken } = await partitionSuppressed(identity.orgId, [audience.brandId], [key]);
   if (taken.length > 0) {
-    await tagFoundAlreadyTaken(identity.orgId, audience.id, "apollo", taken);
+    await tagFoundAlreadyTaken(identity.orgId, audience.id, "apollo", taken, identity.audienceSourceId ?? null);
     return false;
   }
   if (matchesOptOut(exclusions, key)) {
@@ -326,7 +343,56 @@ export async function nextCandidate(
   reach: readonly Reach[] = []
 ): Promise<NextCandidateResult> {
   const deadline = Date.now() + budgetMs;
+  // SOURCES (audience-sources.ts): the slug names WHERE to look; an audience with
+  // no source offers from its own list, exactly as before.
+  if (!isCrmSourcedFeature(identityIn.workflowTracking?.featureSlug)) {
+    const pick = await pickServeSource(audienceIn, identityIn.workflowTracking?.featureSlug);
+    if (pick.kind === "off") {
+      console.log(
+        `[human-service] audience_source.off org=${identityIn.orgId} audience=${audienceIn.id} path=candidates reason=${JSON.stringify(pick.reason)}`
+      );
+      return { status: "exhausted", candidate: null, reason: "pool_exhausted", target: screenTarget(audienceIn) };
+    }
+    if (pick.kind === "sources") {
+      return nextCandidateFromSources(audienceIn, pick.sources, identityIn, deadline, budgetMs, reach);
+    }
+  }
+  return nextCandidateFromList(audienceIn, identityIn, deadline, budgetMs, reach);
+}
+
+async function nextCandidateFromSources(
+  audience: AudienceRow,
+  sources: AudienceSource[],
+  identity: Identity,
+  deadline: number,
+  budgetMs: number,
+  reach: readonly Reach[]
+): Promise<NextCandidateResult> {
+  let last: NextCandidateResult | null = null;
+  for (const source of sources) {
+    const result = await nextCandidateFromList(
+      sourceView(audience, source),
+      { ...identity, audienceSourceId: source.id },
+      deadline,
+      budgetMs,
+      reach
+    );
+    if (result.status !== "exhausted") return result;
+    if (result.reason === "no_recent_posts") await persistSourceExhaustion(source.id, { reachable: false });
+    last = result;
+  }
+  return last!;
+}
+
+async function nextCandidateFromList(
+  audienceIn: AudienceRow,
+  identityIn: Identity,
+  deadline: number,
+  budgetMs: number,
+  reach: readonly Reach[]
+): Promise<NextCandidateResult> {
   let audience = audienceIn;
+  const sourceId = identityIn.audienceSourceId ?? null;
   assertCandidateProvider(audience, identityIn);
   // The serving pipe writes on a channel apollo's people never carry (src/lib/reach.ts):
   // nothing is popped or offered, so nobody is bought or burned for it.
@@ -354,18 +420,18 @@ export async function nextCandidate(
   // A caller asking for catch-all addresses is first offered the catch-all
   // people this audience already revealed, verified and dropped for the brand
   // (catch-all-rereach.ts): their reveal on this candidate costs nothing.
-  if (widenedVerdicts(identity.acceptedEmails).length > 0) {
+  if (!sourceId && widenedVerdicts(identity.acceptedEmails).length > 0) {
     const rereach = await offerRereach(audience, identity);
     if (rereach) return { status: "candidate", candidate: toView(rereach), target };
   }
 
-  const yieldNow = await readCandidateYield(audience.id);
+  const yieldNow = await readCandidateYield(audience.id, sourceId);
   if (yieldNow?.spent) {
     await exhaustOnScreenYield(identity, audience, yieldNow);
     return { status: "exhausted", candidate: null, reason: "yield_exhausted", target };
   }
 
-  const lapsed = await retakeLapsedOffer(identity.orgId, audience.id);
+  const lapsed = await retakeLapsedOffer(identity.orgId, audience.id, sourceId);
   if (lapsed) return { status: "candidate", candidate: toView(lapsed), target };
 
   const exclusions = await loadServeExclusions(identity);
@@ -382,7 +448,7 @@ export async function nextCandidate(
       return { status: "pending", candidate: null, target };
     }
     walked += 1;
-    const teaser = await popTeaser(identity.orgId, audience.id);
+    const teaser = await popTeaser(identity.orgId, audience.id, sourceId);
     if (!teaser) {
       const search = await peopleSearch({
         provider: "apollo",
@@ -396,10 +462,11 @@ export async function nextCandidate(
           noRecentPostsAnswer(identity.orgId, audience.id, "candidates");
           return { status: "exhausted", candidate: null, reason: "no_recent_posts", target };
         }
-        await persistReachableCountOnExhaustion(identity.orgId, audience.id);
+        if (sourceId) await persistSourceExhaustion(sourceId, { reachable: true });
+        else await persistReachableCountOnExhaustion(identity.orgId, audience.id);
         return { status: "exhausted", candidate: null, reason: "pool_exhausted", target };
       }
-      await bufferTeasers(identity.orgId, audience.id, search.people);
+      await bufferTeasers(identity.orgId, audience.id, search.people, sourceId);
       continue;
     }
     if (!(await passesFreeChecks(audience, identity, teaser, exclusions, ownCompany))) continue;
@@ -415,6 +482,7 @@ export async function nextCandidate(
         linkedinUrl: teaser.linkedinUrl,
         teaser: teaser.teaser,
         organizationDomain: teaser.organizationDomain,
+        sourceId,
       })
       .onConflictDoNothing({
         target: [audienceCandidates.audienceId, audienceCandidates.providerPersonId],
@@ -552,9 +620,17 @@ export async function revealCandidate(
   candidateId: string,
   basis: string | null
 ): Promise<RevealCandidateResult> {
-  assertCandidateProvider(audienceIn, identityIn);
-  const identity = apolloIdentity(audienceIn, identityIn);
-  const existing = await loadCandidate(identity.orgId, audienceIn.id, candidateId);
+  const existing = await loadCandidate(identityIn.orgId, audienceIn.id, candidateId);
+  // A candidate a source offered is revealed and recorded as that source's.
+  const source = existing.sourceId
+    ? ((await sourcesOf([audienceIn.id])).get(audienceIn.id) ?? []).find((s) => s.id === existing.sourceId) ?? null
+    : null;
+  const audienceView = source ? sourceView(audienceIn, source) : audienceIn;
+  assertCandidateProvider(audienceView, identityIn);
+  const identity = apolloIdentity(audienceView, {
+    ...identityIn,
+    ...(existing.sourceId ? { audienceSourceId: existing.sourceId } : {}),
+  });
   if (existing.status === "revealed") {
     return { ...storedReveal(existing.revealResult), replayed: true };
   }
@@ -590,6 +666,7 @@ export async function revealCandidate(
     result = rereach
       ? await revealRereach(audienceIn, identity, rereach)
       : await revealFresh(audienceIn, identity, claimed.providerPersonId);
+    if (result.status === "served" && existing.sourceId) await markSourceServed(existing.sourceId);
   } catch (err) {
     // Nothing recorded: hand the candidate back so a retry can reveal it.
     await db
@@ -626,7 +703,8 @@ async function revealFresh(
       identity.orgId,
       audience.id,
       revealed.person,
-      revealed.emailVerdict ?? null
+      revealed.emailVerdict ?? null,
+      identity.audienceSourceId ?? null
     );
     return {
       status: "served",

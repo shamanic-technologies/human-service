@@ -1,43 +1,31 @@
-// PROFILE x SOURCE (owner 2026-10-09).
+// PROFILE x SOURCE (owner 2026-10-09), merged model AUDIENCE-SOURCES-1016
+// (owner 2026-10-16: "the SOURCES should be a concept separate from TARGETING").
 //
-// A client PROFILE says WHO ("Heads of QA"): it is a cold audience (an Apollo
-// search list, `apollo_search`) the client keeps, pauses or archives on the
-// Targeting page. A SOURCE says WHERE we find them: a buying signal (hiring now,
-// new in role, recently funded) or competitor-post engagement. The two are
-// orthogonal, so the lists a source serves are one audience per (profile, source):
-// "Heads of QA (Recently funded)". Each carries `profile_audience_id` and screens
-// its candidates against the profile's own text, so pausing "CTOs" stops every
-// list that finds CTOs, whatever the source.
+// A client PROFILE says WHO ("Heads of QA"): a cold audience (an Apollo search
+// list, `apollo_search`) the client keeps, pauses or archives on the Targeting
+// page. A SOURCE says WHERE we find them: a buying signal (hiring now, new in role,
+// recently funded) or competitor-post engagement. A source is an `audience_sources`
+// row OF the profile (audience-sources.ts), never an audience of its own: one
+// profile = one audience, whatever the number of places we look. Every source is
+// screened against the profile's own text, and pausing the profile stops every
+// source with it.
 //
-// Before this, each signal list carried the WHOLE launch ICP ("VPs of Engineering,
-// Heads of QA, and CTOs ..."), so a paused profile kept being sourced through every
-// signal (brand d0965c2c, 2026-10-09). Those whole-ICP lists (profile NULL) are
-// RETIRED (archived, history kept) by the first profile build of their offer.
+// Before 2026-10-16 each (profile, source) pair was its own audience row
+// "<profile> (Hiring now)" carrying `profile_audience_id`: those LEGACY lists still
+// count as the profile having that source (never built twice) until the one-time
+// merge (source-audience-merge.ts) turns each into a source of its profile.
+// Whole-ICP lists (built before profiles, profile NULL) are RETIRED by the first
+// profile build of their offer, as before.
 //
-// Smallest delta of the existing model: an audience stays immutable (stats keyed
-// by its id), a source list is a plain apollo pointer audience exactly as before,
-// only built on the profile's Apollo audience instead of the ICP's.
-//
-// Live = profile live AND source on AND list status. Two hold tables keep the two
-// switches independent: `source_campaign_audience_holds` (a source campaign OFF)
-// and `audience_profile_holds` (a person paused the profile). A list resumes only
-// when NEITHER holds it. A person changing a list or a profile directly wins over
-// both: their own row's open holds are closed.
-//
-// Cost: building a source list spends nothing new. The coverage read and the
-// signal list's size are free Apollo teaser searches (apollo-service); the
-// profile's Apollo audience is the one serve-next would build anyway; the profile
-// text is drafted once (chat-service, org-billed) if it was not written yet.
+// Cost: adding a source spends nothing new. The coverage read and the signal's
+// size are free Apollo teaser searches (apollo-service); the profile's Apollo
+// audience is the one serve-next would build anyway; the profile text is drafted
+// once (chat-service, org-billed) if it was not written yet.
 
 import { systemResumable, systemStatus } from "./audience-status-origin.js";
 import { and, eq, inArray, isNull, notInArray } from "drizzle-orm";
 import { db } from "../db/index.js";
-import {
-  audienceProfileHolds,
-  audiences,
-  sourceCampaignAudienceHolds,
-  sourceCampaignStates,
-} from "../db/schema.js";
+import { audienceProfileHolds, audiences, sourceCampaignAudienceHolds } from "../db/schema.js";
 import {
   BUYING_SIGNAL_TYPES,
   createApolloSignalAudience,
@@ -48,8 +36,8 @@ import {
 } from "../lib/apollo-audiences.js";
 import { audienceListKind } from "./audience-snapshot.js";
 import { ensureTargetText, audienceTargetFields } from "./audience-target-text.js";
-import { dedupeSegmentNames } from "./audience-refill.js";
 import { ensureApolloPointer } from "./audiences.js";
+import { addSource, sourceBornStatus, sourceKind, sourcesOf, type AudienceSource } from "./audience-sources.js";
 import type { Identity } from "./people-providers.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
@@ -163,82 +151,26 @@ export async function profileListsDue(
   const rows = await offerRows(scope);
   const profiles = await liveProfiles(scope, rows);
   const keys: SourceKey[] = list === "linkedin_engagement" ? ["linkedin_engagement"] : [...BUYING_SIGNAL_TYPES];
+  const sources = await sourcesOf(profiles.map((p) => p.id));
   return profiles.some((p) => {
-    const have = new Set(rows.filter((r) => r.profileAudienceId === p.id).map((r) => sourceKeyOf(r)));
+    const have = profileSourceKeys(p.id, rows, sources.get(p.id) ?? []);
     return keys.some((k) => !have.has(k));
   });
 }
 
-// ── Born status of a new source list ─────────────────────────────────────────
-
-export interface BornStatus {
-  status: "active" | "paused";
-  /** Born paused by a source campaign OFF: held so its ON resumes it. */
-  sourceHold: { originSlug: string; campaignId: string | null } | null;
-}
-
 /**
- * The status a new (profile, source) list is born in, from what already decides it:
- *   1. the offer's source campaign for that origin (ON: active, OFF: paused + held);
- *   2. else the retired whole-ICP list of that source, if still there (its status, and
- *      its source hold), so a list a person paused stays paused per profile;
- *   3. else the sibling lists of that source (active when any is);
- *   4. else the source's own default (`fallback`).
+ * The source kinds a profile already has, any status (a source a person's archive
+ * stopped is never re-created): its sources, plus its legacy per-source lists.
  */
-export async function bornStatus(
-  scope: OfferScope,
-  key: SourceKey,
-  originSlug: string | null,
-  rows: AudienceRow[],
-  fallback: "active" | "paused"
-): Promise<BornStatus> {
-  if (originSlug) {
-    const [state] = await db
-      .select()
-      .from(sourceCampaignStates)
-      .where(
-        and(
-          eq(sourceCampaignStates.orgId, scope.orgId),
-          eq(sourceCampaignStates.brandId, scope.brandId),
-          eq(sourceCampaignStates.offerId, scope.offerId),
-          eq(sourceCampaignStates.originSlug, originSlug)
-        )
-      );
-    if (state) {
-      return state.status === "on"
-        ? { status: "active", sourceHold: null }
-        : { status: "paused", sourceHold: { originSlug, campaignId: state.campaignId } };
-    }
+export function profileSourceKeys(profileId: string, rows: AudienceRow[], sources: AudienceSource[]): Set<SourceKey> {
+  const have = new Set<SourceKey>();
+  for (const s of sources) have.add(sourceKind(s) as SourceKey);
+  for (const r of rows) {
+    if (r.profileAudienceId !== profileId || r.status === "deprecated") continue;
+    const k = sourceKeyOf(r);
+    if (k) have.add(k);
   }
-  const sameSource = rows.filter((r) => sourceKeyOf(r) === key && r.status !== "archived");
-  const legacy = sameSource.find((r) => !r.profileAudienceId);
-  if (legacy) {
-    if (legacy.status === "active") return { status: "active", sourceHold: null };
-    const [hold] = await openSourceHolds([legacy.id]);
-    return {
-      status: "paused",
-      sourceHold: hold ? { originSlug: hold.originSlug, campaignId: hold.campaignId } : null,
-    };
-  }
-  const siblings = sameSource.filter((r) => r.profileAudienceId);
-  if (siblings.length > 0) {
-    return { status: siblings.some((r) => r.status === "active") ? "active" : "paused", sourceHold: null };
-  }
-  return { status: fallback, sourceHold: null };
-}
-
-/** Record the source hold a list was born under (born paused by a source campaign OFF). */
-export async function holdBornList(scope: OfferScope, audienceId: string, born: BornStatus): Promise<void> {
-  if (!born.sourceHold) return;
-  await db
-    .insert(sourceCampaignAudienceHolds)
-    .values({
-      ...scope,
-      originSlug: born.sourceHold.originSlug,
-      audienceId,
-      campaignId: born.sourceHold.campaignId,
-    })
-    .onConflictDoNothing();
+  return have;
 }
 
 /**
@@ -279,10 +211,6 @@ export async function readyProfile(
   return { row: built, text };
 }
 
-export function profileListName(profile: Pick<AudienceRow, "name">, source: string): string {
-  return `${profile.name} (${source})`;
-}
-
 // ── Buying-signal lists per profile ──────────────────────────────────────────
 
 export interface ProfileSignalOutcome {
@@ -296,7 +224,10 @@ export interface ProfileSignalOutcome {
   /** Distinct companies of those people. Null when unmeasured. */
   companies: number | null;
   companiesExact: boolean | null;
+  /** The profile audience the source belongs to (null when none was added). */
   audienceId: string | null;
+  /** The source of the profile (audience_sources.id); null when none. */
+  sourceId: string | null;
   reason: string | null;
 }
 
@@ -362,6 +293,7 @@ async function ensureSignalsForProfile(
     companies: null,
     companiesExact: null,
     audienceId: null,
+    sourceId: null,
     reason: null,
   });
   const failAll = (types: BuyingSignalType[], reason: string): ProfileSignalOutcome[] => {
@@ -371,12 +303,17 @@ async function ensureSignalsForProfile(
     return types.map((t) => ({ ...base(t), outcome: "failed", reason }));
   };
 
-  const existing = new Map<BuyingSignalType, AudienceRow>();
-  for (const r of rows) {
-    const k = r.profileAudienceId === profile.id ? sourceKeyOf(r) : null;
-    if (k && k !== "linkedin_engagement" && !existing.has(k)) existing.set(k, r);
+  const sources = (await sourcesOf([profile.id])).get(profile.id) ?? [];
+  const existing = new Map<BuyingSignalType, { audienceId: string; sourceId: string | null }>();
+  for (const src of sources) {
+    const k = sourceKind(src) as SourceKey;
+    if (k !== "linkedin_engagement" && !existing.has(k)) existing.set(k, { audienceId: profile.id, sourceId: src.id });
   }
-  const done: ProfileSignalOutcome[] = [...existing].map(([type, r]) => ({ ...base(type), outcome: "exists", audienceId: r.id }));
+  for (const r of rows) {
+    const k = r.profileAudienceId === profile.id && r.status !== "deprecated" ? sourceKeyOf(r) : null;
+    if (k && k !== "linkedin_engagement" && !existing.has(k)) existing.set(k, { audienceId: r.id, sourceId: null });
+  }
+  const done: ProfileSignalOutcome[] = [...existing].map(([type, e]) => ({ ...base(type), outcome: "exists", ...e }));
   const missing = BUYING_SIGNAL_TYPES.filter((t) => !existing.has(t));
   if (missing.length === 0) return done;
 
@@ -405,9 +342,8 @@ async function ensureSignalsForProfile(
       continue;
     }
     try {
-      const row = await createSignalList({ scope, profile: ready.row, text: ready.text, type, windowDays, rows, args });
-      rows.push(row);
-      done.push({ ...common, outcome: "created", audienceId: row.id });
+      const source = await createSignalSource({ scope, profile: ready.row, type, windowDays, args });
+      done.push({ ...common, outcome: "created", audienceId: profile.id, sourceId: source.id });
     } catch (err) {
       const [failed] = failAll([type], errMessage(err));
       done.push({ ...failed, people: common.people, companies: common.companies, companiesExact: common.companiesExact });
@@ -416,65 +352,41 @@ async function ensureSignalsForProfile(
   return done;
 }
 
-function signalDescription(profileName: string, type: BuyingSignalType, windowDays: number): string {
-  const what =
-    type === "hiring"
-      ? "whose company posted a job opening"
-      : type === "job_change"
-        ? "who started their current role"
-        : "whose company raised its latest funding round";
-  return `${profileName} ${what} in the last ${windowDays} days.`;
-}
-
-async function createSignalList(input: {
+async function createSignalSource(input: {
   scope: OfferScope;
   profile: AudienceRow;
-  text: string;
   type: BuyingSignalType;
   windowDays: number;
-  rows: AudienceRow[];
   args: EnsureProfileSignalsArgs;
-}): Promise<AudienceRow> {
+}): Promise<AudienceSource> {
   const { scope, profile, type, windowDays, args } = input;
-  const [name] = dedupeSegmentNames([profileListName(profile, SIGNAL_NAMES[type])], input.rows.map((r) => r.name));
-  const born: BornStatus = args.status
-    ? { status: args.status, sourceHold: null }
-    : await bornStatus(scope, type, args.originSlug, input.rows, "active");
+  const status = args.status ?? (await sourceBornStatus(scope, "apollo_buying_signal", args.originSlug, "active"));
+  // apollo-service's signal audience on the profile's own Apollo audience: the
+  // source looks for the PROFILE's people, narrowed to the signal.
   const apollo = await createApolloSignalAudience({
     baseApolloAudienceId: profile.apolloAudienceId!,
     brandId: scope.brandId,
-    name,
+    name: `${profile.name} (${SIGNAL_NAMES[type]})`,
     type,
     windowDays,
     identity: args.identity,
   });
-  const [row] = await db
-    .insert(audiences)
-    .values({
-      ...scope,
-      name,
-      description: signalDescription(profile.name, type, windowDays),
-      // The profile's own text: the screen judges this list's people against WHO
-      // the profile is, never the whole launch ICP.
-      nlPrompt: input.text,
-      ...audienceTargetFields(input.text),
-      provider: "apollo",
-      apolloAudienceId: apollo.apolloAudienceId,
-      filters: apollo.filters,
-      apolloCount: apollo.count,
-      countedAt: new Date(),
-      status: born.status,
-      ...systemStatus("born"),
-      source: PROFILE_SIGNAL_SOURCE,
-      profileAudienceId: profile.id,
-      createdByUserId: args.userId,
-    })
-    .returning();
-  await holdBornList(scope, row.id, born);
+  const { source } = await addSource({
+    audience: profile,
+    list: "apollo_buying_signal",
+    signalType: type,
+    windowDays,
+    name: SIGNAL_NAMES[type],
+    apolloAudienceId: apollo.apolloAudienceId,
+    filters: apollo.filters,
+    apolloCount: apollo.count,
+    status,
+    userId: args.userId,
+  });
   console.log(
-    `[human-service] profile_sources.signal_created org=${scope.orgId} brand=${scope.brandId} profile=${profile.id} type=${type} audience=${row.id} status=${born.status} count=${apollo.count}`
+    `[human-service] profile_sources.signal_source_created org=${scope.orgId} brand=${scope.brandId} profile=${profile.id} type=${type} source=${source.id} status=${source.status} count=${apollo.count}`
   );
-  return row;
+  return source;
 }
 
 // ── A person changes a profile (or a list) ───────────────────────────────────

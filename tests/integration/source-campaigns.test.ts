@@ -11,7 +11,7 @@ import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db, sql as rawSql } from "../../src/db/index.js";
 import { readFileSync } from "node:fs";
-import { audiences, sourceCampaignAudienceHolds, sourceCampaignStates } from "../../src/db/schema.js";
+import { audiences, audienceSources, sourceCampaignAudienceHolds, sourceCampaignStates } from "../../src/db/schema.js";
 import {
   createApolloLinkedinEngagementAudience,
   createApolloSignalAudience,
@@ -119,6 +119,15 @@ function push(body: Record<string, unknown>) {
     .send({ brandId: BRAND, offerId: OFFER, campaignId: LI_CAMPAIGN, ...body });
 }
 
+// AUDIENCE-SOURCES-1016: a buying signal / engagement is a SOURCE of a profile audience.
+async function sourcesOfAudience(id: string) {
+  return db.select().from(audienceSources).where(eq(audienceSources.audienceId, id)).orderBy(audienceSources.createdAt);
+}
+async function allSources(list?: string) {
+  const rows = await db.select().from(audienceSources);
+  return list ? rows.filter((r) => r.list === list) : rows;
+}
+
 async function statusOf(id: string) {
   const [row] = await db.select({ status: audiences.status }).from(audiences).where(eq(audiences.id, id));
   return row?.status;
@@ -169,20 +178,19 @@ afterAll(async () => {
 });
 
 describe("push: POST /orgs/source-campaigns/state", () => {
-  it("ON with no audience of the list CREATES the LinkedIn engagement audience, active, under the offer, visible in the list", async () => {
-    await insertAudience({ name: "Clinic owners" }); // cold filters: another list
+  it("ON with no engagement source ADDS one to the profile, active, listed in its channels[] (no new audience)", async () => {
+    const profile = await insertAudience({ name: "Clinic owners" }); // cold filters: another list
     const res = await push({ originSlug: LINKEDIN, status: "on" });
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ outcome: "created", listKind: "linkedin_engagement", status: "on", campaignId: LI_CAMPAIGN });
-    expect(res.body.audiences).toHaveLength(1);
-    expect(res.body.audiences[0].status).toBe("active");
+    expect(res.body.audiences).toEqual([expect.objectContaining({ id: profile.id, status: "active", sourceId: expect.any(String) })]);
+    expect(await db.select().from(audiences)).toHaveLength(1);
 
     const list = await request(app).get(`/orgs/audiences?brandId=${BRAND}&offerId=${OFFER}`).set(getAuthHeaders());
-    const listed = (list.body.audiences as Array<{ id: string; status: string; channels: Array<{ list: string }> }>).find(
-      (a) => a.id === res.body.audiences[0].id
-    );
-    expect(listed?.status).toBe("active");
-    expect(listed?.channels[0]?.list).toBe("linkedin_engagement");
+    const [listed] = list.body.audiences as Array<{ id: string; status: string; channels: Array<{ list: string; status?: string }> }>;
+    expect(listed.id).toBe(profile.id);
+    expect(listed.channels.map((c) => c.list)).toEqual(["apollo_search", "linkedin_engagement"]);
+    expect(listed.channels[1].status).toBe("active");
 
     // The build is billed under its own run labelled with the origin AND the source campaign.
     expect(vi.mocked(createRun)).toHaveBeenCalledWith(
@@ -192,7 +200,6 @@ describe("push: POST /orgs/source-campaigns/state", () => {
       })
     );
   });
-
   it("OFF pauses every active audience of THAT list only, and the next ON resumes exactly those", async () => {
     const cold = await insertAudience({ name: "Clinic owners" });
     const li = await insertAudience({ name: "Engaged", filters: ENGAGEMENT_FILTERS, source: "linkedin_engagement_signal", profileAudienceId: cold.id });
@@ -231,10 +238,9 @@ describe("push: POST /orgs/source-campaigns/state", () => {
     const again = await push({ originSlug: LINKEDIN, status: "on" });
     expect(again.body.outcome).toBe("active");
     expect(vi.mocked(createApolloLinkedinEngagementAudience)).toHaveBeenCalledTimes(1);
-    const rows = await db.select().from(audiences).where(eq(audiences.source, "linkedin_engagement_signal"));
-    expect(rows).toHaveLength(1);
+    expect(await allSources("linkedin_engagement")).toHaveLength(1);
+    expect(await db.select().from(audiences)).toHaveLength(1);
   });
-
   it("ON of Your CRM Contacts creates one active audience per uploaded file not bound yet", async () => {
     vi.mocked(crmListUploads).mockResolvedValue([
       { id: "up-1", brandId: BRAND, filename: "clients.csv", rowCount: 10, status: "ready" },
@@ -318,8 +324,8 @@ describe("reconcile: campaign-service is read, what CHANGED is applied", () => {
     expect(await statusOf(cold.id)).toBe("active");
   });
 
-  it("a source turned ON for the first time on an offer holding none of its list gets its audience", async () => {
-    await insertAudience({ name: "Owners" });
+  it("a source turned ON for the first time on an offer holding none of its list gets its source", async () => {
+    const profile = await insertAudience({ name: "Owners" });
     campaignSays([
       { featureSlug: COLD, campaignId: COLD_CAMPAIGN, status: "ongoing", running: true },
       { featureSlug: LINKEDIN, campaignId: LI_CAMPAIGN, status: "ongoing", running: true },
@@ -328,11 +334,10 @@ describe("reconcile: campaign-service is read, what CHANGED is applied", () => {
     expect(res.status).toBe(200);
     const li = res.body.entries.find((e: { originSlug: string }) => e.originSlug === LINKEDIN);
     expect(li).toMatchObject({ action: "created", status: "on" });
-    const rows = await db.select().from(audiences).where(eq(audiences.source, "linkedin_engagement_signal"));
-    expect(rows).toHaveLength(1);
-    expect(rows[0].status).toBe("active");
+    const sources = await allSources("linkedin_engagement");
+    expect(sources).toHaveLength(1);
+    expect(sources[0]).toMatchObject({ audienceId: profile.id, status: "active" });
   });
-
   it("a campaign-service read failure is reported per offer, nothing moves", async () => {
     const li = await insertAudience({ name: "Engaged", filters: ENGAGEMENT_FILTERS });
     vi.mocked(fetchOfferSourceCampaigns).mockRejectedValue(new Error("campaign-service down"));
@@ -352,8 +357,8 @@ describe("reconcile: campaign-service is read, what CHANGED is applied", () => {
 });
 
 describe("the competitor-engagement sweep follows the offer's LinkedIn source", () => {
-  it("an offer whose sources are campaigns, LinkedIn OFF: the sweep's audience is born PAUSED", async () => {
-    await insertAudience({ name: "Owners" });
+  it("an offer whose sources are campaigns, LinkedIn OFF: the sweep's source is born PAUSED", async () => {
+    const profile = await insertAudience({ name: "Owners" });
     await db.insert(sourceCampaignStates).values({
       orgId: ORG,
       brandId: BRAND,
@@ -365,21 +370,21 @@ describe("the competitor-engagement sweep follows the offer's LinkedIn source", 
     });
     const sweep = await request(app).post(`/internal/competitor-engagement-audiences?brandId=${BRAND}`).set(getAuthHeaders());
     expect(sweep.status).toBe(200);
-    const rows = await db.select().from(audiences).where(eq(audiences.source, "linkedin_engagement_signal"));
-    expect(rows).toHaveLength(1);
-    expect(rows[0].status).toBe("paused");
+    const sources = await allSources("linkedin_engagement");
+    expect(sources).toHaveLength(1);
+    expect(sources[0].status).toBe("paused");
+    expect(await statusOf(profile.id)).toBe("active");
 
     // Turning LinkedIn ON resumes it, nothing left to build.
     const on = await push({ originSlug: LINKEDIN, status: "on" });
     expect(on.body.outcome).toBe("resumed");
+    expect((await allSources("linkedin_engagement"))[0].status).toBe("active");
     expect(vi.mocked(createApolloLinkedinEngagementAudience)).toHaveBeenCalledTimes(1);
   });
-
   it("an offer whose sources are not campaigns yet keeps today's rule: born active", async () => {
     await insertAudience({ name: "Owners" });
     await request(app).post(`/internal/competitor-engagement-audiences?brandId=${BRAND}`).set(getAuthHeaders());
-    const rows = await db.select().from(audiences).where(eq(audiences.source, "linkedin_engagement_signal"));
-    expect(rows[0].status).toBe("active");
+    expect((await allSources("linkedin_engagement"))[0].status).toBe("active");
   });
 });
 
@@ -423,92 +428,98 @@ describe("profile x source: pausing a profile stops every list of its people", (
     return db.select().from(audiences).where(eq(audiences.profileAudienceId, profileId));
   }
 
-  it("buying signals ON builds one list per (profile, signal above threshold), each screened on its profile's text, the whole-ICP lists archived", async () => {
+  it("buying signals ON adds one source per (profile, signal above threshold) to the profile, the whole-ICP lists archived", async () => {
     const { qa, cto } = await seedProfiles();
     const wholeIcp = await insertAudience({ name: "Hiring now", filters: SIGNAL_FILTERS, source: "icp_portfolio_signal" });
     const res = await push({ originSlug: SIGNALS, status: "on" });
     expect(res.body.outcome).toBe("created");
     for (const p of [qa, cto]) {
-      const lists = await listsOf(p.id);
-      expect(lists.map((l) => l.name).sort()).toEqual([`${p.name} (Hiring now)`, `${p.name} (New in role)`]);
-      for (const l of lists) {
-        expect(l.status).toBe("active");
-        expect(l.nlPrompt).toBe(p.id === qa.id ? "Heads of QA (also Director of QA)" : "CTOs (also Head of Technology)");
-      }
+      const sources = await sourcesOfAudience(p.id);
+      expect(sources.map((l) => [l.signalType, l.name, l.status])).toEqual([
+        ["hiring", "Hiring now", "active"],
+        ["job_change", "New in role", "active"],
+      ]);
     }
+    // No audience row per source: the two profiles and the retired whole-ICP list only.
+    expect(await db.select().from(audiences)).toHaveLength(3);
     // Measured on each profile's own Apollo audience.
     expect(vi.mocked(createApolloSignalAudience).mock.calls.every((c) => c[0].baseApolloAudienceId === qa.apolloAudienceId)).toBe(true);
     expect(await statusOf(wholeIcp.id)).toBe("archived");
-
-    const list = await request(app).get(`/orgs/audiences?brandId=${BRAND}&profileAudienceId=${qa.id}`).set(getAuthHeaders());
-    expect(list.body.audiences.map((a: { profileAudienceId: string }) => a.profileAudienceId)).toEqual([qa.id, qa.id]);
   });
-
-  it("a person pausing a profile pauses its lists (signals AND engagement); resuming it resumes them; the other profile is untouched", async () => {
+  it("a person pausing a profile stops it through every source (signals AND engagement); the other profile is untouched", async () => {
     const { qa, cto } = await seedProfiles();
     await push({ originSlug: SIGNALS, status: "on" });
     await push({ originSlug: LINKEDIN, status: "on" });
-    const ctoLists = await listsOf(cto.id);
-    expect(ctoLists).toHaveLength(3);
-    expect(ctoLists.every((l) => l.status === "active")).toBe(true);
+    const ctoSources = await sourcesOfAudience(cto.id);
+    expect(ctoSources).toHaveLength(3);
+    expect(ctoSources.every((l) => l.status === "active")).toBe(true);
 
     const paused = await setStatus(cto.id, "paused");
     expect(paused.status).toBe(200);
-    expect((await listsOf(cto.id)).map((l) => l.status)).toEqual(["paused", "paused", "paused"]);
-    expect((await listsOf(qa.id)).every((l) => l.status === "active")).toBe(true);
+    // One audience: pausing it is pausing every place its people are looked for.
+    const active = await request(app).get(`/orgs/audiences?brandId=${BRAND}&offerId=${OFFER}&status=active`).set(getAuthHeaders());
+    expect(active.body.audiences.map((a: { id: string }) => a.id)).toEqual([qa.id]);
 
     await setStatus(cto.id, "active");
-    expect((await listsOf(cto.id)).every((l) => l.status === "active")).toBe(true);
+    expect(await statusOf(cto.id)).toBe("active");
+    expect((await sourcesOfAudience(cto.id)).every((l) => l.status === "active")).toBe(true);
   });
-
-  it("archiving a profile pauses its lists too", async () => {
+  it("archiving a profile pauses its legacy per-source lists too", async () => {
     const { cto } = await seedProfiles();
-    await push({ originSlug: SIGNALS, status: "on" });
+    await insertAudience({ name: "CTOs (Hiring now)", filters: SIGNAL_FILTERS, profileAudienceId: cto.id });
     await setStatus(cto.id, "archived");
-    expect((await listsOf(cto.id)).every((l) => l.status === "paused")).toBe(true);
+    const lists = await listsOf(cto.id);
+    expect(lists).toHaveLength(1);
+    expect(lists.every((l) => l.status === "paused")).toBe(true);
   });
 
-  it("source OFF + profile paused: the list runs again only once BOTH are back on, in either order", async () => {
+  it("source OFF + profile paused: the source serves again only once BOTH are back on, in either order", async () => {
     const { cto } = await seedProfiles();
     await push({ originSlug: SIGNALS, status: "on" });
-    const [list] = await listsOf(cto.id);
+    const sourceStatus = async () => (await sourcesOfAudience(cto.id))[0].status;
 
-    // Source off, then profile paused, then profile resumed: still off by the source.
+    // Source off, then profile paused, then profile resumed: the source is still off.
     await push({ originSlug: SIGNALS, status: "off" });
     await setStatus(cto.id, "paused");
     await setStatus(cto.id, "active");
-    expect(await statusOf(list.id)).toBe("paused");
+    expect(await sourceStatus()).toBe("paused");
     await push({ originSlug: SIGNALS, status: "on" });
-    expect(await statusOf(list.id)).toBe("active");
+    expect(await sourceStatus()).toBe("active");
 
-    // Profile paused, then source off, then source on: still paused by the profile.
+    // Profile paused, then source off, then source on: still paused by the person.
     await setStatus(cto.id, "paused");
     await push({ originSlug: SIGNALS, status: "off" });
     await push({ originSlug: SIGNALS, status: "on" });
-    expect(await statusOf(list.id)).toBe("paused");
+    expect(await statusOf(cto.id)).toBe("paused");
     await setStatus(cto.id, "active");
-    expect(await statusOf(list.id)).toBe("active");
+    expect(await statusOf(cto.id)).toBe("active");
+    expect(await sourceStatus()).toBe("active");
   });
-
-  it("a list a PERSON paused directly is never revived by its profile's resume nor by its source's ON", async () => {
+  it("a legacy per-source list a PERSON paused directly is never revived by its profile's resume", async () => {
     const { cto } = await seedProfiles();
-    await push({ originSlug: SIGNALS, status: "on" });
-    const [list, other] = await listsOf(cto.id);
+    const list = await insertAudience({ name: "CTOs (Hiring now)", filters: SIGNAL_FILTERS, profileAudienceId: cto.id });
+    const other = await insertAudience({
+      name: "CTOs (New in role)",
+      filters: { person_titles: ["owner"], buying_signal: { type: "job_change", window_days: 90 } },
+      profileAudienceId: cto.id,
+    });
     await setStatus(cto.id, "paused");
     await setStatus(list.id, "paused");
     await setStatus(cto.id, "active");
     expect(await statusOf(list.id)).toBe("paused");
     expect(await statusOf(other.id)).toBe("active");
   });
-
-  it("a profile turned off only by the Apollo Cold Filters source still gets its signal lists (the source is off, not the profile)", async () => {
+  it("a profile turned off only by the Apollo Cold Filters source still gets its signal sources, and runs through them", async () => {
     const { qa } = await seedProfiles();
     await push({ originSlug: COLD, campaignId: COLD_CAMPAIGN, status: "off" });
     expect(await statusOf(qa.id)).toBe("paused");
     await push({ originSlug: SIGNALS, status: "on" });
-    const lists = await listsOf(qa.id);
-    expect(lists).toHaveLength(2);
-    expect(lists.every((l) => l.status === "active")).toBe(true);
+    const sources = await sourcesOfAudience(qa.id);
+    expect(sources).toHaveLength(2);
+    expect(sources.every((l) => l.status === "active")).toBe(true);
+    // Its own (cold) list stays off; the audience runs through its ON sources.
+    const [row] = await db.select().from(audiences).where(eq(audiences.id, qa.id));
+    expect(row).toMatchObject({ status: "active", ownSourceStatus: "paused" });
   });
 });
 
@@ -587,24 +598,20 @@ describe("a pause a PERSON made is never undone by a product path", () => {
     expect(await statusOf(a.id)).toBe("paused");
   });
 
-  it("a profile's engagement list a PERSON paused stays paused when LinkedIn is turned ON again", async () => {
+  it("a profile a PERSON paused stays paused when LinkedIn is turned OFF then ON again", async () => {
     const profile = await insertAudience({ name: "Heads of QA" });
     await db.update(audiences).set({ targetText: "Heads of QA" }).where(eq(audiences.id, profile.id));
     await push({ originSlug: LINKEDIN, status: "on" });
-    const [list] = await db.select().from(audiences).where(eq(audiences.profileAudienceId, profile.id));
-    expect(list.status).toBe("active");
+    expect((await sourcesOfAudience(profile.id))[0].status).toBe("active");
     await push({ originSlug: LINKEDIN, status: "off" });
-    await setStatus(list.id, "paused");
-    const on = await push({ originSlug: LINKEDIN, status: "on" });
-    expect(on.body.outcome).toBe("exists_inactive");
-    expect(await statusOf(list.id)).toBe("paused");
-  });
-
-  it("a profile resume never revives a list a person paused, even one the cascade had held", async () => {
-    const profile = await insertAudience({ name: "CTOs" });
-    await db.update(audiences).set({ targetText: "CTOs" }).where(eq(audiences.id, profile.id));
+    await setStatus(profile.id, "paused");
     await push({ originSlug: LINKEDIN, status: "on" });
-    const [list] = await db.select().from(audiences).where(eq(audiences.profileAudienceId, profile.id));
+    expect(await statusOf(profile.id)).toBe("paused");
+    expect((await sourcesOfAudience(profile.id))[0].status).toBe("active");
+  });
+  it("a profile resume never revives a legacy list a person paused, even one the cascade had held", async () => {
+    const profile = await insertAudience({ name: "CTOs" });
+    const list = await insertAudience({ name: "CTOs (Engaged)", filters: ENGAGEMENT_FILTERS, profileAudienceId: profile.id });
     await setStatus(profile.id, "paused");
     expect((await rowOf(list.id)).statusSetReason).toBe("profile_paused");
     // A legacy pause the cascade cannot prove it made (no provenance): left paused.
@@ -612,7 +619,6 @@ describe("a pause a PERSON made is never undone by a product path", () => {
     await setStatus(profile.id, "active");
     expect(await statusOf(list.id)).toBe("paused");
   });
-
   it("migration 0044 marks a paused row an OPEN hold holds as a system pause, and nothing else", async () => {
     const held = await insertAudience({ name: "Owners", status: "paused" });
     const released = await insertAudience({ name: "Managers", status: "paused" });

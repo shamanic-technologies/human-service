@@ -3,7 +3,7 @@ import { personStatus } from "../services/audience-status-origin.js";
 import { ensureAvatar, ensureProfileAvatar } from "../services/audience-avatar.js";
 import { emailsOfPersons } from "../services/person-emails.js";
 import { EmailVerificationError } from "../lib/email-verification.js";
-import { and, asc, count, desc, eq, isNotNull, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
 import {
   audienceTargetFields,
   ensureTargetText,
@@ -102,6 +102,7 @@ import {
 import { crmListUploads, crmPeopleServeStats, type CrmServeStats } from "../lib/crm-contacts.js";
 import { getAudiencePreview } from "../services/audience-preview.js";
 import { applyPersonStatusChange } from "../services/profile-sources.js";
+import { describeSourceChannels, pickSourcingList, sourcesOf, type AudienceSource } from "../services/audience-sources.js";
 import {
   checkNextPreviewPerson,
   getPreviewEmailChecks,
@@ -749,7 +750,10 @@ router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) 
   // SAME 3-month suppression window the serve path enforces. Every list item
   // carries sizeCount / availableToContactCount / availableToContactPct so the
   // dashboard renders them straight from the wire (never client-computed).
-  const contactability = await computeAudienceContactability(rows);
+  const [contactability, sourcesByAudience] = await Promise.all([
+    computeAudienceContactability(rows),
+    sourcesOf(rows.map((r) => r.id)),
+  ]);
 
   res.json({
     audiences: rows.map((row) => {
@@ -763,7 +767,8 @@ router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) 
       const c = contactability.get(row.id);
       // null = pool UNKNOWN (linkedin_engagement before its first exhaustion):
       // the three figures are omitted, never served as 0 ("served out").
-      return c ? { ...serializeAudience(row, c), ...c } : serializeAudience(row, null);
+      const sources = sourcesByAudience.get(row.id) ?? [];
+      return c ? { ...serializeAudience(row, c, sources), ...c } : serializeAudience(row, null, sources);
     }),
     total: totalRows[0]?.value ?? 0,
     limit,
@@ -1439,16 +1444,22 @@ router.get(
       return;
     }
     const featureSlug = getWorkflowTracking(res.locals).featureSlug;
-    const list = serveListKind(audience, featureSlug);
-    if (!list) {
-      res.status(422).json({ error: "Audience has no committed provider — it serves from no list." });
-      return;
-    }
     try {
+      // One of the audience's ON sources (audience-sources.ts); an audience with
+      // no source answers its own list, exactly as before.
+      const list = serveListKind(audience, featureSlug) && (await pickSourcingList(audience, featureSlug));
+      if (!list) {
+        res.status(422).json({
+          error: audience.provider
+            ? "No source of this audience is on — it serves from no list."
+            : "Audience has no committed provider — it serves from no list.",
+        });
+        return;
+      }
       res.json({ audienceId: audience.id, list, sourcingFeatureSlug: await sourcingOriginSlug(list) });
     } catch (err) {
       if (err instanceof SourcingOriginError) {
-        console.error(`[human-service] audience.sourcing_origin_failed audience=${audience.id} list=${list} ${err.message}`);
+        console.error(`[human-service] audience.sourcing_origin_failed audience=${audience.id} ${err.message}`);
         res.status(502).json({ error: err.message, source: "features-service" });
         return;
       }
@@ -1519,34 +1530,68 @@ router.get(
 
     const limit = parsedQuery.data.limit ?? DEFAULT_MEMBERS_LIMIT;
     const offset = parsedQuery.data.offset ?? 0;
+    // Rows merged INTO this audience (a per-source list deprecated with its
+    // canonical link here, AUDIENCE-SOURCES-1016) keep their members: they are
+    // this audience's members too, each person once (earliest membership).
+    const merged = (
+      await db
+        .select({ id: audiences.id })
+        .from(audiences)
+        .where(
+          and(
+            eq(audiences.orgId, orgId),
+            eq(audiences.canonicalAudienceId, req.params.id),
+            eq(audiences.status, "deprecated")
+          )
+        )
+    ).map((r) => r.id);
     const whereClause = and(
-      eq(audienceMembers.audienceId, req.params.id),
+      merged.length > 0
+        ? inArray(audienceMembers.audienceId, [req.params.id, ...merged])
+        : eq(audienceMembers.audienceId, req.params.id),
       eq(audienceMembers.orgId, orgId)
     );
+    const memberFields = {
+      personId: people.id,
+      emailNorm: people.emailNorm,
+      linkedinUrlNorm: people.linkedinUrlNorm,
+      firstName: people.firstName,
+      lastName: people.lastName,
+      fullName: people.fullName,
+      companyDomain: people.companyDomain,
+      source: audienceMembers.source,
+      confidence: audienceMembers.confidence,
+      provenance: audienceMembers.provenance,
+      joinedAt: audienceMembers.joinedAt,
+      lastServedAt: audienceMembers.lastServedAt,
+    };
 
     const [rows, totalRows] = await Promise.all([
-      db
-        .select({
-          personId: people.id,
-          emailNorm: people.emailNorm,
-          linkedinUrlNorm: people.linkedinUrlNorm,
-          firstName: people.firstName,
-          lastName: people.lastName,
-          fullName: people.fullName,
-          companyDomain: people.companyDomain,
-          source: audienceMembers.source,
-          confidence: audienceMembers.confidence,
-          provenance: audienceMembers.provenance,
-          joinedAt: audienceMembers.joinedAt,
-          lastServedAt: audienceMembers.lastServedAt,
-        })
-        .from(audienceMembers)
-        .innerJoin(people, eq(audienceMembers.personId, people.id))
-        .where(whereClause)
-        .orderBy(asc(audienceMembers.joinedAt))
-        .limit(limit)
-        .offset(offset),
-      db.select({ value: count() }).from(audienceMembers).where(whereClause),
+      merged.length === 0
+        ? db
+            .select(memberFields)
+            .from(audienceMembers)
+            .innerJoin(people, eq(audienceMembers.personId, people.id))
+            .where(whereClause)
+            .orderBy(asc(audienceMembers.joinedAt))
+            .limit(limit)
+            .offset(offset)
+        : (() => {
+            const once = db
+              .selectDistinctOn([people.id], memberFields)
+              .from(audienceMembers)
+              .innerJoin(people, eq(audienceMembers.personId, people.id))
+              .where(whereClause)
+              .orderBy(people.id, asc(audienceMembers.joinedAt))
+              .as("m");
+            return db.select().from(once).orderBy(asc(once.joinedAt)).limit(limit).offset(offset);
+          })(),
+      merged.length === 0
+        ? db.select({ value: count() }).from(audienceMembers).where(whereClause)
+        : db
+            .select({ value: sql<number>`count(distinct ${audienceMembers.personId})::int` })
+            .from(audienceMembers)
+            .where(whereClause),
     ]);
 
     // Every address of each member (person-emails.ts), primary first.
@@ -1592,13 +1637,24 @@ function isUniqueViolation(err: unknown): boolean {
 // Serialize rows WITH their contactability, so every channel size served on any
 // audience response is the same figure the list serves as sizeCount.
 export async function serializeAudiences(rows: Array<typeof audiences.$inferSelect>) {
-  const contactability = await computeAudienceContactability(rows);
-  return rows.map((row) => serializeAudience(row, contactability.get(row.id) ?? null));
+  const [contactability, sources] = await Promise.all([
+    computeAudienceContactability(rows),
+    sourcesOf(rows.map((r) => r.id)),
+  ]);
+  return rows.map((row) => serializeAudience(row, contactability.get(row.id) ?? null, sources.get(row.id) ?? []));
 }
 
-// The lists derived from the audience's text, each with its size. Today one row
-// holds at most one list; the shape is a list so a text can carry several.
+// WHERE the audience's people are found: its own list first, then one entry per
+// source beside it (audience-sources.ts), each with its size.
 function describeChannels(
+  row: typeof audiences.$inferSelect,
+  contact: AudienceContactabilityEntry,
+  sources: AudienceSource[] = []
+) {
+  return [...describeOwnChannel(row, contact), ...describeSourceChannels(row.id, sources)];
+}
+
+function describeOwnChannel(
   row: typeof audiences.$inferSelect,
   contact: AudienceContactabilityEntry
 ) {
@@ -1633,7 +1689,8 @@ function readSignal(filters: unknown): { type: string; windowDays: number | null
 
 function serializeAudience(
   row: typeof audiences.$inferSelect,
-  contact: AudienceContactabilityEntry
+  contact: AudienceContactabilityEntry,
+  sources: AudienceSource[] = []
 ) {
   return {
     id: row.id,
@@ -1664,7 +1721,7 @@ function serializeAudience(
     targetText: row.targetText,
     targetTextOrigin: row.targetTextOrigin as "segment_target" | "audience_target" | null,
     targetTextMissingReason: targetTextMissingReason(row),
-    channels: describeChannels(row, contact),
+    channels: describeChannels(row, contact, sources),
   };
 }
 

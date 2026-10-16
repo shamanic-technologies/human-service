@@ -1959,7 +1959,7 @@
             "items": {
               "$ref": "#/components/schemas/AudienceChannel"
             },
-            "description": "The lists derived from this audience's text that a channel uses to find people, each with its own size. Every lead from every list is screened against targetText before it is used. Today every audience holds at most one list (empty for an audience with no committed provider)."
+            "description": "WHERE this audience's people are found: its own list first, then one entry per SOURCE of the audience (a buying signal, competitor-post engagement), each with its own size. A source is never an audience of its own. Every lead from every list is screened against targetText before it is used. Empty for an audience with no committed provider."
           }
         },
         "required": [
@@ -2017,7 +2017,24 @@
           "audienceId": {
             "type": "string",
             "format": "uuid",
-            "description": "The audience row that holds the list (today, always the audience itself)."
+            "description": "The audience this list finds people for (always the audience itself)."
+          },
+          "sourceId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Set on a SOURCE of the audience (a buying signal, competitor-post engagement): WHERE its people are also looked for, beside its own list. Absent on the audience's own list (the first entry)."
+          },
+          "name": {
+            "type": "string",
+            "description": "The source's name (e.g. \"Hiring now\"). Absent on the own list."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "paused"
+            ],
+            "description": "A source's on/off (its source campaign). Absent on the own list."
           },
           "signal": {
             "type": "object",
@@ -3168,6 +3185,12 @@
             "type": "string",
             "format": "uuid"
           },
+          "sourceId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid",
+            "description": "The audience source that found this candidate (a buying signal, competitor-post engagement); null = the audience's own list."
+          },
           "providerPersonId": {
             "type": "string",
             "description": "Apollo person id (the reveal handle)."
@@ -3277,6 +3300,7 @@
         "required": [
           "candidateId",
           "audienceId",
+          "sourceId",
           "providerPersonId",
           "linkedinUrl",
           "offeredAt",
@@ -5487,7 +5511,7 @@
             "items": {
               "$ref": "#/components/schemas/PortfolioAudience"
             },
-            "description": "Cold audiences first, then signal audiences (signal ones appear once status=ready). All created/activated ACTIVE."
+            "description": "The portfolio's audiences, one per client profile, created/activated ACTIVE. A buying signal is a SOURCE of a profile (its channels[]), never an audience of its own."
           },
           "signals": {
             "type": "array",
@@ -5609,7 +5633,14 @@
           "audienceId": {
             "type": "string",
             "nullable": true,
-            "format": "uuid"
+            "format": "uuid",
+            "description": "The profile audience the signal is a source of (a legacy per-signal audience on outcomes recorded before 2026-10-16). null when none was added."
+          },
+          "sourceId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid",
+            "description": "The source of the profile (its channels[] entry with this sourceId). null when none was added."
           },
           "reason": {
             "type": "string",
@@ -6839,6 +6870,10 @@
                 },
                 "status": {
                   "type": "string"
+                },
+                "sourceId": {
+                  "type": "string",
+                  "description": "Set when the audience is reached through a SOURCE of this list (then status is that source's on/off)."
                 }
               },
               "required": [
@@ -6846,7 +6881,8 @@
                 "name",
                 "status"
               ]
-            }
+            },
+            "description": "The offer's audiences of this list: those whose own list it is, then those reached through a source of it."
           }
         },
         "required": [
@@ -7876,6 +7912,137 @@
           "events",
           "nextCursor",
           "hasMore"
+        ]
+      },
+      "MergeSourceAudiencesResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "scanned": {
+            "type": "integer",
+            "description": "Per-source audience rows (profileAudienceId set, not deprecated) in scope."
+          },
+          "moved": {
+            "type": "integer",
+            "description": "Rows that became (or, on a dry run, would become) a source of their profile."
+          },
+          "archived": {
+            "type": "number",
+            "enum": [
+              0
+            ],
+            "description": "Always 0: nothing is archived or deleted."
+          },
+          "moves": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "childAudienceId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "childName": {
+                  "type": "string"
+                },
+                "targetAudienceId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "targetName": {
+                  "type": "string"
+                },
+                "list": {
+                  "type": "string"
+                },
+                "signalType": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "status": {
+                  "type": "string"
+                },
+                "sourceId": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "uuid",
+                  "description": "The source written. null on a dry run."
+                }
+              },
+              "required": [
+                "childAudienceId",
+                "childName",
+                "targetAudienceId",
+                "targetName",
+                "list",
+                "signalType",
+                "status",
+                "sourceId"
+              ]
+            }
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "childAudienceId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "childName": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "profile_missing",
+                    "profile_deprecated",
+                    "not_a_source_list",
+                    "profile_has_source"
+                  ]
+                }
+              },
+              "required": [
+                "childAudienceId",
+                "childName",
+                "reason"
+              ]
+            }
+          }
+        },
+        "required": [
+          "dryRun",
+          "scanned",
+          "moved",
+          "archived",
+          "moves",
+          "skipped"
+        ]
+      },
+      "RevertSourceAudienceMergeResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "reverted": {
+            "type": "integer"
+          },
+          "children": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "required": [
+          "dryRun",
+          "reverted",
+          "children"
         ]
       }
     },
@@ -15085,6 +15252,140 @@
           },
           "400": {
             "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/merge-source-audiences": {
+      "post": {
+        "summary": "One-time data fix (AUDIENCE-SOURCES-1016): each per-source audience row (\"<profile> (Hiring now)\") becomes a SOURCE of its profile audience, keeping its Apollo pointer, status and reachable ceiling; the old row is deprecated with canonicalAudienceId = the profile so every read resolves it there. Nothing archived or deleted. Idempotent, dry-runnable, reversible via /internal/merge-source-audiences/revert.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "dryRun",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "orgId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Merge result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MergeSourceAudiencesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/merge-source-audiences/revert": {
+      "post": {
+        "summary": "Undo the per-source audience merge in scope: each merged row gets back exactly its prior status and canonical link, its source is removed, its buffered teasers and copied rejections go back.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "dryRun",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "orgId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revert result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevertSourceAudienceMergeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query",
             "content": {
               "application/json": {
                 "schema": {

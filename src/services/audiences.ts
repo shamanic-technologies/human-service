@@ -84,6 +84,8 @@ import { crmPeopleServeStats, crmServeNext, normalizeCrmContact } from "../lib/c
 import { normalizeReach, personReaches, providerCanReach, type Reach } from "../lib/reach.js";
 import { widenedVerdicts, type EmailVerdict } from "../lib/email-verification.js";
 import { takeRereachForServe } from "./catch-all-rereach.js";
+import { tagMemberSource } from "./audience-member-sources.js";
+import { markSourceServed, persistSourceExhaustion, pickServeSource, sourceView, type AudienceSource } from "./audience-sources.js";
 import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
 
 // Tag served contacts as members of an audience (provenance membership). Upserts
@@ -98,7 +100,9 @@ import { audienceTargetFields, ensureTargetText } from "./audience-target-text.j
 export async function tagAudienceServe(
   orgId: string,
   audienceId: string,
-  contacts: ServedContact[]
+  contacts: ServedContact[],
+  // The audience source that served them (null = the audience's own list).
+  sourceId: string | null = null
 ): Promise<string[]> {
   const personIds: string[] = [];
   for (const c of contacts) {
@@ -121,6 +125,7 @@ export async function tagAudienceServe(
           // their window lapsed, becomes 'served'.
           set: { lastServedAt: sql`now()`, source: c.provider, provenance: "served" },
         });
+      await tagMemberSource(tx, orgId, audienceId, personId, sourceId, "served");
     });
   }
   return personIds;
@@ -2265,11 +2270,13 @@ export async function servedWithPersonId(
   orgId: string,
   audienceId: string,
   person: Person,
-  emailVerdict: EmailVerdict | null = null
+  emailVerdict: EmailVerdict | null = null,
+  // The audience source that served them (null = the audience's own list).
+  sourceId: string | null = null
 ): Promise<ServeNextResult> {
   const [personId] = await tagAudienceServe(orgId, audienceId, [
     toServedContact(person),
-  ]);
+  ], sourceId);
   return { status: "served", person, personId, emailVerdict };
 }
 
@@ -2439,7 +2446,7 @@ export async function exhaustOnScreenYield(
   console.log(
     `[human-service] audience.screen_yield_exhausted org=${identity.orgId} brand=${audience.brandId} audience=${audience.id} screens=${stats.screens} passes=${stats.passes}`
   );
-  await persistReachableCountOnExhaustion(identity.orgId, audience.id);
+  await persistExhaustion(identity, audience.id);
   if (!yieldRefillAsked.has(audience.id)) {
     yieldRefillAsked.add(audience.id);
     // Imported at call time: audience-refill.ts imports this module.
@@ -2515,6 +2522,74 @@ export async function serveNextPerson(
     );
   }
 
+  // SOURCES (audience-sources.ts): the slug lead-service serves under names WHERE
+  // to look. An audience with no source serves its own list, exactly as before.
+  const pick = await pickServeSource(audience, featureSlug);
+  if (pick.kind === "off") {
+    console.log(
+      `[human-service] audience_source.off org=${identity.orgId} audience=${audience.id} slug=${featureSlug ?? "-"} reason=${JSON.stringify(pick.reason)}`
+    );
+    return { status: "exhausted", person: null };
+  }
+  if (pick.kind === "sources") {
+    return serveFromSources(audience, pick.sources, identity, deadline, budgetMs, reach);
+  }
+  return serveFromList(audience, identity, deadline, budgetMs, reach);
+}
+
+// Serve from the audience's sources of one kind, in pick order: the first one
+// serving wins; a walked-out one is marked and the next tried. `pending` stops.
+async function serveFromSources(
+  audience: typeof audiences.$inferSelect,
+  sources: AudienceSource[],
+  identity: Identity,
+  deadline: number,
+  budgetMs: number,
+  reach: readonly Reach[]
+): Promise<ServeNextResult> {
+  let last: ServeNextResult = { status: "exhausted", person: null };
+  for (const source of sources) {
+    const result = await serveFromList(
+      sourceView(audience, source),
+      { ...identity, audienceSourceId: source.id },
+      deadline,
+      budgetMs,
+      reach
+    );
+    if (result.status === "served") {
+      await markSourceServed(source.id);
+      return result;
+    }
+    if (result.status === "pending") return result;
+    if (result.reason === "no_recent_posts") await persistSourceExhaustion(source.id, { reachable: false });
+    last = result;
+  }
+  return last;
+}
+
+// Where the walk stopped for good: the audience's own list persists its reachable
+// ceiling on the audience row; a source on its own row.
+async function persistExhaustion(identity: Identity, audienceId: string): Promise<void> {
+  if (identity.audienceSourceId) {
+    await persistSourceExhaustion(identity.audienceSourceId, { reachable: true });
+    return;
+  }
+  await persistReachableCountOnExhaustion(identity.orgId, audienceId);
+}
+
+// Serve the next person from ONE list: the audience's own (identity carries no
+// source) or one source of it (`sourceView` + identity.audienceSourceId). Every
+// row the walk writes (buffer, verdict, membership, bronze serve) is the
+// audience's, tagged with that source.
+async function serveFromList(
+  audience: typeof audiences.$inferSelect,
+  identity: Identity,
+  deadline: number,
+  budgetMs: number,
+  reach: readonly Reach[]
+): Promise<ServeNextResult> {
+  const provider = audience.provider;
+  const sourceId = identity.audienceSourceId ?? null;
   if (provider !== "apollo" && provider !== "apify") {
     throw new AudienceNotServableError(
       "Audience has no committed provider — cannot serve people."
@@ -2559,10 +2634,10 @@ export async function serveNextPerson(
     // suppression-recorded by the gateway, so surface exhausted rather than
     // committing an uncontactable person as served.
     if (!person || !hasUsableEmail(person)) {
-      await persistReachableCountOnExhaustion(identity.orgId, audience.id);
+      await persistExhaustion(identity, audience.id);
       return { status: "exhausted", person: null };
     }
-    return servedWithPersonId(identity.orgId, audience.id, person);
+    return servedWithPersonId(identity.orgId, audience.id, person, null, sourceId);
   }
 
   // apollo: search is a FREE teaser list. Apollo's /search/next hands back up to
@@ -2624,14 +2699,14 @@ export async function serveNextPerson(
   // this audience already revealed, verified and dropped for the brand: paid
   // for once, handed from what we stored, each once (catch-all-rereach.ts).
   // Before the yield read: they cost nothing and were already judged.
-  if (widenedVerdicts(identity.acceptedEmails).length > 0) {
+  if (!sourceId && widenedVerdicts(identity.acceptedEmails).length > 0) {
     const rereach = await takeRereachForServe(identity, audience.brandId, audience.id);
     if (rereach) {
       return servedWithPersonId(identity.orgId, audience.id, rereach.person, rereach.serve.verdict);
     }
   }
 
-  const yieldAtStart = await readScreenYield(audience);
+  const yieldAtStart = await readScreenYield(audience, sourceId);
   if (yieldAtStart?.spent) return exhaustOnScreenYield(identity, audience, yieldAtStart);
 
   let walked = 0;
@@ -2649,11 +2724,11 @@ export async function serveNextPerson(
     // so a dead audience stops mid-call without dropping an unjudged teaser.
     if (screensSinceYieldRead >= SCREEN_YIELD_CHECK_EVERY) {
       screensSinceYieldRead = 0;
-      const yieldNow = await readScreenYield(audience);
+      const yieldNow = await readScreenYield(audience, sourceId);
       if (yieldNow?.spent) return exhaustOnScreenYield(identity, audience, yieldNow);
     }
     walked += 1;
-    const teaser = await popTeaser(identity.orgId, audience.id);
+    const teaser = await popTeaser(identity.orgId, audience.id, sourceId);
     if (!teaser) {
       // Buffer dry → advance apollo's free cursor one fruitful chunk. peopleSearch
       // already drops brand-suppressed teasers before returning, and returns the
@@ -2667,10 +2742,10 @@ export async function serveNextPerson(
       });
       if (search.people.length === 0) {
         if (search.noRecentPosts) return noRecentPostsAnswer(identity.orgId, audience.id, "serve_next");
-        await persistReachableCountOnExhaustion(identity.orgId, audience.id);
+        await persistExhaustion(identity, audience.id);
         return { status: "exhausted", person: null };
       }
-      await bufferTeasers(identity.orgId, audience.id, search.people);
+      await bufferTeasers(identity.orgId, audience.id, search.people, sourceId);
       continue;
     }
 
@@ -2684,7 +2759,7 @@ export async function serveNextPerson(
       [{ linkedinUrl: teaser.linkedinUrl, providerPersonId: teaser.providerPersonId }]
     );
     if (popped.taken.length > 0) {
-      await tagFoundAlreadyTaken(identity.orgId, audience.id, "apollo", popped.taken);
+      await tagFoundAlreadyTaken(identity.orgId, audience.id, "apollo", popped.taken, sourceId);
       continue;
     }
 
@@ -2739,6 +2814,7 @@ export async function serveNextPerson(
       audience,
       subject: teaser,
       identity,
+      sourceId,
     });
     if (screen.screened && !screen.onTarget) {
       console.log(
@@ -2764,7 +2840,8 @@ export async function serveNextPerson(
         identity.orgId,
         audience.id,
         revealed.person,
-        revealed.emailVerdict ?? null
+        revealed.emailVerdict ?? null,
+        sourceId
       );
     }
     // Reveal yielded no usable email, or was post-pay suppressed → drop, pop the

@@ -37,7 +37,7 @@
 // exist without the evidence that produced it. Keyed on the AUDIENCE, because
 // the verdict is relative to the target that audience defined.
 
-import { and, desc, eq, inArray, like } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, like } from "drizzle-orm";
 import { db } from "../db/index.js";
 import {
   audienceScreenedOut,
@@ -130,6 +130,9 @@ export async function screenTeaser(args: {
   audience: { id: string; nlPrompt: string | null; targetText: string | null };
   subject: ScreenSubject;
   identity: ChatIdentity;
+  // The audience source whose teaser this is (null = own list). The verdict is
+  // always against the AUDIENCE's text; the source is recorded with it.
+  sourceId?: string | null;
 }): Promise<ScreenOutcome> {
   const { orgId, audience, subject, identity } = args;
 
@@ -166,6 +169,7 @@ export async function screenTeaser(args: {
     yesProbability: judgment.yesProbability,
     model: `typesafe/${judgment.model}`,
     target,
+    sourceId: args.sourceId ?? null,
   });
 
   return { screened: true, onTarget, yesProbability: judgment.yesProbability };
@@ -182,6 +186,7 @@ async function recordScreening(args: {
   yesProbability: number;
   model: string;
   target: { text: string; field: "target_text" | "nl_prompt" };
+  sourceId: string | null;
 }): Promise<void> {
   const { orgId, audienceId, subject, onTarget, yesProbability, model, target } = args;
   const reason = `P(yes)=${yesProbability.toFixed(3)} ${screenBarTag()}`;
@@ -199,6 +204,7 @@ async function recordScreening(args: {
       promptVersion: SCREEN_PROMPT_VERSION,
       targetText: target.text,
       targetField: target.field,
+      sourceId: args.sourceId,
     });
     if (onTarget) return;
     await tx
@@ -295,11 +301,15 @@ export function screenBarTag(): string {
  * Read the audience's yield under the question the screen would ask NOW. No
  * text to judge against ⟹ nothing is screened, so nothing is spent: null.
  */
-export async function readScreenYield(audience: {
-  id: string;
-  nlPrompt: string | null;
-  targetText: string | null;
-}): Promise<ScreenYield | null> {
+export async function readScreenYield(
+  audience: {
+    id: string;
+    nlPrompt: string | null;
+    targetText: string | null;
+  },
+  // Each source of an audience has its own yield window (null = own list).
+  sourceId: string | null = null
+): Promise<ScreenYield | null> {
   const target = screenTarget(audience);
   if (!target) return null;
   const recent = await db
@@ -308,6 +318,7 @@ export async function readScreenYield(audience: {
     .where(
       and(
         eq(audienceTeaserScreenings.audienceId, audience.id),
+        sourceId ? eq(audienceTeaserScreenings.sourceId, sourceId) : isNull(audienceTeaserScreenings.sourceId),
         eq(audienceTeaserScreenings.promptVersion, SCREEN_PROMPT_VERSION),
         eq(audienceTeaserScreenings.targetText, target.text),
         like(audienceTeaserScreenings.reason, `%${screenBarTag()}`)

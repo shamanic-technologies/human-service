@@ -25,7 +25,8 @@ export type SystemStatusReason =
   | "profile_resumed" // its client profile was resumed (cascade)
   | "born" // created by a product path in the status it was born in
   | "whole_icp_retired" // the whole-ICP list was retired once profiles had their lists
-  | "portfolio_adopted"; // a launch adopted a confirmed split
+  | "portfolio_adopted" // a launch adopted a confirmed split
+  | "merged_into_audience"; // a per-source list became a source of its profile (AUDIENCE-SOURCES-1016)
 
 export function personStatus(userId: string | null | undefined) {
   return {
