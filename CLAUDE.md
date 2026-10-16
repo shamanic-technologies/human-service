@@ -1509,6 +1509,14 @@ human-service only ACTS on the answer, in `finalizeResolved`
   (`shapeEmailVerdict`, `src/lib/serve-email-policy.ts`); never on other
   statuses. A replayed pre-option served reveal reads `valid` (only valid was
   ever served).
+- **`valid_catch_all_and_unknown` (UNKNOWN-EMAILS-OPTION-1014, owner option
+  2026-10-14, REAFFIRMED by the owner 2026-10-16)**: serves `valid`, `catch_all`
+  AND `unknown` (fresh reveal, candidates, and the free re-reach of stored
+  unknown people); invalid/risky never. It is a live, supported value, NOT
+  deprecated: #432 (CATCHALL-BOUNCE-1016) collapsed it to `valid_and_catch_all`
+  and was reverted on the owner's order. Never narrow, alias or deprecate an
+  `acceptedEmails` value on bounce data alone: the caller's knowing choice wins;
+  bounce control belongs to the workflow picking the value.
 - **Re-reach** (`src/services/catch-all-rereach.ts`, ledger `catch_all_rereaches`,
   migration 0045): with `valid_and_catch_all`, an audience FIRST hands out the
   catch-all people IT revealed and dropped for the brand (bronze `lead_serves`
