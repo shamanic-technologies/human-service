@@ -1,7 +1,9 @@
 // Re-reach of catch-all people already paid for (CATCHALL-SERVE-OPTION-1013).
-// Same for unknown-verdict people under `valid_catch_all_and_unknown`
-// (UNKNOWN-EMAILS-OPTION-1014): the verdicts looked for are the caller's
-// `widenedVerdicts`, and each person is handed with their OWN verdict.
+// The verdicts looked for are the caller's `widenedVerdicts`, and each person is
+// handed with their OWN verdict. UNKNOWN-EMAILS-OPTION-1014 (2026-10-14) also
+// re-reached unknown-verdict people; SUPERSEDED on 2026-10-16
+// (CATCHALL-BOUNCE-1016): unknown bounced 36.8% fleet-wide and is never emailed,
+// so no option widens to it any more and only catch_all people are re-reached.
 //
 // WHY. Until a caller could ask for catch-all addresses, every revealed person
 // whose address verified `catch_all` was CLAIMED for the brand (bronze
@@ -69,7 +71,7 @@ export interface RereachableServe {
   // The audience's candidate row for this person, when the candidate path saw
   // them before (a revealed `not_served` row): re-offered in place.
   candidateId: string | null;
-  // The verdict the paid verification gave this address (catch_all, unknown).
+  // The verdict the paid verification gave this address (catch_all; never unknown since CATCHALL-BOUNCE-1016).
   verdict: EmailVerdict;
 }
 
@@ -275,7 +277,7 @@ export function rereachPerson(serve: RereachableServe): Person {
     seniority: t.seniority ?? null,
     email: serve.email,
     emailStatus: null,
-    // The verifier said so: the domain accepts every address (unknown: it could not tell).
+    // The verifier said so: the domain accepts every address.
     catchAll: serve.verdict === "catch_all" ? true : null,
     inferred: null,
     linkedinUrl: serve.linkedinUrl,
