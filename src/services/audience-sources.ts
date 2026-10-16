@@ -41,6 +41,7 @@ import { audienceListKind } from "./audience-snapshot.js";
 import { isCrmSourcedFeature, listKindOfOriginSlug, type AudienceListKind } from "./sourcing-origin.js";
 import { isSystemResumable, systemStatus } from "./audience-status-origin.js";
 export { tagMemberSource } from "./audience-member-sources.js";
+import { LEAD_SOURCING_SLUG, readLeadSourcingChoice } from "./lead-sourcing.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
 
@@ -125,7 +126,8 @@ export function sourceView(audience: AudienceRow, source: AudienceSource): Audie
 
 export type ServePick =
   | { kind: "own" }
-  | { kind: "sources"; sources: AudienceSource[] }
+  // In serve order. `null` = the audience's OWN list (a Lead Sourcing serve mixes both).
+  | { kind: "sources"; sources: Array<AudienceSource | null> }
   | { kind: "off"; reason: string };
 
 /**
@@ -136,13 +138,22 @@ export type ServePick =
  *     ON (or the audience not active) ⟹ off: nothing served through it.
  *   - the slug names the audience's own list ⟹ own list, unless it is OFF while
  *     other sources run.
+ *   - `lead-sourcing` (the channel that PICKS its origins, lead-sourcing.ts) ⟹ the
+ *     own list when its origin is chosen and on, plus every ON source whose origin is
+ *     chosen, in random order (each its share), the ones walked out recently last;
+ *     nothing chosen ⟹ off. No stored choice ⟹ own list.
  *   - anything else (an outreach slug, an origin the audience has no source of)
  *     ⟹ its own list, exactly as before.
  */
-export async function pickServeSource(audience: AudienceRow, featureSlug: string | undefined): Promise<ServePick> {
+export async function pickServeSource(
+  audience: AudienceRow,
+  featureSlug: string | undefined,
+  random: () => number = Math.random
+): Promise<ServePick> {
   if (isCrmSourcedFeature(featureSlug) || !featureSlug) return { kind: "own" };
   const sources = (await sourcesOf([audience.id])).get(audience.id) ?? [];
   if (sources.length === 0) return { kind: "own" };
+  if (featureSlug === LEAD_SOURCING_SLUG) return pickLeadSourcing(audience, sources, random);
   const list = await listKindOfOriginSlug(featureSlug);
   if (!list) return { kind: "own" };
   const ofList = sources.filter((s) => s.list === list);
@@ -165,6 +176,36 @@ export async function pickServeSource(audience: AudienceRow, featureSlug: string
   return { kind: "sources", sources: on };
 }
 
+async function pickLeadSourcing(
+  audience: AudienceRow,
+  sources: AudienceSource[],
+  random: () => number
+): Promise<ServePick> {
+  if (!audience.offerId) return { kind: "own" };
+  const choice = await readLeadSourcingChoice({ orgId: audience.orgId, brandId: audience.brandId, offerId: audience.offerId });
+  if (!choice) return { kind: "own" };
+  if (audience.status !== "active") return { kind: "off", reason: `audience is ${audience.status}` };
+  const chosen = new Set<string>();
+  for (const slug of choice.chosenOriginSlugs) {
+    const list = await listKindOfOriginSlug(slug);
+    if (list) chosen.add(list);
+  }
+  const own = audienceListKind(audience);
+  const entries: Array<AudienceSource | null> = [];
+  if (own && chosen.has(own) && ownListOn(audience)) entries.push(null);
+  entries.push(...sources.filter((s) => isSourceOn(s) && chosen.has(s.list)));
+  if (entries.length === 0) {
+    return { kind: "off", reason: `Lead Sourcing chose ${choice.chosenOriginSlugs.join(",") || "nothing"}: no ON list of the audience among them` };
+  }
+  // Random order (each list its share of serves), stable-partitioned so a source
+  // walked out recently comes last.
+  const now = Date.now();
+  const shuffled = entries.map((e) => ({ e, k: random() })).sort((a, b) => a.k - b.k).map((x) => x.e);
+  const fresh = shuffled.filter((e) => !e || !recentlyExhausted(e, now));
+  const spent = shuffled.filter((e) => e && recentlyExhausted(e, now));
+  return { kind: "sources", sources: [...fresh, ...spent] };
+}
+
 /**
  * The answer of GET /orgs/audiences/{id}/sourcing-origin, by what the caller asks:
  *   - a CRM-sourced feature ⟹ crm (unchanged);
@@ -172,6 +213,7 @@ export async function pickServeSource(audience: AudienceRow, featureSlug: string
  *     this to learn which source campaign an audience belongs to);
  *   - an ORIGIN slug ⟹ that origin when the audience finds people through it (its own
  *     list, or a source of that list whatever its on/off), else its own list;
+ *   - `lead-sourcing` ⟹ one of the lists its choice serves the audience through;
  *   - an OUTREACH slug (the serve label question) ⟹ one of its ON sources at random
  *     (own list when on, each active source kind), preferring those not walked out
  *     recently. null ⟹ no source is ON: an OFF source is never answered.
@@ -187,6 +229,14 @@ export async function pickSourcingList(
   if (!featureSlug) return own;
   const sources = (await sourcesOf([audience.id])).get(audience.id) ?? [];
   if (sources.length === 0) return own;
+  // Lead Sourcing: one of the lists its CHOICE serves this audience through.
+  if (featureSlug === LEAD_SOURCING_SLUG) {
+    const pick = await pickLeadSourcing(audience, sources, random);
+    if (pick.kind === "own") return own;
+    if (pick.kind === "off") return null;
+    const first = pick.sources[0];
+    return first ? (first.list as AudienceListKind) : own;
+  }
   const asked = await listKindOfOriginSlug(featureSlug);
   if (asked) {
     if (asked === own || sources.some((s) => s.list === asked && s.status !== "archived")) return asked;
