@@ -381,6 +381,10 @@ export interface Identity {
   // Pushed down verbatim to crm-service on a CRM serve; a search-provider serve
   // stating it is refused.
   stepFilter?: StepFilter;
+  // The audience SOURCE this serve draws from (audience_sources.id,
+  // src/services/audience-sources.ts); absent / null = the audience's own list.
+  // Recorded on the bronze serve and the per-source provenance; never sent downstream.
+  audienceSourceId?: string | null;
 }
 
 // Map a normalized neutral Person to the suppression/membership contact shape.
@@ -1168,7 +1172,7 @@ export async function peopleSearch(args: {
         // stay unserved, but the audience found them — record it (multi-source
         // provenance, from the free match only, no spend).
         if (args.audienceId && split.taken.length > 0) {
-          await tagFoundAlreadyTaken(args.identity.orgId, args.audienceId, "apollo", split.taken);
+          await tagFoundAlreadyTaken(args.identity.orgId, args.audienceId, "apollo", split.taken, args.identity.audienceSourceId ?? null);
         }
       }
       collected.push(...people);
@@ -1342,6 +1346,7 @@ async function finalizeResolved(
       runId: identity.runId,
       audienceId,
       emailVerdict,
+      audienceSourceId: identity.audienceSourceId ?? null,
     }))
   ) {
     // Taken for the brand by a concurrent serve: not handed back, but the
@@ -1354,7 +1359,7 @@ async function finalizeResolved(
           item: { linkedinUrl: person.linkedinUrl, providerPersonId: person.providerPersonId },
           match: { emailNorm, linkedinUrlNorm: null, providerPersonId: person.providerPersonId },
         },
-      ]);
+      ], identity.audienceSourceId ?? null);
     }
     return { provider, person: null, blocked: { reason: "already_served" } };
   }

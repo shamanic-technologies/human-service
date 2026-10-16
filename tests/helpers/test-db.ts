@@ -21,6 +21,9 @@ import {
   sourceCampaignAudienceHolds,
   suppressionSendSyncState,
   catchAllRereaches,
+  audienceSources,
+  audienceMemberSources,
+  audienceSourceMerges,
   humanIdentities,
   humanIdentityKeys,
   humanLinks,
@@ -44,6 +47,9 @@ export async function cleanTestData() {
   await db.delete(audienceTeaserScreenings);
   await db.delete(audienceScreenedOut);
   await db.delete(audienceCandidates);
+  await db.delete(audienceMemberSources);
+  await db.delete(audienceSourceMerges);
+  await db.delete(audienceSources);
   await db.delete(audienceMembers);
   await db.delete(audiencePortfolios);
   await db.delete(audienceWideningProposals);

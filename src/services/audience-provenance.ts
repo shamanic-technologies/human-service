@@ -20,6 +20,7 @@ import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audienceMembers, people, personEmails } from "../db/schema.js";
 import { recordServedEmail } from "./person-emails.js";
+import { tagMemberSource } from "./audience-member-sources.js";
 import {
   normalizeEmail,
   normalizeLinkedinUrl,
@@ -189,7 +190,9 @@ export async function tagFoundAlreadyTaken(
   taken: Array<{
     item: { linkedinUrl: string | null; providerPersonId: string | null };
     match: SuppressionMatch;
-  }>
+  }>,
+  // The audience source whose search found them (null = the audience's own list).
+  sourceId: string | null = null
 ): Promise<string[]> {
   const personIds: string[] = [];
   for (const { item, match } of taken) {
@@ -218,6 +221,7 @@ export async function tagFoundAlreadyTaken(
         .onConflictDoNothing({
           target: [audienceMembers.audienceId, audienceMembers.personId],
         });
+      await tagMemberSource(tx, orgId, audienceId, personId, sourceId, "found_taken");
     });
   }
   if (taken.length > 0) {

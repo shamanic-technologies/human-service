@@ -1060,7 +1060,15 @@ export const AudienceChannelSchema = z
           "What the list is. apollo_search: an Apollo people search. apollo_buying_signal: the same search narrowed to people showing a buying signal (see signal). linkedin_engagement: people who engaged with competitor LinkedIn posts (see signal). crm_contacts: the client's own uploaded contacts. apify_search: legacy search provider.",
       }),
     audienceId: z.string().uuid().openapi({
-      description: "The audience row that holds the list (today, always the audience itself).",
+      description: "The audience this list finds people for (always the audience itself).",
+    }),
+    sourceId: z.string().uuid().optional().openapi({
+      description:
+        "Set on a SOURCE of the audience (a buying signal, competitor-post engagement): WHERE its people are also looked for, beside its own list. Absent on the audience's own list (the first entry).",
+    }),
+    name: z.string().optional().openapi({ description: "The source's name (e.g. \"Hiring now\"). Absent on the own list." }),
+    status: z.enum(["active", "paused"]).optional().openapi({
+      description: "A source's on/off (its source campaign). Absent on the own list.",
     }),
     signal: z
       .object({
@@ -1209,7 +1217,7 @@ export const AudienceSchema = z
     }),
     channels: z.array(AudienceChannelSchema).openapi({
       description:
-        "The lists derived from this audience's text that a channel uses to find people, each with its own size. Every lead from every list is screened against targetText before it is used. Today every audience holds at most one list (empty for an audience with no committed provider).",
+        "WHERE this audience's people are found: its own list first, then one entry per SOURCE of the audience (a buying signal, competitor-post engagement), each with its own size. A source is never an audience of its own. Every lead from every list is screened against targetText before it is used. Empty for an audience with no committed provider.",
     }),
   })
   .openapi("Audience");
@@ -1597,6 +1605,9 @@ export const AudienceCandidateViewSchema = z
   .object({
     candidateId: z.string().uuid().openapi({ description: "Handle for reveal / decline." }),
     audienceId: z.string().uuid(),
+    sourceId: z.string().uuid().nullable().openapi({
+      description: "The audience source that found this candidate (a buying signal, competitor-post engagement); null = the audience's own list.",
+    }),
     providerPersonId: z.string().openapi({ description: "Apollo person id (the reveal handle)." }),
     linkedinUrl: z.string().nullable(),
     offeredAt: z.string().openapi({ description: "ISO time the candidate was (last) offered. An undecided offer is offered again after 15 minutes." }),
@@ -3841,7 +3852,12 @@ const PortfolioSignalOutcomeSchema = z
     people: z.number().int().nullable().openapi({ description: "Verified-email people the signal reaches for the profile. null when not measured." }),
     companies: z.number().int().nullable().openapi({ description: "Distinct companies of those people. null when not measured." }),
     companiesExact: z.boolean().nullable().openapi({ description: "false = companies counted over the first 500 people (a floor)." }),
-    audienceId: z.string().uuid().nullable(),
+    audienceId: z.string().uuid().nullable().openapi({
+      description: "The profile audience the signal is a source of (a legacy per-signal audience on outcomes recorded before 2026-10-16). null when none was added.",
+    }),
+    sourceId: z.string().uuid().nullable().optional().openapi({
+      description: "The source of the profile (its channels[] entry with this sourceId). null when none was added.",
+    }),
     reason: z.string().nullable(),
   })
   .openapi("PortfolioSignalOutcome");
@@ -3860,7 +3876,7 @@ export const LaunchAudiencePortfolioResponseSchema = z
     }),
     target: z.string().nullable().openapi({ description: "The nlPrompt every portfolio audience carries." }),
     audiences: z.array(PortfolioAudienceSchema).openapi({
-      description: "Cold audiences first, then signal audiences (signal ones appear once status=ready). All created/activated ACTIVE.",
+      description: "The portfolio's audiences, one per client profile, created/activated ACTIVE. A buying signal is a SOURCE of a profile (its channels[]), never an audience of its own.",
     }),
     signals: z.array(PortfolioSignalOutcomeSchema).openapi({
       description: "One outcome per (client profile, buying signal). Empty while status=building.",
@@ -4360,7 +4376,18 @@ export const SourceCampaignStateResponseSchema = z
     previousStatus: z.enum(["on", "off"]).nullable(),
     outcome: z.enum(SOURCE_OUTCOMES),
     reason: z.string().nullable(),
-    audiences: z.array(z.object({ id: z.string(), name: z.string(), status: z.string() })),
+    audiences: z
+      .array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          status: z.string(),
+          sourceId: z.string().optional().openapi({
+            description: "Set when the audience is reached through a SOURCE of this list (then status is that source's on/off).",
+          }),
+        })
+      )
+      .openapi({ description: "The offer's audiences of this list: those whose own list it is, then those reached through a source of it." }),
   })
   .openapi("SourceCampaignStateResponse");
 
@@ -4816,5 +4843,78 @@ registry.registerPath({
     200: { description: "Counts", content: { "application/json": { schema: z.record(z.string(), z.unknown()) } } },
     202: { description: "Started" },
     ...humanErrors,
+  },
+});
+
+// --- AUDIENCE-SOURCES-1016: one-time merge of per-source audience rows ---
+
+export const MergeSourceAudiencesQuerySchema = z.object({
+  dryRun: z.enum(["true", "false"]).optional(),
+  orgId: z.string().uuid().optional(),
+  brandId: z.string().uuid().optional(),
+});
+
+export const MergeSourceAudiencesResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    scanned: z.number().int().openapi({ description: "Per-source audience rows (profileAudienceId set, not deprecated) in scope." }),
+    moved: z.number().int().openapi({ description: "Rows that became (or, on a dry run, would become) a source of their profile." }),
+    archived: z.literal(0).openapi({ description: "Always 0: nothing is archived or deleted." }),
+    moves: z.array(
+      z.object({
+        childAudienceId: z.string().uuid(),
+        childName: z.string(),
+        targetAudienceId: z.string().uuid(),
+        targetName: z.string(),
+        list: z.string(),
+        signalType: z.string().nullable(),
+        status: z.string(),
+        sourceId: z.string().uuid().nullable().openapi({ description: "The source written. null on a dry run." }),
+      })
+    ),
+    skipped: z.array(
+      z.object({
+        childAudienceId: z.string().uuid(),
+        childName: z.string(),
+        reason: z.enum(["profile_missing", "profile_deprecated", "not_a_source_list", "profile_has_source"]),
+      })
+    ),
+  })
+  .openapi("MergeSourceAudiencesResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/merge-source-audiences",
+  summary:
+    "One-time data fix (AUDIENCE-SOURCES-1016): each per-source audience row (\"<profile> (Hiring now)\") becomes a SOURCE of its profile audience, keeping its Apollo pointer, status and reachable ceiling; the old row is deprecated with canonicalAudienceId = the profile so every read resolves it there. Nothing archived or deleted. Idempotent, dry-runnable, reversible via /internal/merge-source-audiences/revert.",
+  security: [{ apiKey: [] }],
+  request: { query: MergeSourceAudiencesQuerySchema },
+  responses: {
+    200: { description: "Merge result", content: { "application/json": { schema: MergeSourceAudiencesResponseSchema } } },
+    400: { description: "Invalid query", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/merge-source-audiences/revert",
+  summary:
+    "Undo the per-source audience merge in scope: each merged row gets back exactly its prior status and canonical link, its source is removed, its buffered teasers and copied rejections go back.",
+  security: [{ apiKey: [] }],
+  request: { query: MergeSourceAudiencesQuerySchema },
+  responses: {
+    200: {
+      description: "Revert result",
+      content: {
+        "application/json": {
+          schema: z
+            .object({ dryRun: z.boolean(), reverted: z.number().int(), children: z.array(z.string().uuid()) })
+            .openapi("RevertSourceAudienceMergeResponse"),
+        },
+      },
+    },
+    400: { description: "Invalid query", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
   },
 });

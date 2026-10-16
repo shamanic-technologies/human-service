@@ -330,6 +330,13 @@
       "when": 1771847177399,
       "tag": "0046_add_human_identities",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1771933577399,
+      "tag": "0047_add_audience_sources",
+      "breakpoints": true
     }
   ]
 }

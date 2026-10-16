@@ -438,8 +438,10 @@ async function readPortfolio(p: PortfolioRow, replayed: boolean): Promise<Portfo
     out.push({ row, kind: "cold", signal: null, adopted: row.source === ADOPTABLE_SOURCE });
   }
   for (const s of signals) {
-    const row = s.audienceId ? byId.get(s.audienceId) : undefined;
-    if (!row) continue;
+    // A signal is a SOURCE of its profile (audience-sources.ts): the profile is
+    // already listed as cold. Only a legacy per-signal audience row is listed here.
+    const row = s.audienceId && !coldIds.includes(s.audienceId) ? byId.get(s.audienceId) : undefined;
+    if (!row || !row.profileAudienceId) continue;
     out.push({ row, kind: "signal", signal: { type: s.type, windowDays: s.windowDays }, adopted: false });
   }
   return {

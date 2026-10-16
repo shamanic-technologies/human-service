@@ -65,6 +65,7 @@ section — the port binds first).
 | Internal | `POST /internal/backfill-apollo-audience-pointers` | apiKey | One-time data fix ("one filter vocabulary" Wave 2): for every `provider='apollo'` audience lacking `apollo_audience_id`, build a faithful Apollo audience via apollo-service `POST /audiences/suggest-from-segment` (from the row's name + description), then store the **pointer** + cached faithful filters (replacing the old lossy neutral blob) + count. Idempotent (scoped to `apollo_audience_id IS NULL`), `?dryRun=true`, `?async=true`, reversible |
 | Internal | `POST /internal/backfill-audience-offers` | apiKey | One-time data fix: attribute every pre-existing offer-less audience to the offer its `(org, brand)` holds, read from brand-service. A pair with no offer — or with several — stays NULL and is reported, never guessed (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/recover-suppressions` | apiKey | One-time data repair: for a caller-supplied set of `{orgId, brandId, email}`, archive the `brand_suppressions` row into the reversible `suppression_recoveries` ledger (tagged with a `reason`) and DELETE it, so people who were served but never actually contacted become emittable again for their brand. Idempotent (unique `(reason, org, brand, email_norm)`), `?dryRun=true`, reversible. NOT a sweep — the set is supplied, never inferred |
+| Internal | `POST /internal/merge-source-audiences` (+ `/revert`) | apiKey | One-time data fix (AUDIENCE-SOURCES-1016): each per-source audience row becomes a SOURCE of its profile, the row deprecated -> canonical = profile. `?dryRun&orgId&brandId`, reversible, nothing archived. See "Audience x source" |
 | Internal | `POST /internal/recover-suppressions/revert` | apiKey | Undo a recovery: restore every archived suppression row carrying `reason` verbatim + drop the ledger rows. A person re-suppressed by a fresh serve keeps the newer row |
 | Internal | `POST /internal/backfill-sent-suppressions` | apiKey | One-time data repair (the INVERSE of the recovery above): for a caller-supplied set of `{orgId, brandId, email, sentAt}`, create the missing `brand_suppressions` row dated from the REAL send, so people actually EMAILED before per-brand suppression existed (2026-06-15) stop being re-served and re-bought for the remainder of their own window. Idempotent (reversible `suppression_backfills` ledger keyed on `reason`), `?dryRun=true`. Dedicated **25 MB** body parser. NOT a sweep — the set is supplied, never inferred, and never derived from bare serves |
 | Internal | `POST /internal/backfill-sent-suppressions/revert` | apiKey | Undo a backfill: delete exactly the suppression rows that `reason` created + drop the ledger rows. A row re-served since (its `last_served_at` moved) records a real emission and is kept |
@@ -115,7 +116,7 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` / `offerId` / `profileAudienceId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
 | Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}` | apiKey + `x-org-id` | Update metadata (name / nlPrompt only) — immutable otherwise |
-| Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}/status` | apiKey + `x-org-id` | Change status (active / paused / archived) — mutates only status; a profile's source lists follow (see "Profile x source") |
+| Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}/status` | apiKey + `x-org-id` | Change status (active / paused / archived) — mutates only status; pausing an audience stops every source of it (see "Audience x source") |
 | Org-scoped (Audiences v1) | `DELETE /orgs/audiences/{id}` | apiKey + `x-org-id` | Hard delete (cascades members) — archive is a soft state, not delete |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/refresh-count` | apiKey + `x-org-id` + `x-user-id` | Re-snapshot apollo + apify counts via free dry-run |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/serve-next` | apiKey + `x-org-id` + `x-user-id` | Serve the NEXT unserved person of the audience (real provider match on its stored filters; records served; never repeats; clean exhausted signal) |
@@ -123,7 +124,7 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/{candidateId}/reveal` | apiKey + `x-org-id` + `x-user-id` | Billed reveal of an offered candidate, recorded as served exactly like serve-next; billed once (replay) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/{candidateId}/decline` | apiKey + `x-org-id` | Decline: never offered/served again for that audience, Size drops by one (same exclusion set as the screen) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/screenings` | apiKey + `x-org-id` | Past pre-pay screen verdicts (bronze), oldest first, `limit`/`offset`/`providerPersonId` |
-| Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/sourcing-origin` | apiKey + `x-org-id` (+ `x-feature-slug`) | `{audienceId, list, sourcingFeatureSlug}`: the features-service sourcing origin a serve-next of it draws from (lead-service labels its serve run with it). See "Sourcing origin label" |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/sourcing-origin` | apiKey + `x-org-id` (+ `x-feature-slug`) | `{audienceId, list, sourcingFeatureSlug}`: the features-service sourcing origin a serve-next of it draws from (lead-service labels its serve run with it). No slug = own list; outreach slug = one ON source of the audience; origin slug = that origin if the audience finds through it. See "Sourcing origin label", "Audience x source" |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview` | apiKey + `x-org-id` + `x-user-id` | Free sample of who the audience reaches: ~10 real companies + ~20 real people (no email/phone), taken once and stored on the row |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/preview/email-checks` | apiKey + `x-org-id` + `x-user-id` | Free read: for the preview's first 5 people, pending / found (verdict, finder) / not found. Never an address |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/preview/email-checks/next` | apiKey + `x-org-id` + `x-user-id` | Check ONE more sampled person: apollo billed reveal + verification (cost in apollo-service, caller's org), outcome stored, whole state returned. Loop until `done` |
@@ -1872,9 +1873,9 @@ people, companies, companiesExact, audienceId, reason})}`.
   `proposeAudienceSplit` + `confirmAudienceSplit` (`source='icp_portfolio'`,
   every segment kept, colliding names date-suffixed). Background pointer builds
   as after a confirm. A cold failure fails the call loud (502), nothing recorded.
-- **Signal = one cold audience (a PROFILE) + one buying signal**, per profile,
-  kept only at **≥ 20 distinct companies FOR THAT PROFILE** (see "Profile x
-  source"). No whole-ICP Apollo build any more (`icp_apollo_audience_id` is no
+- **Signal = a SOURCE of each profile** (one per buying signal), kept only at
+  **≥ 20 distinct companies FOR THAT PROFILE** (see "Audience x source"); the
+  response lists one audience per profile, signals in its `channels[]`. No whole-ICP Apollo build any more (`icp_apollo_audience_id` is no
   longer written). Windows: hiring 30 days, job_change and funding 90. A failed
   profile build / coverage read / creation is that pair's `failed` outcome,
   logged loud; the cold audiences still ship.
@@ -1953,11 +1954,10 @@ owns the criterion, the harvest, the per-audience no-repeat and the spend.
 ### Competitor-engagement audience, created by us (`src/services/competitor-engagement-audience.ts`)
 
 Owner 2026-10-03: every client brand gets one, NO client input ("c'est à nous de
-gérer nos audiences"). One `linkedin_engagement` list per live PROFILE of the
-(org, brand, offer) (see "Profile x source"), `source='linkedin_engagement_signal'`,
-name "<profile> (Engaged with competitor posts)", window 30 days, `nl_prompt` =
-the profile's own text. One competitor discovery per offer; apollo-service's post
-harvest is global per page, so N lists re-read nothing.
+gérer nos audiences"). One `linkedin_engagement` SOURCE per live PROFILE of the
+(org, brand, offer) (see "Audience x source"), named "Engaged with competitor
+posts", window 30 days, screened on the profile's text. One competitor discovery
+per offer; apollo-service's post harvest is global per page, so N sources re-read nothing.
 - **Pages**: brand-service `POST /orgs/brands/{id}/competitors/discover`
   (`src/lib/brand-competitors.ts`; computes once, stored answer free after). Up
   to 3 distinct `linkedinUrl`s in brand-service order; only pages a competitor's
@@ -2028,10 +2028,10 @@ the features-service catalogue read backwards (`listKindOfOriginSlug`).
   those ON by itself, so first seen they are today's state; prod 2026-10-07 had a running cold-email
   offer with no live audience that would have been given new ones). A
   failed / `not_computed` ON is recorded as not applied, so the next tick retries.
-- **A list a profile pause holds is never resumed by an ON**; an OFF also holds the lists a profile
-  pause holds, so the list runs again only once neither holds it (see "Profile x source").
+- **A legacy list a profile pause holds is never resumed by an ON**; an OFF also holds it, so it runs
+  again only once neither holds it. Sources of an audience: see "Audience x source".
 - **Competitor-engagement sweep follows it**: once an offer has a recorded source state, the sweep's
-  engagement audience is born PAUSED unless the LinkedIn source is ON (ON then resumes it, nothing to
+  engagement source is born PAUSED unless the LinkedIn source is ON (ON then turns it on, nothing to
   build); an offer whose sources are not campaigns yet keeps "born active".
 - Both tables are in the brand transfer. Tests: `tests/integration/source-campaigns.test.ts`.
 
@@ -2058,34 +2058,53 @@ decides which origins the brand uses. Decision per (org, brand, offer) in `lead_
   reason and evidence; lead-service files a serve under Lead Sourcing only for a chosen origin. Spends nothing.
   Tests: `tests/unit/lead-sourcing-decision.test.ts`, `tests/integration/lead-sourcing.test.ts`.
 
-### Profile x source — a paused profile is contacted through NO source (`src/services/profile-sources.ts`)
+### Audience x source — a SOURCE is not an AUDIENCE (`src/services/audience-sources.ts`, AUDIENCE-SOURCES-1016)
 
-Owner 2026-10-09. A client PROFILE = WHO: a cold `apollo_search` audience the client keeps or pauses on
-the Targeting page ("Heads of QA"). A SOURCE = WHERE: a buying signal (hiring / job_change / funding)
-or competitor-post engagement. Lists are profile x source: one audience per pair, carrying
-**`audiences.profile_audience_id`** (migration `0039`, self-FK `ON DELETE SET NULL`), named
-"<profile> (<source>)", screened against the PROFILE's own text. Before: each signal list carried the
-whole launch ICP (brand d0965c2c: CTOs paused, "Hiring now" 5,470 still found CTOs).
+Owner 2026-10-16: « the SOURCES should be a concept separate from TARGETING ». An audience = WHO, one
+target text ("chiro owners & co"). A source = WHERE we look: a buying signal (hiring / job_change /
+funding) or competitor-post engagement, an **`audience_sources`** row BESIDE its audience (migration
+`0047`, one per (audience, kind)), never an audience row. The audience's OWN list (its filters / pointer,
+or CRM file) stays on the row, on/off in `audiences.own_source_status`. Before: one audience per (profile,
+source), "<profile> (Hiring now)" with `profile_audience_id` (0039): Doc Dinners had 44 active = 14
+targets + 27 such rows + 3.
 
-- **Build**: signal lists on the profile's own Apollo pointer (apollo-service `POST /audiences/signal`
-  takes it as base; coverage per profile, threshold 20 companies per pair, below = no list);
-  engagement lists with `{}` base (no Apollo filters exist for that kind). `readyProfile` awaits the
-  profile's pointer build and text (deduped). Live profile = active, or paused ONLY by a source
-  campaign hold (Cold Filters OFF is not unwanting the profile).
-- **Whole-ICP lists retired**: once every live profile of an offer has its answer for a source with no
-  failure, its `profile_audience_id IS NULL` lists of that source are ARCHIVED (stats kept).
-- **Born status** (`bornStatus`): the origin's source campaign state (OFF ⟹ paused + source hold),
-  else the whole-ICP list's status (and hold), else siblings, else the source default.
-- **Pause cascade**: `PATCH /orgs/audiences/{id}/status` closes the row's OWN open holds (a person
-  wins over both switches), then for a profile: not active ⟹ its running or source-held lists get an
-  `audience_profile_holds` row and the running ones pause; active ⟹ its holds release and those lists
-  resume unless a source hold remains. Archived lists never move.
-- **Read**: every audience response carries `profileAudienceId`; `GET /orgs/audiences?profileAudienceId=`
-  lists one profile's lists. Profiles = `profileAudienceId` null + `channels[0].list = apollo_search`.
-- **When**: portfolio launch, source campaign ON, the 6h competitor-engagement sweep
-  (`POST /internal/competitor-engagement-audiences` runs it now). No cost declared here; coverage and
-  sizes are free teaser reads. Tests: the "profile x source" block of `source-campaigns.test.ts`,
-  `audiences-portfolio.test.ts`, `competitor-engagement-audience.test.ts`.
+- **Build** (`profile-sources.ts`, `competitor-engagement-audience.ts`): portfolio launch, source campaign
+  ON, the 6h sweep add sources to each live profile (active, or paused ONLY by a source campaign hold).
+  Signal: apollo-service `POST /audiences/signal` on the profile's own pointer, threshold 20 companies
+  per pair. Engagement: `{}` base. Born status = its source campaign state, else sibling sources, else the
+  offer's rows of that list (legacy, whole-ICP), else default. A legacy per-source row counts as the
+  profile having that source (never built twice). Whole-ICP lists still retired (archived) as before.
+- **Serve** (serve-next, candidates/next): `pickServeSource` maps the request slug to a list kind; the
+  audience's ON sources of it serve (not walked out in 24h first, least recently served first), an OFF
+  one or a non-active audience ⟹ `exhausted`, nothing searched. Own-list slug, outreach slug, unknown
+  origin or no source ⟹ own list, bytes unchanged. A source serve runs the same walk on `sourceView`
+  (the source's pointer / filters, the audience's id / text): buffer, verdicts, yield window, candidates,
+  `lead_serves.audience_source_id`, membership all on the AUDIENCE, tagged with the source id
+  (`identity.audienceSourceId`); screened against the audience's text; exhaustion persists on the source.
+  A reveal records the candidate's source. Catch-all re-reach: own list only.
+- **Per-source provenance**: `audience_member_sources` (audience, person, source NULL = own list, served |
+  found_taken): "how many people did Hiring now find for Employed chiros" is one query.
+- **sourcing-origin** (`pickSourcingList`): no slug ⟹ OWN list, always (lead-service asks it for "which
+  source campaign does this audience belong to"); an origin slug ⟹ that origin if the audience finds
+  through it (own list or a source, any on/off), else own; an outreach slug ⟹ one ON source at random;
+  none ON ⟹ 422. CRM-sourced feature ⟹ crm (unchanged).
+- **ON/OFF** (`source-campaigns.ts`): an origin flips the offer's sources of its list and the
+  `own_source_status` of audiences whose own list it is. An audience runs while one source is ON:
+  the last going OFF pauses it (system, held), the first back resumes it (`syncAudienceLiveness`), never
+  a person's pause (LEAK-1012). No person writes a source; a person pausing the audience stops every
+  source. Push response `audiences[]` lists source-reached audiences with `sourceId` + the source status.
+- **Read**: `channels[]` = own list then one entry per source (`sourceId`, `name`, `status`, signal,
+  size). Size / Remaining stay the own list's. `profileAudienceId` still served (null on the merged model).
+- **Merge** `POST /internal/merge-source-audiences?dryRun&orgId&brandId` (+ `/revert`): each row with
+  `profile_audience_id` ⟹ a source of its profile (pointer, filters, counts, reachable, status), the row
+  `deprecated` + `canonical_audience_id` = profile (stats / resolve / members read the profile), its
+  buffer moved, rejections copied (`merged_from:<id>: `), members tagged per source; a profile paused by
+  its cold OFF while the row ran resumes. Nothing archived or deleted; ledger `audience_source_merges`.
+  NOT run on deploy. ⚠️ lead-service judges a source unit's audiences by the NO-slug answer (own list), so
+  a merged / new source is walked by a source-campaign run only once lead-service asks with the unit's
+  origin slug (or reads `channels[]`): run the merge after that ships.
+- Tests: `tests/integration/audience-sources.test.ts`, the "profile x source" block of
+  `source-campaigns.test.ts`, `audiences-portfolio.test.ts`, `competitor-engagement-audience.test.ts`.
 
 ### Audience refill — a paying brand never runs dry (`src/services/audience-refill.ts`)
 
@@ -2764,7 +2783,12 @@ returns 404, never 403, to avoid leaking existence.
   the API edge.
 - **`audiences.chooser_trace`** is `jsonb` (nullable, no default) — the whole
   `/suggest` decision, audit-only, never read back by this service.
-- **`audience_profile_holds`** (profile x source): `org_id` / `brand_id` /
+- **`audience_sources`** (0047): `org_id` / `brand_id` / `offer_id` / `audience_id` / `legacy_audience_id`
+  uuid; `list` / `signal_type` / `name` / `status` / `apollo_audience_id` text; `filters` jsonb.
+  `audience_member_sources`: `source_id` uuid NULL = own list. `source_id` (uuid, NULL = own list) on
+  `audience_teaser_buffer` / `audience_teaser_screenings` / `audience_candidates`;
+  `lead_serves.audience_source_id`.
+- **`audience_profile_holds`** (legacy per-source lists): `org_id` / `brand_id` /
   `profile_audience_id` / `audience_id` uuid; one open hold per list.
 - **`audience_portfolios`** (launch record): `org_id` / `brand_id` / `offer_id`
   uuid; `icp_text` / `target` / `status` / `icp_apollo_audience_id` text;

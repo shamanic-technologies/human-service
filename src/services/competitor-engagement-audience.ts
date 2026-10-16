@@ -2,15 +2,16 @@
 // brand (owner 2026-10-03: "c'est à nous de gérer nos audiences, on est censé
 // connaître les competitors de notre client et leurs LinkedIn"). No client input.
 //
-// What: one linkedin_engagement signal audience (linkedin-engagement-audience.ts)
-// per CLIENT PROFILE of the offer (profile-sources.ts, owner 2026-10-09), built
-// from up to 3 competitor LinkedIn company pages brand-service found
-// (src/lib/brand-competitors.ts). Every list engages the same pages; each screens
-// the engagers against ITS profile's text, so pausing a profile stops its list.
-// apollo-service reads a page's posts and engagement once a day whoever asks, so
-// one list per profile re-reads nothing. Born ACTIVE (see bornStatus) so
-// campaigns test it against the other audiences. The offer's earlier whole-ICP
-// engagement list is retired once every profile has its own.
+// What: one linkedin_engagement SOURCE (audience-sources.ts, AUDIENCE-SOURCES-1016)
+// per CLIENT PROFILE of the offer (profile-sources.ts), built from up to 3
+// competitor LinkedIn company pages brand-service found
+// (src/lib/brand-competitors.ts). A source of the profile, never an audience of
+// its own: every source engages the same pages; each screens the engagers against
+// ITS profile's text, so pausing a profile stops it. apollo-service reads a page's
+// posts and engagement once a day whoever asks, so one source per profile
+// re-reads nothing. Born per sourceBornStatus (its source campaign; ACTIVE by
+// default). The offer's earlier whole-ICP engagement list is retired once every
+// profile has its own source.
 //
 // When:
 //   - at portfolio launch (audience-portfolio.ts, background phase);
@@ -44,16 +45,15 @@ import { discoverBrandCompetitors, type BrandCompetitor } from "../lib/brand-com
 import { canBeCharged, getPaymentOutlook } from "../lib/billing-outlook.js";
 import { getMigrationState } from "../lib/migration-state.js";
 import { dedupeSegmentNames, pickOffer } from "./audience-refill.js";
-import { createLinkedinEngagementAudience } from "./linkedin-engagement-audience.js";
+import { createApolloLinkedinEngagementAudience } from "../lib/apollo-audiences.js";
+import { addSource, sourceBornStatus, sourcesOf, type AudienceSource } from "./audience-sources.js";
 import type { Identity } from "./people-providers.js";
 import { completeRun, createRun } from "./runs.js";
 import { sourcingOriginSlug, withSourcingOrigin } from "./sourcing-origin.js";
 import {
-  bornStatus,
   ensureProfileSignalLists,
-  holdBornList,
   liveProfiles,
-  profileListName,
+  profileSourceKeys,
   readyProfile,
   retireWholeIcpLists,
   sourceKeyOf,
@@ -74,10 +74,12 @@ export interface CompetitorEngagementOutcome {
   brandId: string;
   offerId: string | null;
   outcome: CompetitorEngagementOutcomeKind;
-  /** The first of `audienceIds` (one list per profile). */
+  /** The first of `audienceIds`. */
   audienceId: string | null;
-  /** The offer's per-profile engagement lists after this call. */
+  /** The profiles (audiences) holding an engagement source after this call (or a legacy per-profile list). */
   audienceIds: string[];
+  /** The engagement sources of those profiles (audience_sources.id). */
+  sourceIds: string[];
   pages: string[];
   reason: string | null;
 }
@@ -129,17 +131,28 @@ export async function ensureCompetitorEngagementAudience(args: EnsureEngagementA
   return p;
 }
 
-/** Each live profile's engagement list (any status; archived ones only when counted). */
-function engagementListOf(rows: AudienceRow[], profileId: string, ignoreArchived: boolean): AudienceRow | null {
-  return (
-    rows.find(
-      (r) =>
-        r.profileAudienceId === profileId &&
-        sourceKeyOf(r) === "linkedin_engagement" &&
-        r.status !== "deprecated" &&
-        !(ignoreArchived && r.status === "archived")
-    ) ?? null
+/**
+ * Each live profile's engagement source: its audience_sources row, else its legacy
+ * per-profile list (any status; archived ones only when counted).
+ */
+function engagementOf(
+  rows: AudienceRow[],
+  sources: Map<string, AudienceSource[]>,
+  profileId: string,
+  ignoreArchived: boolean
+): { audienceId: string; sourceId: string | null } | null {
+  const src = (sources.get(profileId) ?? []).find(
+    (s) => s.list === "linkedin_engagement" && !(ignoreArchived && s.status === "archived")
   );
+  if (src) return { audienceId: profileId, sourceId: src.id };
+  const legacy = rows.find(
+    (r) =>
+      r.profileAudienceId === profileId &&
+      sourceKeyOf(r) === "linkedin_engagement" &&
+      r.status !== "deprecated" &&
+      !(ignoreArchived && r.status === "archived")
+  );
+  return legacy ? { audienceId: legacy.id, sourceId: null } : null;
 }
 
 async function offerAudiences(orgId: string, brandId: string, offerId: string): Promise<AudienceRow[]> {
@@ -157,6 +170,7 @@ async function ensureOnce(args: EnsureEngagementArgs): Promise<CompetitorEngagem
     outcome: "failed",
     audienceId: null,
     audienceIds: [],
+    sourceIds: [],
     pages: [],
     reason: null,
   };
@@ -171,15 +185,19 @@ async function ensureOnce(args: EnsureEngagementArgs): Promise<CompetitorEngagem
   const ignoreArchived = args.ignoreArchived ?? false;
 
   try {
-    let rows = await offerAudiences(args.orgId, args.brandId, args.offerId);
+    const rows = await offerAudiences(args.orgId, args.brandId, args.offerId);
     const profiles = await liveProfiles(scope, rows.filter((r) => r.status !== "deprecated"));
     if (profiles.length === 0) return done({ outcome: "no_profile", reason: "the offer has no live client profile" });
-    const listIds = () =>
-      profiles.map((p) => engagementListOf(rows, p.id, ignoreArchived)?.id).filter((x): x is string => !!x);
-    let missing = profiles.filter((p) => !engagementListOf(rows, p.id, ignoreArchived));
+    let sources = await sourcesOf(profiles.map((p) => p.id));
+    const found = () => profiles.map((p) => engagementOf(rows, sources, p.id, ignoreArchived)).filter((x) => !!x);
+    const ids = () => ({
+      audienceIds: found().map((f) => f.audienceId),
+      sourceIds: found().flatMap((f) => (f.sourceId ? [f.sourceId] : [])),
+    });
+    let missing = profiles.filter((p) => !engagementOf(rows, sources, p.id, ignoreArchived));
     if (missing.length === 0) {
       await retireWholeIcpLists(scope, "linkedin_engagement");
-      return done({ outcome: "exists", audienceIds: listIds() });
+      return done({ outcome: "exists", ...ids() });
     }
 
     // Building these lists is linkedin_engagement sourcing: the discovery and the
@@ -187,12 +205,12 @@ async function ensureOnce(args: EnsureEngagementArgs): Promise<CompetitorEngagem
     const originSlug = await sourcingOriginSlug("linkedin_engagement");
     const identity = withSourcingOrigin(args.identity, originSlug);
     const answer = await discoverBrandCompetitors(args.brandId, identity);
-    if (answer.status === "not_computed") return done({ outcome: "not_computed", reason: answer.reason, audienceIds: listIds() });
+    if (answer.status === "not_computed") return done({ outcome: "not_computed", reason: answer.reason, ...ids() });
     const pages = pickCompetitorPages(answer.competitors);
     if (pages.length === 0) {
       return done({
         outcome: "no_pages",
-        audienceIds: listIds(),
+        ...ids(),
         reason:
           answer.competitors.length === 0
             ? "brand-service found no competitor"
@@ -202,55 +220,50 @@ async function ensureOnce(args: EnsureEngagementArgs): Promise<CompetitorEngagem
 
     // Re-read after the (possibly slow) discovery: a concurrent path may have
     // created some meanwhile.
-    rows = await offerAudiences(args.orgId, args.brandId, args.offerId);
-    missing = profiles.filter((p) => !engagementListOf(rows, p.id, ignoreArchived));
-    // The legacy rule for an offer whose sources are not campaigns: born active,
-    // unless the offer's sources ARE campaigns and LinkedIn's is not on.
+    sources = await sourcesOf(profiles.map((p) => p.id));
+    missing = profiles.filter((p) => !engagementOf(rows, sources, p.id, ignoreArchived));
     const fallback = (await hasSourceStates(scope)) ? "paused" : "active";
-    const live = rows.filter((r) => r.status !== "deprecated");
     let created = 0;
     const failures: string[] = [];
     for (const profile of missing) {
       try {
         const ready = await readyProfile(profile, identity);
-        const born = args.status
-          ? { status: args.status, sourceHold: null }
-          : await bornStatus(scope, "linkedin_engagement", originSlug, live, fallback);
-        const [name] = dedupeSegmentNames(
-          [profileListName(profile, COMPETITOR_ENGAGEMENT_NAME)],
-          rows.map((r) => r.name)
-        );
-        const row = await createLinkedinEngagementAudience({
-          orgId: args.orgId,
-          userId: args.userId,
+        const status = args.status ?? (await sourceBornStatus(scope, "linkedin_engagement", originSlug, fallback));
+        const apollo = await createApolloLinkedinEngagementAudience({
           brandId: args.brandId,
-          offerId: args.offerId,
-          name,
-          nlPrompt: ready.text,
-          status: born.status,
-          statusSetBy: "system",
+          name: `${profile.name} (${COMPETITOR_ENGAGEMENT_NAME})`,
           windowDays: COMPETITOR_ENGAGEMENT_WINDOW_DAYS,
           competitorPages: pages,
           baseFilters: {},
-          profileAudienceId: profile.id,
           identity: { ...identity, brandIds: [args.brandId] },
         });
-        await holdBornList(scope, row.id, born);
-        rows.push(row);
-        live.push(row);
+        await addSource({
+          audience: ready.row,
+          list: "linkedin_engagement",
+          signalType: null,
+          windowDays: COMPETITOR_ENGAGEMENT_WINDOW_DAYS,
+          name: COMPETITOR_ENGAGEMENT_NAME,
+          apolloAudienceId: apollo.apolloAudienceId,
+          filters: apollo.filters,
+          // No Apollo count exists for this kind: unknown until a serve walks it.
+          apolloCount: null,
+          status,
+          userId: args.userId,
+        });
         created++;
       } catch (err) {
         failures.push(`${profile.name}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    sources = await sourcesOf(profiles.map((p) => p.id));
     if (failures.length === 0) await retireWholeIcpLists(scope, "linkedin_engagement");
     if (failures.length > 0 && created === 0) {
-      return done({ outcome: "failed", reason: failures.join("; "), pages, audienceIds: listIds() });
+      return done({ outcome: "failed", reason: failures.join("; "), pages, ...ids() });
     }
     return done({
       outcome: "created",
       pages,
-      audienceIds: listIds(),
+      ...ids(),
       reason: failures.length > 0 ? failures.join("; ") : null,
     });
   } catch (err) {
@@ -285,8 +298,9 @@ export interface SweepEntry {
   action: CompetitorEngagementOutcomeKind | "would_ensure" | "skipped";
   reason: string | null;
   audienceId: string | null;
-  /** The offer's per-profile engagement lists. */
+  /** The profiles holding an engagement source. */
   audienceIds: string[];
+  sourceIds: string[];
   pages: string[];
   /** Per (profile, buying signal), when the offer uses buying signals and a pair was due. */
   signals: ProfileSignalOutcome[];
@@ -353,6 +367,7 @@ export async function runCompetitorEngagementSweep(
         reason: null,
         audienceId: null,
         audienceIds: [],
+        sourceIds: [],
         pages: [],
         signals: [],
       };
@@ -369,12 +384,17 @@ export async function runCompetitorEngagementSweep(
         entry.action = "no_profile";
         continue;
       }
-      const engagementDue = profiles.some((p) => !engagementListOf(inOffer, p.id, false));
-      const signalsDue = (await offerUsesSignals(scope, live)) && profiles.some((p) => signalTypesMissing(live, p.id));
+      const profileSources = await sourcesOf(profiles.map((p) => p.id));
+      const engagementDue = profiles.some((p) => !engagementOf(inOffer, profileSources, p.id, false));
+      const signalsDue =
+        (await offerUsesSignals(scope, live, profileSources)) &&
+        profiles.some((p) => signalTypesMissing(live, p.id, profileSources.get(p.id) ?? []));
       if (!engagementDue && !signalsDue) {
         await retireWholeIcpLists(scope, "linkedin_engagement");
         entry.action = "exists";
-        entry.audienceIds = profiles.map((p) => engagementListOf(inOffer, p.id, false)?.id).filter((x): x is string => !!x);
+        const have = profiles.map((p) => engagementOf(inOffer, profileSources, p.id, false)).filter((x) => !!x);
+        entry.audienceIds = have.map((h) => h.audienceId);
+        entry.sourceIds = have.flatMap((h) => (h.sourceId ? [h.sourceId] : []));
         entry.audienceId = entry.audienceIds[0] ?? null;
         continue;
       }
@@ -419,6 +439,7 @@ export async function runCompetitorEngagementSweep(
         entry.reason = result.value.reason;
         entry.audienceId = result.value.audienceId;
         entry.audienceIds = result.value.audienceIds;
+        entry.sourceIds = result.value.sourceIds;
         entry.pages = result.value.pages;
       }
       if (signalsDue) {
@@ -464,20 +485,25 @@ export async function runCompetitorEngagementSweep(
 }
 
 /** A profile still without a list for some buying signal (a below-threshold pair is re-measured: free). */
-function signalTypesMissing(rows: AudienceRow[], profileId: string): boolean {
-  const have = new Set(rows.filter((r) => r.profileAudienceId === profileId).map((r) => sourceKeyOf(r)));
+function signalTypesMissing(rows: AudienceRow[], profileId: string, sources: AudienceSource[]): boolean {
+  const have = profileSourceKeys(profileId, rows, sources);
   return BUYING_SIGNAL_TYPES.some((t) => !have.has(t));
 }
 
 /** The offer sources from buying signals: it was launched with a portfolio, or holds signal lists. */
 async function offerUsesSignals(
   scope: { orgId: string; brandId: string; offerId: string },
-  rows: AudienceRow[]
+  rows: AudienceRow[],
+  sources: Map<string, AudienceSource[]>
 ): Promise<boolean> {
-  const hasList = rows.some((r) => {
-    const k = sourceKeyOf(r);
-    return k !== null && k !== "linkedin_engagement" && (r.status === "active" || r.status === "paused");
-  });
+  const hasList =
+    [...sources.values()].some((list) =>
+      list.some((s) => s.list === "apollo_buying_signal" && (s.status === "active" || s.status === "paused"))
+    ) ||
+    rows.some((r) => {
+      const k = sourceKeyOf(r);
+      return k !== null && k !== "linkedin_engagement" && (r.status === "active" || r.status === "paused");
+    });
   if (hasList) return true;
   const [portfolio] = await db
     .select({ id: audiencePortfolios.id })

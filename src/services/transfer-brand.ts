@@ -21,6 +21,7 @@ import { sql } from "../db/index.js";
  *    offer wins: one portfolio per (org, brand, offer)),
  *    `source_campaign_states` (the target's own applied state per (offer, origin)
  *    wins), `source_campaign_audience_holds`, `audience_profile_holds`,
+ *    `audience_sources`, `audience_source_merges`, `audience_member_sources` (via its audience),
  *    `lists` (brand_id nullable; brand-less lists are org-wide, left alone).
  *  - keyed through an audience of the brand: `audience_members`,
  *    `audience_teaser_buffer`, `audience_teaser_screenings`,
@@ -82,6 +83,9 @@ const TABLES = [
   "source_campaign_states",
   "source_campaign_audience_holds",
   "audience_profile_holds",
+  "audience_sources",
+  "audience_member_sources",
+  "audience_source_merges",
   "lead_sourcing_choices",
   "lead_sourcing_choice_changes",
   "lists",
@@ -124,6 +128,17 @@ export async function transferBrand(
       add("source_campaign_states", await moveSourceCampaignStates(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
       add("source_campaign_audience_holds", await moveSourceCampaignHolds(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
       add("audience_profile_holds", await moveProfileHolds(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
+      // An audience's sources (AUDIENCE-SOURCES-1016) and the merge ledger follow the brand.
+      add(
+        "audience_sources",
+        (await tx`UPDATE audience_sources SET org_id = ${targetOrgId}, brand_id = ${targetBrandId}
+                  WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`).length
+      );
+      add(
+        "audience_source_merges",
+        (await tx`UPDATE audience_source_merges SET org_id = ${targetOrgId}, brand_id = ${targetBrandId}
+                  WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING child_audience_id`).length
+      );
       add("lead_sourcing_choices", await moveLeadSourcingChoices(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
       add(
         "lead_sourcing_choice_changes",
@@ -453,6 +468,13 @@ async function movePeopleAndMembers(
       AND am.org_id = ${sourceOrgId} AND a.org_id = ${toOrg} AND a.brand_id = ${toBrand}
     RETURNING am.id`;
   add("audience_members", members.length);
+  const memberSources = await tx`
+    UPDATE audience_member_sources ams SET org_id = ${toOrg}, person_id = m.new_id
+    FROM audiences a, transfer_person_map m
+    WHERE ams.audience_id = a.id AND ams.person_id = m.old_id
+      AND ams.org_id = ${sourceOrgId} AND a.org_id = ${toOrg} AND a.brand_id = ${toBrand}
+    RETURNING ams.id`;
+  add("audience_member_sources", memberSources.length);
 
   // A person that collapsed onto the target's same-email person and that the
   // source org no longer references is now an orphan of this brand: drop it.
