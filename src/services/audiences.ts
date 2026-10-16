@@ -2541,27 +2541,24 @@ export async function serveNextPerson(
 // serving wins; a walked-out one is marked and the next tried. `pending` stops.
 async function serveFromSources(
   audience: typeof audiences.$inferSelect,
-  sources: AudienceSource[],
+  sources: Array<AudienceSource | null>,
   identity: Identity,
   deadline: number,
   budgetMs: number,
   reach: readonly Reach[]
 ): Promise<ServeNextResult> {
   let last: ServeNextResult = { status: "exhausted", person: null };
+  // `null` = the audience's own list (a Lead Sourcing serve mixes both).
   for (const source of sources) {
-    const result = await serveFromList(
-      sourceView(audience, source),
-      { ...identity, audienceSourceId: source.id },
-      deadline,
-      budgetMs,
-      reach
-    );
+    const result = source
+      ? await serveFromList(sourceView(audience, source), { ...identity, audienceSourceId: source.id }, deadline, budgetMs, reach)
+      : await serveFromList(audience, identity, deadline, budgetMs, reach);
     if (result.status === "served") {
-      await markSourceServed(source.id);
+      if (source) await markSourceServed(source.id);
       return result;
     }
     if (result.status === "pending") return result;
-    if (result.reason === "no_recent_posts") await persistSourceExhaustion(source.id, { reachable: false });
+    if (source && result.reason === "no_recent_posts") await persistSourceExhaustion(source.id, { reachable: false });
     last = result;
   }
   return last;

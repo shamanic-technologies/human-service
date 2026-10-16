@@ -362,23 +362,20 @@ export async function nextCandidate(
 
 async function nextCandidateFromSources(
   audience: AudienceRow,
-  sources: AudienceSource[],
+  sources: Array<AudienceSource | null>,
   identity: Identity,
   deadline: number,
   budgetMs: number,
   reach: readonly Reach[]
 ): Promise<NextCandidateResult> {
   let last: NextCandidateResult | null = null;
+  // `null` = the audience's own list (a Lead Sourcing serve mixes both).
   for (const source of sources) {
-    const result = await nextCandidateFromList(
-      sourceView(audience, source),
-      { ...identity, audienceSourceId: source.id },
-      deadline,
-      budgetMs,
-      reach
-    );
+    const result = source
+      ? await nextCandidateFromList(sourceView(audience, source), { ...identity, audienceSourceId: source.id }, deadline, budgetMs, reach)
+      : await nextCandidateFromList(audience, identity, deadline, budgetMs, reach);
     if (result.status !== "exhausted") return result;
-    if (result.reason === "no_recent_posts") await persistSourceExhaustion(source.id, { reachable: false });
+    if (source && result.reason === "no_recent_posts") await persistSourceExhaustion(source.id, { reachable: false });
     last = result;
   }
   return last!;

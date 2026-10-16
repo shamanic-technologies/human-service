@@ -2,7 +2,7 @@
 // separate from TARGETING". An audience is WHO (one target text); a source is
 // WHERE we look (a buying signal, competitor-post engagement), stored beside it
 // (audience_sources), never an audience row of its own.
-import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 
 vi.mock("../../src/lib/email-verification.js", async (importOriginal) => ({
   ...((await importOriginal()) as Record<string, unknown>),
@@ -24,6 +24,7 @@ import {
   audienceTeaserBuffer,
   audienceTeaserScreenings,
   leadServes,
+  leadSourcingChoices,
   people,
   sourceCampaignStates,
 } from "../../src/db/schema.js";
@@ -340,6 +341,76 @@ describe("serving: the slug names the source", () => {
     const target = await insertAudience({ name: "Chiro owners", status: "paused", statusSetBy: "person" });
     await addHiringSource(target.id);
     expect((await serve(target.id, SIGNALS)).body.status).toBe("exhausted");
+    expect(searched).toEqual([]);
+  });
+});
+
+describe("Lead Sourcing: serves through the lists its choice names", () => {
+  afterEach(async () => {
+    await db.delete(leadSourcingChoices);
+  });
+  async function choose(origins: string[]) {
+    await db.delete(leadSourcingChoices);
+    await db.insert(leadSourcingChoices).values({
+      orgId: ORG,
+      brandId: BRAND,
+      offerId: OFFER,
+      basis: "every_origin",
+      universeOriginSlugs: [COLD, SIGNALS, LINKEDIN],
+      chosenOriginSlugs: origins,
+      reasons: {},
+    });
+  }
+
+  it("choice = buying signals only: serve-next and candidates go through the hiring source, recorded", async () => {
+    const { searched } = mockApollo();
+    const target = await insertAudience({ name: "Chiro owners" });
+    const hiring = await addHiringSource(target.id);
+    await choose([SIGNALS]);
+    const served = await serve(target.id, "lead-sourcing");
+    expect(served.body.status).toBe("served");
+    expect(served.body.person.providerPersonId).toBe("hiring-0");
+    const [row] = await db.select().from(leadServes).where(eq(leadServes.providerPersonId, "hiring-0"));
+    expect(row.audienceSourceId).toBe(hiring.id);
+    const next = await nextCandidate(target.id, "lead-sourcing");
+    expect(next.body.candidate.providerPersonId).toBe("hiring-1");
+    expect(next.body.candidate.sourceId).toBe(hiring.id);
+    expect(searched.every((k) => k === "hiring")).toBe(true);
+    const origin = await request(app)
+      .get(`/orgs/audiences/${target.id}/sourcing-origin`)
+      .set({ ...getAuthHeaders(), "x-feature-slug": "lead-sourcing" });
+    expect(origin.body.sourcingFeatureSlug).toBe(SIGNALS);
+  });
+
+  it("choice = cold only: the own list serves, never the hiring source", async () => {
+    const { searched } = mockApollo();
+    const target = await insertAudience({ name: "Chiro owners" });
+    await addHiringSource(target.id);
+    await choose([COLD]);
+    const served = await serve(target.id, "lead-sourcing");
+    expect(served.body.person.providerPersonId).toBe("cold-0");
+    expect(searched).toEqual(["cold"]);
+    const [row] = await db.select().from(leadServes).where(eq(leadServes.providerPersonId, "cold-0"));
+    expect(row.audienceSourceId).toBeNull();
+  });
+
+  it("choice = both: a walked-out source falls through to the other list within the same serve", async () => {
+    const { searched } = mockApollo();
+    const target = await insertAudience({ name: "Chiro owners" });
+    await addHiringSource(target.id);
+    await choose([COLD, SIGNALS]);
+    const ids = new Set<string>();
+    for (let i = 0; i < 4; i++) ids.add((await serve(target.id, "lead-sourcing")).body.person.providerPersonId);
+    expect(ids).toEqual(new Set(["cold-0", "cold-1", "hiring-0", "hiring-1"]));
+    expect(new Set(searched)).toEqual(new Set(["cold", "hiring"]));
+  });
+
+  it("nothing the audience holds is chosen: nobody served", async () => {
+    const { searched } = mockApollo();
+    const target = await insertAudience({ name: "Chiro owners" });
+    await addHiringSource(target.id);
+    await choose([LINKEDIN]);
+    expect((await serve(target.id, "lead-sourcing")).body).toEqual({ status: "exhausted", person: null });
     expect(searched).toEqual([]);
   });
 });

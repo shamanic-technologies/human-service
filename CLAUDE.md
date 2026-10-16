@@ -2077,7 +2077,10 @@ targets + 27 such rows + 3.
 - **Serve** (serve-next, candidates/next): `pickServeSource` maps the request slug to a list kind; the
   audience's ON sources of it serve (not walked out in 24h first, least recently served first), an OFF
   one or a non-active audience ⟹ `exhausted`, nothing searched. Own-list slug, outreach slug, unknown
-  origin or no source ⟹ own list, bytes unchanged. A source serve runs the same walk on `sourceView`
+  origin or no source ⟹ own list, bytes unchanged. `lead-sourcing` ⟹ the own list (if its origin is
+  chosen and on) + every ON source of a chosen origin (`lead_sourcing_choices`), random order, walked-out
+  ones last; nothing chosen ⟹ `exhausted`; no stored choice ⟹ own list. sourcing-origin under it answers
+  one of those. A source serve runs the same walk on `sourceView`
   (the source's pointer / filters, the audience's id / text): buffer, verdicts, yield window, candidates,
   `lead_serves.audience_source_id`, membership all on the AUDIENCE, tagged with the source id
   (`identity.audienceSourceId`); screened against the audience's text; exhaustion persists on the source.
