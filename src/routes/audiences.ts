@@ -1162,7 +1162,7 @@ function parseServeReach(
       ok: false,
       error:
         field === "acceptedEmails"
-          ? "acceptedEmails must be valid_only, valid_and_catch_all or valid_catch_all_and_unknown"
+          ? "acceptedEmails must be valid_only or valid_and_catch_all (valid_catch_all_and_unknown is deprecated and behaves as valid_and_catch_all)"
           : field === "relationships"
             ? "relationships must be business_only"
             : field === "stepFilter"
