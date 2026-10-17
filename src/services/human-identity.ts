@@ -11,7 +11,7 @@
 //   human_identities     atomic humans. Never rewritten, never deleted.
 //   human_identity_keys  fleet-wide unique keys: email | phone are PROOF;
 //                        linkedin_url | apollo_person_id | apify_person_id |
-//                        messaging_handle only resolve.
+//                        messaging_handle | crm_record only resolve.
 //   human_links          merge ('same') / split ('distinct') statements between
 //                        two atomic humans, scope 'fleet' or 'org'.
 //   human_facts          facts carried on the human (opt_out, do_not_contact).
@@ -44,6 +44,7 @@ import {
 } from "../db/schema.js";
 import { normalizeEmail, normalizeLinkedinUrl } from "./suppression.js";
 import type { MessagingNetwork } from "../lib/messaging-networks.js";
+import type { CrmRecordProvider } from "../lib/crm-record-providers.js";
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export type Exec = typeof db | Tx;
@@ -55,6 +56,7 @@ export const KEY_KINDS = [
   "apollo_person_id",
   "apify_person_id",
   "messaging_handle",
+  "crm_record",
 ] as const;
 export type KeyKind = (typeof KEY_KINDS)[number];
 const PROOF_KINDS = new Set<KeyKind>(["email", "phone"]);
@@ -75,6 +77,29 @@ export function messagingHandleKey(network: MessagingNetwork, rawId: string): Id
 function parseMessagingHandle(valueNorm: string): { network: string; id: string } {
   const i = valueNorm.indexOf(":");
   return { network: valueNorm.slice(0, i), id: valueNorm.slice(i + 1) };
+}
+
+// A person a brand knows ONLY as a record in one of its own tools (a GoHighLevel
+// contact, a Stripe customer, a PostHog person, a Clerk user: a name, no email,
+// no phone) is a human too (HUMAN-RECORD-KEYS-1017). The key is the vendor's
+// record id SCOPED to the client account it lives in, so the same id in two
+// clients' accounts is two keys. Like a messaging handle it only RESOLVES: it
+// never merges two humans by itself, only an org-scoped judgment link does.
+// Stored as `<provider>:<accountId>:<id>`; the account id may not hold ':' so
+// the split is unambiguous, the record id is verbatim (case kept, trimmed).
+export function crmRecordKey(provider: CrmRecordProvider, rawAccountId: string, rawId: string): IdentityKey {
+  const accountId = rawAccountId.trim();
+  const id = rawId.trim();
+  if (!accountId) throw new InvalidIdentityKeyError(`${provider} record accountId is blank`);
+  if (accountId.includes(":")) throw new InvalidIdentityKeyError(`${provider} record accountId may not contain ':'`);
+  if (!id) throw new InvalidIdentityKeyError(`${provider} record id is blank`);
+  return { kind: "crm_record", valueNorm: `${provider}:${accountId}:${id}` };
+}
+
+function parseCrmRecord(valueNorm: string): { provider: string; accountId: string; id: string } {
+  const i = valueNorm.indexOf(":");
+  const j = valueNorm.indexOf(":", i + 1);
+  return { provider: valueNorm.slice(0, i), accountId: valueNorm.slice(i + 1, j), id: valueNorm.slice(j + 1) };
 }
 
 export const FACT_KINDS = ["opt_out", "do_not_contact"] as const;
@@ -627,6 +652,7 @@ export interface HumanView {
   linkedinUrls: string[];
   providerPersonIds: Array<{ provider: "apollo" | "apify"; id: string }>;
   messagingHandles: Array<{ network: string; id: string }>;
+  crmRecords: Array<{ provider: string; accountId: string; id: string }>;
   facts: Array<{
     factId: string;
     humanId: string;
@@ -708,6 +734,7 @@ export async function getHumanView(humanId: string, orgId: string | null): Promi
       ...of("apify_person_id").map((id) => ({ provider: "apify" as const, id })),
     ],
     messagingHandles: of("messaging_handle").map(parseMessagingHandle),
+    crmRecords: of("crm_record").map(parseCrmRecord),
     facts: facts.map((f) => ({
       factId: f.id,
       humanId: f.humanId,

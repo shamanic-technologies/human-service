@@ -25,6 +25,7 @@ import {
   StillOneHumanError,
   getHumanView,
   listEvents,
+  crmRecordKey,
   messagingHandleKey,
   normalizeKey,
   resolveIdentity,
@@ -108,10 +109,11 @@ router.post("/internal/human-identities/resolve", requireApiKey, async (req: Req
         valueNorm: normalizeKey("apollo_person_id", p.id),
       })),
       ...(b.messagingHandles ?? []).map((h) => messagingHandleKey(h.network, h.id)),
+      ...(b.crmRecords ?? []).map((r) => crmRecordKey(r.provider, r.accountId, r.id)),
     ];
     if (keys.length === 0) {
       res.status(400).json({
-        error: "at least one email, phone, linkedinUrl, providerPersonId or messagingHandle is required",
+        error: "at least one email, phone, linkedinUrl, providerPersonId, messagingHandle or crmRecord is required",
       });
       return;
     }

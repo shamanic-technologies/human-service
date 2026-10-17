@@ -337,3 +337,69 @@ describe("messaging handles (RELATIONSHIP-TAGS-1014)", () => {
     expect((await resolve({ messagingHandles: [{ network: "whatsapp", id: "   " }] })).status).toBe(400);
   });
 });
+
+describe("CRM record keys (HUMAN-RECORD-KEYS-1017)", () => {
+  const GHL = { provider: "gohighlevel", accountId: "locDocDinners", id: "pVk2bD1sQx8yZ3mR7tLw" };
+  const MARIE = "marie@example.com";
+
+  it("a record with no email or phone gets a human, and the same record again is the same human", async () => {
+    const miss = await resolve({ orgId: ORG_A, crmRecords: [GHL], create: false });
+    expect(miss.status).toBe(200);
+    expect(miss.body.humanId).toBeNull();
+
+    const a = await resolve({ orgId: ORG_A, source: "crm-service", crmRecords: [GHL] });
+    expect(a.status).toBe(200);
+    expect(a.body.created).toBe(true);
+    const again = await resolve({ orgId: ORG_A, crmRecords: [{ ...GHL, id: ` ${GHL.id} ` }] });
+    expect(again.body.created).toBe(false);
+    expect(again.body.humanId).toBe(a.body.humanId);
+
+    const v = await view(a.body.humanId, ORG_A);
+    expect(v.body.crmRecords).toEqual([GHL]);
+    expect(v.body.emails).toEqual([]);
+
+    // The event feed carries the key the way it carries every other key.
+    const feed = await request(app).get("/internal/human-identities/events").set(H);
+    const created = feed.body.events.find(
+      (e: { type: string; humanIds: string[] }) => e.type === "human.created" && e.humanIds.includes(a.body.atomicHumanId)
+    );
+    expect(created.data.keys).toEqual([
+      { kind: "crm_record", valueNorm: `gohighlevel:${GHL.accountId}:${GHL.id}` },
+    ]);
+  });
+
+  it("the same record id in two client accounts (or two tools) is two humans", async () => {
+    const a = await resolve({ crmRecords: [GHL] });
+    const otherAccount = await resolve({ crmRecords: [{ ...GHL, accountId: "locOtherClient" }] });
+    const otherTool = await resolve({ crmRecords: [{ ...GHL, provider: "stripe" }] });
+    expect(new Set([a.body.humanId, otherAccount.body.humanId, otherTool.body.humanId]).size).toBe(3);
+  });
+
+  it("a record never merges by itself; an org judgment link joins it in that org only", async () => {
+    const marie = await resolve({ orgId: ORG_A, emails: [MARIE] });
+    const record = await resolve({ orgId: ORG_A, crmRecords: [GHL] });
+    expect(record.body.humanId).not.toBe(marie.body.humanId);
+
+    // Given beside her email, the record is already held: it stays where it is.
+    const both = await resolve({ orgId: ORG_A, emails: [MARIE], crmRecords: [GHL] });
+    expect(both.body.humanId).toBe(marie.body.humanId);
+    expect(both.body.mergedHumanIds).toEqual([]);
+    expect((await resolve({ orgId: ORG_A, crmRecords: [GHL], create: false })).body.humanId).toBe(record.body.humanId);
+
+    const merged = await link({ orgId: ORG_A, relation: "same", humanIds: [marie.body.humanId, record.body.humanId] });
+    expect(merged.status).toBe(200);
+    const inA = await resolve({ orgId: ORG_A, crmRecords: [GHL], create: false });
+    expect(inA.body.humanId).toBe((await resolve({ orgId: ORG_A, emails: [MARIE], create: false })).body.humanId);
+    expect((await resolve({ orgId: ORG_B, crmRecords: [GHL], create: false })).body.humanId).toBe(record.body.humanId);
+    const vA = await view(inA.body.humanId, ORG_A);
+    expect(vA.body.emails).toEqual([MARIE]);
+    expect(vA.body.crmRecords).toEqual([GHL]);
+  });
+
+  it("400 on an unknown provider, a blank id, or an accountId holding ':'", async () => {
+    expect((await resolve({ crmRecords: [{ ...GHL, provider: "salesforce" }] })).status).toBe(400);
+    expect((await resolve({ crmRecords: [{ ...GHL, id: "   " }] })).status).toBe(400);
+    expect((await resolve({ crmRecords: [{ ...GHL, accountId: "  " }] })).status).toBe(400);
+    expect((await resolve({ crmRecords: [{ ...GHL, accountId: "a:b" }] })).status).toBe(400);
+  });
+});

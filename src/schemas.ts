@@ -9,6 +9,7 @@ import { REACH_CHANNELS } from "./lib/reach.js";
 import { ACCEPTED_EMAILS } from "./lib/email-verification.js";
 import { RELATIONSHIP_POLICIES } from "./lib/relationship-policy.js";
 import { MESSAGING_NETWORKS } from "./lib/messaging-networks.js";
+import { CRM_RECORD_PROVIDERS } from "./lib/crm-record-providers.js";
 
 extendZodWithOpenApi(z);
 export const registry = new OpenAPIRegistry();
@@ -4569,6 +4570,24 @@ export const ResolveHumanRequestSchema = z
           "A person seen only through a messaging network (e.g. a WhatsApp member known by its LID, no phone visible; a LinkedIn member seen through the bridge). `id` = the network's own id for that member, verbatim (case kept). Resolve only: a handle held by another human never merges anything; only an org judgment link (POST /internal/human-identities/links with orgId) makes it one human with someone else.",
         example: [{ network: "whatsapp", id: "83932385144839@lid" }],
       }),
+    crmRecords: z
+      .array(
+        z.object({
+          provider: z.enum(CRM_RECORD_PROVIDERS).openapi({ description: "The client's tool holding the record." }),
+          accountId: z.string().min(1).max(200).regex(/^[^:]+$/, "accountId may not contain ':'").openapi({
+            description:
+              "The client account the record lives in, so the same record id in two clients' accounts is two humans. The vendor's own account id when known (GoHighLevel location id, Stripe account id acct_..., PostHog project id, Clerk instance id), else the id of the connection the record was read through. Verbatim, trimmed, no ':'.",
+          }),
+          id: z.string().min(1).max(300).openapi({ description: "The vendor's own record id (contact / customer / person / user id), verbatim, trimmed." }),
+        })
+      )
+      .max(10)
+      .optional()
+      .openapi({
+        description:
+          "A person known to a brand ONLY as a record in one of its own tools (a GoHighLevel contact, a Stripe customer, a PostHog person, a Clerk user), often with no email and no phone. Resolve only: a record held by another human never merges anything; only an org judgment link (POST /internal/human-identities/links with orgId) makes it one human with someone else. Stored as key kind `crm_record`, value `<provider>:<accountId>:<id>` (that is how it appears in the event feed's `keys`).",
+        example: [{ provider: "gohighlevel", accountId: "ve9EPM428h8vShlRW1KT", id: "pVk2bD1sQx8yZ3mR7tLw" }],
+      }),
     source: z.string().min(1).openapi({ description: "The service stating these keys are ONE contact (e.g. crm-service)." }),
     create: z.boolean().openapi({
       description: "true = create the human if nobody holds a key, attach the keys nobody holds, merge on a shared proof key. false = read only.",
@@ -4611,6 +4630,9 @@ export const HumanViewSchema = z
     providerPersonIds: z.array(z.object({ provider: z.enum(["apollo", "apify"]), id: z.string() })),
     messagingHandles: z.array(z.object({ network: z.string(), id: z.string() })).openapi({
       description: "Messaging handles (network + id) the human is known by.",
+    }),
+    crmRecords: z.array(z.object({ provider: z.string(), accountId: z.string(), id: z.string() })).openapi({
+      description: "Client-tool records (provider + account + record id) the human is known by.",
     }),
     facts: z.array(
       z.object({
