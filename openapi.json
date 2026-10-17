@@ -7384,6 +7384,51 @@
               }
             ]
           },
+          "crmRecords": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "enum": [
+                    "gohighlevel",
+                    "stripe",
+                    "posthog",
+                    "clerk"
+                  ],
+                  "description": "The client's tool holding the record."
+                },
+                "accountId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "pattern": "^[^:]+$",
+                  "description": "The client account the record lives in, so the same record id in two clients' accounts is two humans. The vendor's own account id when known (GoHighLevel location id, Stripe account id acct_..., PostHog project id, Clerk instance id), else the id of the connection the record was read through. Verbatim, trimmed, no ':'."
+                },
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300,
+                  "description": "The vendor's own record id (contact / customer / person / user id), verbatim, trimmed."
+                }
+              },
+              "required": [
+                "provider",
+                "accountId",
+                "id"
+              ]
+            },
+            "maxItems": 10,
+            "description": "A person known to a brand ONLY as a record in one of its own tools (a GoHighLevel contact, a Stripe customer, a PostHog person, a Clerk user), often with no email and no phone. Resolve only: a record held by another human never merges anything; only an org judgment link (POST /internal/human-identities/links with orgId) makes it one human with someone else. Stored as key kind `crm_record`, value `<provider>:<accountId>:<id>` (that is how it appears in the event feed's `keys`).",
+            "example": [
+              {
+                "provider": "gohighlevel",
+                "accountId": "ve9EPM428h8vShlRW1KT",
+                "id": "pVk2bD1sQx8yZ3mR7tLw"
+              }
+            ]
+          },
           "source": {
             "type": "string",
             "minLength": 1,
@@ -7474,6 +7519,29 @@
             },
             "description": "Messaging handles (network + id) the human is known by."
           },
+          "crmRecords": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "accountId": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "provider",
+                "accountId",
+                "id"
+              ]
+            },
+            "description": "Client-tool records (provider + account + record id) the human is known by."
+          },
           "facts": {
             "type": "array",
             "items": {
@@ -7552,6 +7620,7 @@
           "linkedinUrls",
           "providerPersonIds",
           "messagingHandles",
+          "crmRecords",
           "facts",
           "people",
           "links"
