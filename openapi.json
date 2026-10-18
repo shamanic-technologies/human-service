@@ -8113,6 +8113,204 @@
           "reverted",
           "children"
         ]
+      },
+      "TeaserScreeningResearchResponse": {
+        "type": "object",
+        "properties": {
+          "screen": {
+            "type": "string",
+            "enum": [
+              "human-service"
+            ],
+            "description": "Which service ran the screen. lead-service runs it since 2026-10-07 and is read separately."
+          },
+          "firstScreenedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "First Jev-judged screening (ISO). Null when none exist."
+          },
+          "lastScreenedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "Last Jev-judged screening (ISO). History is frozen since the handover to lead-service."
+          },
+          "totals": {
+            "type": "object",
+            "properties": {
+              "screened": {
+                "type": "integer",
+                "description": "People Apollo returned that the Jev screen judged (passed + declined)."
+              },
+              "passed": {
+                "type": "integer",
+                "description": "Judged on target: allowed on to the paid email reveal."
+              },
+              "declined": {
+                "type": "integer",
+                "description": "Turned away before the paid reveal (nothing bought for them)."
+              },
+              "distinctOrgs": {
+                "type": "integer",
+                "description": "Distinct client orgs whose leads the screen judged, whole period."
+              },
+              "distinctAudiences": {
+                "type": "integer",
+                "description": "Distinct audiences whose leads the screen judged, whole period."
+              }
+            },
+            "required": [
+              "screened",
+              "passed",
+              "declined",
+              "distinctOrgs",
+              "distinctAudiences"
+            ],
+            "description": "Since inception, every org. Only Jev-judged rows (with a P(yes)); the earlier glm-flash v1 rows carry no probability and are excluded."
+          },
+          "months": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "screened": {
+                  "type": "integer",
+                  "description": "People Apollo returned that the Jev screen judged (passed + declined)."
+                },
+                "passed": {
+                  "type": "integer",
+                  "description": "Judged on target: allowed on to the paid email reveal."
+                },
+                "declined": {
+                  "type": "integer",
+                  "description": "Turned away before the paid reveal (nothing bought for them)."
+                },
+                "month": {
+                  "type": "string",
+                  "description": "Calendar month, UTC, YYYY-MM."
+                },
+                "buckets": {
+                  "type": "object",
+                  "properties": {
+                    "below_0_2": {
+                      "type": "object",
+                      "properties": {
+                        "screened": {
+                          "type": "integer",
+                          "description": "People Apollo returned that the Jev screen judged (passed + declined)."
+                        },
+                        "passed": {
+                          "type": "integer",
+                          "description": "Judged on target: allowed on to the paid email reveal."
+                        },
+                        "declined": {
+                          "type": "integer",
+                          "description": "Turned away before the paid reveal (nothing bought for them)."
+                        }
+                      },
+                      "required": [
+                        "screened",
+                        "passed",
+                        "declined"
+                      ],
+                      "description": "P(yes) < 0.2."
+                    },
+                    "0_2_to_0_5": {
+                      "type": "object",
+                      "properties": {
+                        "screened": {
+                          "type": "integer",
+                          "description": "People Apollo returned that the Jev screen judged (passed + declined)."
+                        },
+                        "passed": {
+                          "type": "integer",
+                          "description": "Judged on target: allowed on to the paid email reveal."
+                        },
+                        "declined": {
+                          "type": "integer",
+                          "description": "Turned away before the paid reveal (nothing bought for them)."
+                        }
+                      },
+                      "required": [
+                        "screened",
+                        "passed",
+                        "declined"
+                      ],
+                      "description": "0.2 <= P(yes) <= 0.5."
+                    },
+                    "0_5_to_0_8": {
+                      "type": "object",
+                      "properties": {
+                        "screened": {
+                          "type": "integer",
+                          "description": "People Apollo returned that the Jev screen judged (passed + declined)."
+                        },
+                        "passed": {
+                          "type": "integer",
+                          "description": "Judged on target: allowed on to the paid email reveal."
+                        },
+                        "declined": {
+                          "type": "integer",
+                          "description": "Turned away before the paid reveal (nothing bought for them)."
+                        }
+                      },
+                      "required": [
+                        "screened",
+                        "passed",
+                        "declined"
+                      ],
+                      "description": "0.5 < P(yes) < 0.8."
+                    },
+                    "0_8_and_above": {
+                      "type": "object",
+                      "properties": {
+                        "screened": {
+                          "type": "integer",
+                          "description": "People Apollo returned that the Jev screen judged (passed + declined)."
+                        },
+                        "passed": {
+                          "type": "integer",
+                          "description": "Judged on target: allowed on to the paid email reveal."
+                        },
+                        "declined": {
+                          "type": "integer",
+                          "description": "Turned away before the paid reveal (nothing bought for them)."
+                        }
+                      },
+                      "required": [
+                        "screened",
+                        "passed",
+                        "declined"
+                      ],
+                      "description": "P(yes) >= 0.8."
+                    }
+                  },
+                  "required": [
+                    "below_0_2",
+                    "0_2_to_0_5",
+                    "0_5_to_0_8",
+                    "0_8_and_above"
+                  ],
+                  "description": "The month split by Jev's probability that the person belongs to the audience. The pass bar was P(yes) > 0.8 until 2026-09-29, > 0.5 since, so a 0.5-0.8 person may be passed or declined depending on the day."
+                }
+              },
+              "required": [
+                "screened",
+                "passed",
+                "declined",
+                "month",
+                "buckets"
+              ]
+            },
+            "description": "Oldest month first; months with no Jev screening are omitted."
+          }
+        },
+        "required": [
+          "screen",
+          "firstScreenedAt",
+          "lastScreenedAt",
+          "totals",
+          "months"
+        ]
       }
     },
     "parameters": {}
@@ -15459,6 +15657,32 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/research/teaser-screenings": {
+      "get": {
+        "summary": "Staff research: per month, the people the pre-pay Jev screen judged while human-service ran it, by verdict and P(yes) bucket, fleet-wide since inception.",
+        "description": "Pure DB read, no spend, no identity headers. Feeds the staff Research page via features-service.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Screen decisions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeaserScreeningResearchResponse"
                 }
               }
             }
