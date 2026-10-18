@@ -9,6 +9,7 @@ import transferBrandRoutes from "../../src/routes/transfer-brand.js";
 import backfillRoutes from "../../src/routes/backfill.js";
 import audienceRefillRoutes from "../../src/routes/audience-refill.js";
 import audienceSnapshotRoutes from "../../src/routes/audience-snapshot.js";
+import researchRoutes from "../../src/routes/research.js";
 import competitorEngagementRoutes from "../../src/routes/competitor-engagement.js";
 import sourceCampaignRoutes from "../../src/routes/source-campaigns.js";
 import leadSourcingRoutes from "../../src/routes/lead-sourcing.js";
@@ -42,6 +43,7 @@ export function createTestApp() {
   app.use(backfillRoutes);
   app.use(audienceRefillRoutes);
   app.use(audienceSnapshotRoutes);
+  app.use(researchRoutes);
   app.use(competitorEngagementRoutes);
   app.use(sourceCampaignRoutes);
   app.use(leadSourcingRoutes);

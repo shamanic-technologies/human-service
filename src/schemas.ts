@@ -4940,3 +4940,48 @@ registry.registerPath({
     401: { description: "Unauthorized" },
   },
 });
+
+// ---------------------------------------------------------------------------
+// Research (staff, fleet-wide): how the pre-pay Jev screen decided while
+// human-service ran it. Engine: src/services/research-teaser-screenings.ts.
+// ---------------------------------------------------------------------------
+const ScreeningCountsSchema = z.object({
+  screened: z.number().int().openapi({ description: "People Apollo returned that the Jev screen judged (passed + declined)." }),
+  passed: z.number().int().openapi({ description: "Judged on target: allowed on to the paid email reveal." }),
+  declined: z.number().int().openapi({ description: "Turned away before the paid reveal (nothing bought for them)." }),
+});
+
+export const TeaserScreeningResearchResponseSchema = z
+  .object({
+    screen: z.literal("human-service").openapi({ description: "Which service ran the screen. lead-service runs it since 2026-10-07 and is read separately." }),
+    firstScreenedAt: z.string().nullable().openapi({ description: "First Jev-judged screening (ISO). Null when none exist." }),
+    lastScreenedAt: z.string().nullable().openapi({ description: "Last Jev-judged screening (ISO). History is frozen since the handover to lead-service." }),
+    totals: ScreeningCountsSchema.extend({
+      distinctOrgs: z.number().int().openapi({ description: "Distinct client orgs whose leads the screen judged, whole period." }),
+      distinctAudiences: z.number().int().openapi({ description: "Distinct audiences whose leads the screen judged, whole period." }),
+    }).openapi({ description: "Since inception, every org. Only Jev-judged rows (with a P(yes)); the earlier glm-flash v1 rows carry no probability and are excluded." }),
+    months: z.array(
+      ScreeningCountsSchema.extend({
+        month: z.string().openapi({ description: "Calendar month, UTC, YYYY-MM." }),
+        buckets: z.object({
+          below_0_2: ScreeningCountsSchema.openapi({ description: "P(yes) < 0.2." }),
+          "0_2_to_0_5": ScreeningCountsSchema.openapi({ description: "0.2 <= P(yes) <= 0.5." }),
+          "0_5_to_0_8": ScreeningCountsSchema.openapi({ description: "0.5 < P(yes) < 0.8." }),
+          "0_8_and_above": ScreeningCountsSchema.openapi({ description: "P(yes) >= 0.8." }),
+        }).openapi({ description: "The month split by Jev's probability that the person belongs to the audience. The pass bar was P(yes) > 0.8 until 2026-09-29, > 0.5 since, so a 0.5-0.8 person may be passed or declined depending on the day." }),
+      }),
+    ).openapi({ description: "Oldest month first; months with no Jev screening are omitted." }),
+  })
+  .openapi("TeaserScreeningResearchResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/research/teaser-screenings",
+  summary: "Staff research: per month, the people the pre-pay Jev screen judged while human-service ran it, by verdict and P(yes) bucket, fleet-wide since inception.",
+  description: "Pure DB read, no spend, no identity headers. Feeds the staff Research page via features-service.",
+  security: [{ apiKey: [] }],
+  responses: {
+    200: { description: "Screen decisions", content: { "application/json": { schema: TeaserScreeningResearchResponseSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
