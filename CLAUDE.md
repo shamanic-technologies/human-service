@@ -1036,6 +1036,13 @@ Optional `?orgId=` narrows; omitted = every org holding the brand.
   (`yes_probability > SCREEN_MIN_YES_PROBABILITY`; a 0.80-era 0.65 counts as
   accepted); v1 rows (no probability) keep their boolean. Never screened =
   neither accepted nor rejected.
+- **Candidate decisions are verdicts too** (SNAPSHOT-ACCEPTED-CANDIDATES-1021):
+  since 2026-10-07 lead-service decides on the candidate path, and no screen
+  row is written any more. `audience_candidates` `revealing`/`revealed` =
+  accepted, `declined` = rejected (stage `screened`), `offered` = waiting; the
+  later of a screen verdict and a decision wins per (audience, person). Brands
+  with screen verdicts only read byte-identical (prod: 222 = 222). Biggest
+  brand read 2.5s -> 5.4s.
 - **Company key**: revealed `people` carry the domain but no name (prod:
   `company_name` NULL), teasers the name but no domain; a screened-then-revealed
   person bridges name -> domain for the brand, so `domain:<d>` when known, else
