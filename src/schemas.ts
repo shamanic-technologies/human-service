@@ -1685,11 +1685,13 @@ export const RevealCandidateResponseSchema = z
         "own_company",
         "bounced",
         "not_deliverable",
+        "email_not_found",
+        "email_lookup_pending",
       ])
       .optional()
       .openapi({
         description:
-          "On every 'not_served'. provider_skipped = the provider declined to buy the reveal (its mail domain cannot verify; NO credit spent). Every other reason comes after a bought reveal: no_person / no_email = the provider returned nobody / no address; not_deliverable = the address failed verification (see verdict); opted_out / won / already_served / own_company / bounced = a gate after the reveal.",
+          "On every 'not_served'. provider_skipped = the provider declined to buy the reveal (its mail domain cannot verify; NO credit spent). Every other reason comes after a bought reveal: no_person / no_email = the provider returned nobody / no address; not_deliverable = the address failed verification (see verdict); opted_out / won / already_served / own_company / bounced = a gate after the reveal. CRM candidates: email_not_found = the contact had no email and the lookup found none (or it could not be looked up), never handed out again; email_lookup_pending = the finder is still working, the candidate is offered again later (nothing billed twice).",
       }),
     verdict: z.string().optional().openapi({
       description: "not_deliverable only: the verification verdict (catch_all, unknown, invalid, risky).",
@@ -2230,9 +2232,9 @@ registry.registerPath({
   method: "post",
   path: "/orgs/audiences/{id}/candidates/next",
   summary:
-    "Next FREE candidate of an apollo audience (who + company, every free check applied), before any reveal is bought",
+    "Next FREE candidate of an apollo or CRM-sourced audience (who + company, every free check applied), before any reveal is bought",
   description:
-    "For lead-service's pre-pay qualification. Nothing is screened and nothing is billed. Each person is offered once per audience; an offer not decided within 15 minutes is offered again. serve-next is unchanged.",
+    "For lead-service's pre-pay qualification. Nothing is screened and nothing is billed. Each person is offered once per audience; an offer not decided within 15 minutes is offered again. serve-next is unchanged. CRM-sourced (a crm audience, or the CRM feature identity): the next contact of the brand's CRM, including a contact added without an email (its email is looked up at reveal, billed on the serve's run); stepFilter and relationships are pushed down to crm-service as on serve-next.",
   security: [{ apiKey: [] }],
   request: {
     headers: peopleHeaders,
@@ -2242,7 +2244,7 @@ registry.registerPath({
   responses: {
     200: { description: "A candidate, exhausted or pending", content: { "application/json": { schema: NextCandidateResponseSchema } } },
     404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
-    422: { description: "Not an apollo audience (use serve-next), or no stored filters", content: { "application/json": { schema: ErrorSchema } } },
+    422: { description: "An apify audience (use serve-next), a stepFilter on an apollo audience, or no stored filters", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
     502: { description: "Provider or gate source error", content: { "application/json": { schema: ErrorSchema } } },
   },

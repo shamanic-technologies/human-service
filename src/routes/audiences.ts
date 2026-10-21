@@ -1285,11 +1285,10 @@ router.post(
       return;
     }
     if (reachParse.acceptedEmails) identity.acceptedEmails = reachParse.acceptedEmails;
-    // Candidates are apollo-only: a CRM step filter cannot be honoured here.
-    if (reachParse.stepFilter) {
-      res.status(422).json({ error: "A stepFilter needs a CRM-sourced serve; candidates exist only for apollo audiences." });
-      return;
-    }
+    // A CRM-sourced candidate serve pushes both down to crm-service, as serve-next
+    // does; an apollo audience refuses a stepFilter (422, before any search).
+    if (reachParse.relationships) identity.relationships = reachParse.relationships;
+    if (reachParse.stepFilter) identity.stepFilter = reachParse.stepFilter;
     try {
       const result = await nextCandidate(audience, identity, undefined, reachParse.reach);
       console.log(
@@ -1299,6 +1298,10 @@ router.post(
     } catch (err) {
       if (err instanceof AudienceNotServableError) {
         res.status(422).json({ error: err.message });
+        return;
+      }
+      if (reachParse.stepFilter && err instanceof ProviderError && err.provider === "crm" && err.status === 400) {
+        res.status(400).json({ error: `crm-service refused stepFilter: ${err.body}`, source: "crm-service" });
         return;
       }
       sendProviderError(res, err);
