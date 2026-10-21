@@ -43,6 +43,16 @@ export interface CrmContact {
   fullName: string | null;
   firstName: string | null;
   lastName: string | null;
+  // What finds the email of a contact the client added without one
+  // (crm-service CRM-ADD-ONE-CONTACT-1021, additive: older rows omit them).
+  companyName?: string | null;
+  companyDomain?: string | null;
+  jobTitle?: string | null;
+  linkedinUrl?: string | null;
+  note?: string | null;
+  // known = primaryEmail is the address; unknown = handed out for its email to be
+  // looked up (only with `includeEmailUnknown`).
+  emailStatus?: "known" | "unknown" | "not_found" | null;
 }
 
 // The PEOPLE pool of crm-service (contract live since crm-service v0.39.0): the
@@ -92,6 +102,10 @@ export interface CrmServeScope {
   // top-level as crm-service's `stepFilter` (both pools), ANDed there with the pool
   // filter. Absent = no key on the wire.
   stepFilter?: StepFilter | null;
+  // CSV pool only: after the sendable contacts, also hand out contacts whose email
+  // is not known yet (emailStatus `unknown`), for the caller to look it up and write
+  // it back (crmWriteEmailLookup). Absent = no key on the wire.
+  includeEmailUnknown?: boolean;
 }
 
 export interface CrmServeStats {
@@ -186,6 +200,7 @@ export async function crmServeNext(
         ...(reachableBy ? { reachableBy } : {}),
         ...(scope.relationships ? { relationships: scope.relationships } : {}),
         ...(scope.stepFilter ? { stepFilter: scope.stepFilter } : {}),
+        ...(scope.includeEmailUnknown ? { includeEmailUnknown: true } : {}),
       }),
     });
   } catch (err) {
@@ -204,6 +219,53 @@ export async function crmServeNext(
     contacts: Array.isArray(data.contacts) ? data.contacts : [],
     served: typeof data.served === "number" ? data.served : 0,
     exhausted: data.exhausted === true,
+  };
+}
+
+// Write the email lookup of a handed-out email-unknown contact back to crm-service
+// (POST /orgs/contacts/{contactId}/email-lookup). `found` gives the contact its
+// address AND marks it served for the brand (the hand-out was its serve);
+// `not_found` means it is never handed out again. Idempotent there. A 409
+// `email_already_known` (the contact got an address meanwhile) is a settled
+// answer, not a failure: returned as such. Anything else non-2xx fails loud.
+export interface CrmEmailLookupResult {
+  status: "found" | "not_found" | "already_known";
+  duplicateOf: string | null;
+}
+
+export async function crmWriteEmailLookup(
+  contactId: string,
+  brandId: string,
+  outcome: { status: "found"; email: string } | { status: "not_found" },
+  identity: Identity
+): Promise<CrmEmailLookupResult> {
+  const { url, key } = requireCrm();
+  let res: Response;
+  try {
+    res = await fetchWithConnectRetry(
+      `${url}/orgs/contacts/${encodeURIComponent(contactId)}/email-lookup`,
+      {
+        method: "POST",
+        headers: downstreamHeaders(key, identity),
+        body: JSON.stringify({ brandId, ...outcome }),
+      }
+    );
+  } catch (err) {
+    throw new ProviderError("crm", 0, String(err));
+  }
+  if (res.status === 409) {
+    const text = await res.text().catch(() => "");
+    if (text.includes("email_already_known")) return { status: "already_known", duplicateOf: null };
+    throw new ProviderError("crm", 409, text);
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ProviderError("crm", res.status, text);
+  }
+  const data = (await res.json()) as { duplicateOf?: unknown };
+  return {
+    status: outcome.status,
+    duplicateOf: typeof data.duplicateOf === "string" ? data.duplicateOf : null,
   };
 }
 

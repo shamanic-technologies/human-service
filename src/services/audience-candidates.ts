@@ -63,6 +63,7 @@ import {
 import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import { ensureTargetText, screenTarget } from "./audience-target-text.js";
 import { isCrmSourcedFeature } from "./sourcing-origin.js";
+import { nextCrmCandidate, revealCrmCandidate, type CrmRevealReason } from "./crm-candidates.js";
 import {
   markSourceServed,
   persistSourceExhaustion,
@@ -192,16 +193,25 @@ function toView(row: AudienceCandidate): CandidateView {
   };
 }
 
-// Only an apollo audience has a free teaser and a separate billed reveal. crm
-// contacts are burned by crm-service on serve and apify bills per hit, so there
-// is no free moment to hand out: those keep serve-next.
+// A CRM-sourced serve (the CRM feature identity, or a crm audience) is offered
+// through crm-candidates.ts: the hand-out is free and the only paid step (the
+// email lookup of a contact added without one) sits at the reveal.
+function isCrmCandidateServe(audience: AudienceRow, identity: Identity): boolean {
+  return isCrmSourcedFeature(identity.workflowTracking?.featureSlug) || audience.provider === "crm";
+}
+
+// Otherwise only an apollo audience has a free teaser and a separate billed
+// reveal; apify bills per hit, so there is no free moment to hand out: it keeps
+// serve-next.
 function assertCandidateProvider(audience: AudienceRow, identity: Identity): void {
-  if (
-    isCrmSourcedFeature(identity.workflowTracking?.featureSlug) ||
-    audience.provider !== "apollo"
-  ) {
+  if (audience.provider !== "apollo") {
     throw new AudienceNotServableError(
-      "Candidates exist only for apollo audiences (a free teaser, then a billed reveal). Use serve-next for crm / apify."
+      "Candidates exist only for apollo and CRM-sourced audiences. Use serve-next for apify."
+    );
+  }
+  if (identity.stepFilter) {
+    throw new AudienceNotServableError(
+      "A stepFilter needs a CRM-sourced serve; an apollo audience cannot honour it."
     );
   }
 }
@@ -343,19 +353,25 @@ export async function nextCandidate(
   reach: readonly Reach[] = []
 ): Promise<NextCandidateResult> {
   const deadline = Date.now() + budgetMs;
+  if (isCrmCandidateServe(audienceIn, identityIn)) {
+    const next = await nextCrmCandidate(audienceIn, identityIn, { reach }, () =>
+      retakeLapsedOffer(identityIn.orgId, audienceIn.id, null)
+    );
+    return next.status === "candidate"
+      ? { status: "candidate", candidate: toView(next.row), target: next.target }
+      : { status: "exhausted", candidate: null, reason: "pool_exhausted", target: next.target };
+  }
   // SOURCES (audience-sources.ts): the slug names WHERE to look; an audience with
   // no source offers from its own list, exactly as before.
-  if (!isCrmSourcedFeature(identityIn.workflowTracking?.featureSlug)) {
-    const pick = await pickServeSource(audienceIn, identityIn.workflowTracking?.featureSlug);
-    if (pick.kind === "off") {
-      console.log(
-        `[human-service] audience_source.off org=${identityIn.orgId} audience=${audienceIn.id} path=candidates reason=${JSON.stringify(pick.reason)}`
-      );
-      return { status: "exhausted", candidate: null, reason: "pool_exhausted", target: screenTarget(audienceIn) };
-    }
-    if (pick.kind === "sources") {
-      return nextCandidateFromSources(audienceIn, pick.sources, identityIn, deadline, budgetMs, reach);
-    }
+  const pick = await pickServeSource(audienceIn, identityIn.workflowTracking?.featureSlug);
+  if (pick.kind === "off") {
+    console.log(
+      `[human-service] audience_source.off org=${identityIn.orgId} audience=${audienceIn.id} path=candidates reason=${JSON.stringify(pick.reason)}`
+    );
+    return { status: "exhausted", candidate: null, reason: "pool_exhausted", target: screenTarget(audienceIn) };
+  }
+  if (pick.kind === "sources") {
+    return nextCandidateFromSources(audienceIn, pick.sources, identityIn, deadline, budgetMs, reach);
   }
   return nextCandidateFromList(audienceIn, identityIn, deadline, budgetMs, reach);
 }
@@ -598,7 +614,7 @@ export interface RevealCandidateResult {
   // On every `not_served`: why nobody came back. `provider_skipped` means the
   // provider declined to buy the reveal (no credit spent); every other reason
   // comes after a bought reveal. `no_email` = the reveal carried no address.
-  reason?: RevealBlockReason | "no_email";
+  reason?: RevealBlockReason | "no_email" | CrmRevealReason;
   // not_deliverable: the verification verdict (catch_all, unknown, invalid, risky).
   verdict?: string;
   // provider_skipped: the provider's own reason (e.g. catch_all_domain).
@@ -618,6 +634,7 @@ export async function revealCandidate(
   basis: string | null
 ): Promise<RevealCandidateResult> {
   const existing = await loadCandidate(identityIn.orgId, audienceIn.id, candidateId);
+  if (existing.crmContact) return revealCrmCandidateRow(audienceIn, identityIn, existing, basis);
   // A candidate a source offered is revealed and recorded as that source's.
   const source = existing.sourceId
     ? ((await sourcesOf([audienceIn.id])).get(audienceIn.id) ?? []).find((s) => s.id === existing.sourceId) ?? null
@@ -678,6 +695,63 @@ export async function revealCandidate(
     .where(eq(audienceCandidates.id, candidateId));
   console.log(
     `[human-service] audience.candidate_revealed org=${identity.orgId} audience=${audienceIn.id} candidate=${candidateId} status=${result.status}${result.reason ? ` reason=${result.reason}` : ""}`
+  );
+  return { ...result, replayed: false };
+}
+
+// A CRM candidate's reveal: the same claim / store / replay as the apollo one,
+// the work done by crm-candidates.ts. A lookup still pending hands the candidate
+// back (offered), so a later call asks the finder again (for free).
+async function revealCrmCandidateRow(
+  audience: AudienceRow,
+  identity: Identity,
+  existing: AudienceCandidate,
+  basis: string | null
+): Promise<RevealCandidateResult> {
+  if (existing.status === "revealed") return { ...storedReveal(existing.revealResult), replayed: true };
+  if (existing.status === "declined") throw new CandidateStateError("Candidate was declined", existing.status);
+  const claimCutoff = new Date(Date.now() - CANDIDATE_REVEAL_CLAIM_TTL_MS);
+  const [claimed] = await db
+    .update(audienceCandidates)
+    .set({ status: "revealing", decidedAt: new Date(), basis })
+    .where(
+      and(
+        eq(audienceCandidates.id, existing.id),
+        or(
+          eq(audienceCandidates.status, "offered"),
+          and(eq(audienceCandidates.status, "revealing"), lt(audienceCandidates.decidedAt, claimCutoff))
+        )
+      )
+    )
+    .returning();
+  if (!claimed) {
+    const now = await loadCandidate(identity.orgId, audience.id, existing.id);
+    if (now.status === "revealed") return { ...storedReveal(now.revealResult), replayed: true };
+    throw new CandidateStateError(`Candidate is ${now.status}`, now.status);
+  }
+  const handBack = () =>
+    db
+      .update(audienceCandidates)
+      .set({ status: "offered", decidedAt: null, basis: null })
+      .where(and(eq(audienceCandidates.id, existing.id), eq(audienceCandidates.status, "revealing")));
+  let crm: Awaited<ReturnType<typeof revealCrmCandidate>>;
+  try {
+    crm = await revealCrmCandidate(audience, identity, claimed);
+  } catch (err) {
+    await handBack();
+    throw err;
+  }
+  const { handBack: back, ...result } = crm;
+  if (back) {
+    await handBack();
+    return { ...result, replayed: false };
+  }
+  await db
+    .update(audienceCandidates)
+    .set({ status: "revealed", revealResult: result })
+    .where(eq(audienceCandidates.id, existing.id));
+  console.log(
+    `[human-service] audience.candidate_revealed org=${identity.orgId} audience=${audience.id} candidate=${existing.id} status=${result.status}${result.reason ? ` reason=${result.reason}` : ""} path=crm`
   );
   return { ...result, replayed: false };
 }
