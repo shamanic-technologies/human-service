@@ -4,6 +4,7 @@ import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import {
+  audienceCandidates,
   audienceMembers,
   audiences,
   audienceTeaserBuffer,
@@ -221,5 +222,62 @@ describe("GET /internal/brands/:brandId/audience-snapshot/person-companies", () 
     expect(res.body).toEqual({ brandId: OTHER_BRAND, total: 0, people: [] });
     expect((await request(app).get(`/internal/brands/nope/audience-snapshot/person-companies`).set(getAuthHeaders())).status).toBe(400);
     expect((await request(app).get(`/internal/brands/${BRAND}/audience-snapshot/person-companies`)).status).toBe(401);
+  });
+});
+
+// Since 2026-10-07 lead-service decides on the candidate path: a revealed
+// candidate is accepted by its target, a declined one is not. The legacy seed
+// above (screen verdicts only) keeps its exact counts.
+describe("candidate-path decisions", () => {
+  async function candidate(audienceId: string, pid: string, org: string, status: "offered" | "revealing" | "revealed" | "declined", domain: string | null = null) {
+    await db.insert(audienceCandidates).values({
+      orgId: ORG, audienceId, providerPersonId: pid, teaser: snap(pid, org), organizationDomain: domain,
+      status, decidedAt: status === "offered" ? null : new Date(),
+    });
+  }
+
+  it("reads revealed as accepted, declined as rejected, offered as waiting, on every surface", async () => {
+    const r = await audience("Roofing Companies");
+    await candidate(r.id, "c1", "Acme Roofing", "revealed", "acmeroofing.com");
+    await reveal(r.id, "c1", "acmeroofing.com");
+    await candidate(r.id, "c2", "Best Roofs", "revealed");
+    await candidate(r.id, "c3", "Acme Roofing", "declined", "acmeroofing.com");
+    await candidate(r.id, "c4", "Cold Co", "declined");
+    await candidate(r.id, "c5", "New Co", "offered");
+    await candidate(r.id, "c6", "Mid Co", "revealing");
+
+    const s = await request(app).get(`/internal/brands/${BRAND}/audience-snapshot`).set(getAuthHeaders());
+    const row = s.body.audiences.find((x: { audienceId: string }) => x.audienceId === r.id);
+    expect(row.people).toEqual({ held: 6, revealed: 1, screened: 5, accepted: 3, rejected: 2, waiting: 1 });
+    expect(row.companies).toEqual({ held: 5, revealed: 1, accepted: 3 });
+    expect(s.body.totals.people.accepted).toBe(3);
+
+    const ppl = await request(app).get(`/internal/brands/${BRAND}/audience-snapshot/people?acceptedOnly=true`).set(getAuthHeaders());
+    expect(ppl.body.total).toBe(3);
+    expect(ppl.body.people.map((p: { personKey: string }) => p.personKey).sort()).toEqual(["c1", "c2", "c6"]);
+    const c1 = ppl.body.people.find((p: { personKey: string }) => p.personKey === "c1");
+    expect(c1.acceptedBy.map((x: { audienceId: string }) => x.audienceId)).toEqual([r.id]);
+    expect(c1.company.companyKey).toBe("domain:acmeroofing.com");
+
+    const all = await request(app).get(`/internal/brands/${BRAND}/audience-snapshot/people?limit=500`).set(getAuthHeaders());
+    const c3 = all.body.people.find((p: { personKey: string }) => p.personKey === "c3");
+    expect(c3.sources[0]).toMatchObject({ stage: "screened", verdict: "rejected" });
+    expect(c3.acceptedBy).toEqual([]);
+
+    const cos = await request(app).get(`/internal/brands/${BRAND}/audience-snapshot/companies?acceptedOnly=true`).set(getAuthHeaders());
+    expect(cos.body.total).toBe(3);
+    const acme = cos.body.companies.find((c: { companyKey: string }) => c.companyKey === "domain:acmeroofing.com");
+    expect(acme.people).toEqual({ held: 2, revealed: 1, accepted: 1 });
+    expect(acme.acceptedBy).toEqual([expect.objectContaining({ audienceId: r.id, acceptedPeople: 1 })]);
+  });
+
+  it("the later of a screen verdict and a candidate decision wins", async () => {
+    const r = await audience("Mixed");
+    await screen(r.id, "m1", "Old Co", 0.9, true);
+    await new Promise((res) => setTimeout(res, 5));
+    await candidate(r.id, "m1", "Old Co", "declined");
+    const s = await request(app).get(`/internal/brands/${BRAND}/audience-snapshot`).set(getAuthHeaders());
+    const row = s.body.audiences.find((x: { audienceId: string }) => x.audienceId === r.id);
+    expect(row.people).toMatchObject({ held: 1, screened: 1, accepted: 0, rejected: 1 });
   });
 });
