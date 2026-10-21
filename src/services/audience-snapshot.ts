@@ -12,6 +12,11 @@
 // teaser and the revealed person), so a teaser that was later revealed counts
 // once. A revealed person with no provider id keys on its people.id.
 //
+// "Judged" (stage `screened`) = the pre-pay screen's verdict OR, since
+// 2026-10-07, lead-service's decision on the candidate path (audience_candidates:
+// revealing / revealed = accepted, declined = rejected); the latest of the two
+// per audience + person wins. An offered, undecided candidate is waiting.
+//
 // "Accepted" = the audience's LATEST verdict on that person passes the CURRENT
 // bar: yes-probability > SCREEN_MIN_YES_PROBABILITY. A verdict taken under an
 // older, stricter bar is re-read at today's bar, since the question is "does the
@@ -69,14 +74,26 @@ function heldSql(scope: SnapshotScope) {
       select a.id, a.org_id from audiences a
       where a.brand_id = ${scope.brandId} ${orgFilter}
     ),
-    scr as (
-      select distinct on (s.audience_id, s.provider_person_id)
-        s.audience_id, s.provider_person_id, s.teaser, s.yes_probability,
+    verdicts as (
+      select s.audience_id, s.provider_person_id, s.teaser, s.yes_probability,
         case when s.yes_probability is not null
           then s.yes_probability > ${SCREEN_MIN_YES_PROBABILITY}
-          else s.verdict end as accepted
+          else s.verdict end as accepted,
+        null::text as org_domain, s.created_at as judged_at
       from audience_teaser_screenings s join aud on aud.id = s.audience_id
-      order by s.audience_id, s.provider_person_id, s.created_at desc
+      union all
+      -- lead-service's decision on the candidate path (since 2026-10-07): paying
+      -- the reveal = its target accepted the person, declining = it did not.
+      select c.audience_id, c.provider_person_id, c.teaser, null::double precision,
+        c.status in ('revealing', 'revealed'), lower(c.organization_domain), c.decided_at
+      from audience_candidates c join aud on aud.id = c.audience_id
+      where c.status in ('revealing', 'revealed', 'declined') and c.decided_at is not null
+    ),
+    scr as (
+      select distinct on (v.audience_id, v.provider_person_id)
+        v.audience_id, v.provider_person_id, v.teaser, v.yes_probability, v.accepted, v.org_domain
+      from verdicts v
+      order by v.audience_id, v.provider_person_id, v.judged_at desc
     ),
     src as (
       select m.audience_id,
@@ -93,7 +110,7 @@ function heldSql(scope: SnapshotScope) {
       where m.provenance = 'served'
       union all
       select scr.audience_id, scr.provider_person_id, null, 'screened',
-        scr.teaser->>'name', scr.teaser->>'title', scr.teaser->>'organizationName', null,
+        scr.teaser->>'name', scr.teaser->>'title', scr.teaser->>'organizationName', scr.org_domain,
         scr.accepted, scr.yes_probability
       from scr
       union all
@@ -101,6 +118,13 @@ function heldSql(scope: SnapshotScope) {
         b.teaser->>'name', b.teaser->>'title', b.teaser->>'organizationName', null,
         null, null
       from audience_teaser_buffer b join aud on aud.id = b.audience_id
+      union all
+      -- a candidate handed to lead-service and not decided yet: held, waiting
+      select c.audience_id, c.provider_person_id, null, 'buffered',
+        c.teaser->>'name', c.teaser->>'title', c.teaser->>'organizationName', lower(c.organization_domain),
+        null, null
+      from audience_candidates c join aud on aud.id = c.audience_id
+      where c.status = 'offered'
     ),
     held as (
       select audience_id, person_key,
