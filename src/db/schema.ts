@@ -1,3 +1,4 @@
+import type { CrmContact } from "../lib/crm-contacts.js";
 import {
   pgTable,
   uuid,
@@ -1029,6 +1030,9 @@ export const audienceCandidates = pgTable(
     revealResult: jsonb("reveal_result"),
     // The source that offered this candidate (audience_sources.id, 0047); NULL = own list.
     sourceId: uuid("source_id"),
+    // A CRM-served candidate (0048): the crm-service contact as handed out, so the
+    // reveal (and a re-offer after a crash) needs no second crm call. NULL = apollo.
+    crmContact: jsonb("crm_contact").$type<CrmContact>(),
     offeredAt: timestamp("offered_at", { withTimezone: true }).notNull().defaultNow(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

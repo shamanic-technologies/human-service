@@ -121,7 +121,7 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `DELETE /orgs/audiences/{id}` | apiKey + `x-org-id` | Hard delete (cascades members) — archive is a soft state, not delete |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/refresh-count` | apiKey + `x-org-id` + `x-user-id` | Re-snapshot apollo + apify counts via free dry-run |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/serve-next` | apiKey + `x-org-id` + `x-user-id` | Serve the NEXT unserved person of the audience (real provider match on its stored filters; records served; never repeats; clean exhausted signal) |
-| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/next` | apiKey + `x-org-id` + `x-user-id` | Next FREE candidate of an apollo audience (who + company incl. domain, every free gate applied, no screen, no reveal) for lead-service's pre-pay qualification. See "Candidate API" |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/next` | apiKey + `x-org-id` + `x-user-id` | Next FREE candidate of an apollo OR CRM-sourced audience (who + company incl. domain, every free gate applied, no screen, no reveal) for lead-service's pre-pay qualification. See "Candidate API", "CRM candidates" |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/{candidateId}/reveal` | apiKey + `x-org-id` + `x-user-id` | Billed reveal of an offered candidate, recorded as served exactly like serve-next; billed once (replay) |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/candidates/{candidateId}/decline` | apiKey + `x-org-id` | Decline: never offered/served again for that audience, Size drops by one (same exclusion set as the screen) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}/screenings` | apiKey + `x-org-id` | Past pre-pay screen verdicts (bronze), oldest first, `limit`/`offset`/`providerPersonId` |
@@ -1701,6 +1701,38 @@ live in prod and it stops calling serve-next (relayed by lead-service session
   which this path honours, so nothing judged is re-judged or re-bought.
 - No cost declared (apollo-service bills the reveal). Tests:
   `tests/integration/audiences-candidates.test.ts`.
+
+### CRM candidates — qualified first, email looked up at reveal (`src/services/crm-candidates.ts`, CRM-SERVE-FIND-EMAIL-1021)
+
+Owner 2026-10-21: a client adds people they know (Copilot / API / MCP, often name +
+company + LinkedIn, no email; crm-service CRM-ADD-ONE-CONTACT-1021); adding is free,
+a paid lookup only when a campaign serves the person, billed to that campaign. And a
+CRM-served person meets the same screen + must-pass checks as every other source.
+- **candidates/next serves CRM** (crm audience, or the CRM feature identity on any
+  audience; apify still 422): `crmServeNext` limit 1 with `includeEmailUnknown: true`
+  on the CSV pool (never on a people-pool audience: crm-service refuses it), same
+  reach / relationships / stepFilter push-down as serve-next; free gates opt-out, own
+  company (incl. the contact's company name / domain), bounce (email known). The
+  handed-out contact is stored on `audience_candidates.crm_contact` (migration 0048),
+  teaser = name, job title, company name; domain = company domain. lead-service's
+  existing candidate path (screen, must-pass, reveal / decline) needs no change: it
+  used serve-next for CRM only because this answered 422.
+- **reveal**: email known ⟹ served free, as serve-next did. Unknown ⟹ apollo-service
+  `POST /email-finder/find` (vendor treg, first + last + domain and/or LinkedIn;
+  `src/lib/email-finder.ts`), cost provisioned / actualized by apollo-service on the
+  serve's `x-run-id`, never twice for one person (its silver row). Then crm-service
+  `POST /orgs/contacts/{id}/email-lookup`: found (crm marks the address served for the
+  brand) ⟹ served if the caller's `acceptedEmails` takes the verdict and the post gates
+  pass, else not_served (`not_deliverable` / `opted_out` / `own_company` / `bounced`);
+  not_found, or nothing to find it with (no domain, no LinkedIn: no spend) ⟹
+  not_served `email_not_found`, never handed out again; treg `pending` ⟹ not_served
+  `email_lookup_pending`, candidate back to `offered` (re-offered after 15 min, the
+  finder answers free).
+- crm-service burns a sendable contact on hand-out, so a declined one is gone for the
+  brand (as serve-next dropping it). An email-unknown contact handed out again after
+  crm's 24 h TTL hits the (audience, contact) candidate row: skipped free.
+- serve-next for CRM is unchanged (no `includeEmailUnknown`, no lookup). Tests:
+  `tests/integration/crm-candidates.test.ts`.
 
 ### Audience text — ONE text per audience (`src/services/audience-target-text.ts`)
 
