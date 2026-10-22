@@ -19,6 +19,7 @@
 // deliberately delayed and each tick is fire-and-forget, so the O(pairs)
 // brand-service reads can never delay port-bind or fail a deploy healthcheck.
 
+import { messageOf } from "../lib/db-error.js";
 import { getMigrationState } from "../lib/migration-state.js";
 import { BrandConfigError } from "../lib/brand-offers.js";
 import {
@@ -102,7 +103,7 @@ export async function runOfferAttributionSweep(): Promise<OfferBackfillResult | 
     // take the process down, and it must not silently look like "no gaps".
     if (err instanceof BrandConfigError) {
       console.error(
-        `[human-service] offer_sweep.unconfigured ${err.message} — no audience attributed this tick`
+        `[human-service] offer_sweep.unconfigured ${messageOf(err)} — no audience attributed this tick`
       );
       return null;
     }

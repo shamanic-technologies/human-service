@@ -35,6 +35,7 @@
 // a cent of model tokens, once per brand, declared by brand-service), which is
 // why the sweep only runs it for orgs billing can charge.
 
+import { errorMessage } from "../lib/db-error.js";
 import { and, desc, eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audiencePortfolios, audiences, sourceCampaignStates } from "../db/schema.js";
@@ -252,7 +253,7 @@ async function ensureOnce(args: EnsureEngagementArgs): Promise<CompetitorEngagem
         });
         created++;
       } catch (err) {
-        failures.push(`${profile.name}: ${err instanceof Error ? err.message : String(err)}`);
+        failures.push(`${profile.name}: ${errorMessage(err)}`);
       }
     }
     sources = await sourcesOf(profiles.map((p) => p.id));
@@ -267,7 +268,7 @@ async function ensureOnce(args: EnsureEngagementArgs): Promise<CompetitorEngagem
       reason: failures.length > 0 ? failures.join("; ") : null,
     });
   } catch (err) {
-    return done({ outcome: "failed", reason: err instanceof Error ? err.message : String(err) });
+    return done({ outcome: "failed", reason: errorMessage(err) });
   }
 }
 
@@ -413,7 +414,7 @@ export async function runCompetitorEngagementSweep(
             ? { ok: true, reason: null, detail: null }
             : { ok: false, reason: "not_chargeable", detail: outlook ? outlook.state : "no_account" };
         } catch (err) {
-          gate = { ok: false, reason: "billing_unreadable", detail: err instanceof Error ? err.message : String(err) };
+          gate = { ok: false, reason: "billing_unreadable", detail: errorMessage(err) };
         }
         chargeable.set(orgId, gate);
       }
@@ -533,7 +534,7 @@ async function underOwnRun<T>(
   try {
     tracking = { brandIds: [brandId], featureSlug: await sourcingOriginSlug(list) };
   } catch (err) {
-    const skip = `sourcing_origin_unresolved: ${err instanceof Error ? err.message : String(err)}`;
+    const skip = `sourcing_origin_unresolved: ${errorMessage(err)}`;
     console.error(`[human-service] competitor_engagement.sweep_origin_failed org=${orgId} brand=${brandId} ${skip}`);
     return { skip };
   }

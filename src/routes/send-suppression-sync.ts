@@ -1,3 +1,4 @@
+import { messageOf } from "../lib/db-error.js";
 import { Router } from "express";
 import { requireApiKey } from "../middleware/auth.js";
 import { SendFeedConfigError, SendFeedSourceError } from "../lib/instantly-sends.js";
@@ -20,7 +21,7 @@ router.post("/internal/sync-send-suppressions", requireApiKey, async (_req, res)
     res.json(result);
   } catch (err) {
     if (err instanceof SendFeedConfigError || err instanceof SendFeedSourceError) {
-      res.status(502).json({ error: err.message, source: "instantly-service" });
+      res.status(502).json({ error: messageOf(err), source: "instantly-service" });
       return;
     }
     throw err;

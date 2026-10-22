@@ -1,3 +1,4 @@
+import { errorMessage } from "../lib/db-error.js";
 import { Router } from "express";
 import { requireApiKey } from "../middleware/auth.js";
 import { TransferBrandRequestSchema } from "../schemas.js";
@@ -20,7 +21,7 @@ router.post("/internal/transfer-brand", requireApiKey, async (req, res) => {
   } catch (err) {
     console.error("[human-service] Error in transfer-brand:", err);
     res.status(500).json({
-      error: `transfer-brand failed, nothing was moved: ${err instanceof Error ? err.message : String(err)}`,
+      error: `transfer-brand failed, nothing was moved: ${errorMessage(err)}`,
     });
   }
 });

@@ -1,3 +1,4 @@
+import { messageOf } from "../lib/db-error.js";
 import { BrandConfigError, BrandServiceError } from "../lib/brand-offers.js";
 import { Router } from "express";
 import { EmailVerificationError } from "../lib/email-verification.js";
@@ -60,7 +61,7 @@ function sendProviderError(
 ): void {
   if (err instanceof ProviderUnsupportedError) {
     res.status(501).json({
-      error: err.message,
+      error: messageOf(err),
       provider: err.provider,
       capability: err.capability,
     });
@@ -71,9 +72,9 @@ function sendProviderError(
     // read its own input must not wave people through, so this fails the request
     // rather than serving somebody who may have asked us to stop.
     console.error(
-      `[human-service] people.opt_out_source_error ${err.name}: ${err.message}`
+      `[human-service] people.opt_out_source_error ${err.name}: ${messageOf(err)}`
     );
-    res.status(502).json({ error: err.message, source: "instantly-service" });
+    res.status(502).json({ error: messageOf(err), source: "instantly-service" });
     return;
   }
   if (err instanceof BounceConfigError || err instanceof BounceSourceError) {
@@ -81,18 +82,18 @@ function sendProviderError(
     // the consent log: never serve through a gate that cannot read its own
     // input — an empty answer would hand back an address we know is dead.
     console.error(
-      `[human-service] people.bounce_source_error ${err.name}: ${err.message}`
+      `[human-service] people.bounce_source_error ${err.name}: ${messageOf(err)}`
     );
-    res.status(502).json({ error: err.message, source: "instantly-service" });
+    res.status(502).json({ error: messageOf(err), source: "instantly-service" });
     return;
   }
   if (err instanceof BrandConfigError || err instanceof BrandServiceError) {
     // The brand's own company could not be read, so the serve cannot tell its
     // staff apart from prospects. Never serve through that gate blind.
     console.error(
-      `[human-service] people.brand_source_error ${err.name}: ${err.message}`
+      `[human-service] people.brand_source_error ${err.name}: ${messageOf(err)}`
     );
-    res.status(502).json({ error: err.message, source: "brand-service" });
+    res.status(502).json({ error: messageOf(err), source: "brand-service" });
     return;
   }
   if (err instanceof WonLeadsConfigError || err instanceof WonLeadsSourceError) {
@@ -100,20 +101,20 @@ function sendProviderError(
     // consent log: never serve through a gate that cannot read its own input —
     // an empty answer would hand a paying client back to cold outreach.
     console.error(
-      `[human-service] people.won_leads_source_error ${err.name}: ${err.message}`
+      `[human-service] people.won_leads_source_error ${err.name}: ${messageOf(err)}`
     );
-    res.status(502).json({ error: err.message, source: "lead-service" });
+    res.status(502).json({ error: messageOf(err), source: "lead-service" });
     return;
   }
   if (err instanceof EmailVerificationError) {
     // The revealed address could not be verified. Never serve it unverified —
     // that spends the send and the sender reputation the check protects.
     console.error(`[human-service] people.verify_email_error ${err.message}`);
-    res.status(502).json({ error: err.message, source: "email-verification" });
+    res.status(502).json({ error: messageOf(err), source: "email-verification" });
     return;
   }
   if (err instanceof ProviderConfigError) {
-    res.status(502).json({ error: err.message, provider: err.provider });
+    res.status(502).json({ error: messageOf(err), provider: err.provider });
     return;
   }
   if (err instanceof ProviderError) {
@@ -121,7 +122,7 @@ function sendProviderError(
       `[human-service] people.provider_error provider=${err.provider} status=${err.status}`
     );
     res.status(502).json({
-      error: err.message,
+      error: messageOf(err),
       provider: err.provider,
       upstreamStatus: err.status,
     });

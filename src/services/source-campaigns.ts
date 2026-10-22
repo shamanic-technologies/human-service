@@ -50,6 +50,7 @@
 // org-billed under a `source-campaign-audience` run labelled with the origin slug and
 // the source campaign id: only ever because the customer turned that source ON.
 
+import { errorMessage } from "../lib/db-error.js";
 import { ensureProfileAvatar } from "./audience-avatar.js";
 import { and, desc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -302,7 +303,7 @@ async function applyLocked(args: ApplySourceArgs, list: AudienceListKind): Promi
     }
   } catch (err) {
     result.outcome = "failed";
-    result.reason = err instanceof Error ? err.message : String(err);
+    result.reason = errorMessage(err);
   }
   result.audiences = await listView(scope, list);
   await recordState(args, list, result, prior);
@@ -833,7 +834,7 @@ export async function runSourceCampaignReconcile(
       try {
         sources = await fetchOfferSourceCampaigns(scope);
       } catch (err) {
-        entries.push({ ...scope, originSlug: null, action: "read_failed", status: null, reason: err instanceof Error ? err.message : String(err) });
+        entries.push({ ...scope, originSlug: null, action: "read_failed", status: null, reason: errorMessage(err) });
         continue;
       }
       const recorded = await db
@@ -857,7 +858,7 @@ export async function runSourceCampaignReconcile(
           chosen = new Set((await ensureLeadSourcingChoice(scope, leadSourcing.campaignId)).chosenOriginSlugs);
         } catch (err) {
           // Nothing is moved for this offer this pass: turning its origins OFF on a failed read would stop its leads.
-          entries.push({ ...scope, originSlug: LEAD_SOURCING_SLUG, action: "read_failed", status: "on", reason: err instanceof Error ? err.message : String(err) });
+          entries.push({ ...scope, originSlug: LEAD_SOURCING_SLUG, action: "read_failed", status: "on", reason: errorMessage(err) });
           continue;
         }
       }
@@ -885,7 +886,7 @@ export async function runSourceCampaignReconcile(
           applied++;
           entries.push({ ...scope, originSlug: src.featureSlug, action: r.outcome, status, reason: r.reason });
         } catch (err) {
-          entries.push({ ...scope, originSlug: src.featureSlug, action: "failed", status, reason: err instanceof Error ? err.message : String(err) });
+          entries.push({ ...scope, originSlug: src.featureSlug, action: "failed", status, reason: errorMessage(err) });
         }
       }
     }

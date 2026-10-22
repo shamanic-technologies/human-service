@@ -22,6 +22,7 @@
 // audience is the one serve-next would build anyway; the profile text is drafted
 // once (chat-service, org-billed) if it was not written yet.
 
+import { errorMessage } from "../lib/db-error.js";
 import { systemResumable, systemStatus } from "./audience-status-origin.js";
 import { and, eq, inArray, isNull, notInArray } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -470,5 +471,5 @@ export async function applyPersonStatusChange(row: AudienceRow): Promise<{ pause
 }
 
 function errMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return errorMessage(err);
 }

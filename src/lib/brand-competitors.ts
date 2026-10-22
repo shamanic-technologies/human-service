@@ -16,6 +16,7 @@
 //     brand yet). The caller retries later, never reads it as "none".
 // Any other non-2xx, a network failure or a malformed body throws (fail loud).
 
+import { errorString } from "./db-error.js";
 import { z } from "zod";
 import { downstreamHeaders, fetchWithConnectRetry, type Identity } from "../services/people-providers.js";
 import { BrandConfigError, BrandServiceError } from "./brand-offers.js";
@@ -58,7 +59,7 @@ export async function discoverBrandCompetitors(
       body: JSON.stringify({}),
     });
   } catch (err) {
-    throw new BrandServiceError(0, `brand-service unreachable: ${String(err)}`);
+    throw new BrandServiceError(0, `brand-service unreachable: ${errorString(err)}`);
   }
   if (res.status === 422) {
     // Nothing is known about the brand yet (its profile is not extracted): not

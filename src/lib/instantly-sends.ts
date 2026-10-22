@@ -12,6 +12,7 @@
 // SendFeedSourceError, a missing env throws SendFeedConfigError. The cursor is
 // only advanced after a page is applied, so a failed read loses nothing.
 
+import { errorString } from "./db-error.js";
 import { fetchWithConnectRetry } from "../services/people-providers.js";
 
 export class SendFeedSourceError extends Error {
@@ -59,7 +60,7 @@ export async function readOutreachFacts(since: string): Promise<OutreachFactPage
       { method: "GET", headers: { "X-API-Key": key } }
     );
   } catch (err) {
-    throw new SendFeedSourceError(0, String(err));
+    throw new SendFeedSourceError(0, errorString(err));
   }
   if (!res.ok) {
     throw new SendFeedSourceError(res.status, await res.text().catch(() => ""));

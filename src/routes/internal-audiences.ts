@@ -8,6 +8,7 @@
 // OWN 25 MB parser, so the large payload is accepted here and skipped by the
 // global parser (body-parser sets req._body and later parsers no-op). The
 // resolution engine + rationale live in src/services/audiences.ts.
+import { messageOf } from "../lib/db-error.js";
 import express, { Router } from "express";
 import { requireApiKey } from "../middleware/auth.js";
 import {
@@ -105,15 +106,15 @@ router.post(
       );
     } catch (err) {
       if (err instanceof StillFitsAudienceNotFoundError) {
-        res.status(404).json({ error: err.message, code: "audience_not_found" });
+        res.status(404).json({ error: messageOf(err), code: "audience_not_found" });
       } else if (err instanceof CannotJudgeError) {
-        res.status(422).json({ error: err.message, code: err.code });
+        res.status(422).json({ error: messageOf(err), code: err.code });
       } else if (parsed.data.stepFilter && err instanceof ProviderError && err.status === 400) {
         // crm-service refused the pipe's step filter: relayed, never a silent verdict.
         res.status(400).json({ error: `crm-service refused stepFilter: ${err.body}`, source: "crm-service" });
       } else if (err instanceof ProviderError || err instanceof ProviderConfigError) {
         console.error("[human-service] still-fits: crm-service failed", err);
-        res.status(502).json({ error: err.message, code: "crm_unavailable" });
+        res.status(502).json({ error: messageOf(err), code: "crm_unavailable" });
       } else {
         console.error("[human-service] still-fits failed", err);
         res.status(500).json({ error: "still-fits read failed" });

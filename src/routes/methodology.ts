@@ -1,3 +1,4 @@
+import { errorString } from "../lib/db-error.js";
 import { Router } from "express";
 import { eq } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -288,7 +289,7 @@ router.post(
         pagesScraped: pages.length,
       });
     } catch (err) {
-      traceEvent(runId, { service: "human-service", event: "extract-failed", level: "error", detail: String(err) }, { "x-org-id": orgId, "x-user-id": userId });
+      traceEvent(runId, { service: "human-service", event: "extract-failed", level: "error", detail: errorString(err) }, { "x-org-id": orgId, "x-user-id": userId });
       console.error("Error extracting methodology:", err);
       res.status(500).json({ error: "Internal server error" });
     }
