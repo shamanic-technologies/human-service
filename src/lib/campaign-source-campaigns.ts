@@ -9,6 +9,7 @@
 // CampaignServiceError. Connect-phase retry only (a sibling container that may be
 // mid-restart).
 
+import { errorString } from "./db-error.js";
 import { z } from "zod";
 import { fetchWithConnectRetry } from "../services/people-providers.js";
 
@@ -56,7 +57,7 @@ export async function fetchOfferSourceCampaigns(scope: {
       headers: { "x-api-key": key, "x-org-id": scope.orgId },
     });
   } catch (err) {
-    throw new CampaignServiceError(0, `campaign-service unreachable: ${String(err)}`);
+    throw new CampaignServiceError(0, `campaign-service unreachable: ${errorString(err)}`);
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");

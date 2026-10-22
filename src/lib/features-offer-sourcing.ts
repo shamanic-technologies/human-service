@@ -5,6 +5,7 @@
 //
 // Fail loud: missing env/identity, unreachable, non-2xx or a malformed body throws OfferSourcingReadError.
 
+import { errorMessage } from "./db-error.js";
 import { z } from "zod";
 import { fetchWithConnectRetry } from "../services/people-providers.js";
 
@@ -50,7 +51,7 @@ export async function fetchOfferSourcingEvidence(args: {
       headers: { "x-api-key": key, "x-org-id": args.orgId, "x-user-id": args.userId, "x-run-id": args.runId },
     });
   } catch (err) {
-    throw new OfferSourcingReadError(`features-service ${url} unreachable: ${err instanceof Error ? err.message : String(err)}`);
+    throw new OfferSourcingReadError(`features-service ${url} unreachable: ${errorMessage(err)}`);
   }
   if (!res.ok) {
     throw new OfferSourcingReadError(`features-service ${url} answered ${res.status}: ${(await res.text()).slice(0, 300)}`);

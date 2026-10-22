@@ -8,6 +8,7 @@
 // SourcingOriginError. Connect-phase retry only (features-service is a sibling
 // container that may be mid-restart).
 
+import { errorMessage } from "./db-error.js";
 import { z } from "zod";
 import { fetchWithConnectRetry } from "../services/people-providers.js";
 
@@ -31,7 +32,7 @@ export async function fetchSourcingOriginsByList(): Promise<Map<string, string>>
   try {
     res = await fetchWithConnectRetry(url, { method: "GET" });
   } catch (err) {
-    throw new SourcingOriginError(`features-service ${url} unreachable: ${err instanceof Error ? err.message : String(err)}`);
+    throw new SourcingOriginError(`features-service ${url} unreachable: ${errorMessage(err)}`);
   }
   if (!res.ok) {
     throw new SourcingOriginError(`features-service ${url} answered ${res.status}: ${(await res.text()).slice(0, 300)}`);
@@ -61,7 +62,7 @@ export async function fetchLeadSourcingOrigins(): Promise<{ slug: string; origin
   try {
     res = await fetchWithConnectRetry(url, { method: "GET" });
   } catch (err) {
-    throw new SourcingOriginError(`features-service ${url} unreachable: ${err instanceof Error ? err.message : String(err)}`);
+    throw new SourcingOriginError(`features-service ${url} unreachable: ${errorMessage(err)}`);
   }
   if (!res.ok) {
     throw new SourcingOriginError(`features-service ${url} answered ${res.status}: ${(await res.text()).slice(0, 300)}`);

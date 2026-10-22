@@ -1,3 +1,5 @@
+import { DrizzleQueryError } from "drizzle-orm/errors";
+
 /**
  * Connect-phase failure detection, shared by the boot migration retry and the
  * platform-key registration retry.
@@ -69,7 +71,9 @@ export function isTransientConnectError(err: unknown, seen = new Set<unknown>())
 }
 
 /** Human-readable one-liner for a log or a 503 body. */
-export function describeError(err: unknown): string {
+export function describeError(caught: unknown): string {
+  // A failed query's own message carries its SQL and params: describe the driver cause.
+  const err = caught instanceof DrizzleQueryError && caught.cause !== undefined ? caught.cause : caught;
   if (err instanceof Error) {
     const code = (err as { code?: unknown }).code;
     return typeof code === "string" ? `${code}: ${err.message}` : err.message;

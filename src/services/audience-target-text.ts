@@ -25,6 +25,7 @@
 //     built (a signal), not who is wanted.
 //   - No nl_prompt at all ⟹ no text (null), stated as `no_customer_text`.
 
+import { errorMessage } from "../lib/db-error.js";
 import { and, eq, isNull, ne } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audiences } from "../db/schema.js";
@@ -253,7 +254,7 @@ export async function backfillTargetTexts(opts: {
       }
     } catch (err) {
       result.segmentTarget--;
-      const error = err instanceof Error ? err.message : String(err);
+      const error = errorMessage(err);
       result.failed.push({ audienceId: row.id, error });
       console.error(`[human-service] audience.target_text_backfill.failed audience=${row.id} ${error}`);
     }

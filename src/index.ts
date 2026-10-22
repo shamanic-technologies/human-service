@@ -1,4 +1,5 @@
 import express from "express";
+import { queryErrorHandler } from "./lib/db-error.js";
 import cors from "cors";
 import { runMigrationsOnBoot } from "./db/boot-migrate.js";
 import { requireMigratedSchema } from "./middleware/readiness.js";
@@ -84,6 +85,8 @@ app.use(audiencesRoutes);
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
 });
+
+app.use(queryErrorHandler);
 
 if (process.env.NODE_ENV !== "test") {
   // BIND THE PORT FIRST. Everything that touches the network — `migrate()` on a

@@ -47,6 +47,7 @@
 // Boot safety: NOTHING here is awaited before `app.listen()` (same pattern as
 // offer-attribution-sweep.ts).
 
+import { errorMessage } from "../lib/db-error.js";
 import { ensureProfileAvatar } from "./audience-avatar.js";
 import { and, desc, eq, ne, notInArray, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -484,7 +485,7 @@ async function refillBrand(
   try {
     outlook = await getPaymentOutlook(pool.orgId);
   } catch (err) {
-    return skip("billing_unreadable", err instanceof Error ? err.message : String(err));
+    return skip("billing_unreadable", errorMessage(err));
   }
   out.billingState = outlook ? outlook.state : "no_account";
   if (!canBeCharged(outlook)) return skip("not_chargeable", out.billingState);
@@ -552,7 +553,7 @@ async function refillBrand(
   try {
     featureSlug = await sourcingOriginSlug("apollo_search");
   } catch (err) {
-    return skip("failed", `sourcing origin unresolved: ${err instanceof Error ? err.message : String(err)}`);
+    return skip("failed", `sourcing origin unresolved: ${errorMessage(err)}`);
   }
   const tracking = { brandIds: [pool.brandId], featureSlug };
   const runId = await createRun({
@@ -610,7 +611,7 @@ async function refillBrand(
     await completeRun(runId, "completed", runIdentity);
   } catch (err) {
     await completeRun(runId, "failed", runIdentity);
-    return skip("failed", err instanceof Error ? err.message : String(err));
+    return skip("failed", errorMessage(err));
   }
 
   // Build each new audience's Apollo filters in the background, org-billed,

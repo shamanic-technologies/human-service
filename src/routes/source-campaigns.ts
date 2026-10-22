@@ -1,3 +1,4 @@
+import { messageOf } from "../lib/db-error.js";
 import { Router } from "express";
 import { requireApiKey, requireOrgIdOnly } from "../middleware/auth.js";
 import { SourceCampaignReconcileQuerySchema, SourceCampaignStateRequestSchema } from "../schemas.js";
@@ -28,12 +29,12 @@ router.post("/orgs/source-campaigns/state", requireApiKey, requireOrgIdOnly, asy
     res.json(result);
   } catch (err) {
     if (err instanceof UnknownSourceOriginError) {
-      res.status(400).json({ error: err.message });
+      res.status(400).json({ error: messageOf(err) });
       return;
     }
     if (err instanceof SourcingOriginError) {
       // The catalogue that says which list an origin is could not be read.
-      res.status(502).json({ error: err.message });
+      res.status(502).json({ error: messageOf(err) });
       return;
     }
     console.error("[human-service] source_campaign.state_error", err);

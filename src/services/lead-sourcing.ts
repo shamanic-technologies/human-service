@@ -24,6 +24,7 @@
 // Spend: none. Reading the decision and its evidence is free; a list it turns ON is built by the existing source
 // campaign code, org-billed as always.
 
+import { errorMessage } from "../lib/db-error.js";
 import { and, eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { leadSourcingChoiceChanges, leadSourcingChoices, sourceCampaignStates, type LeadSourcingChoice } from "../db/schema.js";
@@ -184,7 +185,7 @@ export async function refreshLeadSourcingChoice(
       evidence = await fetchOfferSourcingEvidence({ ...scope, ...identity });
     } catch (err) {
       console.error(
-        `[human-service] lead_sourcing.evidence_unreadable org=${scope.orgId} brand=${scope.brandId} offer=${scope.offerId}: ${err instanceof Error ? err.message : String(err)} (decision of ${row.decidedAt.toISOString()} stands)`
+        `[human-service] lead_sourcing.evidence_unreadable org=${scope.orgId} brand=${scope.brandId} offer=${scope.offerId}: ${errorMessage(err)} (decision of ${row.decidedAt.toISOString()} stands)`
       );
       return row;
     }

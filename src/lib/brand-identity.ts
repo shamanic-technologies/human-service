@@ -11,6 +11,7 @@
 // throws BrandConfigError — the same errors as the offers client, which the
 // routes already map to 502. Connect-phase retry only.
 
+import { errorString } from "./db-error.js";
 import { z } from "zod";
 import { fetchWithConnectRetry } from "../services/people-providers.js";
 import { BrandConfigError, BrandServiceError } from "./brand-offers.js";
@@ -47,7 +48,7 @@ export async function getBrandIdentity(
       headers: { "x-api-key": key, "x-org-id": orgId },
     });
   } catch (err) {
-    throw new BrandServiceError(0, `brand-service unreachable: ${String(err)}`);
+    throw new BrandServiceError(0, `brand-service unreachable: ${errorString(err)}`);
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
