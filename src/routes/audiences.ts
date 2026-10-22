@@ -38,6 +38,7 @@ import {
   ServeNextRequestSchema,
 } from "../schemas.js";
 import { normalizeReach, type Reach } from "../lib/reach.js";
+import { pgErrorCode } from "../lib/pg-error.js";
 import {
   CandidateNotFoundError,
   CandidateStateError,
@@ -1628,13 +1629,9 @@ router.get(
 // --- helpers ---
 
 // Postgres unique_violation (e.g. the name-unique-per-brand index). postgres.js
-// surfaces it as an error with `.code === "23505"`.
+// surfaces it as `.code === "23505"`, wrapped by drizzle in a DrizzleQueryError.
 function isUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    (err as { code?: string }).code === "23505"
-  );
+  return pgErrorCode(err) === "23505";
 }
 
 // Serialize rows WITH their contactability, so every channel size served on any

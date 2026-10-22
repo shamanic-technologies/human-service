@@ -42,6 +42,7 @@ import { isCrmSourcedFeature, listKindOfOriginSlug, type AudienceListKind } from
 import { isSystemResumable, systemStatus } from "./audience-status-origin.js";
 export { tagMemberSource } from "./audience-member-sources.js";
 import { LEAD_SOURCING_SLUG, readLeadSourcingChoice } from "./lead-sourcing.js";
+import { pgErrorCode } from "../lib/pg-error.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
 
@@ -330,7 +331,7 @@ export async function addSource(input: NewSource): Promise<{ source: AudienceSou
     await syncAudienceLiveness([input.audience.id]);
     return { source, created: true };
   } catch (err) {
-    if ((err as { code?: string }).code !== "23505") throw err;
+    if (pgErrorCode(err) !== "23505") throw err;
     const again = ((await sourcesOf([input.audience.id])).get(input.audience.id) ?? []).find(
       (s) => s.list === input.list && (s.signalType ?? null) === input.signalType
     );
