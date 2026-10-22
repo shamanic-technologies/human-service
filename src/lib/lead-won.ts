@@ -22,6 +22,7 @@
 // error / malformed body throws WonLeadsSourceError and a missing env throws
 // WonLeadsConfigError; both surface as 502 at the route.
 
+import { errorString } from "./db-error.js";
 import {
   downstreamHeaders,
   fetchWithConnectRetry,
@@ -65,7 +66,7 @@ async function getWonEmails(
       { method: "GET", headers: downstreamHeaders(key, identity) }
     );
   } catch (err) {
-    throw new WonLeadsSourceError(0, String(err));
+    throw new WonLeadsSourceError(0, errorString(err));
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");

@@ -18,6 +18,8 @@
 // pair join is exact, so anything cleverer would be a heuristic solving a
 // problem that does not exist.
 
+import { messageOf } from "../lib/db-error.js";
+import { errorMessage, errorString } from "../lib/db-error.js";
 import { and, eq, isNull } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audiences } from "../db/schema.js";
@@ -130,8 +132,8 @@ export async function backfillAudienceOffers(
       if (err instanceof BrandConfigError) throw err;
       const reason =
         err instanceof BrandServiceError
-          ? `brand-service ${err.status}: ${err.message}`.slice(0, 200)
-          : `brand-service error: ${String(err)}`.slice(0, 200);
+          ? `brand-service ${err.status}: ${messageOf(err)}`.slice(0, 200)
+          : `brand-service error: ${errorString(err)}`.slice(0, 200);
       console.warn(
         `[human-service] backfill_offer.skip org=${pair.orgId} brand=${pair.brandId} ${reason}`
       );
@@ -219,7 +221,7 @@ export async function backfillAudienceOffers(
         });
       }
     } catch (err) {
-      const reason = `write failed: ${err instanceof Error ? err.message : String(err)}`.slice(
+      const reason = `write failed: ${errorMessage(err)}`.slice(
         0,
         200
       );

@@ -12,6 +12,7 @@
 // ProviderError ("crm") → 502 at the route; a missing env throws
 // ProviderConfigError ("crm").
 
+import { errorString } from "./db-error.js";
 import {
   downstreamHeaders,
   fetchWithConnectRetry,
@@ -150,7 +151,7 @@ export async function crmListUploads(
       headers: downstreamHeaders(key, identity),
     });
   } catch (err) {
-    throw new ProviderError("crm", 0, String(err));
+    throw new ProviderError("crm", 0, errorString(err));
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -204,7 +205,7 @@ export async function crmServeNext(
       }),
     });
   } catch (err) {
-    throw new ProviderError("crm", 0, String(err));
+    throw new ProviderError("crm", 0, errorString(err));
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -251,7 +252,7 @@ export async function crmWriteEmailLookup(
       }
     );
   } catch (err) {
-    throw new ProviderError("crm", 0, String(err));
+    throw new ProviderError("crm", 0, errorString(err));
   }
   if (res.status === 409) {
     const text = await res.text().catch(() => "");
@@ -291,7 +292,7 @@ export async function crmPeopleServeStats(
       headers: downstreamHeaders(key, identity),
     });
   } catch (err) {
-    throw new ProviderError("crm", 0, String(err));
+    throw new ProviderError("crm", 0, errorString(err));
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -363,7 +364,7 @@ export async function crmStillFits(
       }),
     });
   } catch (err) {
-    throw new ProviderError("crm", 0, String(err));
+    throw new ProviderError("crm", 0, errorString(err));
   }
   if (res.status === 404) return null;
   if (!res.ok) {

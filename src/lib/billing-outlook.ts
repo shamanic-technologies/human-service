@@ -18,6 +18,7 @@
 // throws BillingServiceError; a missing env throws BillingConfigError. The
 // caller never treats an unreadable outlook as chargeable.
 
+import { errorString } from "./db-error.js";
 import { z } from "zod";
 import { fetchWithConnectRetry } from "../services/people-providers.js";
 
@@ -98,7 +99,7 @@ export async function getPaymentOutlook(orgId: string): Promise<PaymentOutlook |
       headers: { "x-api-key": key },
     });
   } catch (err) {
-    throw new BillingServiceError(0, `billing-service unreachable: ${String(err)}`);
+    throw new BillingServiceError(0, `billing-service unreachable: ${errorString(err)}`);
   }
   if (res.status === 404) return null;
   if (!res.ok) {

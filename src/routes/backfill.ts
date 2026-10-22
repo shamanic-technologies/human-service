@@ -1,3 +1,5 @@
+import { messageOf } from "../lib/db-error.js";
+import { errorMessage } from "../lib/db-error.js";
 import { Router } from "express";
 import { isProfile } from "../services/profile-sources.js";
 import { and, eq, isNull, ne } from "drizzle-orm";
@@ -160,14 +162,14 @@ router.post(
           err instanceof ChatConfigError ||
           (err instanceof ChatServiceError && err.status === 0)
         ) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = errorMessage(err);
           console.error(`[human-service] backfill_desc.abort ${msg}`);
           res.status(502).json({ error: msg, backfilled, failed });
           return;
         }
         // Per-row generation failure (empty/malformed LLM output, transient
         // chat error): log + skip; the row stays null and is retried on re-run.
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = errorMessage(err);
         console.warn(
           `[human-service] backfill_desc.row_failed id=${row.id} ${msg}`
         );
@@ -263,7 +265,7 @@ router.post(
     } catch (err) {
       if (err instanceof PersonaFilterMapError) {
         console.error(`[human-service] remap.map_error ${err.message}`);
-        res.status(502).json({ error: err.message });
+        res.status(502).json({ error: messageOf(err) });
         return;
       }
       throw err;
@@ -341,7 +343,7 @@ async function runApifyToApolloMigration(
     try {
       result = await migrateApifyAudienceToApollo(row);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       // ONLY a missing-config error is truly systemic (every row would fail the
       // same way) -> abort the sweep. A per-audience provider/LLM hiccup
       // (apollo 5xx, chat 502/unreachable, a flaky refine) must NOT halt the
@@ -458,7 +460,7 @@ router.post(
           )
         )
         .catch((err) => {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = errorMessage(err);
           console.error(`[human-service] migrate_apify.run_async_aborted ${msg}`);
         });
       return;
@@ -482,7 +484,7 @@ router.post(
       // persist; a re-run resumes (migrated rows are now deprecated, skipped).
       if (err instanceof MigrationAborted) {
         res.status(502).json({
-          error: err.message,
+          error: messageOf(err),
           migrated: err.migrated,
           failed: err.failed,
         });
@@ -521,7 +523,7 @@ async function runAvatarBackfill(
         await generateAudienceAvatarViaPlatform(row.orgId, row.id, prompt);
         filled++;
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        const msg = errorMessage(err);
         if (err instanceof ChatConfigError) {
           console.error(`[human-service] backfill_avatars.abort id=${row.id} ${msg}`);
           aborted = new MigrationAborted(msg, [], failed);
@@ -620,7 +622,7 @@ router.post(
           )
         )
         .catch((err) => {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = errorMessage(err);
           console.error(`[human-service] backfill_avatars.run_async_aborted ${msg}`);
         });
       return;
@@ -641,7 +643,7 @@ router.post(
       });
     } catch (err) {
       if (err instanceof MigrationAborted) {
-        res.status(502).json({ error: err.message, failed: err.failed });
+        res.status(502).json({ error: messageOf(err), failed: err.failed });
         return;
       }
       throw err;
@@ -765,7 +767,7 @@ async function runApolloPointerBackfill(
     try {
       result = await backfillApolloAudiencePointer(row);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
       // Only a missing-config error is truly systemic (every row fails the same
       // way) -> abort. A per-row apollo hiccup (5xx, transient) is logged, counted
       // failed, and the sweep continues; the row stays pointer-less, retried later.
@@ -881,7 +883,7 @@ router.post(
           )
         )
         .catch((err) => {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = errorMessage(err);
           console.error(`[human-service] backfill_apollo_ptr.run_async_aborted ${msg}`);
         });
       return;
@@ -904,7 +906,7 @@ router.post(
       // Systemic apollo outage / missing config -> fail loud (502). Already-pointed
       // rows persist; a re-run resumes (only pointer-less rows remain).
       if (err instanceof MigrationAborted) {
-        res.status(502).json({ error: err.message, failed: err.failed });
+        res.status(502).json({ error: messageOf(err), failed: err.failed });
         return;
       }
       throw err;
@@ -961,7 +963,7 @@ router.post("/internal/backfill-audience-offers", requireApiKey, async (req, res
     // No brand-service config ⟹ no offers readable anywhere ⟹ the sweep is
     // meaningless. Fail loud rather than report every pair as an offer-less gap.
     if (err instanceof BrandConfigError) {
-      res.status(502).json({ error: err.message });
+      res.status(502).json({ error: messageOf(err) });
       return;
     }
     throw err;

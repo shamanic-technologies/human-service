@@ -19,6 +19,7 @@
 // BounceSourceError and a missing env throws BounceConfigError; both surface as
 // 502 at the route, exactly like an unreadable opt-out log.
 
+import { errorString } from "./db-error.js";
 import {
   downstreamHeaders,
   fetchWithConnectRetry,
@@ -75,7 +76,7 @@ export async function findBouncedEmails(
         body: JSON.stringify({ emails: batch }),
       });
     } catch (err) {
-      throw new BounceSourceError(0, String(err));
+      throw new BounceSourceError(0, errorString(err));
     }
     if (!res.ok) {
       const text = await res.text().catch(() => "");

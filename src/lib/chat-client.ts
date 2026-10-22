@@ -26,6 +26,7 @@ export class ChatConfigError extends Error {
   }
 }
 
+import { errorString } from "./db-error.js";
 import type { WorkflowTrackingHeaders } from "../middleware/auth.js";
 import { workflowTrackingToHeaders } from "../middleware/auth.js";
 
@@ -121,7 +122,7 @@ async function postCompleteForJson(
       res = await fetch(url, init);
     } catch (err) {
       // Thrown rejection = connect-phase / network — transient, write-safe.
-      lastErr = new ChatServiceError(0, `chat-service unreachable: ${String(err)}`);
+      lastErr = new ChatServiceError(0, `chat-service unreachable: ${errorString(err)}`);
       if (canRetry && isTransientConnectError(err)) {
         await sleep(RETRY_BACKOFF_MS[attempt]);
         continue;
@@ -299,7 +300,7 @@ export async function generateImage(args: {
       body: JSON.stringify({ prompt: args.prompt }),
     });
   } catch (err) {
-    throw new ChatServiceError(0, `chat-service unreachable: ${String(err)}`);
+    throw new ChatServiceError(0, `chat-service unreachable: ${errorString(err)}`);
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -339,7 +340,7 @@ export async function platformGenerateImage(args: {
       body: JSON.stringify({ prompt: args.prompt }),
     });
   } catch (err) {
-    throw new ChatServiceError(0, `chat-service unreachable: ${String(err)}`);
+    throw new ChatServiceError(0, `chat-service unreachable: ${errorString(err)}`);
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -404,7 +405,7 @@ export async function judgeChoices(args: {
       body: JSON.stringify({ state: args.state, questions }),
     });
   } catch (err) {
-    throw new ChatServiceError(0, `chat-service unreachable: ${String(err)}`);
+    throw new ChatServiceError(0, `chat-service unreachable: ${errorString(err)}`);
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -472,7 +473,7 @@ export async function judgeYesNo(args: {
       }),
     });
   } catch (err) {
-    throw new ChatServiceError(0, `chat-service unreachable: ${String(err)}`);
+    throw new ChatServiceError(0, `chat-service unreachable: ${errorString(err)}`);
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");

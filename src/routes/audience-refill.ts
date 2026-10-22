@@ -1,3 +1,4 @@
+import { messageOf } from "../lib/db-error.js";
 import { Router } from "express";
 import { requireApiKey, requireOrgIdOnly } from "../middleware/auth.js";
 import {
@@ -47,11 +48,11 @@ router.post("/internal/audience-refill", requireApiKey, async (req, res) => {
 
 function sendWideningError(res: import("express").Response, err: unknown): boolean {
   if (err instanceof WideningProposalNotFoundError) {
-    res.status(404).json({ error: err.message });
+    res.status(404).json({ error: messageOf(err) });
     return true;
   }
   if (err instanceof WideningProposalConflictError) {
-    res.status(409).json({ error: err.message });
+    res.status(409).json({ error: messageOf(err) });
     return true;
   }
   return false;

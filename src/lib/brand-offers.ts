@@ -20,6 +20,7 @@
 // Connect-phase retry only (thrown rejection, never a completed HTTP response) —
 // brand-service is a sibling container that may be mid-restart.
 
+import { errorString } from "./db-error.js";
 import { z } from "zod";
 import { fetchWithConnectRetry } from "../services/people-providers.js";
 
@@ -92,7 +93,7 @@ export async function listBrandOffers(
       },
     });
   } catch (err) {
-    throw new BrandServiceError(0, `brand-service unreachable: ${String(err)}`);
+    throw new BrandServiceError(0, `brand-service unreachable: ${errorString(err)}`);
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");

@@ -16,6 +16,7 @@
 // through. A non-2xx / network error throws OptOutSourceError and a missing env
 // throws OptOutConfigError; both surface as 502 at the route.
 
+import { errorString } from "./db-error.js";
 import {
   downstreamHeaders,
   fetchWithConnectRetry,
@@ -72,7 +73,7 @@ async function getOptOuts(
       headers: downstreamHeaders(key, identity),
     });
   } catch (err) {
-    throw new OptOutSourceError(0, String(err));
+    throw new OptOutSourceError(0, errorString(err));
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");

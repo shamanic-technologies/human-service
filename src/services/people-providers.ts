@@ -12,6 +12,7 @@
 // never a silent fallback, because a gateway that masks a provider outage
 // lies to the caller.
 
+import { errorString } from "../lib/db-error.js";
 import type { WorkflowTrackingHeaders } from "../middleware/auth.js";
 import { workflowTrackingToHeaders } from "../middleware/auth.js";
 import {
@@ -535,7 +536,7 @@ async function postProvider(
     });
   } catch (err) {
     // Network-phase failure after retries — fail loud.
-    throw new ProviderError(provider, 0, String(err));
+    throw new ProviderError(provider, 0, errorString(err));
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -558,7 +559,7 @@ async function getProvider(
       headers: downstreamHeaders(apiKey, identity),
     });
   } catch (err) {
-    throw new ProviderError(provider, 0, String(err));
+    throw new ProviderError(provider, 0, errorString(err));
   }
   if (!res.ok) {
     const text = await res.text().catch(() => "");

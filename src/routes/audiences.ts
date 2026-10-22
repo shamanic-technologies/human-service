@@ -1,3 +1,4 @@
+import { messageOf } from "../lib/db-error.js";
 import { Router } from "express";
 import { personStatus } from "../services/audience-status-origin.js";
 import { ensureAvatar, ensureProfileAvatar } from "../services/audience-avatar.js";
@@ -145,33 +146,33 @@ function sendProviderError(
   err: unknown
 ): void {
   if (err instanceof ChatConfigError) {
-    res.status(502).json({ error: err.message });
+    res.status(502).json({ error: messageOf(err) });
     return;
   }
   if (err instanceof ChatServiceError) {
     console.error(
       `[human-service] audiences.chat_error status=${err.status}`
     );
-    res.status(502).json({ error: err.message, upstreamStatus: err.status });
+    res.status(502).json({ error: messageOf(err), upstreamStatus: err.status });
     return;
   }
   if (err instanceof BrandConfigError || err instanceof BrandServiceError) {
     // What the client sells could not be read, so no audience target can be
     // written from it. Never stored without one.
     console.error(
-      `[human-service] audiences.brand_source_error ${err.name}: ${err.message}`
+      `[human-service] audiences.brand_source_error ${err.name}: ${messageOf(err)}`
     );
-    res.status(502).json({ error: err.message, source: "brand-service" });
+    res.status(502).json({ error: messageOf(err), source: "brand-service" });
     return;
   }
   if (err instanceof AudienceTargetOfferNotFoundError) {
-    res.status(502).json({ error: err.message, source: "brand-service" });
+    res.status(502).json({ error: messageOf(err), source: "brand-service" });
     return;
   }
   if (err instanceof ProviderUnsupportedError) {
     res
       .status(501)
-      .json({ error: err.message, provider: err.provider, capability: err.capability });
+      .json({ error: messageOf(err), provider: err.provider, capability: err.capability });
     return;
   }
   if (err instanceof OptOutConfigError || err instanceof OptOutSourceError) {
@@ -179,9 +180,9 @@ function sendProviderError(
     // read its own input must not wave people through, so this fails the request
     // rather than serving somebody who may have asked us to stop.
     console.error(
-      `[human-service] audiences.opt_out_source_error ${err.name}: ${err.message}`
+      `[human-service] audiences.opt_out_source_error ${err.name}: ${messageOf(err)}`
     );
-    res.status(502).json({ error: err.message, source: "instantly-service" });
+    res.status(502).json({ error: messageOf(err), source: "instantly-service" });
     return;
   }
   if (err instanceof BounceConfigError || err instanceof BounceSourceError) {
@@ -189,9 +190,9 @@ function sendProviderError(
     // the consent log: never serve through a gate that cannot read its own
     // input — an empty answer would hand back an address we know is dead.
     console.error(
-      `[human-service] audiences.bounce_source_error ${err.name}: ${err.message}`
+      `[human-service] audiences.bounce_source_error ${err.name}: ${messageOf(err)}`
     );
-    res.status(502).json({ error: err.message, source: "instantly-service" });
+    res.status(502).json({ error: messageOf(err), source: "instantly-service" });
     return;
   }
   if (err instanceof WonLeadsConfigError || err instanceof WonLeadsSourceError) {
@@ -199,20 +200,20 @@ function sendProviderError(
     // consent log: never serve through a gate that cannot read its own input —
     // an empty answer would hand a paying client back to cold outreach.
     console.error(
-      `[human-service] audiences.won_leads_source_error ${err.name}: ${err.message}`
+      `[human-service] audiences.won_leads_source_error ${err.name}: ${messageOf(err)}`
     );
-    res.status(502).json({ error: err.message, source: "lead-service" });
+    res.status(502).json({ error: messageOf(err), source: "lead-service" });
     return;
   }
   if (err instanceof EmailVerificationError) {
     // The revealed address could not be verified. Never serve it unverified —
     // that spends the send and the sender reputation the check protects.
     console.error(`[human-service] audiences.verify_email_error ${err.message}`);
-    res.status(502).json({ error: err.message, source: "email-verification" });
+    res.status(502).json({ error: messageOf(err), source: "email-verification" });
     return;
   }
   if (err instanceof ProviderConfigError) {
-    res.status(502).json({ error: err.message, provider: err.provider });
+    res.status(502).json({ error: messageOf(err), provider: err.provider });
     return;
   }
   if (err instanceof ProviderError) {
@@ -220,7 +221,7 @@ function sendProviderError(
       `[human-service] audiences.provider_error provider=${err.provider} status=${err.status}`
     );
     res.status(502).json({
-      error: err.message,
+      error: messageOf(err),
       provider: err.provider,
       upstreamStatus: err.status,
     });
@@ -543,7 +544,7 @@ router.post(
         res.status(409).json({
           error:
             err instanceof SplitNameConflictError
-              ? err.message
+              ? messageOf(err)
               : "An audience with this name already exists for this brand and offer.",
         });
         return;
@@ -612,7 +613,7 @@ router.post(
         res.status(409).json({
           error:
             err instanceof SplitNameConflictError
-              ? err.message
+              ? messageOf(err)
               : "An audience with this name already exists for this brand and offer.",
         });
         return;
@@ -1138,7 +1139,7 @@ router.post(
       res.json(await checkCompanyRowEmail(audience, buildIdentity(res), index));
     } catch (err) {
       if (err instanceof PreviewCompanyRowError) {
-        res.status(err.status).json({ error: err.message });
+        res.status(err.status).json({ error: messageOf(err) });
         return;
       }
       sendProviderError(res, err);
@@ -1242,7 +1243,7 @@ router.post(
       res.json(shapeEmailVerdict(result, reachParse.acceptedEmails));
     } catch (err) {
       if (err instanceof AudienceNotServableError) {
-        res.status(422).json({ error: err.message });
+        res.status(422).json({ error: messageOf(err) });
         return;
       }
       // crm-service refused the pipe's step filter: the caller's mistake, relayed
@@ -1298,7 +1299,7 @@ router.post(
       res.json(result);
     } catch (err) {
       if (err instanceof AudienceNotServableError) {
-        res.status(422).json({ error: err.message });
+        res.status(422).json({ error: messageOf(err) });
         return;
       }
       if (reachParse.stepFilter && err instanceof ProviderError && err.provider === "crm" && err.status === 400) {
@@ -1341,15 +1342,15 @@ router.post(
       res.json(shapeEmailVerdict(result, parsed.data.acceptedEmails));
     } catch (err) {
       if (err instanceof CandidateNotFoundError) {
-        res.status(404).json({ error: err.message });
+        res.status(404).json({ error: messageOf(err) });
         return;
       }
       if (err instanceof CandidateStateError) {
-        res.status(409).json({ error: err.message, status: err.currentStatus });
+        res.status(409).json({ error: messageOf(err), status: err.currentStatus });
         return;
       }
       if (err instanceof AudienceNotServableError) {
-        res.status(422).json({ error: err.message });
+        res.status(422).json({ error: messageOf(err) });
         return;
       }
       sendProviderError(res, err);
@@ -1385,11 +1386,11 @@ router.post(
       );
     } catch (err) {
       if (err instanceof CandidateNotFoundError) {
-        res.status(404).json({ error: err.message });
+        res.status(404).json({ error: messageOf(err) });
         return;
       }
       if (err instanceof CandidateStateError) {
-        res.status(409).json({ error: err.message, status: err.currentStatus });
+        res.status(409).json({ error: messageOf(err), status: err.currentStatus });
         return;
       }
       throw err;
@@ -1464,7 +1465,7 @@ router.get(
     } catch (err) {
       if (err instanceof SourcingOriginError) {
         console.error(`[human-service] audience.sourcing_origin_failed audience=${audience.id} ${err.message}`);
-        res.status(502).json({ error: err.message, source: "features-service" });
+        res.status(502).json({ error: messageOf(err), source: "features-service" });
         return;
       }
       throw err;

@@ -1,3 +1,4 @@
+import { errorMessage } from "../lib/db-error.js";
 import { Router } from "express";
 import { requireApiKey, requireOrgIdOnly } from "../middleware/auth.js";
 import { LeadSourcingSourcesQuerySchema } from "../schemas.js";
@@ -60,7 +61,7 @@ router.get("/orgs/lead-sourcing/sources", requireApiKey, requireOrgIdOnly, async
     });
   } catch (err) {
     console.error("[human-service] lead_sourcing.read_error", err);
-    res.status(502).json({ error: err instanceof Error ? err.message : String(err) });
+    res.status(502).json({ error: errorMessage(err) });
   }
 });
 

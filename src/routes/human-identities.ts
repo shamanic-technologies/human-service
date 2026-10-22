@@ -1,5 +1,6 @@
 // Internal (service-auth) routes of the fleet-wide human identity. The model and
 // its rules live in src/services/human-identity.ts.
+import { messageOf } from "../lib/db-error.js";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { requireApiKey } from "../middleware/auth.js";
 import {
@@ -54,15 +55,15 @@ function firstIssue(...results: Parsed[]): string | null {
 // Known errors -> their status; anything else is a real 500.
 function fail(err: unknown, res: Response, next: NextFunction): void {
   if (err instanceof InvalidIdentityKeyError || err instanceof FleetMergeNeedsProofError) {
-    res.status(400).json({ error: err.message });
+    res.status(400).json({ error: messageOf(err) });
   } else if (err instanceof HumanNotFoundError) {
-    res.status(404).json({ error: err.message });
+    res.status(404).json({ error: messageOf(err) });
   } else if (err instanceof LinkNotFoundError) {
     res.status(404).json({ error: "Link not found in this scope" });
   } else if (err instanceof FactNotFoundError) {
     res.status(404).json({ error: "Fact not found" });
   } else if (err instanceof StillOneHumanError || err instanceof SeparatedHumansError) {
-    res.status(409).json({ error: err.message });
+    res.status(409).json({ error: messageOf(err) });
   } else {
     next(err);
   }
