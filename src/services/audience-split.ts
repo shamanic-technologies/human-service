@@ -40,6 +40,7 @@ import {
   type SplitAxis,
 } from "../lib/audience-split-vocab.js";
 import { audienceTargetFields } from "./audience-target-text.js";
+import { noteListBuilt } from "./run-outputs.js";
 
 export { SPLIT_AXES, SPLIT_ICONS, type SplitAxis };
 
@@ -311,7 +312,9 @@ export async function confirmAudienceSplit(args: {
    * automatic refill (audience-refill.ts) stamps `auto_refill`. */
   source?: string;
 }): Promise<Array<typeof audiences.$inferSelect>> {
-  return db.transaction((tx) => insertSplitAudiences(tx, args));
+  const rows = await db.transaction((tx) => insertSplitAudiences(tx, args));
+  for (const r of rows) noteListBuilt(r.id);
+  return rows;
 }
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];

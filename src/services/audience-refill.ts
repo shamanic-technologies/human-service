@@ -71,6 +71,7 @@ import { listBrandOffers } from "../lib/brand-offers.js";
 import { completeRun, createRun } from "./runs.js";
 import { sourcingOriginSlug } from "./sourcing-origin.js";
 import { ensureTargetText } from "./audience-target-text.js";
+import { addRunOutputs } from "./run-outputs.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
 
@@ -608,6 +609,8 @@ async function refillBrand(
       segments: inside.segments.map((s, i) => ({ name: names[i], description: s.description })),
       source: AUTO_REFILL_SOURCE,
     });
+    // The refill's output: the audiences it created (declared on its run as it closes).
+    addRunOutputs(runId, created.map((r) => r.id));
     await completeRun(runId, "completed", runIdentity);
   } catch (err) {
     await completeRun(runId, "failed", runIdentity);

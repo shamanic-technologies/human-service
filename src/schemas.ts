@@ -2468,6 +2468,53 @@ registry.registerPath({
   },
 });
 
+// --- Internal: outcomes of PAST runs (COST-BACKFILL-1023-HUMAN) ---
+export const BackfillRunOutcomesQuerySchema = z.object({
+  dryRun: z.enum(["true", "false"]).optional().openapi({
+    description: "When 'true', read every past run, plan its declaration and report, declaring nothing. Defaults to false.",
+  }),
+  async: z.enum(["true", "false"]).optional().openapi({
+    description: "When 'true', answer 202 at once and run in the background (the result is logged).",
+  }),
+});
+
+const NotDeclaredSummarySchema = z.object({ runs: z.number().int(), cents: z.number() });
+
+export const BackfillRunOutcomesResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    orgs: z.number().int(),
+    runs: z.number().int().openapi({ description: "Every run human-service opened, read from runs-service." }),
+    spendingRuns: z.number().int().openapi({ description: "Runs whose billed subtree cost is above 0." }),
+    spendCents: z.number().openapi({ description: "Billed subtree cost of the spending runs, cents." }),
+    declaredRuns: z.number().int(),
+    declaredCents: z.number().openapi({ description: "Spend of the runs that carry a declaration after this backfill, cents." }),
+    occurrences: z.record(z.string(), z.number().int()).openapi({ description: "Declared occurrences by direction:outcomeKey." }),
+    notDeclared: z.record(z.string(), NotDeclaredSummarySchema).openapi({
+      description:
+        "Spending runs left undeclared, by reason: staff_experiment (support), verdict_not_kept (a loss: rolls to the serve that bought it), text_for_lists_built_elsewhere, estimate_only, duplicate_build, list_shared_with_another_run, no_list_built, lead_not_found, no_serve_row, not_completed.",
+    }),
+    notDeclaredRuns: z.array(z.object({ runId: z.string(), taskName: z.string(), costCents: z.number(), reason: z.string() })),
+    recordedCount: z.number().int().openapi({ description: "Occurrences runs-service recorded now (0 on a dry run or a replay)." }),
+    alreadyRecordedCount: z.number().int(),
+  })
+  .openapi("BackfillRunOutcomesResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/backfill-run-outcomes",
+  summary:
+    "One-time backfill: declare on every past run human-service opened the outcomes it produced (audience_built, email_checked), read from our own rows, as if declared when the run ran (idempotent, dry-runnable)",
+  security: [{ apiKey: [] }],
+  request: { query: BackfillRunOutcomesQuerySchema },
+  responses: {
+    200: { description: "Backfill result", content: { "application/json": { schema: BackfillRunOutcomesResponseSchema } } },
+    202: { description: "Accepted (async=true): runs in the background and logs its result" },
+    401: { description: "Unauthorized" },
+    502: { description: "runs-service or lead-service unreadable / unconfigured: nothing declared past the failing call", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
 // --- Internal: one-time backfill of per-audience descriptions (pre-#82 rows) ---
 export const BackfillAudienceDescriptionsQuerySchema = z.object({
   dryRun: z

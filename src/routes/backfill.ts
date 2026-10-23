@@ -10,6 +10,7 @@ import {
   RemapAudienceFiltersQuerySchema,
   BackfillAudienceDescriptionsQuerySchema,
   BackfillAudienceTargetTextsQuerySchema,
+  BackfillRunOutcomesQuerySchema,
   MigrateApifyAudiencesQuerySchema,
   BackfillAudienceAvatarsQuerySchema,
   BackfillCanonicalLinksQuerySchema,
@@ -38,9 +39,40 @@ import {
 } from "../services/audiences.js";
 import { ChatConfigError, ChatServiceError } from "../lib/chat-client.js";
 import { ProviderConfigError } from "../services/people-providers.js";
+import { BackfillUpstreamError, backfillRunOutcomes } from "../services/run-outcomes-backfill.js";
 import { backfillTargetTexts } from "../services/audience-target-text.js";
 
 const router = Router();
+
+// POST /internal/backfill-run-outcomes?dryRun=true|false&async=true|false
+//
+// COST-BACKFILL-1023-HUMAN: declare on every PAST run human-service opened the
+// outcomes it produced (audience_built, email_checked), read from our own rows,
+// through runs-service's backfill door. Idempotent (a re-run records nothing
+// new), dry-runnable (plans + reports, declares nothing). See
+// src/services/run-outcomes-backfill.ts. NOT on boot.
+router.post("/internal/backfill-run-outcomes", requireApiKey, async (req, res) => {
+  const parsed = BackfillRunOutcomesQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+  const opts = { dryRun: parsed.data.dryRun === "true" };
+  if (parsed.data.async === "true") {
+    void backfillRunOutcomes(opts).catch((err) => console.error("[human-service] run_outcomes_backfill.crashed", err));
+    res.status(202).json({ accepted: true, dryRun: opts.dryRun });
+    return;
+  }
+  try {
+    res.json(await backfillRunOutcomes(opts));
+  } catch (err) {
+    if (err instanceof BackfillUpstreamError) {
+      res.status(502).json({ error: err.message, source: err.source });
+      return;
+    }
+    throw err;
+  }
+});
 
 const BACKFILL_SOURCE = "brand_persona_backfill";
 

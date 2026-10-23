@@ -87,6 +87,8 @@ import { takeRereachForServe } from "./catch-all-rereach.js";
 import { tagMemberSource } from "./audience-member-sources.js";
 import { markSourceServed, persistSourceExhaustion, pickServeSource, sourceView, type AudienceSource } from "./audience-sources.js";
 import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
+import { noteListBuilt } from "./run-outputs.js";
+import { withRunOutputs } from "./run-outputs.js";
 
 // Tag served contacts as members of an audience (provenance membership). Upserts
 // the canonical person, then the audience_members bridge row (idempotent on
@@ -1966,11 +1968,13 @@ export async function backfillApolloAudiencePointer(
   }
   const runIdentity = { orgId: base.orgId, userId: base.userId, workflowTracking: tracking };
   try {
-    const result = await buildPointerUnder(row, {
-      ...base,
-      runId: ownRunId,
-      workflowTracking: tracking,
-    });
+    const result = await withRunOutputs(ownRunId, () =>
+      buildPointerUnder(row, {
+        ...base,
+        runId: ownRunId,
+        workflowTracking: tracking,
+      })
+    );
     await completeRun(ownRunId, "completed", runIdentity);
     return result;
   } catch (err) {
@@ -2020,7 +2024,7 @@ async function buildPointerUnder(
   if (!builtFilters || Object.keys(builtFilters).length === 0) {
     return null;
   }
-  await db
+  const written = await db
     .update(audiences)
     .set({
       apolloAudienceId: built.apolloAudienceId,
@@ -2031,7 +2035,11 @@ async function buildPointerUnder(
       ...(chooserTrace ? { chooserTrace } : {}),
       updatedAt: new Date(),
     })
-    .where(and(eq(audiences.id, row.id), isNull(audiences.apolloAudienceId)));
+    .where(and(eq(audiences.id, row.id), isNull(audiences.apolloAudienceId)))
+    .returning({ id: audiences.id });
+  // Only the build that WROTE the pointer built the list (a concurrent duplicate's
+  // result is discarded by the isNull guard and produced nothing).
+  if (written.length > 0) noteListBuilt(row.id);
   return {
     id: row.id,
     name: row.name,
