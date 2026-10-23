@@ -15,6 +15,7 @@ import { audiences, type Audience } from "../db/schema.js";
 import { createApolloLinkedinEngagementAudience } from "../lib/apollo-audiences.js";
 import type { Identity } from "./people-providers.js";
 import { audienceTargetFields } from "./audience-target-text.js";
+import { noteListBuilt } from "./run-outputs.js";
 
 export const LINKEDIN_ENGAGEMENT_SOURCE = "linkedin_engagement_signal";
 
@@ -73,5 +74,6 @@ export async function createLinkedinEngagementAudience(args: {
   console.log(
     `[human-service] audience.linkedin_engagement_created org=${args.orgId} brand=${args.brandId} audience=${row.id} apollo=${apollo.apolloAudienceId} pages=${args.competitorPages.length}`
   );
+  noteListBuilt(row.id);
   return row;
 }

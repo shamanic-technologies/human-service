@@ -77,6 +77,8 @@ import { getMigrationState } from "../lib/migration-state.js";
 import { ensureLeadSourcingChoice, LEAD_SOURCING_SLUG } from "./lead-sourcing.js";
 import { isSystemResumable, systemResumable, systemStatus } from "./audience-status-origin.js";
 import { isSourceOn, offerSources, ownListOn, setOfferSourcesStatus, sourcesOf, syncAudienceLiveness } from "./audience-sources.js";
+import { noteListBuilt } from "./run-outputs.js";
+import { withRunOutputs } from "./run-outputs.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
 
@@ -604,14 +606,16 @@ async function createList(args: ApplySourceArgs, list: AudienceListKind, result:
   );
   let ok = false;
   try {
-    if (list === "linkedin_engagement") await createEngagement(args, userId, identity, result);
-    else if (list === "apollo_search") await createColdFilters(args, userId, identity, result);
-    else if (list === "apollo_buying_signal") await createBuyingSignals(args, userId, identity, result);
-    else if (list === "crm_contacts") await createCrmAudiences(args, userId, identity, result);
-    else {
-      result.outcome = "retired_origin";
-      result.reason = `nothing builds a ${list} list any more`;
-    }
+    await withRunOutputs(runId, async () => {
+      if (list === "linkedin_engagement") await createEngagement(args, userId, identity, result);
+      else if (list === "apollo_search") await createColdFilters(args, userId, identity, result);
+      else if (list === "apollo_buying_signal") await createBuyingSignals(args, userId, identity, result);
+      else if (list === "crm_contacts") await createCrmAudiences(args, userId, identity, result);
+      else {
+        result.outcome = "retired_origin";
+        result.reason = `nothing builds a ${list} list any more`;
+      }
+    });
     ok = result.outcome !== "failed";
   } finally {
     await completeRun(runId, ok ? "completed" : "failed", runIdentity);
@@ -771,6 +775,7 @@ async function createCrmAudiences(args: ApplySourceArgs, userId: string, identit
       }))
     )
     .returning();
+  for (const r of rows) noteListBuilt(r.id);
   result.outcome = rows.length > 0 ? "created" : "no_target";
 }
 

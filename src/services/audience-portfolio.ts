@@ -71,6 +71,7 @@ import {
   SIGNAL_WINDOW_DAYS,
   type ProfileSignalOutcome,
 } from "./profile-sources.js";
+import { withRunOutputs } from "./run-outputs.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
 type PortfolioRow = typeof audiencePortfolios.$inferSelect;
@@ -195,6 +196,8 @@ async function runLaunch(args: LaunchPortfolioArgs, key: string): Promise<Portfo
     identity = { ...identity, runId: ownRunId };
   }
   const runIdentity = { orgId: args.orgId, userId: args.userId, workflowTracking: tracking };
+  // Work under OUR run records the lists it creates on it (declared as it closes).
+  const underOwnRun = <T>(fn: () => Promise<T>): Promise<T> => (ownRunId ? withRunOutputs(ownRunId, fn) : fn());
   const closeRun = async (status: "completed" | "failed") => {
     if (ownRunId) await completeRun(ownRunId, status, runIdentity);
   };
@@ -218,7 +221,7 @@ async function runLaunch(args: LaunchPortfolioArgs, key: string): Promise<Portfo
   let target = portfolio.target;
   if (!coldIds) {
     try {
-      const cold = await buildColdAudiences(icpText, args, coldIdentity);
+      const cold = await underOwnRun(() => buildColdAudiences(icpText, args, coldIdentity));
       coldIds = cold.ids;
       target = cold.target;
     } catch (err) {
@@ -231,7 +234,7 @@ async function runLaunch(args: LaunchPortfolioArgs, key: string): Promise<Portfo
       .where(eq(audiencePortfolios.id, portfolio.id));
   }
 
-  const background = finishSignals({ portfolio, args, identity, signalIdentity, signalOrigin, closeRun })
+  const background = underOwnRun(() => finishSignals({ portfolio, args, identity, signalIdentity, signalOrigin, closeRun }))
     .catch((err) =>
       // The row stays `building` with its cold set: the next call resumes.
       console.error(`[human-service] audience_portfolio.background_failed portfolio=${portfolio.id}`, err)

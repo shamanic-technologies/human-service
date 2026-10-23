@@ -60,6 +60,7 @@ import {
   sourceKeyOf,
   type ProfileSignalOutcome,
 } from "./profile-sources.js";
+import { withRunOutputs } from "./run-outputs.js";
 
 /** apollo-service accepts 1-3 competitor pages per audience. */
 export const MAX_COMPETITOR_PAGES = 3;
@@ -543,7 +544,7 @@ async function underOwnRun<T>(
     console.error(`[human-service] competitor_engagement.sweep_run_failed org=${orgId} brand=${brandId} task=${taskName}`);
     return { skip: "run_failed" };
   }
-  const value = await fn({ orgId, userId, runId, workflowTracking: tracking });
+  const value = await withRunOutputs(runId, () => fn({ orgId, userId, runId, workflowTracking: tracking }));
   await completeRun(runId, isFailed(value) ? "failed" : "completed", { orgId, userId, workflowTracking: tracking });
   return { value };
 }

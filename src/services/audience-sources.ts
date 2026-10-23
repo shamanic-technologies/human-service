@@ -43,6 +43,7 @@ import { isSystemResumable, systemStatus } from "./audience-status-origin.js";
 export { tagMemberSource } from "./audience-member-sources.js";
 import { LEAD_SOURCING_SLUG, readLeadSourcingChoice } from "./lead-sourcing.js";
 import { pgErrorCode } from "../lib/pg-error.js";
+import { noteListBuilt } from "./run-outputs.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
 
@@ -328,6 +329,7 @@ export async function addSource(input: NewSource): Promise<{ source: AudienceSou
     console.log(
       `[human-service] audience_source.created org=${source.orgId} brand=${source.brandId} audience=${source.audienceId} source=${source.id} list=${source.list} signal=${source.signalType ?? "-"} status=${source.status}`
     );
+    noteListBuilt(source.id);
     await syncAudienceLiveness([input.audience.id]);
     return { source, created: true };
   } catch (err) {
