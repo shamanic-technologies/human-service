@@ -69,6 +69,7 @@ section — the port binds first).
 | Internal | `POST /internal/recover-suppressions/revert` | apiKey | Undo a recovery: restore every archived suppression row carrying `reason` verbatim + drop the ledger rows. A person re-suppressed by a fresh serve keeps the newer row |
 | Internal | `POST /internal/backfill-sent-suppressions` | apiKey | One-time data repair (the INVERSE of the recovery above): for a caller-supplied set of `{orgId, brandId, email, sentAt}`, create the missing `brand_suppressions` row dated from the REAL send, so people actually EMAILED before per-brand suppression existed (2026-06-15) stop being re-served and re-bought for the remainder of their own window. Idempotent (reversible `suppression_backfills` ledger keyed on `reason`), `?dryRun=true`. Dedicated **25 MB** body parser. NOT a sweep — the set is supplied, never inferred, and never derived from bare serves |
 | Internal | `POST /internal/backfill-sent-suppressions/revert` | apiKey | Undo a backfill: delete exactly the suppression rows that `reason` created + drop the ledger rows. A row re-served since (its `last_served_at` moved) records a real emission and is kept |
+| Internal | `POST /internal/backfill-run-outcomes` | apiKey | Declare on every PAST run we opened the outcomes it produced (`audience_built`, `email_checked`) through runs-service's backfill door (`?dryRun`, `?async`, idempotent). See "Outcomes of the runs we open" |
 | Internal | `POST /internal/sync-send-suppressions` | apiKey | Run the send -> suppression sync now (also every 2 min): copy every real email instantly-service sent onto the brand's suppression window. See "Window runs from the EMAIL" |
 | Internal | `POST /internal/backfill-audience-target-texts` | apiKey | One-time data fix: write every pre-0033 audience's own text (`targetText`), by the one rule in "Audience text" below (idempotent, `?dryRun=true`, `?async=true`, `?brandId=`, platform-billed) |
 | Internal | `POST /internal/audience-refill` | apiKey | Run the audience refill now (`?dryRun=true` reports who WOULD be refilled, spending nothing; `?brandId=` narrows). Per-brand `action`: `refilled` (inside the validated target) / `widening_proposed` / `would_refill` / `skipped`. See "Audience refill" below |
@@ -3025,6 +3026,38 @@ Run tracking is wired through `src/services/runs.ts` for the legacy
 `/humans/*` endpoints. The CRM `/orgs/lists/*` endpoints currently rely on
 the caller's `x-run-id` for downstream tracing only — they don't create
 their own runs because list CRUD is short, idempotent, and free.
+
+### Outcomes of the runs we open (COST-ACCOUNTING-1023, `src/services/run-outputs.ts`)
+
+runs-service is the ledger of what each outcome costs to produce: a run's whole cost (own rows + descendants
+that declare nothing: chat-service LLM calls) is split over the outcome occurrences it DECLARES; nothing
+declared = "produced none". Our one duty: every run human-service OPENS names the lists it built.
+- **Outcome** `audience_built` (catalogue step declared 2026-10-23, subjectKind object, toward `lead_identified`
+  at 19 %: 157 of 807 lists built in 90 days reached a lead), subject `human-service` + the audience id OR the
+  `audience_sources` id (uuids, never colliding).
+- **Mechanism**: the work of an own run runs inside `withRunOutputs(runId, fn)` (AsyncLocalStorage `run()`;
+  NEVER `enterWith`: it re-labels the caller's context once it awaits, pinned by
+  `tests/unit/run-outcomes.test.ts`); list writers call `noteListBuilt(id)` (`confirmAudienceSplit` after
+  commit, `addSource` when created, the linkedin-engagement row, CRM per-file rows, the pointer build only when
+  ITS update wrote the pointer); `completeRun` declares the set (`POST /v1/runs/:id/outcomes`), whatever the
+  status, before closing. A write under a CALLER's run (inbound x-run-id) is in no context: the caller declares.
+  Declaration failure = logged loud with the ids, never thrown. A list noted after its run closed is logged.
+- **Runs that declare**: audience-pointer-build, audience-refill (explicit `addRunOutputs`), audience-portfolio-
+  launch, source-campaign-audience, competitor-engagement-audience, profile-signal-lists.
+- **Runs that declare nothing, on purpose**: audience-target-draft (writes the text of audiences another step
+  creates; $1.25 since inception), audience-split-estimate (onboarding sizing, no list), audience-preview-
+  companies (signed-out preview, apollo-service declares its own spend). Measured in the backfill report.
+- **Backfill of past runs** `POST /internal/backfill-run-outcomes?dryRun&async` (`run-outcomes-backfill.ts`):
+  lists our runs per org from runs-service `GET /v1/runs?serviceName=human-service&include=subtreeCost`, plans
+  from our rows, declares through `POST /v1/platform-runs/outcomes/batch` with `occurredAt: run_started_at`
+  (idempotent: a re-run records nothing). Rules: verify-email (2026-09-25, when we verified emails ourselves)
+  = `email_checked` produced + `email_found` consumed on the LEAD (lead-service `POST
+  /internal/leads/ids/resolve`), paired with the `lead_serves` row its parent serve wrote right after it
+  (1006/1006 paid runs pair, gap <= 0.4 s); a verdict not kept (invalid/risky) = loss, nothing declared;
+  pointer build = first completed build of its `audienceId`; list-building runs = lists created in their
+  window (org, brand, a source tag the task writes), a list inside two runs' windows = nobody's. Only runs that
+  spent. Staff experiments (prompt-test, verify-chooser, audience-suggest-verif*, diag-*, crm-email-lookup-probe)
+  are support, never declared.
 
 ## Workflow tracking headers (`x-campaign-id` / `x-brand-id` / `x-workflow-slug` / `x-audience-id` / `x-feature-slug`)
 

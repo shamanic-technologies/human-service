@@ -39,6 +39,7 @@ import {
   type ChatIdentity,
 } from "../lib/chat-client.js";
 import { completeRun, createRun } from "./runs.js";
+import { withRunOutputs } from "./run-outputs.js";
 
 // Same switch as every other onboarding audience call (owner decision
 // 2026-09-29): Claude Sonnet 5.5, which rejects temperature, so no sampling
@@ -186,7 +187,7 @@ async function withTargetRun<T>(
   }
   const runIdentity = { orgId: identity.orgId, userId: identity.userId, workflowTracking: tracking };
   try {
-    const out = await fn({ ...identity, runId, workflowTracking: tracking });
+    const out = await withRunOutputs(runId, () => fn({ ...identity, runId, workflowTracking: tracking }));
     await completeRun(runId, "completed", runIdentity);
     return out;
   } catch (err) {
