@@ -22,7 +22,7 @@
     "@asteasolutions/zod-to-openapi": "^8.4.0",
     "cors": "^2.8.5",
     "drizzle-orm": "^0.45.4",
-    "express": "^4.21.0",
+    "express": "^4.22.3",
     "postgres": "^3.4.0",
     "tldts": "^7.4.16",
     "zod": "^4.0.0"
@@ -34,8 +34,13 @@
     "@types/supertest": "^6.0.3",
     "drizzle-kit": "^0.31.11",
     "supertest": "^7.0.0",
-    "tsx": "^4.0.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.3.0",
     "vitest": "^4.1.12"
+  },
+  "overrides": {
+    "@esbuild-kit/core-utils": {
+      "esbuild": "^0.25.12"
+    }
   }
 }
