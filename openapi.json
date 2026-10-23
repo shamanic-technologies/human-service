@@ -3795,6 +3795,109 @@
           "sample"
         ]
       },
+      "BackfillRunOutcomesResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "orgs": {
+            "type": "integer"
+          },
+          "runs": {
+            "type": "integer",
+            "description": "Every run human-service opened, read from runs-service."
+          },
+          "spendingRuns": {
+            "type": "integer",
+            "description": "Runs whose billed subtree cost is above 0."
+          },
+          "spendCents": {
+            "type": "number",
+            "description": "Billed subtree cost of the spending runs, cents."
+          },
+          "declaredRuns": {
+            "type": "integer"
+          },
+          "declaredCents": {
+            "type": "number",
+            "description": "Spend of the runs that carry a declaration after this backfill, cents."
+          },
+          "occurrences": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Declared occurrences by direction:outcomeKey."
+          },
+          "notDeclared": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "runs": {
+                  "type": "integer"
+                },
+                "cents": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "runs",
+                "cents"
+              ]
+            },
+            "description": "Spending runs left undeclared, by reason: staff_experiment (support), verdict_not_kept (a loss: rolls to the serve that bought it), text_for_lists_built_elsewhere, estimate_only, duplicate_build, list_shared_with_another_run, no_list_built, lead_not_found, no_serve_row, not_completed."
+          },
+          "notDeclaredRuns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "runId": {
+                  "type": "string"
+                },
+                "taskName": {
+                  "type": "string"
+                },
+                "costCents": {
+                  "type": "number"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "runId",
+                "taskName",
+                "costCents",
+                "reason"
+              ]
+            }
+          },
+          "recordedCount": {
+            "type": "integer",
+            "description": "Occurrences runs-service recorded now (0 on a dry run or a replay)."
+          },
+          "alreadyRecordedCount": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "dryRun",
+          "orgs",
+          "runs",
+          "spendingRuns",
+          "spendCents",
+          "declaredRuns",
+          "declaredCents",
+          "occurrences",
+          "notDeclared",
+          "notDeclaredRuns",
+          "recordedCount",
+          "alreadyRecordedCount"
+        ]
+      },
       "BackfillAudienceDescriptionsResponse": {
         "type": "object",
         "properties": {
@@ -12453,6 +12556,74 @@
           },
           "401": {
             "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/backfill-run-outcomes": {
+      "post": {
+        "summary": "One-time backfill: declare on every past run human-service opened the outcomes it produced (audience_built, email_checked), read from our own rows, as if declared when the run ran (idempotent, dry-runnable)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', read every past run, plan its declaration and report, declaring nothing. Defaults to false."
+            },
+            "required": false,
+            "description": "When 'true', read every past run, plan its declaration and report, declaring nothing. Defaults to false.",
+            "name": "dryRun",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', answer 202 at once and run in the background (the result is logged)."
+            },
+            "required": false,
+            "description": "When 'true', answer 202 at once and run in the background (the result is logged).",
+            "name": "async",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Backfill result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillRunOutcomesResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted (async=true): runs in the background and logs its result"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "runs-service or lead-service unreadable / unconfigured: nothing declared past the failing call",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
