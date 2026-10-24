@@ -1,6 +1,7 @@
 import type { WorkflowTrackingHeaders } from "../middleware/auth.js";
 import { workflowTrackingToHeaders } from "../middleware/auth.js";
 import { takeRunOutputs } from "./run-outputs.js";
+import type { PlatformSupportKind } from "../lib/chat-client.js";
 
 /** Catalogue step of every list human-service builds (see run-outputs.ts). */
 export const AUDIENCE_BUILT = "audience_built";
@@ -22,9 +23,48 @@ interface IdentityContext {
   workflowTracking?: WorkflowTrackingHeaders;
 }
 
+/**
+ * Support functions (runs-service, cost-accounting doctrine): spend that produces
+ * no outcome BY DESIGN, named and reported apart. A run marked support at
+ * creation never declares an outcome.
+ */
+export type SupportFunction = PlatformSupportKind;
+
+export interface RunSupport {
+  kind: SupportFunction;
+  reason: string;
+}
+
+/**
+ * The runs human-service opens whose spend produces no outcome by design
+ * (LEDGER-HISTORY-1024). Marked at creation; the same table marks the past ones
+ * (run-outcomes-backfill.ts), so a run made today and one made last month read
+ * the same in the ledger.
+ */
+export const TASK_SUPPORT: Record<string, RunSupport> = {
+  // Writes the person-level target text of audiences a split confirm / suggestion
+  // creates after it: an onboarding step, never a list of its own.
+  "audience-target-draft": {
+    kind: "product_feature",
+    reason: "audience target draft: the target text of audiences an onboarding step creates, no list of its own",
+  },
+  // Sizes the proposed segments for the signed-out onboarding cards: creates nothing.
+  "audience-split-estimate": {
+    kind: "product_feature",
+    reason: "audience split estimate: sizes onboarding segment cards, creates no list",
+  },
+  // The signed-out companies preview (apollo-service declares what it researched).
+  "audience-preview-companies": {
+    kind: "product_feature",
+    reason: "audience companies preview: signed-out onboarding sample, no list built",
+  },
+};
+
 interface CreateRunParams extends IdentityContext {
   parentRunId?: string;
   taskName: string;
+  /** Mark the run SUPPORT at creation (its spend produces no outcome by design). */
+  support?: RunSupport;
 }
 
 interface CostItem {
@@ -53,6 +93,7 @@ export async function createRun(
       body: JSON.stringify({
         serviceName: "human-service",
         taskName: params.taskName,
+        ...(params.support ? { support: params.support } : {}),
       }),
     });
 

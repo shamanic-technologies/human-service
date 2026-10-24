@@ -3,7 +3,9 @@ import { addRunOutputs, noteListBuilt, takeRunOutputs, withRunOutputs } from "..
 import {
   attributeLists,
   batchesOf,
+  coverageByDay,
   pairVerifyRuns,
+  supportMarkCalls,
   planRunOutcomes,
   type BuiltList,
   type PastRun,
@@ -112,6 +114,19 @@ describe("run outputs: what a run we opened built", () => {
       await completeRun("run-empty", "completed", { orgId: "org-1", userId: "user-1" });
       expect(calls.map((c) => c.url)).toEqual(["http://runs/v1/runs/run-empty"]);
     });
+
+    it("a no-outcome-by-design task is marked support at creation; a list-building one is not", async () => {
+      const { createRun, TASK_SUPPORT } = await import("../../src/services/runs.js");
+      await createRun({ orgId: "org-1", userId: "user-1", taskName: "audience-split-estimate", support: TASK_SUPPORT["audience-split-estimate"] });
+      await createRun({ orgId: "org-1", userId: "user-1", taskName: "audience-refill" });
+      expect(calls[0].body).toEqual({
+        serviceName: "human-service",
+        taskName: "audience-split-estimate",
+        support: { kind: "product_feature", reason: TASK_SUPPORT["audience-split-estimate"].reason },
+      });
+      expect(calls[1].body).toEqual({ serviceName: "human-service", taskName: "audience-refill" });
+      expect(Object.keys(TASK_SUPPORT).sort()).toEqual(["audience-preview-companies", "audience-split-estimate", "audience-target-draft"]);
+    });
   });
 });
 
@@ -210,8 +225,8 @@ describe("backfill planning", () => {
     expect(byRun.get("launch-b")).toBeUndefined();
     expect([...shared].sort()).toEqual(["launch-a", "launch-b"]);
 
-    const { planned, notDeclared } = planRunOutcomes({
-      runs: [refill, a, b, run({ id: "draft", taskName: "audience-target-draft" }), run({ id: "probe", taskName: "prompt-test" }), run({ id: "free", taskName: "audience-refill", costCents: 0, startedAt: "2026-10-02T10:00:00.000Z", completedAt: "2026-10-02T10:01:00.000Z" })],
+    const { planned, notDeclared, support } = planRunOutcomes({
+      runs: [refill, a, b, run({ id: "draft", taskName: "audience-target-draft" }), run({ id: "probe", taskName: "prompt-test" }), run({ id: "mystery", taskName: "some-new-task" }), run({ id: "free", taskName: "audience-refill", costCents: 0, startedAt: "2026-10-02T10:00:00.000Z", completedAt: "2026-10-02T10:01:00.000Z" })],
       pointerAudiencesWithPointer: new Set(),
       verifyPairs: new Map(),
       leadOf: () => null,
@@ -223,8 +238,51 @@ describe("backfill planning", () => {
     ]);
     expect(Object.fromEntries(notDeclared.map((n) => [n.runId, n.reason]))).toEqual({
       "launch-b": "list_shared_with_another_run",
-      draft: "text_for_lists_built_elsewhere",
-      probe: "staff_experiment",
+      mystery: "unclassified",
+    });
+    expect(support.map((x) => [x.runId, x.support.kind])).toEqual([
+      ["draft", "product_feature"],
+      ["probe", "staff_experiment"],
+    ]);
+  });
+
+  it("support tasks are marked whatever they spent; marks group by function, <= 5000 per call", () => {
+    const runs = [
+      run({ id: "e0", taskName: "audience-split-estimate", costCents: 0 }),
+      run({ id: "e1", taskName: "audience-split-estimate" }),
+      run({ id: "pc", taskName: "audience-preview-companies" }),
+      run({ id: "x1", taskName: "verify-chooser" }),
+    ];
+    const plan = planRunOutcomes({ runs, pointerAudiencesWithPointer: new Set(), verifyPairs: new Map(), leadOf: () => null, lists: [] });
+    expect(plan.planned).toEqual([]);
+    expect(plan.notDeclared).toEqual([]);
+    expect(plan.support.map((x) => x.runId)).toEqual(["e0", "e1", "pc", "x1"]);
+    const calls = supportMarkCalls(plan.support);
+    expect(calls.map((c) => [c.support.kind, c.runIds])).toEqual([
+      ["product_feature", ["e0", "e1"]],
+      ["product_feature", ["pc"]],
+      ["staff_experiment", ["x1"]],
+    ]);
+    const many = Array.from({ length: 5001 }, (_, i) => ({ runId: `r${String(i).padStart(5, "0")}`, taskName: "prompt-test", costCents: 0, startedAt: "2026-10-01T00:00:00.000Z", support: { kind: "staff_experiment" as const, reason: "x" } }));
+    expect(supportMarkCalls(many).map((c) => c.runIds.length)).toEqual([5000, 1]);
+  });
+
+  it("every cent of a day lands on a declared occurrence, a support mark or a run with no output", () => {
+    const runs = [
+      run({ id: "v-kept", taskName: "verify-email", parentRunId: "parent-1", costCents: 0.5, startedAt: "2026-09-25T00:00:05.000Z" }),
+      run({ id: "v-lost", taskName: "verify-email", parentRunId: "parent-1", costCents: 0.25, startedAt: "2026-09-25T00:00:20.000Z" }),
+      run({ id: "draft", taskName: "audience-target-draft", costCents: 2, startedAt: "2026-09-25T09:00:00.000Z" }),
+      run({ id: "odd", taskName: "some-new-task", costCents: 1, startedAt: "2026-09-26T09:00:00.000Z" }),
+    ];
+    const serves = [
+      serve({ id: "s1", servedAt: new Date("2026-09-25T00:00:10.000Z"), verdict: "valid" }),
+      serve({ id: "s2", servedAt: new Date("2026-09-25T00:00:25.000Z"), verdict: "invalid" }),
+    ];
+    const plan = planRunOutcomes({ runs, pointerAudiencesWithPointer: new Set(), verifyPairs: pairVerifyRuns(runs, serves), leadOf: () => "lead-1", lists: [] });
+    const at = new Map(runs.map((r) => [r.id, r.startedAt]));
+    expect(coverageByDay(plan, (id) => at.get(id)!)).toEqual({
+      "2026-09-25": { spendCents: 2.75, declaredCents: 0.5, supportCents: 2, noOutputCents: 0.25, unclassifiedCents: 0 },
+      "2026-09-26": { spendCents: 1, declaredCents: 0, supportCents: 0, noOutputCents: 0, unclassifiedCents: 1 },
     });
   });
 

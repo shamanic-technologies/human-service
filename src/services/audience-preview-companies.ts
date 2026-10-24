@@ -23,7 +23,7 @@ import {
   isLinkedinEngagementFilters,
   type ApolloPreviewCompanyRow,
 } from "../lib/apollo-audiences.js";
-import { completeRun, createRun } from "./runs.js";
+import { completeRun, createRun, TASK_SUPPORT } from "./runs.js";
 import { audienceSourcingOriginSlug } from "./sourcing-origin.js";
 import { ProviderError, type Identity } from "./people-providers.js";
 import type { AudiencePreviewReason } from "./audience-preview.js";
@@ -258,6 +258,7 @@ async function withRun<T>(
     orgId: identity.orgId,
     userId: identity.userId,
     taskName: "audience-preview-companies",
+    support: TASK_SUPPORT["audience-preview-companies"],
     workflowTracking: tracking,
   });
   if (!ownRunId) {
