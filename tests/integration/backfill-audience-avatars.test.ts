@@ -5,6 +5,7 @@ import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import { audiences } from "../../src/db/schema.js";
 import { eq } from "drizzle-orm";
+import { AVATAR_BACKFILL_SUPPORT } from "../../src/services/audiences.js";
 
 const app = createTestApp();
 const apiKeyHeader = {
@@ -77,8 +78,11 @@ describe("POST /internal/backfill-audience-avatars", () => {
   it("real run generates null avatars from chat-service URLs and is idempotent", async () => {
     await seed();
     let generated = 0;
-    fetchSpy.mockImplementation(async (url: string) => {
+    fetchSpy.mockImplementation(async (url: string, init?: { headers?: Record<string, string>; body?: string }) => {
       if (String(url).endsWith("/internal/platform-images/generate")) {
+        // Whose work: a declared support function, never a run (PLATFORM-CALLER-RUN-1024).
+        expect(JSON.parse(init?.body ?? "{}").support).toEqual(AVATAR_BACKFILL_SUPPORT);
+        expect(Object.keys(init?.headers ?? {}).map((k) => k.toLowerCase())).not.toContain("x-run-id");
         generated++;
         return imageOk(`https://cdn.test/audiences/${generated}.png`);
       }

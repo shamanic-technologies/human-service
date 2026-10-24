@@ -219,9 +219,43 @@ export async function completeJson(args: {
   });
 }
 
+// WHOSE WORK a platform call is (chat-service COST-SUPPORT-1024, LOCKED, live
+// from chat-service v0.63.111). Every call to an /internal/platform-* route
+// states exactly ONE of: the run of THIS service doing the work (`runId`, sent
+// as `x-run-id`: the platform run becomes its child and the spend rides the
+// outcome that run declares), or, only when no run stands behind the call by
+// design, the support function it serves (`support`, sent in the body: reported
+// apart, never on an outcome). Both at once is a 400; neither will soon be one.
+// Never pass a run id forwarded from an inbound request: it is not our run.
+export const PLATFORM_SUPPORT_KINDS = [
+  "payment_fees",
+  "brand_setup",
+  "copilot",
+  "platform_llm",
+  "staff_experiment",
+  "product_feature",
+  "retired_product",
+] as const;
+export type PlatformSupportKind = (typeof PLATFORM_SUPPORT_KINDS)[number];
+export interface PlatformSupport {
+  kind: PlatformSupportKind;
+  reason: string;
+}
+export type PlatformCaller =
+  | { runId: string; support?: never }
+  | { support: PlatformSupport; runId?: never };
+
+function platformCallerHeaders(caller: PlatformCaller): Record<string, string> {
+  return caller.runId ? { "x-run-id": caller.runId } : {};
+}
+
+function platformCallerBody(caller: PlatformCaller): { support?: PlatformSupport } {
+  return caller.support ? { support: caller.support } : {};
+}
+
 // One-shot JSON LLM completion via chat-service POST /internal/platform-complete
 // — the ORG-LESS, service-auth platform path (auth = x-api-key only, no
-// x-org-id/x-user-id/x-run-id). chat-service resolves the PLATFORM provider key
+// x-org-id/x-user-id; `caller` says whose work it is, see PlatformCaller). chat-service resolves the PLATFORM provider key
 // and OWNS whatever cost the call incurs (platform-run declaration lives there),
 // so human-service declares none. Use this for internal service-to-service LLM
 // work that does NOT belong to a specific org/user (e.g. a one-time historical
@@ -238,13 +272,16 @@ export async function platformCompleteJson(args: {
   model?: string;
   temperature?: number;
   disableThinking?: boolean;
+  caller: PlatformCaller;
 }): Promise<Record<string, unknown>> {
   const { url, key } = requireChat();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-API-Key": key,
+    ...platformCallerHeaders(args.caller),
   };
   const body = {
+    ...platformCallerBody(args.caller),
     message: args.message,
     systemPrompt: args.systemPrompt,
     responseFormat: "json",
@@ -317,7 +354,8 @@ export async function generateImage(args: {
 }
 
 // Platform twin of generateImage — POST /internal/platform-images/generate, the
-// ORG-LESS, service-auth path (x-api-key only, no x-org-id/x-user-id/x-run-id).
+// ORG-LESS, service-auth path (x-api-key only, no x-org-id/x-user-id; `caller`
+// says whose work it is, see PlatformCaller).
 // chat-service uses the platform Google key and declares the image-gen spend on a
 // PLATFORM run, so the caller passes NO org/user/run and the org is NOT billed.
 // Use this for internal sweeps (e.g. backfilling audience avatars) that don't
@@ -325,11 +363,13 @@ export async function generateImage(args: {
 // throws ChatServiceError; an unreachable host throws ChatServiceError(0).
 export async function platformGenerateImage(args: {
   prompt: string;
+  caller: PlatformCaller;
 }): Promise<GeneratedImage> {
   const { url, key } = requireChat();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-API-Key": key,
+    ...platformCallerHeaders(args.caller),
   };
 
   let res: Response;
@@ -337,7 +377,7 @@ export async function platformGenerateImage(args: {
     res = await fetchWithConnectRetry(`${url}/internal/platform-images/generate`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ prompt: args.prompt }),
+      body: JSON.stringify({ ...platformCallerBody(args.caller), prompt: args.prompt }),
     });
   } catch (err) {
     throw new ChatServiceError(0, `chat-service unreachable: ${errorString(err)}`);
