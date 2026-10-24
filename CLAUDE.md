@@ -3059,6 +3059,16 @@ declared = "produced none". Our one duty: every run human-service OPENS names th
   spent. Staff experiments (prompt-test, verify-chooser, audience-suggest-verif*, diag-*, crm-email-lookup-probe)
   are support, never declared.
 
+### Platform calls say whose work they are (PLATFORM-CALLER-RUN-1024)
+
+Every call to a chat-service `/internal/platform-*` route passes `caller` (`PlatformCaller`,
+`src/lib/chat-client.ts`): `{runId}` = the run of THIS service doing the work (sent as `x-run-id`;
+never an inbound request's run) OR `{support: {kind, reason}}` when no run stands behind it by design.
+Both = 400, neither = soon 400. Today all three are backfills of audiences already built, `product_feature`:
+description (`DESCRIPTION_BACKFILL_SUPPORT`), avatar (`AVATAR_BACKFILL_SUPPORT`), target text
+(`TARGET_TEXT_BACKFILL_SUPPORT`). A new platform call that produces an outcome gets a run, never a support
+mark. Pinned by `tests/unit/platform-caller.test.ts`.
+
 ## Workflow tracking headers (`x-campaign-id` / `x-brand-id` / `x-workflow-slug` / `x-audience-id` / `x-feature-slug`)
 
 workflow-service stamps these optional tracking headers on every campaign-DAG
