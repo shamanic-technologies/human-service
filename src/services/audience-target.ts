@@ -39,7 +39,7 @@ import {
   type PlatformSupport,
   type ChatIdentity,
 } from "../lib/chat-client.js";
-import { completeRun, createRun } from "./runs.js";
+import { completeRun, createRun, TASK_SUPPORT } from "./runs.js";
 import { withRunOutputs } from "./run-outputs.js";
 
 // Same switch as every other onboarding audience call (owner decision
@@ -181,6 +181,7 @@ async function withTargetRun<T>(
     orgId: identity.orgId,
     userId: identity.userId,
     taskName: "audience-target-draft",
+    support: TASK_SUPPORT["audience-target-draft"],
     workflowTracking: tracking,
   });
   if (!runId) {

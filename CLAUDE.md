@@ -3044,9 +3044,9 @@ declared = "produced none". Our one duty: every run human-service OPENS names th
   Declaration failure = logged loud with the ids, never thrown. A list noted after its run closed is logged.
 - **Runs that declare**: audience-pointer-build, audience-refill (explicit `addRunOutputs`), audience-portfolio-
   launch, source-campaign-audience, competitor-engagement-audience, profile-signal-lists.
-- **Runs that declare nothing, on purpose**: audience-target-draft (writes the text of audiences another step
-  creates; $1.25 since inception), audience-split-estimate (onboarding sizing, no list), audience-preview-
-  companies (signed-out preview, apollo-service declares its own spend). Measured in the backfill report.
+- **Runs SUPPORT by design** (LEDGER-HISTORY-1024): audience-target-draft, audience-split-estimate,
+  audience-preview-companies are marked `product_feature` at creation (`TASK_SUPPORT` in `runs.ts`, `support` on
+  POST /v1/runs): onboarding steps that build no list. Staff tasks (`STAFF_EXPERIMENT_TASKS`) = `staff_experiment`.
 - **Backfill of past runs** `POST /internal/backfill-run-outcomes?dryRun&async` (`run-outcomes-backfill.ts`):
   lists our runs per org from runs-service `GET /v1/runs?serviceName=human-service&include=subtreeCost`, plans
   from our rows, declares through `POST /v1/platform-runs/outcomes/batch` with `occurredAt: run_started_at`
@@ -3056,8 +3056,9 @@ declared = "produced none". Our one duty: every run human-service OPENS names th
   (1006/1006 paid runs pair, gap <= 0.4 s); a verdict not kept (invalid/risky) = loss, nothing declared;
   pointer build = first completed build of its `audienceId`; list-building runs = lists created in their
   window (org, brand, a source tag the task writes), a list inside two runs' windows = nobody's. Only runs that
-  spent. Staff experiments (prompt-test, verify-chooser, audience-suggest-verif*, diag-*, crm-email-lookup-probe)
-  are support, never declared.
+  spent are declared. The same pass marks every past run of a support task through runs-service's owner door
+  (`/v1/platform-runs/support-marks/apply`, idempotent) and reports `byDay` (UTC run-start day): spend = declared +
+  support + noOutput (a loss: verdict not kept, no list built...) + unclassified (a task no rule knows, must be 0).
 
 ### Platform calls say whose work they are (PLATFORM-CALLER-RUN-1024)
 

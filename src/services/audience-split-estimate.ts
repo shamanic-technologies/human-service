@@ -41,7 +41,7 @@ import {
   ProviderError,
   type Identity,
 } from "./people-providers.js";
-import { createRun, completeRun } from "./runs.js";
+import { createRun, completeRun, TASK_SUPPORT } from "./runs.js";
 
 const ESTIMATE_LLM_PROVIDER = "google" as const;
 const ESTIMATE_LLM_MODEL = "flash-pro";
@@ -220,6 +220,7 @@ async function withEstimateRun<T>(
     orgId: identity.orgId,
     userId: identity.userId,
     taskName: "audience-split-estimate",
+    support: TASK_SUPPORT["audience-split-estimate"],
     workflowTracking: tracking,
   });
   if (!runId) {
