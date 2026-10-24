@@ -2094,10 +2094,15 @@ export async function ensureApolloPointer(
   const existing = pointerBuildsInFlight.get(audience.id);
   if (existing) return existing;
   const build = (async () => {
+    // The caller's row can be stale: a build that finished after it was read
+    // already wrote the pointer. Re-read before spending, else the same audience
+    // is built (and paid) again (prod 2026-10-12: 4 rebuilds, $0.78).
+    const [fresh] = await db.select().from(audiences).where(eq(audiences.id, audience.id));
+    if (fresh && !needsApolloPointerBuild(fresh)) return fresh;
     console.log(
       `[human-service] audience.pointer_build.start org=${audience.orgId} audience=${audience.id}`
     );
-    const built = await backfillApolloAudiencePointer(audience, {
+    const built = await backfillApolloAudiencePointer(fresh ?? audience, {
       orgId: identity.orgId,
       ...(identity.userId ? { userId: identity.userId } : {}),
       ...(identity.runId ? { runId: identity.runId } : {}),
