@@ -36,6 +36,7 @@ import {
   ChatServiceError,
   completeJson,
   platformCompleteJson,
+  type PlatformSupport,
   type ChatIdentity,
 } from "../lib/chat-client.js";
 import { completeRun, createRun } from "./runs.js";
@@ -287,6 +288,17 @@ export async function draftSegmentTarget(args: {
 }
 
 /**
+ * The target-text backfill runs under no run of ours by design: it rewrites the
+ * text of audiences that already exist (their build declared `audience_built`),
+ * like the live draft whose `audience-target-draft` run declares nothing.
+ */
+export const TARGET_TEXT_BACKFILL_SUPPORT: PlatformSupport = {
+  kind: "product_feature",
+  reason:
+    "One-time backfill of the own target text of audiences built before target_text existed; produces no outcome.",
+};
+
+/**
  * Same draft on chat-service's ORG-LESS platform path, for the one-time
  * backfill of rows that predate target_text: a text we owe existing audiences
  * must not retroactively bill their orgs (same rule as the description
@@ -298,6 +310,7 @@ export async function draftSegmentTargetOnPlatform(args: {
   offers: BrandOffer[];
 }): Promise<string> {
   const out = await platformCompleteJson({
+    caller: { support: TARGET_TEXT_BACKFILL_SUPPORT },
     message: buildSegmentTargetMessage(args),
     systemPrompt: buildSegmentTargetSystemPrompt(),
     provider: TARGET_LLM_PROVIDER,

@@ -69,6 +69,7 @@ import {
   platformCompleteJson,
   generateImage,
   platformGenerateImage,
+  type PlatformSupport,
   ChatServiceError,
 } from "../lib/chat-client.js";
 import {
@@ -1375,6 +1376,15 @@ function buildDescriptionSystemPrompt(): string {
 // the description in the SAME call that picks (src/services/audience-chooser.ts),
 // so two calls can no longer disagree about what the audience is. The remaining
 // caller is the one-time description backfill in src/routes/backfill.ts.
+// The description backfill runs under no run of ours by design: it labels
+// audiences that already exist (their build declared `audience_built`) for the
+// dashboard, and produces no outcome.
+export const DESCRIPTION_BACKFILL_SUPPORT: PlatformSupport = {
+  kind: "product_feature",
+  reason:
+    "One-time backfill of the dashboard description line of audiences already built; produces no outcome.",
+};
+
 export async function generateAudienceDescription(args: {
   name: string;
   filters: unknown;
@@ -1395,7 +1405,7 @@ export async function generateAudienceDescription(args: {
   };
   const json = args.identity
     ? await completeJson({ ...completeArgs, identity: args.identity })
-    : await platformCompleteJson(completeArgs);
+    : await platformCompleteJson({ ...completeArgs, caller: { support: DESCRIPTION_BACKFILL_SUPPORT } });
   const description = json.description;
   if (typeof description !== "string" || description.trim().length === 0) {
     throw new AudienceDescriptionError(
@@ -2983,12 +2993,20 @@ export async function generateAvatar(
 // chat-service's ORG-LESS platform image endpoint — no org/user/run identity, no
 // org billing (platform-run cost) — so it works for EVERY audience including the
 // ones with no created_by_user_id, and bills no one. Stores hosted URLs.
+// The avatar backfill runs under no run of ours by design: a picture on the
+// dashboard for an audience that already exists, no outcome produced.
+export const AVATAR_BACKFILL_SUPPORT: PlatformSupport = {
+  kind: "product_feature",
+  reason:
+    "Backfill of the dashboard avatar picture of audiences already built; produces no outcome.",
+};
+
 export async function generateAudienceAvatarViaPlatform(
   orgId: string,
   audienceId: string,
   prompt: string
 ): Promise<void> {
-  const img = await platformGenerateImage({ prompt });
+  const img = await platformGenerateImage({ prompt, caller: { support: AVATAR_BACKFILL_SUPPORT } });
   await db
     .update(audiences)
     .set({ avatarUrl: img.url, updatedAt: new Date() })
