@@ -59,7 +59,9 @@ router.post("/internal/backfill-run-outcomes", requireApiKey, async (req, res) =
   }
   const opts = { dryRun: parsed.data.dryRun === "true" };
   if (parsed.data.async === "true") {
-    void backfillRunOutcomes(opts).catch((err) => console.error("[human-service] run_outcomes_backfill.crashed", err));
+    void backfillRunOutcomes(opts)
+      .then(({ notDeclaredRuns: _runs, ...summary }) => console.log(`[human-service] run_outcomes_backfill.result ${JSON.stringify(summary)}`))
+      .catch((err) => console.error("[human-service] run_outcomes_backfill.crashed", err));
     res.status(202).json({ accepted: true, dryRun: opts.dryRun });
     return;
   }

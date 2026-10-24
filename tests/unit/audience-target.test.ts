@@ -9,7 +9,8 @@ vi.mock("../../src/lib/chat-client.js", async (orig) => ({
   completeJson: vi.fn(),
 }));
 
-vi.mock("../../src/services/runs.js", () => ({
+vi.mock("../../src/services/runs.js", async (orig) => ({
+  ...(await orig<typeof import("../../src/services/runs.js")>()),
   createRun: vi.fn(async () => "11111111-1111-4111-8111-111111111111"),
   completeRun: vi.fn(async () => undefined),
 }));
@@ -136,7 +137,12 @@ describe("draftAudienceTarget", () => {
       identity: { orgId: identity.orgId, userId: "u1" },
     });
     expect(createRun).toHaveBeenCalledWith(
-      expect.objectContaining({ orgId: identity.orgId, userId: "u1", taskName: "audience-target-draft" })
+      expect.objectContaining({
+        orgId: identity.orgId,
+        userId: "u1",
+        taskName: "audience-target-draft",
+        support: expect.objectContaining({ kind: "product_feature" }),
+      })
     );
     expect(vi.mocked(completeJson).mock.calls[0][0].identity.runId).toBe(
       "11111111-1111-4111-8111-111111111111"

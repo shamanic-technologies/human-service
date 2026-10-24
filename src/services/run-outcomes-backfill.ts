@@ -25,16 +25,20 @@
 //         one of the run's brands, a source tag that task writes, created between
 //         the run's start and end. A list created inside the window of TWO
 //         list-building runs is not attributable to one: not declared, reported.
-//   audience-target-draft ⟹ NOT declared: it writes the target text of audiences
-//         created afterwards by another step, never one list of its own. Reported.
-//   Every other task is a staff experiment (support function, never an outcome).
+//   audience-target-draft, audience-split-estimate, audience-preview-companies
+//       ⟹ SUPPORT `product_feature` (LEDGER-HISTORY-1024): onboarding steps that
+//         build no list by design, marked exactly as a run opened today is
+//         (TASK_SUPPORT in runs.ts, `support` on run create).
+//   Staff tasks (STAFF_EXPERIMENT_TASKS) ⟹ SUPPORT `staff_experiment`.
+//   A task in none of these lists is reported `unclassified` (never guessed).
 //
-// Only runs that SPENT are declared (subtree cost > 0); a declaration is
-// idempotent on runs-service's side, so a re-run writes nothing new.
+// Only runs that SPENT are declared (subtree cost > 0); every run of a support
+// task is marked (a run opened today is marked at creation whatever it spends).
+// Both doors are idempotent on runs-service's side: a re-run writes nothing new.
 import { and, gte, inArray, isNotNull, lte, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audienceSources, audiences, leadServes } from "../db/schema.js";
-import { AUDIENCE_BUILT, SUBJECT_SERVICE } from "./runs.js";
+import { AUDIENCE_BUILT, SUBJECT_SERVICE, TASK_SUPPORT, type RunSupport } from "./runs.js";
 
 export const LEAD_SUBJECT_SERVICE = "lead-service";
 /** Verdicts whose check is KEPT (fleet doctrine, same as apollo-service). */
@@ -55,14 +59,24 @@ export const LIST_TASK_SOURCE_LISTS: Record<string, string[]> = {
   "competitor-engagement-audience": ["linkedin_engagement"],
   "profile-signal-lists": ["apollo_buying_signal"],
 };
-const PRODUCT_TASKS = new Set([
-  "verify-email",
-  "audience-pointer-build",
-  "audience-target-draft",
-  "audience-split-estimate",
-  "audience-preview-companies",
-  ...Object.keys(LIST_TASK_SOURCES),
+/** Tasks whose runs produce outcomes (declared from our rows). */
+const PRODUCT_TASKS = new Set(["verify-email", "audience-pointer-build", ...Object.keys(LIST_TASK_SOURCES)]);
+/** Staff probes, tests and experiments ever run under human-service (read from runs-service 2026-10-24). */
+export const STAFF_EXPERIMENT_TASKS = new Set([
+  "prompt-test",
+  "verify-chooser",
+  "verify-suggest-one-audience",
+  "audience-suggest-verification",
+  "audience-suggest-verify",
+  "diag-suggest-issue-234",
+  "crm-email-lookup-probe",
 ]);
+const STAFF_SUPPORT: RunSupport = { kind: "staff_experiment", reason: "human-service staff probe / test / experiment run" };
+
+/** The support function a run of this task serves, if its spend produces no outcome by design. */
+export function supportOfTask(taskName: string): RunSupport | null {
+  return TASK_SUPPORT[taskName] ?? (STAFF_EXPERIMENT_TASKS.has(taskName) ? STAFF_SUPPORT : null);
+}
 
 export interface PastRun {
   id: string;
@@ -92,19 +106,24 @@ export interface PlannedRun {
   consumed: Occurrence[];
 }
 
-/** Why a spending run is not declared. */
+/** Why a spending run declares nothing: a loss of its pipe (the ledger handles it), or a task nobody classified. */
 export type NotDeclaredReason =
-  | "staff_experiment"
   | "not_completed"
   | "no_list_built"
   | "list_shared_with_another_run"
   | "duplicate_build"
-  | "text_for_lists_built_elsewhere"
-  | "estimate_only"
-  | "preview_only"
   | "verdict_not_kept"
   | "no_serve_row"
-  | "lead_not_found";
+  | "lead_not_found"
+  | "unclassified";
+
+export interface SupportRun {
+  runId: string;
+  taskName: string;
+  costCents: number;
+  startedAt: string;
+  support: RunSupport;
+}
 
 export interface NotDeclared {
   runId: string;
@@ -211,9 +230,10 @@ export function planRunOutcomes(input: {
   verifyPairs: Map<string, ServeRow | null>;
   leadOf: (serve: ServeRow) => string | null;
   lists: BuiltList[];
-}): { planned: PlannedRun[]; notDeclared: NotDeclared[] } {
+}): { planned: PlannedRun[]; notDeclared: NotDeclared[]; support: SupportRun[] } {
   const planned: PlannedRun[] = [];
   const notDeclared: NotDeclared[] = [];
+  const support: SupportRun[] = [];
   const skip = (r: PastRun, reason: NotDeclaredReason) =>
     notDeclared.push({ runId: r.id, taskName: r.taskName, costCents: r.costCents, reason });
   const plan = (r: PastRun, produced: Occurrence[], consumed: Occurrence[] = []) =>
@@ -229,9 +249,14 @@ export function planRunOutcomes(input: {
   }
 
   for (const r of input.runs) {
+    const sup = supportOfTask(r.taskName);
+    if (sup) {
+      support.push({ runId: r.id, taskName: r.taskName, costCents: r.costCents, startedAt: r.startedAt, support: sup });
+      continue;
+    }
     if (!(r.costCents > 0)) continue;
     if (!PRODUCT_TASKS.has(r.taskName)) {
-      skip(r, "staff_experiment");
+      skip(r, "unclassified");
       continue;
     }
     if (r.taskName === "verify-email") {
@@ -250,18 +275,6 @@ export function planRunOutcomes(input: {
       }
       continue;
     }
-    if (r.taskName === "audience-target-draft") {
-      skip(r, "text_for_lists_built_elsewhere");
-      continue;
-    }
-    if (r.taskName === "audience-split-estimate") {
-      skip(r, "estimate_only");
-      continue;
-    }
-    if (r.taskName === "audience-preview-companies") {
-      skip(r, "preview_only");
-      continue;
-    }
     if (r.status !== "completed" && r.status !== "failed") {
       skip(r, "not_completed");
       continue;
@@ -276,7 +289,7 @@ export function planRunOutcomes(input: {
     if (ids.length > 0) plan(r, ids.sort().map(audienceBuilt));
     else skip(r, shared.has(r.id) ? "list_shared_with_another_run" : "no_list_built");
   }
-  return { planned, notDeclared };
+  return { planned, notDeclared, support };
 }
 
 /** Batches for the backfill door: <= 500 runs and <= 1000 occurrences per call. */
@@ -316,7 +329,7 @@ function env(name: string, source: string): string {
 async function runsGet(path: string, orgId: string): Promise<unknown> {
   const url = env("RUNS_SERVICE_URL", "runs-service");
   const key = env("RUNS_SERVICE_API_KEY", "runs-service");
-  const res = await fetch(`${url}${path}`, { headers: { "x-api-key": key, "x-org-id": orgId }, signal: AbortSignal.timeout(60_000) });
+  const res = await fetch(`${url}${path}`, { headers: { "x-api-key": key, "x-org-id": orgId }, signal: AbortSignal.timeout(300_000) });
   if (!res.ok) throw new BackfillUpstreamError("runs-service", `GET ${path} ${res.status}: ${(await res.text()).slice(0, 300)}`);
   return res.json();
 }
@@ -414,6 +427,88 @@ async function declareBatch(batch: PlannedRun[]): Promise<BatchResult> {
   return { recordedCount: body.recordedCount, alreadyRecordedCount: body.alreadyRecordedCount };
 }
 
+export interface SupportMarkResult {
+  marked: number;
+  alreadyMarked: number;
+}
+
+export const SUPPORT_MARKED_BY = "human-service LEDGER-HISTORY-1024 backfill";
+
+/** Group support runs by (kind, reason), <= 5000 run ids per call (runs-service's owner door cap). */
+export function supportMarkCalls(support: SupportRun[], maxRuns = 5000): Array<{ support: RunSupport; runIds: string[] }> {
+  const groups = new Map<string, { support: RunSupport; runIds: string[] }>();
+  for (const s of support) {
+    const key = `${s.support.kind}\u0000${s.support.reason}`;
+    const g = groups.get(key) ?? { support: s.support, runIds: [] };
+    g.runIds.push(s.runId);
+    groups.set(key, g);
+  }
+  const out: Array<{ support: RunSupport; runIds: string[] }> = [];
+  for (const g of groups.values()) {
+    const ids = [...g.runIds].sort();
+    for (let i = 0; i < ids.length; i += maxRuns) out.push({ support: g.support, runIds: ids.slice(i, i + maxRuns) });
+  }
+  return out;
+}
+
+/** Mark our own past runs SUPPORT through runs-service's owner door (idempotent: an already marked run keeps its mark). */
+async function markSupport(call: { support: RunSupport; runIds: string[] }): Promise<SupportMarkResult> {
+  const url = env("RUNS_SERVICE_URL", "runs-service");
+  const key = env("RUNS_SERVICE_API_KEY", "runs-service");
+  const res = await fetch(`${url}/v1/platform-runs/support-marks/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-api-key": key, "x-service-name": SUBJECT_SERVICE },
+    body: JSON.stringify({ kind: call.support.kind, reason: call.support.reason, markedBy: SUPPORT_MARKED_BY, runIds: call.runIds }),
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!res.ok) throw new BackfillUpstreamError("runs-service", `POST /v1/platform-runs/support-marks/apply ${res.status}: ${(await res.text()).slice(0, 1000)}`);
+  const body = (await res.json()) as { markedCount?: unknown; alreadyMarkedCount?: unknown };
+  if (typeof body.markedCount !== "number" || typeof body.alreadyMarkedCount !== "number") {
+    throw new BackfillUpstreamError("runs-service", "support-marks/apply answered no markedCount / alreadyMarkedCount");
+  }
+  return { marked: body.markedCount, alreadyMarked: body.alreadyMarkedCount };
+}
+
+export interface DayCoverage {
+  /** Billed subtree cost of the runs started that UTC day, cents. */
+  spendCents: number;
+  /** On a declared occurrence. */
+  declaredCents: number;
+  /** On a support mark (by design no outcome). */
+  supportCents: number;
+  /** Runs with no output: a loss of their pipe (verdict not kept, no list built...). */
+  noOutputCents: number;
+  /** A task nobody classified: must stay 0. */
+  unclassifiedCents: number;
+}
+
+/** Per UTC run-start day: every cent of our runs' spend lands in exactly one bucket. */
+export function coverageByDay(plan: { planned: PlannedRun[]; notDeclared: NotDeclared[]; support: SupportRun[] }, startedAtOf: (runId: string) => string): Record<string, DayCoverage> {
+  const out: Record<string, DayCoverage> = {};
+  const day = (runId: string) => {
+    const d = startedAtOf(runId).slice(0, 10);
+    return (out[d] ??= { spendCents: 0, declaredCents: 0, supportCents: 0, noOutputCents: 0, unclassifiedCents: 0 });
+  };
+  for (const p of plan.planned) {
+    const d = day(p.runId);
+    d.spendCents += p.costCents;
+    d.declaredCents += p.costCents;
+  }
+  for (const s of plan.support) {
+    if (!(s.costCents > 0)) continue;
+    const d = day(s.runId);
+    d.spendCents += s.costCents;
+    d.supportCents += s.costCents;
+  }
+  for (const n of plan.notDeclared) {
+    const d = day(n.runId);
+    d.spendCents += n.costCents;
+    if (n.reason === "unclassified") d.unclassifiedCents += n.costCents;
+    else d.noOutputCents += n.costCents;
+  }
+  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => a.localeCompare(b)));
+}
+
 export interface RunOutcomesBackfillResult {
   dryRun: boolean;
   orgs: number;
@@ -425,6 +520,10 @@ export interface RunOutcomesBackfillResult {
   occurrences: Record<string, number>;
   notDeclared: Record<NotDeclaredReason, { runs: number; cents: number }>;
   notDeclaredRuns: NotDeclared[];
+  support: Record<string, { runs: number; spendingRuns: number; cents: number }>;
+  supportMarked: number;
+  supportAlreadyMarked: number;
+  byDay: Record<string, DayCoverage>;
   recordedCount: number;
   alreadyRecordedCount: number;
 }
@@ -492,7 +591,7 @@ export async function backfillRunOutcomes(opts: { dryRun: boolean }): Promise<Ru
     for (const s of src) lists.push({ id: s.id, orgId: s.orgId, brandId: s.brandId, kind: `source:${s.list}`, createdAt: s.createdAt });
   }
 
-  const { planned, notDeclared } = planRunOutcomes({
+  const { planned, notDeclared, support } = planRunOutcomes({
     runs,
     pointerAudiencesWithPointer: withPointer,
     verifyPairs,
@@ -512,6 +611,30 @@ export async function backfillRunOutcomes(opts: { dryRun: boolean }): Promise<Ru
       );
     }
   }
+
+  let supportMarked = 0;
+  let supportAlreadyMarked = 0;
+  if (!opts.dryRun) {
+    for (const call of supportMarkCalls(support)) {
+      const r = await markSupport(call);
+      supportMarked += r.marked;
+      supportAlreadyMarked += r.alreadyMarked;
+      console.log(
+        `[human-service] run_outcomes_backfill.support kind=${call.support.kind} runs=${call.runIds.length} marked=${r.marked} already=${r.alreadyMarked}`
+      );
+    }
+  }
+  const supportSummary: Record<string, { runs: number; spendingRuns: number; cents: number }> = {};
+  for (const s of support) {
+    const g = (supportSummary[`${s.support.kind}:${s.taskName}`] ??= { runs: 0, spendingRuns: 0, cents: 0 });
+    g.runs++;
+    if (s.costCents > 0) {
+      g.spendingRuns++;
+      g.cents += s.costCents;
+    }
+  }
+  const startedAt = new Map(runs.map((r) => [r.id, r.startedAt]));
+  const byDay = coverageByDay({ planned, notDeclared, support }, (id) => startedAt.get(id) ?? "unknown");
 
   const occurrences: Record<string, number> = {};
   for (const p of planned) for (const o of [...p.produced.map((x) => `produced:${x.outcomeKey}`), ...p.consumed.map((x) => `consumed:${x.outcomeKey}`)]) occurrences[o] = (occurrences[o] ?? 0) + 1;
@@ -533,11 +656,15 @@ export async function backfillRunOutcomes(opts: { dryRun: boolean }): Promise<Ru
     occurrences,
     notDeclared: notDeclaredSummary,
     notDeclaredRuns: notDeclared,
+    support: supportSummary,
+    supportMarked,
+    supportAlreadyMarked,
+    byDay,
     recordedCount,
     alreadyRecordedCount,
   };
   console.log(
-    `[human-service] run_outcomes_backfill.${opts.dryRun ? "dry_run" : "done"} orgs=${result.orgs} runs=${result.runs} spending=${result.spendingRuns} spendCents=${result.spendCents.toFixed(4)} declaredRuns=${result.declaredRuns} declaredCents=${result.declaredCents.toFixed(4)} recorded=${recordedCount} already=${alreadyRecordedCount}`
+    `[human-service] run_outcomes_backfill.${opts.dryRun ? "dry_run" : "done"} orgs=${result.orgs} runs=${result.runs} spending=${result.spendingRuns} spendCents=${result.spendCents.toFixed(4)} declaredRuns=${result.declaredRuns} declaredCents=${result.declaredCents.toFixed(4)} recorded=${recordedCount} already=${alreadyRecordedCount} supportMarked=${supportMarked} supportAlready=${supportAlreadyMarked}`
   );
   return result;
 }
