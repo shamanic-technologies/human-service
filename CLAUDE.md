@@ -3056,7 +3056,7 @@ declared = "produced none". Our one duty: every run human-service OPENS names th
   (1006/1006 paid runs pair, gap <= 0.4 s); a verdict not kept (invalid/risky) = loss, nothing declared;
   pointer build = first completed build of its `audienceId`; list-building runs = lists created in their
   window (org, brand, a source tag the task writes), a list inside two runs' windows = nobody's. Only runs that
-  spent are declared. The same pass marks every past run of a support task through runs-service's owner door
+  spent are declared, plus every completed verify-email run (an `unknown` verdict was free, still a check). The same pass marks every past run of a support task through runs-service's owner door
   (`/v1/platform-runs/support-marks/apply`, idempotent) and reports `byDay` (UTC run-start day): spend = declared +
   support + noOutput (a loss: verdict not kept, no list built...) + unclassified (a task no rule knows, must be 0).
 

@@ -15,7 +15,11 @@
 //         serve run) whose served_at follows the run's start, in order (measured
 //         2026-10-23: 1006/1006 paid runs pair, every gap <= 0.4 s). A verdict
 //         not kept (invalid, risky) is a loss: nothing declared, its cost rolls
-//         to the serve that bought it.
+//         to the serve that bought it. A free run is a check too: bounceverify
+//         billed only decisive verdicts, so an `unknown` cost nothing (255 runs,
+//         each paired to its `unknown` row; pairing them moved none of the 1006
+//         paid pairs, measured 2026-10-24). human-service verified emails only
+//         2026-09-24 ~18:12 -> 2026-09-25 09:56 UTC, then apollo-service did.
 //   audience-pointer-build ⟹ `audience_built` of the run's own audienceId, by the
 //         FIRST completed build of that audience (a later build's result was
 //         discarded by the "pointer still empty" guard: produced nothing).
@@ -254,7 +258,10 @@ export function planRunOutcomes(input: {
       support.push({ runId: r.id, taskName: r.taskName, costCents: r.costCents, startedAt: r.startedAt, support: sup });
       continue;
     }
-    if (!(r.costCents > 0)) continue;
+    // A check is an outcome whatever it cost: bounceverify billed only decisive
+    // verdicts, so an `unknown` verdict ran for free and is still email_checked.
+    const freeCheck = r.taskName === "verify-email" && r.status === "completed";
+    if (!(r.costCents > 0) && !freeCheck) continue;
     if (!PRODUCT_TASKS.has(r.taskName)) {
       skip(r, "unclassified");
       continue;
@@ -539,7 +546,9 @@ export async function backfillRunOutcomes(opts: { dryRun: boolean }): Promise<Ru
   for (const orgId of orgIds) runs.push(...(await listOrgRuns(orgId)));
 
   // verify-email: the serve rows of their parents.
-  const verifyRuns = runs.filter((r) => r.taskName === "verify-email" && r.costCents > 0);
+  // Every completed check (an `unknown` verdict was free): pairing all of them
+  // keeps a paid run from taking a free run's verdict row.
+  const verifyRuns = runs.filter((r) => r.taskName === "verify-email" && (r.costCents > 0 || r.status === "completed"));
   const parents = [...new Set(verifyRuns.map((r) => r.parentRunId).filter((x): x is string => !!x))];
   const serves: ServeRow[] = [];
   for (let i = 0; i < parents.length; i += 1000) {

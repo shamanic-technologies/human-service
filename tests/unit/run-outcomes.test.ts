@@ -156,6 +156,33 @@ describe("backfill planning", () => {
     expect(pairs.get("v2")?.id).toBe("s2");
   });
 
+  it("a free check (unknown verdict, no charge) is email_checked too and keeps its own verdict row", () => {
+    const runs = [
+      run({ id: "free", taskName: "verify-email", parentRunId: "parent-1", costCents: 0, startedAt: "2026-09-25T00:00:05.000Z" }),
+      run({ id: "paid", taskName: "verify-email", parentRunId: "parent-1", startedAt: "2026-09-25T00:00:20.000Z" }),
+      run({ id: "dead", taskName: "verify-email", parentRunId: "parent-1", costCents: 0, status: "failed", startedAt: "2026-09-25T00:00:40.000Z" }),
+    ];
+    const serves = [
+      serve({ id: "s-unknown", servedAt: new Date("2026-09-25T00:00:10.000Z"), verdict: "unknown" }),
+      serve({ id: "s-valid", servedAt: new Date("2026-09-25T00:00:25.000Z"), verdict: "valid" }),
+    ];
+    const pairs = pairVerifyRuns(runs.filter((r) => r.costCents > 0 || r.status === "completed"), serves);
+    expect(pairs.get("free")?.id).toBe("s-unknown");
+    expect(pairs.get("paid")?.id).toBe("s-valid");
+    const { planned, notDeclared } = planRunOutcomes({
+      runs,
+      pointerAudiencesWithPointer: new Set(),
+      verifyPairs: pairs,
+      leadOf: (s) => `lead-of-${s.id}`,
+      lists: [],
+    });
+    expect(planned.map((p) => [p.runId, p.produced[0].subjectId])).toEqual([
+      ["free", "lead-of-s-unknown"],
+      ["paid", "lead-of-s-valid"],
+    ]);
+    expect(notDeclared).toEqual([]);
+  });
+
   it("a kept verdict declares email_checked on the lead; a rejected one is a loss", () => {
     const runs = [
       run({ id: "v1", taskName: "verify-email", parentRunId: "parent-1", startedAt: "2026-09-25T00:00:05.000Z" }),
