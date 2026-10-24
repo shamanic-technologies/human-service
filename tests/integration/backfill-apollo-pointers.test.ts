@@ -266,3 +266,22 @@ describe("POST /internal/backfill-apollo-audience-pointers", () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe("ensureApolloPointer re-reads the row before spending", () => {
+  it("a stale row whose pointer another build already wrote is not built again", async () => {
+    wire();
+    await seed();
+    const { ensureApolloPointer } = await import("../../src/services/audiences.js");
+    // Born like a split confirm: no pointer, no filters.
+    await db.update(audiences).set({ filters: null }).where(eq(audiences.id, APOLLO_NOPTR));
+    const [stale] = await db.select().from(audiences).where(eq(audiences.id, APOLLO_NOPTR));
+    expect(stale.apolloAudienceId).toBeNull();
+    // Another build finished after `stale` was read.
+    await db.update(audiences).set({ apolloAudienceId: "written-meanwhile", filters: { personTitles: ["Built"] } }).where(eq(audiences.id, APOLLO_NOPTR));
+
+    const row = await ensureApolloPointer(stale, { orgId: ORG, userId: USER });
+
+    expect(row.apolloAudienceId).toBe("written-meanwhile");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
