@@ -10,6 +10,7 @@ import {
   HumanLinkIdParamsSchema,
   HumanViewQuerySchema,
   LinkPeopleQuerySchema,
+  ProviderRecordMergeQuerySchema,
   ResolveHumanRequestSchema,
   StateHumanFactRequestSchema,
   StateHumanLinkRequestSchema,
@@ -37,6 +38,8 @@ import {
   type IdentityKey,
 } from "../services/human-identity.js";
 import { linkPeopleToHumans } from "../services/human-identity-people.js";
+import { mergeOnProviderRecords } from "../services/human-identity-provider-records.js";
+import { RevealRecordConfigError, RevealRecordSourceError, readApolloRevealRecords } from "../lib/apollo-reveal-records.js";
 import type { HumanFact, HumanLink } from "../db/schema.js";
 
 const router = Router();
@@ -62,6 +65,8 @@ function fail(err: unknown, res: Response, next: NextFunction): void {
     res.status(404).json({ error: "Link not found in this scope" });
   } else if (err instanceof FactNotFoundError) {
     res.status(404).json({ error: "Fact not found" });
+  } else if (err instanceof RevealRecordSourceError || err instanceof RevealRecordConfigError) {
+    res.status(502).json({ error: messageOf(err), source: "apollo-service" });
   } else if (err instanceof StillOneHumanError || err instanceof SeparatedHumansError) {
     res.status(409).json({ error: messageOf(err) });
   } else {
@@ -159,6 +164,37 @@ router.post("/internal/human-identities/link-people", requireApiKey, async (req:
     fail(err, res, next);
   }
 });
+
+// One Apollo person = one human, on apollo-service's own reveal record
+// (LEDGER-RESIDUAL-1025-HUMANS). Not on a timer: run by hand, dry run first.
+router.post(
+  "/internal/human-identities/merge-provider-records",
+  requireApiKey,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const query = ProviderRecordMergeQuerySchema.safeParse(req.query);
+    if (!query.success) {
+      res.status(400).json({ error: firstIssue(query) });
+      return;
+    }
+    const args = {
+      dryRun: query.data.dryRun === "true",
+      limit: query.data.limit ?? null,
+      readRecords: readApolloRevealRecords,
+    };
+    if (query.data.async === "true") {
+      void mergeOnProviderRecords(args).catch((err) =>
+        console.error("[human-service] human_identity.provider_record_merge_failed", err)
+      );
+      res.status(202).json({ started: true, dryRun: args.dryRun });
+      return;
+    }
+    try {
+      res.json(await mergeOnProviderRecords(args));
+    } catch (err) {
+      fail(err, res, next);
+    }
+  }
+);
 
 router.post("/internal/human-identities/links", requireApiKey, async (req: Request, res: Response, next: NextFunction) => {
   const body = StateHumanLinkRequestSchema.safeParse(req.body);

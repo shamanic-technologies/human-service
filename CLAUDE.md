@@ -91,6 +91,7 @@ section — the port binds first).
 | Internal | `POST /internal/human-identities/{humanId}/facts` + `POST .../facts/{factId}/withdraw` | apiKey | Facts carried on the human: `opt_out`, `do_not_contact` |
 | Internal | `GET /internal/human-identities/events` (`?after&limit&orgId`) | apiKey | Cursor feed of created / keys_attached / linked / separated / link_withdrawn / fact_* |
 | Internal | `POST /internal/human-identities/link-people` (`?dryRun&async`) | apiKey | Link every per-org person to its human now (also every 2 min) |
+| Internal | `POST /internal/human-identities/merge-provider-records` (`?dryRun&async&limit`) | apiKey | One Apollo person = one human: fleet-merge an id-only human with the holder of the email Apollo's own reveal returned for that id, when unambiguous. See "One human across the fleet" |
 | Internal | `GET /internal/people/by-email` (`?orgId&email`) | apiKey | The person holding ANY of their addresses → `{person: {personId, primaryEmail, emails[]} \| null}`. See "One person, several addresses" |
 | Internal | `GET /internal/people/{personId}` (`?orgId`) | apiKey | One person with every address they hold |
 | Internal | `POST /internal/people/{personId}/emails` | apiKey | Attach an extra address (explicit act, `evidence` + `attachedBy` required). Idempotent; 409 when another person holds it |
@@ -904,6 +905,13 @@ existing read is unchanged; `people.human_id` (migration `0046`) names the human
   (resolve); an ATTACHED address (an org's statement) gets its own human and an
   org-scoped `same` link. Also revisits linked people holding an address no human
   holds yet. Brand transfer copies `human_id` with a copied person.
+- **Provider reveal record** (`human-identity-provider-records.ts`, LEDGER-RESIDUAL-1025-HUMANS): a human
+  holding an Apollo person id and no email / phone + the human holding the email apollo-service's stored
+  paid reveal of that id returned = one human, fleet link basis `provider_record` + `human.linked`. The
+  provider OWNS the id, so its own reveal is proof (not a caller-attached id). Accepted only one-to-one:
+  the id's reveals returned ONE address, revealed for no other id; refused + counted: several addresses,
+  shared address, id holder with another email/phone, address holder with another Apollo id, fleet split.
+  Read through apollo-service (`src/lib/apollo-reveal-records.ts`), never its DB. Manual route, no timer.
 - **Concurrency**: every write takes one advisory xact lock
   (`human-identity-writes`); reads take none.
 - **Reads carrying it (additive)**: `GET /internal/people/{id}` and
