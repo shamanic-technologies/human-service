@@ -2492,7 +2492,7 @@ export const BackfillRunOutcomesResponseSchema = z
     occurrences: z.record(z.string(), z.number().int()).openapi({ description: "Declared occurrences by direction:outcomeKey." }),
     notDeclared: z.record(z.string(), NotDeclaredSummarySchema).openapi({
       description:
-        "Spending runs left with no output, by reason (a loss of their pipe, the ledger handles it): verdict_not_kept (rolls to the serve that bought it), duplicate_build, list_shared_with_another_run, no_list_built, lead_not_found, no_serve_row, not_completed; unclassified = a task no rule knows (must stay empty).",
+        "Spending runs left with no output, by reason (a loss of their pipe, the ledger handles it): verdict_not_kept (rolls to the serve that bought it), list_shared_with_another_run, no_list_built, lead_not_found, no_serve_row, not_completed; unclassified = a task no rule knows (must stay empty).",
     }),
     notDeclaredRuns: z.array(z.object({ runId: z.string(), taskName: z.string(), costCents: z.number(), reason: z.string() })),
     support: z.record(z.string(), z.object({ runs: z.number().int(), spendingRuns: z.number().int(), cents: z.number() })).openapi({

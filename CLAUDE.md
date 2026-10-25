@@ -3038,8 +3038,9 @@ declared = "produced none". Our one duty: every run human-service OPENS names th
 - **Mechanism**: the work of an own run runs inside `withRunOutputs(runId, fn)` (AsyncLocalStorage `run()`;
   NEVER `enterWith`: it re-labels the caller's context once it awaits, pinned by
   `tests/unit/run-outcomes.test.ts`); list writers call `noteListBuilt(id)` (`confirmAudienceSplit` after
-  commit, `addSource` when created, the linkedin-engagement row, CRM per-file rows, the pointer build only when
-  ITS update wrote the pointer); `completeRun` declares the set (`POST /v1/runs/:id/outcomes`), whatever the
+  commit, `addSource` when created, the linkedin-engagement row, CRM per-file rows, every pointer build that
+  built filters: a concurrent duplicate whose write lost the race declares the same list again, which
+  runs-service books ABNORMAL `repeat_production`, never a unit cost, LEDGER-RESIDUAL-1025); `completeRun` declares the set (`POST /v1/runs/:id/outcomes`), whatever the
   status, before closing. A write under a CALLER's run (inbound x-run-id) is in no context: the caller declares.
   Declaration failure = logged loud with the ids, never thrown. A list noted after its run closed is logged.
 - **Runs that declare**: audience-pointer-build, audience-refill (explicit `addRunOutputs`), audience-portfolio-
@@ -3054,7 +3055,7 @@ declared = "produced none". Our one duty: every run human-service OPENS names th
   = `email_checked` produced + `email_found` consumed on the LEAD (lead-service `POST
   /internal/leads/ids/resolve`), paired with the `lead_serves` row its parent serve wrote right after it
   (1006/1006 paid runs pair, gap <= 0.4 s); a verdict not kept (invalid/risky) = loss, nothing declared;
-  pointer build = first completed build of its `audienceId`; list-building runs = lists created in their
+  pointer build = every completed build of its `audienceId` (a duplicate = the ledger's repeat); list-building runs = lists created in their
   window (org, brand, a source tag the task writes), a list inside two runs' windows = nobody's. Only runs that
   spent are declared, plus every completed verify-email run (an `unknown` verdict was free, still a check). The same pass marks every past run of a support task through runs-service's owner door
   (`/v1/platform-runs/support-marks/apply`, idempotent) and reports `byDay` (UTC run-start day): spend = declared +
