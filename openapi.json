@@ -15771,6 +15771,87 @@
         }
       }
     },
+    "/internal/human-identities/merge-provider-records": {
+      "post": {
+        "summary": "One Apollo person = one human: merge (fleet) a human known only by an Apollo person id with the human holding the email Apollo's own paid reveal returned for that id, when that record is unambiguous.",
+        "description": "Evidence = apollo-service's stored reveal records (free read). Refused and counted: id revealed with several addresses, address revealed for several person ids, id holder already holding another email/phone, address holder holding another Apollo id, fleet split. A merge is a fleet 'same' link (basis provider_record) + human.linked event. Idempotent (replay = alreadyOne). ?dryRun=true decides and writes nothing; ?async=true answers 202 and logs the counts; ?limit=N looks at the first N candidates.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "dryRun",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "async",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "exclusiveMinimum": true
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "nullable": true
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Started"
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "apollo-service reveal record unreadable"
+          }
+        }
+      }
+    },
     "/internal/merge-source-audiences": {
       "post": {
         "summary": "One-time data fix (AUDIENCE-SOURCES-1016): each per-source audience row (\"<profile> (Hiring now)\") becomes a SOURCE of its profile audience, keeping its Apollo pointer, status and reachable ceiling; the old row is deprecated with canonicalAudienceId = the profile so every read resolves it there. Nothing archived or deleted. Idempotent, dry-runnable, reversible via /internal/merge-source-audiences/revert.",

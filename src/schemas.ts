@@ -4934,6 +4934,29 @@ registry.registerPath({
   },
 });
 
+export const ProviderRecordMergeQuerySchema = z.object({
+  dryRun: z.enum(["true", "false"]).optional(),
+  async: z.enum(["true", "false"]).optional(),
+  limit: z.coerce.number().int().positive().optional(),
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/human-identities/merge-provider-records",
+  summary:
+    "One Apollo person = one human: merge (fleet) a human known only by an Apollo person id with the human holding the email Apollo's own paid reveal returned for that id, when that record is unambiguous.",
+  description:
+    "Evidence = apollo-service's stored reveal records (free read). Refused and counted: id revealed with several addresses, address revealed for several person ids, id holder already holding another email/phone, address holder holding another Apollo id, fleet split. A merge is a fleet 'same' link (basis provider_record) + human.linked event. Idempotent (replay = alreadyOne). ?dryRun=true decides and writes nothing; ?async=true answers 202 and logs the counts; ?limit=N looks at the first N candidates.",
+  security: [{ apiKey: [] }],
+  request: { query: ProviderRecordMergeQuerySchema },
+  responses: {
+    200: { description: "Counts", content: { "application/json": { schema: z.record(z.string(), z.unknown()) } } },
+    202: { description: "Started" },
+    ...humanErrors,
+    502: { description: "apollo-service reveal record unreadable" },
+  },
+});
+
 // --- AUDIENCE-SOURCES-1016: one-time merge of per-source audience rows ---
 
 export const MergeSourceAudiencesQuerySchema = z.object({
