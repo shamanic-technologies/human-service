@@ -3847,7 +3847,7 @@
                 "cents"
               ]
             },
-            "description": "Spending runs left with no output, by reason (a loss of their pipe, the ledger handles it): verdict_not_kept (rolls to the serve that bought it), duplicate_build, list_shared_with_another_run, no_list_built, lead_not_found, no_serve_row, not_completed; unclassified = a task no rule knows (must stay empty)."
+            "description": "Spending runs left with no output, by reason (a loss of their pipe, the ledger handles it): verdict_not_kept (rolls to the serve that bought it), list_shared_with_another_run, no_list_built, lead_not_found, no_serve_row, not_completed; unclassified = a task no rule knows (must stay empty)."
           },
           "notDeclaredRuns": {
             "type": "array",

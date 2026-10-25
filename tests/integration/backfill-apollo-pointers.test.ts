@@ -285,3 +285,24 @@ describe("ensureApolloPointer re-reads the row before spending", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
+
+describe("pointer build: a concurrent duplicate declares the list it built again (LEDGER-RESIDUAL-1025)", () => {
+  it("a build whose pointer write lost the race still declares audience_built (runs-service books the repeat)", async () => {
+    await seed();
+    wire();
+    const { backfillApolloAudiencePointer } = await import("../../src/services/audiences.js");
+    // The row as a concurrent caller read it BEFORE another build wrote the pointer.
+    const [stale] = await db.select().from(audiences).where(eq(audiences.id, APOLLO_NOPTR));
+    await db.update(audiences).set({ apolloAudienceId: "won-the-race" }).where(eq(audiences.id, APOLLO_NOPTR));
+
+    await backfillApolloAudiencePointer(stale);
+
+    const [row] = await db.select().from(audiences).where(eq(audiences.id, APOLLO_NOPTR));
+    expect(row.apolloAudienceId).toBe("won-the-race");
+    const declared = fetchSpy.mock.calls.filter(([u]) => String(u).endsWith("/outcomes"));
+    expect(declared).toHaveLength(1);
+    expect(JSON.parse(declared[0][1].body).produced).toEqual([
+      { outcomeKey: "audience_built", subjectService: "human-service", subjectId: APOLLO_NOPTR },
+    ]);
+  });
+});

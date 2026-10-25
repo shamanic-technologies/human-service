@@ -211,7 +211,7 @@ describe("backfill planning", () => {
     expect(notDeclared.map((n) => [n.runId, n.reason])).toEqual([["v2", "verdict_not_kept"]]);
   });
 
-  it("only the first completed pointer build of an audience built it", () => {
+  it("every completed pointer build of an audience holding a pointer declares it (a duplicate is the ledger's repeat)", () => {
     const runs = [
       run({ id: "p-failed", taskName: "audience-pointer-build", audienceId: "aud-1", status: "failed", startedAt: "2026-10-01T09:00:00.000Z" }),
       run({ id: "p-first", taskName: "audience-pointer-build", audienceId: "aud-1", startedAt: "2026-10-01T10:00:00.000Z" }),
@@ -225,10 +225,12 @@ describe("backfill planning", () => {
       leadOf: () => null,
       lists: [],
     });
-    expect(planned.map((p) => [p.runId, p.produced[0].subjectId])).toEqual([["p-first", "aud-1"]]);
+    expect(planned.map((p) => [p.runId, p.produced[0].subjectId])).toEqual([
+      ["p-first", "aud-1"],
+      ["p-again", "aud-1"],
+    ]);
     expect(Object.fromEntries(notDeclared.map((n) => [n.runId, n.reason]))).toEqual({
       "p-failed": "no_list_built",
-      "p-again": "duplicate_build",
       "p-none": "no_list_built",
     });
   });

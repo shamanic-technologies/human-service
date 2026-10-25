@@ -20,9 +20,13 @@
 //         each paired to its `unknown` row; pairing them moved none of the 1006
 //         paid pairs, measured 2026-10-24). human-service verified emails only
 //         2026-09-24 ~18:12 -> 2026-09-25 09:56 UTC, then apollo-service did.
-//   audience-pointer-build ⟹ `audience_built` of the run's own audienceId, by the
-//         FIRST completed build of that audience (a later build's result was
-//         discarded by the "pointer still empty" guard: produced nothing).
+//   audience-pointer-build ⟹ `audience_built` of the run's own audienceId, by EVERY
+//         completed build of an audience that holds a pointer. A concurrent
+//         duplicate (its result discarded by the "pointer still empty" guard) did
+//         build that list a second time: it declares the same occurrence and
+//         runs-service books it ABNORMAL `repeat_production` (a run re-buying what
+//         the same task already made), never a unit's cost (LEDGER-RESIDUAL-1025:
+//         4 such builds on 2026-10-12, $0.78, read as undeclared before).
 //   audience-refill, audience-portfolio-launch, source-campaign-audience,
 //   competitor-engagement-audience, profile-signal-lists ⟹ `audience_built` of
 //         every list (audience row or audience source) the run CREATED: same org,
@@ -115,7 +119,6 @@ export type NotDeclaredReason =
   | "not_completed"
   | "no_list_built"
   | "list_shared_with_another_run"
-  | "duplicate_build"
   | "verdict_not_kept"
   | "no_serve_row"
   | "lead_not_found"
@@ -244,13 +247,6 @@ export function planRunOutcomes(input: {
     planned.push({ runId: r.id, taskName: r.taskName, costCents: r.costCents, produced, consumed });
 
   const { byRun, shared } = attributeLists(input.runs, input.lists);
-  // First completed pointer build per audience wrote the pointer.
-  const firstBuild = new Map<string, string>();
-  for (const r of [...input.runs].sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt))) {
-    if (r.taskName === "audience-pointer-build" && r.status === "completed" && r.audienceId && !firstBuild.has(r.audienceId)) {
-      firstBuild.set(r.audienceId, r.id);
-    }
-  }
 
   for (const r of input.runs) {
     const sup = supportOfTask(r.taskName);
@@ -288,7 +284,6 @@ export function planRunOutcomes(input: {
     }
     if (r.taskName === "audience-pointer-build") {
       if (r.status !== "completed" || !r.audienceId || !input.pointerAudiencesWithPointer.has(r.audienceId)) skip(r, "no_list_built");
-      else if (firstBuild.get(r.audienceId) !== r.id) skip(r, "duplicate_build");
       else plan(r, [audienceBuilt(r.audienceId)]);
       continue;
     }

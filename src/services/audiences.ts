@@ -2047,9 +2047,15 @@ async function buildPointerUnder(
     })
     .where(and(eq(audiences.id, row.id), isNull(audiences.apolloAudienceId)))
     .returning({ id: audiences.id });
-  // Only the build that WROTE the pointer built the list (a concurrent duplicate's
-  // result is discarded by the isNull guard and produced nothing).
-  if (written.length > 0) noteListBuilt(row.id);
+  // The build made the list whether or not it WROTE the pointer: a concurrent
+  // duplicate (its result discarded by the isNull guard) built the same list a
+  // second time and spent doing it. It declares the same occurrence; runs-service
+  // books the repeat as abnormal `repeat_production`, never a unit's cost
+  // (LEDGER-RESIDUAL-1025: silent, that spend read as undeclared).
+  if (written.length === 0) {
+    console.warn(`[human-service] audience.pointer_build duplicate audience=${row.id}: pointer already written, this build's result is discarded`);
+  }
+  noteListBuilt(row.id);
   return {
     id: row.id,
     name: row.name,
