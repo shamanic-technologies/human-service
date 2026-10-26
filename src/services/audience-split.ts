@@ -311,6 +311,10 @@ export async function confirmAudienceSplit(args: {
   /** Provenance tag. Defaults to `split_proposal` (a human confirmed it); the
    * automatic refill (audience-refill.ts) stamps `auto_refill`. */
   source?: string;
+  /** Row ids minted by the caller, one per segment in order. The confirm route
+   * mints them so the Apollo build can start BEFORE the rows exist (while the
+   * target draft runs); omitted ⟹ the database picks them. */
+  ids?: string[];
 }): Promise<Array<typeof audiences.$inferSelect>> {
   const rows = await db.transaction((tx) => insertSplitAudiences(tx, args));
   for (const r of rows) noteListBuilt(r.id);
@@ -318,15 +322,17 @@ export async function confirmAudienceSplit(args: {
 }
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+type SplitArgs = Parameters<typeof confirmAudienceSplit>[0];
 
-/** confirmAudienceSplit's body, for a caller that already holds a transaction
- * (accepting a widening proposal locks the proposal row in the same one). */
-export async function insertSplitAudiences(
-  tx: Tx,
-  args: Parameters<typeof confirmAudienceSplit>[0]
-): Promise<Array<typeof audiences.$inferSelect>> {
+/** The segment names already taken in the (org, brand, offer) scope. A plain
+ * read: the confirm route asks it BEFORE starting any build, so a 409 spends
+ * nothing; the transaction asks it again, which is what makes it binding. */
+export async function takenSplitNames(
+  executor: Tx | typeof db,
+  args: Pick<SplitArgs, "orgId" | "brandId" | "offerId" | "segments">
+): Promise<string[]> {
   const lowered = args.segments.map((s) => s.name.toLowerCase());
-  const taken = await tx
+  const taken = await executor
     .select({ name: audiences.name })
     .from(audiences)
     .where(
@@ -337,33 +343,64 @@ export async function insertSplitAudiences(
         inArray(sql`lower(${audiences.name})`, lowered)
       )
     );
-  if (taken.length > 0) {
-    throw new SplitNameConflictError(taken.map((t) => t.name));
+  return taken.map((t) => t.name);
+}
+
+/** The rows a split confirm inserts, one per segment, in order. */
+function splitAudienceValues(args: SplitArgs) {
+  if (args.ids && args.ids.length !== args.segments.length) {
+    throw new Error(
+      `split confirm: ${args.ids.length} minted ids for ${args.segments.length} segments`
+    );
   }
-  return tx
-    .insert(audiences)
-    .values(
-      args.segments.map((s) => ({
-        orgId: args.orgId,
-        brandId: args.brandId,
-        offerId: args.offerId,
-        name: s.name,
-        description: s.description,
-        nlPrompt: args.targetAudience,
-        // One segment = not one of several: the target IS its text. Several:
-        // each gets its own segment target, drafted after the confirm by
-        // ensureTargetText (audience-target-text.ts), before its first serve.
-        ...(args.segments.length === 1
-          ? audienceTargetFields(args.targetAudience)
-          : { targetText: null, targetTextOrigin: null }),
-        provider: "apollo",
-        apolloAudienceId: null,
-        filters: null,
-        status: "active",
-        source: args.source ?? "split_proposal",
-        createdByUserId: args.userId,
-      }))
-    )
-    .returning();
+  return args.segments.map((s, i) => ({
+    ...(args.ids ? { id: args.ids[i] } : {}),
+    orgId: args.orgId,
+    brandId: args.brandId,
+    offerId: args.offerId,
+    name: s.name,
+    description: s.description,
+    nlPrompt: args.targetAudience,
+    // One segment = not one of several: the target IS its text. Several:
+    // each gets its own segment target, drafted after the confirm by
+    // ensureTargetText (audience-target-text.ts), before its first serve.
+    ...(args.segments.length === 1
+      ? audienceTargetFields(args.targetAudience)
+      : { targetText: null, targetTextOrigin: null }),
+    provider: "apollo",
+    apolloAudienceId: null,
+    filters: null,
+    status: "active",
+    source: args.source ?? "split_proposal",
+    createdByUserId: args.userId,
+  }));
+}
+
+/**
+ * The rows a confirm WILL insert under the minted ids, before they exist, for
+ * the Apollo build to start on. Everything the build reads (id, org, brand,
+ * name, description, provider, creator) is final here; the drafted target is
+ * not known yet and the build never reads it (it builds from the segment's own
+ * name + description), so it is null on these copies.
+ */
+export function prospectiveSplitRows(
+  args: Omit<SplitArgs, "targetAudience"> & { ids: string[] }
+): Array<typeof audiences.$inferSelect> {
+  return splitAudienceValues({ ...args, targetAudience: null }).map(
+    (v) => v as unknown as typeof audiences.$inferSelect
+  );
+}
+
+/** confirmAudienceSplit's body, for a caller that already holds a transaction
+ * (accepting a widening proposal locks the proposal row in the same one). */
+export async function insertSplitAudiences(
+  tx: Tx,
+  args: SplitArgs
+): Promise<Array<typeof audiences.$inferSelect>> {
+  const taken = await takenSplitNames(tx, args);
+  if (taken.length > 0) {
+    throw new SplitNameConflictError(taken);
+  }
+  return tx.insert(audiences).values(splitAudienceValues(args)).returning();
 }
 

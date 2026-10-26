@@ -1942,7 +1942,11 @@ export async function backfillApolloAudiencePointer(
   row: typeof audiences.$inferSelect,
   // The identity the build is billed + traced under. Omitted (the historical
   // sweep) ⟹ the row's own org + creator, i.e. still ORG-billed.
-  identityOverride?: Identity
+  identityOverride?: Identity,
+  // A build started BEFORE its row is committed (the split confirm starts it
+  // while the target draft runs): explore + choose, then wait for this before
+  // writing. false ⟹ the confirm wrote nothing, so the result is discarded.
+  rowCommitted?: Promise<boolean>
 ): Promise<ApolloPointerBackfillResult | null> {
   // The build is list building: it and every call under it carry the origin of
   // the list it builds (unresolvable ⟹ throws before anything is spent).
@@ -1954,7 +1958,7 @@ export async function backfillApolloAudiencePointer(
   // request that carries none (the split confirm, the manual backfill) opens
   // its OWN run under the row's org, so it is still org-billed and traced.
   // No run ⟹ fail loud: a build that cannot be attributed must not run.
-  if (base.runId) return buildPointerUnder(row, base);
+  if (base.runId) return buildPointerUnder(row, base, rowCommitted);
   if (!base.userId) {
     throw new Error(
       `audience ${row.id}: no x-run-id and no user to open a run for the Apollo pointer build`
@@ -1983,7 +1987,7 @@ export async function backfillApolloAudiencePointer(
         ...base,
         runId: ownRunId,
         workflowTracking: tracking,
-      })
+      }, rowCommitted)
     );
     await completeRun(ownRunId, "completed", runIdentity);
     return result;
@@ -1993,9 +1997,19 @@ export async function backfillApolloAudiencePointer(
   }
 }
 
+/** Thrown by a build started ahead of its row when the confirm wrote nothing
+ * (a failed target draft, a taken name): the explored result is discarded. */
+export class PointerRowNotCommittedError extends Error {
+  constructor(audienceId: string) {
+    super(`audience ${audienceId}: the confirm did not create the row, the Apollo build is discarded`);
+    this.name = "PointerRowNotCommittedError";
+  }
+}
+
 async function buildPointerUnder(
   row: typeof audiences.$inferSelect,
-  identity: Identity
+  identity: Identity,
+  rowCommitted?: Promise<boolean>
 ): Promise<ApolloPointerBackfillResult | null> {
   const apollo = await suggestApolloAudience({
     name: row.name,
@@ -2029,6 +2043,10 @@ async function buildPointerUnder(
     );
     built = { ...chosen.candidate, degraded: chosen.degraded };
     chooserTrace = buildChooserTrace({ nlPrompt, candidates: apollo.candidates, chosen });
+  }
+  // Explore + choose ran without the row; the write needs it.
+  if (rowCommitted && !(await rowCommitted)) {
+    throw new PointerRowNotCommittedError(row.id);
   }
   const builtFilters = built.filters as Record<string, unknown> | null;
   if (!builtFilters || Object.keys(builtFilters).length === 0) {
@@ -2104,7 +2122,11 @@ export function needsApolloPointerBuild(
  */
 export async function ensureApolloPointer(
   audience: typeof audiences.$inferSelect,
-  identity: Identity
+  identity: Identity,
+  // The split confirm passes the rows it is ABOUT to insert (minted ids) and
+  // resolves this once the transaction settles, so the slow Apollo build runs
+  // beside the target draft instead of after it. See backfillApolloAudiencePointer.
+  rowCommitted?: Promise<boolean>
 ): Promise<typeof audiences.$inferSelect> {
   if (!needsApolloPointerBuild(audience)) return audience;
   const existing = pointerBuildsInFlight.get(audience.id);
@@ -2126,7 +2148,7 @@ export async function ensureApolloPointer(
       ...(identity.workflowTracking
         ? { workflowTracking: identity.workflowTracking }
         : {}),
-    });
+    }, rowCommitted);
     console.log(
       `[human-service] audience.pointer_build.${built ? "done" : "empty"} org=${audience.orgId} audience=${audience.id} count=${built?.count ?? "n/a"}`
     );
