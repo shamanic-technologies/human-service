@@ -2460,8 +2460,13 @@ them as OpenAPI enums).
 "Audience target"), `source='split_proposal'`, `offer_id` required.
   The Apollo filters are built by the existing pointer build
   (`backfillApolloAudiencePointer`), triggered TWICE and deduped through one
-  in-flight promise per audience (`ensureApolloPointer`): in the background right
-  after the confirm (org-billed with the confirm's identity), and INLINE on
+  in-flight promise per audience (`ensureApolloPointer`): in the background,
+  STARTED BEFORE the target draft (2026-10-26, -5 s to first companies: the build
+  reads the segment's name + description, never the target), on rows under ids
+  the route mints; it explores + chooses, then awaits a `rowCommitted` promise
+  before writing (false = failed draft / 409 ⟹ `PointerRowNotCommittedError`,
+  result discarded, so all-or-nothing holds; a taken name 409s BEFORE any build),
+  org-billed with the confirm's identity, and INLINE on
   serve-next if it has not landed (org-billed with the serve's identity). So an
   active split audience is never unservable, at worst its first serve waits ~2-3
   min on the build. A build yielding no usable filters still 422s at serve.
@@ -2802,7 +2807,10 @@ EXPLORES; it no longer DECIDES.)
   sampling param and must never start. That constraint binds the CHOOSER too
   (`src/services/audience-chooser.ts`), which keeps its own switch (`CHOOSER_LLM_PROVIDER` /
   `CHOOSER_LLM_MODEL`) with reasoning left ON — it sends no sampling param and no
-  `disableThinking`.
+  `disableThinking`. Measured 2026-10-26 on 30 stored traces: effort low saves
+  ~0.8 s (11 %) but changes 1-3/30 picks (default is 30/30 self-consistent);
+  `claude-haiku-5-5` is SLOWER and agrees 19/30. Kept as is: latency is output
+  (one rationale per attempt), not reasoning.
 - **Input is ONLY `{nlPrompt, brandId, offerId?}`** — no `strategy`/count knob and
   no split threshold. `offerId` is a pure SCOPE stamped on the persisted row (see
   "An audience belongs to ONE offer"); it never reaches Layer 1's prompt or the
