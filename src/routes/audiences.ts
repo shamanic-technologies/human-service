@@ -1,5 +1,6 @@
 import { messageOf } from "../lib/db-error.js";
 import { Router } from "express";
+import { randomUUID } from "node:crypto";
 import { personStatus } from "../services/audience-status-origin.js";
 import { ensureAvatar, ensureProfileAvatar } from "../services/audience-avatar.js";
 import { emailsOfPersons } from "../services/person-emails.js";
@@ -56,6 +57,8 @@ import { serveListKind, sourcingOriginSlug, SourcingOriginError } from "../servi
 import {
   proposeAudienceSplit,
   confirmAudienceSplit,
+  prospectiveSplitRows,
+  takenSplitNames,
   SplitNameConflictError,
 } from "../services/audience-split.js";
 import {
@@ -74,6 +77,7 @@ import {
   suggestAudiences,
   serveNextPerson,
   ensureApolloPointer,
+  PointerRowNotCommittedError,
   needsApolloPointerBuild,
   generateAvatar,
   buildAvatarPrompt,
@@ -490,8 +494,9 @@ router.post(
 
 // --- POST /orgs/audiences/split/confirm ---
 // The segments the customer kept -> ACTIVE audiences under (brand, offer), all
-// or nothing. Apollo filters are built right after, in the background (and
-// inline on the first serve-next if the background build has not landed).
+// or nothing. Apollo filters are built in the background, started BEFORE the
+// target draft so it does not wait on it (and inline on the first serve-next if
+// the background build has not landed).
 router.post(
   "/orgs/audiences/split/confirm",
   requireApiKey,
@@ -508,63 +513,99 @@ router.post(
       return;
     }
     const orgId = res.locals.orgId as string;
-    // The customer's words become a PERSON-level target (who to write to, who
-    // stays in around them, which functions are out) before they are stored as
-    // nl_prompt, the sentence the pre-pay screen judges every candidate against.
-    // Read against THIS offer, so the roles come from what it sells.
-    let target: string | null = null;
-    if (parsed.data.targetAudience) {
-      try {
-        target = await draftAudienceTarget({
-          customerTarget: parsed.data.targetAudience,
-          brandId: parsed.data.brandId,
-          offerId: parsed.data.offerId,
-          identity: buildIdentity(res),
-        });
-      } catch (err) {
-        sendProviderError(res, err);
-        return;
-      }
-      console.log(
-        `[human-service] audience.target_drafted org=${orgId} brand=${parsed.data.brandId} offer=${parsed.data.offerId} target=${JSON.stringify(target)}`
-      );
+    const userId = (res.locals.userId as string | undefined) ?? null;
+    const scope = {
+      orgId,
+      brandId: parsed.data.brandId,
+      offerId: parsed.data.offerId,
+      segments: parsed.data.segments,
+    };
+    // A taken name is a 409 before anything is spent (the transaction checks
+    // again, which is what makes it binding).
+    const taken = await takenSplitNames(db, scope);
+    if (taken.length > 0) {
+      res.status(409).json({ error: messageOf(new SplitNameConflictError(taken)) });
+      return;
+    }
+    // The Apollo build (the slow part of confirm -> first companies) reads the
+    // segment's own name + description, never the drafted target, so it starts
+    // NOW on the rows this confirm is about to insert (ids minted here), beside
+    // the target draft instead of after it. It explores + chooses, then waits
+    // for `committed` before writing: false (a failed draft, a lost name race)
+    // discards it, so all-or-nothing holds and no row exists half-created.
+    // serve-next and preview reuse the same in-flight build (ensureApolloPointer).
+    const ids = parsed.data.segments.map(() => randomUUID());
+    let settle!: (rowsWritten: boolean) => void;
+    const committed = new Promise<boolean>((resolve) => {
+      settle = resolve;
+    });
+    const buildIdentityForSplit = buildIdentity(res);
+    for (const row of prospectiveSplitRows({ ...scope, userId, ids })) {
+      void ensureApolloPointer(row, buildIdentityForSplit, committed).catch((err) => {
+        if (err instanceof PointerRowNotCommittedError) {
+          console.warn(`[human-service] audience.pointer_build.discarded org=${orgId} audience=${row.id}: ${messageOf(err)}`);
+          return;
+        }
+        console.error(
+          `[human-service] audience.pointer_build.failed org=${orgId} audience=${row.id}`,
+          err
+        );
+      });
     }
     let created;
+    let rowsWritten = false;
     try {
-      created = await confirmAudienceSplit({
-        orgId,
-        userId: (res.locals.userId as string | undefined) ?? null,
-        brandId: parsed.data.brandId,
-        offerId: parsed.data.offerId,
-        targetAudience: target,
-        segments: parsed.data.segments,
-      });
-    } catch (err) {
-      if (err instanceof SplitNameConflictError || isUniqueViolation(err)) {
-        res.status(409).json({
-          error:
-            err instanceof SplitNameConflictError
-              ? messageOf(err)
-              : "An audience with this name already exists for this brand and offer.",
-        });
-        return;
+      // The customer's words become a PERSON-level target (who to write to, who
+      // stays in around them, which functions are out) before they are stored as
+      // nl_prompt, the sentence the pre-pay screen judges every candidate against.
+      // Read against THIS offer, so the roles come from what it sells.
+      let target: string | null = null;
+      if (parsed.data.targetAudience) {
+        try {
+          target = await draftAudienceTarget({
+            customerTarget: parsed.data.targetAudience,
+            brandId: parsed.data.brandId,
+            offerId: parsed.data.offerId,
+            identity: buildIdentity(res),
+          });
+        } catch (err) {
+          sendProviderError(res, err);
+          return;
+        }
+        console.log(
+          `[human-service] audience.target_drafted org=${orgId} brand=${parsed.data.brandId} offer=${parsed.data.offerId} target=${JSON.stringify(target)}`
+        );
       }
-      throw err;
+      try {
+        created = await confirmAudienceSplit({
+          ...scope,
+          userId,
+          targetAudience: target,
+          ids,
+        });
+        rowsWritten = true;
+      } catch (err) {
+        if (err instanceof SplitNameConflictError || isUniqueViolation(err)) {
+          res.status(409).json({
+            error:
+              err instanceof SplitNameConflictError
+                ? messageOf(err)
+                : "An audience with this name already exists for this brand and offer.",
+          });
+          return;
+        }
+        throw err;
+      }
+    } finally {
+      // Every exit (draft failure, 409, a throw) settles the waiting builds.
+      settle(rowsWritten);
     }
     console.log(
       `[human-service] audience.split_confirm org=${orgId} brand=${parsed.data.brandId} offer=${parsed.data.offerId} created=${created.length}`
     );
-    // Build each segment's Apollo filters now, in the background (org-billed
-    // with this request's identity). serve-next builds inline if one has not
-    // landed yet, so a confirmed segment is never active AND unservable.
-    const buildIdentityForSplit = buildIdentity(res);
+    // The Apollo builds already run (above). serve-next builds inline if one
+    // has not landed yet, so a confirmed segment is never active AND unservable.
     for (const row of created) {
-      void ensureApolloPointer(row, buildIdentityForSplit).catch((err) =>
-        console.error(
-          `[human-service] audience.pointer_build.failed org=${orgId} audience=${row.id}`,
-          err
-        )
-      );
       // Each segment's own text (several segments share one nl_prompt), drafted
       // now in the background; serve-next drafts it inline if it has not landed.
       void ensureTargetText(row, buildIdentityForSplit).catch((err) =>

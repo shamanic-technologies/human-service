@@ -309,3 +309,78 @@ describe("POST /orgs/audiences/split/confirm — target draft failure", () => {
     expect(await db.select().from(audiences)).toHaveLength(0);
   });
 });
+
+// ONBOARDING-SEARCH-SPEED-1026: the Apollo build reads the segment's own name +
+// description, never the drafted target, so it must not queue behind the draft
+// (5.1s of the visitor's wait to the first companies, measured 2026-10-26).
+describe("POST /orgs/audiences/split/confirm — the Apollo build does not wait for the target draft", () => {
+  function wireApollo(built: string[]) {
+    process.env.APOLLO_SERVICE_URL = "http://apollo:8080";
+    process.env.APOLLO_SERVICE_API_KEY = "apollo-key";
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      if (String(url).endsWith("/audiences/suggest-from-segment")) {
+        const body = JSON.parse(init.body ?? "{}") as { name: string };
+        built.push(body.name);
+        return ok({ apolloAudienceId: `ptr-${body.name}`, filters: { person_titles: [body.name] }, count: 120 });
+      }
+      // Target text / avatar are not under test here.
+      return { ok: false, status: 503, json: async () => ({}), text: async () => "not under test" };
+    });
+  }
+
+  it("starts every segment's build while the draft is still running, then writes it on the committed rows", async () => {
+    const built: string[] = [];
+    wireApollo(built);
+    let finishDraft!: (t: string) => void;
+    vi.mocked(draftAudienceTarget).mockImplementationOnce(
+      () => new Promise<string>((resolve) => { finishDraft = resolve; })
+    );
+    const pending = confirm({ targetAudience: "B2B SaaS founders", segments: TWO }).then((r) => r);
+    for (let i = 0; i < 100 && built.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+    // The draft has not answered, and both builds already reached apollo-service.
+    expect(built.sort()).toEqual(TWO.map((s) => s.name).sort());
+    expect(await db.select().from(audiences)).toHaveLength(0);
+    finishDraft(DRAFTED);
+    const res = await pending;
+    expect(res.status).toBe(201);
+    const ids = res.body.audiences.map((a: { id: string }) => a.id).sort();
+    let rows: Array<typeof audiences.$inferSelect> = [];
+    for (let i = 0; i < 50; i++) {
+      rows = await db.select().from(audiences);
+      if (rows.length === 2 && rows.every((r) => r.apolloAudienceId)) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // The build wrote onto the very rows the confirm created (minted ids), once each.
+    expect(rows.map((r) => r.id).sort()).toEqual(ids);
+    for (const r of rows) {
+      expect(r.nlPrompt).toBe(DRAFTED);
+      expect(r.apolloAudienceId).toBe(`ptr-${r.name}`);
+      expect(r.filters).toEqual({ person_titles: [r.name] });
+    }
+    expect(built).toHaveLength(2);
+  });
+
+  it("a failed draft still writes nothing: the early build is discarded, no row appears later", async () => {
+    const built: string[] = [];
+    wireApollo(built);
+    vi.mocked(draftAudienceTarget).mockImplementationOnce(async () => {
+      for (let i = 0; i < 100 && built.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
+      throw new AudienceTargetOfferNotFoundError(BRAND, OFFER);
+    });
+    const res = await confirm({ targetAudience: "B2B SaaS founders", segments: TWO });
+    expect(res.status).toBe(502);
+    expect(built).toHaveLength(2);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(await db.select().from(audiences)).toHaveLength(0);
+  });
+
+  it("a taken name 409s before any build is started", async () => {
+    expect((await confirm({ segments: [TWO[0]] })).status).toBe(201);
+    const built: string[] = [];
+    wireApollo(built);
+    const res = await confirm({ segments: [TWO[1], { ...TWO[0], name: "us saas FOUNDERS" }] });
+    expect(res.status).toBe(409);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(built).toHaveLength(0);
+  });
+});
