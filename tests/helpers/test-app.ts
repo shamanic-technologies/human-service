@@ -1,3 +1,5 @@
+import { queryErrorHandler } from "../../src/lib/db-error.js";
+import { internalErrorHandler } from "../../src/lib/async-route-errors.js";
 import express from "express";
 import cors from "cors";
 import { requireMigratedSchema } from "../../src/middleware/readiness.js";
@@ -59,6 +61,8 @@ export function createTestApp() {
   app.use((_req: express.Request, res: express.Response) => {
     res.status(404).json({ error: "Not found" });
   });
+  app.use(queryErrorHandler);
+  app.use(internalErrorHandler);
 
   return app;
 }
