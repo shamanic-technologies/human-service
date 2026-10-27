@@ -657,6 +657,44 @@ were anchored before their send and **4,613 were servable again**.
 - No read path changed: one window, one anchor. Env: `INSTANTLY_SERVICE_URL`,
   `INSTANTLY_SERVICE_API_KEY`. Tests: `tests/integration/send-suppression-sync.test.ts`.
 
+### The serve states its window — `excludeEmailedWithin` (FRESH-2-MONTHS-1027)
+
+A used-up market (Doc Dinners: 47.7k held, ~3,800 emailed 60-90 days ago) keeps
+prospecting by writing again to people emailed MORE than 2 months ago (owner
+2026-10-27, every client). `src/lib/recontact-window.ts` owns the vocabulary.
+
+- **Field = lead-service's, forwarded verbatim**: body `excludeEmailedWithin`
+  `"3_months" | "2_months"` on `POST /orgs/audiences/{id}/serve-next`,
+  `/candidates/next` and `/candidates/{candidateId}/reveal` (send the same value on
+  all three; unknown = 400). Absent / `3_months` = today's serve, byte-identical
+  (`windowCutoff()` prints the same SQL). One value per REQUEST, chosen by the
+  caller's workflow: never per brand / campaign, never stored.
+- **Every suppression read of the serve takes it** (`identity.excludeEmailedWithin`,
+  the last argument of `partitionSuppressed` / `getSuppressionSet` /
+  `isEmailSuppressed` / `claimServe`): the apollo teaser filter, the POP re-check,
+  the candidate free checks, the apify exclude-set, and the reveal's atomic claim
+  (a row older than the window is re-claimed: new bronze row, `last_served_at` =
+  now, the window restarts). NOT a serve, so 3 months always: send sync, backfill
+  reporting, the audiences' Remaining rollup (`computeAudienceContactability`).
+- **The forward-only walk never re-finds its own people**, so a shorter window
+  first walks the people THIS audience (and this source of it) already served whose
+  brand row lapsed under it (`src/services/recontact-rereach.ts` `selectLapsed`,
+  keyset on `(last_served_at, email_norm)`, oldest first): handed or emailed only
+  (a `served` membership of the address under the brand, or `last_sent_at`), not
+  screened out / declined for the audience, no open candidate. serve-next: free
+  gates (windowed suppression of their other keys, opt-out/won, own company,
+  bounce), NO screen (judged when first served), then `resolveEmail`. candidates:
+  `passesFreeChecks`, the decided `revealed` candidate row is RE-OPENED (`offered`,
+  `revealResult` null) or a row written from the stored teaser; the reveal is an
+  ordinary reveal. Both run before the yield read, after the catch-all re-reach.
+- **No second reveal credit**: the re-reveal is an apollo-service `/enrich` of a
+  person it already revealed = its 12-month person cache (no Apollo call, no
+  credit); only the verification re-runs when its verdict is older than 30 days
+  (apollo-service's reuse), the check we want before writing again. Every
+  post-reveal gate and the verdict policy apply as for a fresh reveal.
+- Tests: `tests/integration/audiences-recontact-window.test.ts` (70 days handed,
+  40 days refused, absent/3_months refuses 70 days).
+
 ### Brand transfer — `POST /internal/transfer-brand`
 
 Fleet contract orchestrated by brand-service (`POST /orgs/brands/:brandId/transfer`

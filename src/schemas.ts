@@ -8,6 +8,7 @@ import { SPLIT_AXES, SPLIT_ICONS } from "./lib/audience-split-vocab.js";
 import { REACH_CHANNELS } from "./lib/reach.js";
 import { ACCEPTED_EMAILS } from "./lib/email-verification.js";
 import { RELATIONSHIP_POLICIES } from "./lib/relationship-policy.js";
+import { EXCLUDE_EMAILED_WITHIN } from "./lib/recontact-window.js";
 import { MESSAGING_NETWORKS } from "./lib/messaging-networks.js";
 import { CRM_RECORD_PROVIDERS } from "./lib/crm-record-providers.js";
 
@@ -1530,6 +1531,13 @@ export const AcceptedEmailsFieldSchema = z.enum(ACCEPTED_EMAILS).openapi({
   example: "valid_and_catch_all",
 });
 
+// The serve's per-brand re-contact window (FRESH-2-MONTHS-1027).
+export const ExcludeEmailedWithinFieldSchema = z.enum(EXCLUDE_EMAILED_WITHIN).openapi({
+  description:
+    "How long after a person was last served OR emailed for the audience's brand this serve may hand them out again, as the calling workflow states it (same field and values as lead-service's buffer/next, forwarded verbatim). '3_months' (the default when omitted) = today's per-brand suppression. '2_months' = a person last served or emailed for the brand more than 2 months ago may be handed again, on every check this serve makes (teaser filter before paying, the reveal's claim, the apify exclude-set). With '2_months', the people THIS audience already served whose window lapsed are handed FIRST (oldest first), re-revealed from apollo-service's person cache: no second reveal credit (only the email verification re-runs when its verdict is older than 30 days), every gate (opt-out, won, own company, bounce, verdict policy) as a fresh reveal, and the hand-out records a new serve (the window restarts from it). Accepted on serve-next, candidates/next and candidates/{candidateId}/reveal (send the same value on all three). Providers that own their own no-re-serve (crm): no effect.",
+  example: "2_months",
+});
+
 // The serving pipe's relationship policy (RELATIONSHIP-TAGS-1014).
 export const RelationshipsFieldSchema = z.enum(RELATIONSHIP_POLICIES).openapi({
   description:
@@ -1554,6 +1562,7 @@ export const ServeNextRequestSchema = z
   .object({
     reachableBy: ReachableByFieldSchema.optional(),
     acceptedEmails: AcceptedEmailsFieldSchema.optional(),
+    excludeEmailedWithin: ExcludeEmailedWithinFieldSchema.optional(),
     relationships: RelationshipsFieldSchema.optional(),
     stepFilter: StepFilterFieldSchema.optional(),
   })
@@ -1659,6 +1668,7 @@ export const RevealCandidateRequestSchema = z
         "Name of the question your qualification asked (e.g. a criteria version). The yield window is keyed on the latest basis: a new basis starts a new window.",
     }),
     acceptedEmails: AcceptedEmailsFieldSchema.optional(),
+    excludeEmailedWithin: ExcludeEmailedWithinFieldSchema.optional(),
   })
   .strict()
   .openapi("RevealCandidateRequest");

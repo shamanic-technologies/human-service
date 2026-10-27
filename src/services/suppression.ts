@@ -26,18 +26,29 @@
 // is served). linkedin_url_norm is the cross-provider key available BEFORE
 // paying on both providers (apollo teaser + apify lead both carry it).
 //
-// Window = 3 months, enforced on read via last_served_at. No silent fallbacks.
+// Window = 3 months, enforced on read via last_served_at, unless the SERVE asks
+// for a shorter one (`excludeEmailedWithin`, src/lib/recontact-window.ts): every
+// read path below takes the request's window as its last argument (absent = 3
+// months, byte-identical). No silent fallbacks.
 
 import { and, eq, gt, inArray, or, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { brandSuppressions, leadServes } from "../db/schema.js";
 import { personAddressSet } from "./person-emails.js";
+import {
+  DEFAULT_EXCLUDE_EMAILED_WITHIN,
+  WINDOW_INTERVAL,
+  type ExcludeEmailedWithin,
+} from "../lib/recontact-window.js";
 
-// Calendar-accurate 3-month window, evaluated by Postgres at query time. The
-// single source of the re-contact window — every read path (teaser filter,
-// exclude-set, resolve-email block, AND the audiences contactability rollup)
-// references this so "suppressed within window" never diverges.
-export const windowCutoff = () => sql`now() - interval '3 months'`;
+// Calendar-accurate re-contact window, evaluated by Postgres at query time. The
+// single source of the window — every read path (teaser filter, exclude-set,
+// resolve-email block, claimServe, AND the audiences contactability rollup)
+// references this so "suppressed within window" never diverges. Default 3
+// months; a serve stating `excludeEmailedWithin: "2_months"` passes its window
+// (the interval literal comes from a closed map, never from the request text).
+export const windowCutoff = (window: ExcludeEmailedWithin = DEFAULT_EXCLUDE_EMAILED_WITHIN) =>
+  sql`now() - interval '${sql.raw(WINDOW_INTERVAL[window])}'`;
 
 export function normalizeEmail(
   email: string | null | undefined
@@ -166,7 +177,8 @@ export async function partitionSuppressed<
 >(
   orgId: string,
   brandIds: string[],
-  items: T[]
+  items: T[],
+  window?: ExcludeEmailedWithin
 ): Promise<{ fresh: T[]; taken: Array<{ item: T; match: SuppressionMatch }> }> {
   if (brandIds.length === 0 || items.length === 0) return { fresh: items, taken: [] };
 
@@ -203,7 +215,7 @@ export async function partitionSuppressed<
       and(
         eq(brandSuppressions.orgId, orgId),
         inArray(brandSuppressions.brandId, brandIds),
-        gt(brandSuppressions.lastServedAt, windowCutoff()),
+        gt(brandSuppressions.lastServedAt, windowCutoff(window)),
         or(...matchConds)
       )
     );
@@ -232,15 +244,16 @@ export async function partitionSuppressed<
 // window (the `fresh` half of partitionSuppressed).
 export async function filterSuppressed<
   T extends { linkedinUrl: string | null; providerPersonId: string | null }
->(orgId: string, brandIds: string[], items: T[]): Promise<T[]> {
-  return (await partitionSuppressed(orgId, brandIds, items)).fresh;
+>(orgId: string, brandIds: string[], items: T[], window?: ExcludeEmailedWithin): Promise<T[]> {
+  return (await partitionSuppressed(orgId, brandIds, items, window)).fresh;
 }
 
 // apify path: the windowed exclude-set pushed down to apify /search so the paid
 // actor never returns (never bills) a lead already served for the brand.
 export async function getSuppressionSet(
   orgId: string,
-  brandIds: string[]
+  brandIds: string[],
+  window?: ExcludeEmailedWithin
 ): Promise<{ emails: string[]; linkedinUrls: string[] }> {
   if (brandIds.length === 0) return { emails: [], linkedinUrls: [] };
 
@@ -254,7 +267,7 @@ export async function getSuppressionSet(
       and(
         eq(brandSuppressions.orgId, orgId),
         inArray(brandSuppressions.brandId, brandIds),
-        gt(brandSuppressions.lastServedAt, windowCutoff())
+        gt(brandSuppressions.lastServedAt, windowCutoff(window))
       )
     );
 
@@ -275,14 +288,16 @@ export async function getSuppressionSet(
 export async function isEmailSuppressed(
   orgId: string,
   brandIds: string[],
-  email: string | null
+  email: string | null,
+  window?: ExcludeEmailedWithin
 ): Promise<boolean> {
   const emailNorm = normalizeEmail(email);
   if (brandIds.length === 0 || emailNorm === null) return false;
   return anyAddressSuppressed(
     orgId,
     brandIds,
-    await personAddressSet(db, orgId, [emailNorm])
+    await personAddressSet(db, orgId, [emailNorm]),
+    window
   );
 }
 
@@ -290,7 +305,8 @@ export async function isEmailSuppressed(
 async function anyAddressSuppressed(
   orgId: string,
   brandIds: string[],
-  emailNorms: string[]
+  emailNorms: string[],
+  window?: ExcludeEmailedWithin
 ): Promise<boolean> {
   if (emailNorms.length === 0) return false;
   const rows = await db
@@ -301,7 +317,7 @@ async function anyAddressSuppressed(
         eq(brandSuppressions.orgId, orgId),
         inArray(brandSuppressions.brandId, brandIds),
         inArray(brandSuppressions.emailNorm, emailNorms),
-        gt(brandSuppressions.lastServedAt, windowCutoff())
+        gt(brandSuppressions.lastServedAt, windowCutoff(window))
       )
     )
     .limit(1);
@@ -324,7 +340,10 @@ export async function claimServe(
   orgId: string,
   brandIds: string[],
   contact: ServedContact,
-  ctx: { campaignId?: string; runId?: string; audienceId?: string; emailVerdict?: string; audienceSourceId?: string | null } = {}
+  ctx: { campaignId?: string; runId?: string; audienceId?: string; emailVerdict?: string; audienceSourceId?: string | null } = {},
+  // The serve's re-contact window (absent = 3 months). A row inside it is a
+  // loss; a row older than it is re-claimed (the window restarts from now).
+  window?: ExcludeEmailedWithin
 ): Promise<boolean> {
   if (brandIds.length === 0) return true;
   const emailNorm = normalizeEmail(contact.email);
@@ -339,7 +358,7 @@ export async function claimServe(
   const otherAddresses = (await personAddressSet(db, orgId, [emailNorm])).filter(
     (e) => e !== emailNorm
   );
-  if (await anyAddressSuppressed(orgId, brandIds, otherAddresses)) return false;
+  if (await anyAddressSuppressed(orgId, brandIds, otherAddresses, window)) return false;
   const linkedinNorm = normalizeLinkedinUrl(contact.linkedinUrl);
   try {
     await db.transaction(async (tx) => {
@@ -362,7 +381,7 @@ export async function claimServe(
               linkedinUrlNorm: sql`coalesce(excluded.linkedin_url_norm, ${brandSuppressions.linkedinUrlNorm})`,
               providerPersonId: sql`coalesce(excluded.provider_person_id, ${brandSuppressions.providerPersonId})`,
             },
-            setWhere: sql`${brandSuppressions.lastServedAt} <= ${windowCutoff()}`,
+            setWhere: sql`${brandSuppressions.lastServedAt} <= ${windowCutoff(window)}`,
           })
           .returning({ id: brandSuppressions.id });
         if (claimed.length === 0) throw new AlreadyServedForBrand();
