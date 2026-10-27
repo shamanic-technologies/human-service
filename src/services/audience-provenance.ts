@@ -65,18 +65,6 @@ async function resolvePersonRow(
     c.provider === "apify" && c.providerPersonId ? c.providerPersonId : null;
 
   const keyConds = [];
-  if (emailNorm) {
-    keyConds.push(eq(people.emailNorm, emailNorm));
-    keyConds.push(
-      inArray(
-        people.id,
-        tx
-          .select({ id: personEmails.personId })
-          .from(personEmails)
-          .where(and(eq(personEmails.orgId, orgId), eq(personEmails.emailNorm, emailNorm)))
-      )
-    );
-  }
   if (linkedinNorm) keyConds.push(eq(people.linkedinUrlNorm, linkedinNorm));
   if (apolloId) keyConds.push(eq(people.apolloPersonId, apolloId));
   if (apifyId) keyConds.push(eq(people.apifyPersonId, apifyId));
@@ -86,47 +74,62 @@ async function resolvePersonRow(
       ? [c.firstName, c.lastName].filter(Boolean).join(" ")
       : null;
 
-  if (keyConds.length > 0) {
-    const [existing] = await tx
+  // The person HOLDING the address wins over a row matched only by another key:
+  // an Apollo id or LinkedIn url can sit on a different row of the org than the
+  // address (one human served twice before the rows met), and moving the address
+  // onto that other row would break the (org, email) uniqueness. Same row either
+  // way once identity resolution (human-identity.ts) links them.
+  let existing: typeof people.$inferSelect | undefined;
+  let matchedByEmail = false;
+  if (emailNorm) {
+    [existing] = await tx
+      .select()
+      .from(people)
+      .where(
+        and(
+          eq(people.orgId, orgId),
+          or(
+            eq(people.emailNorm, emailNorm),
+            inArray(
+              people.id,
+              tx
+                .select({ id: personEmails.personId })
+                .from(personEmails)
+                .where(and(eq(personEmails.orgId, orgId), eq(personEmails.emailNorm, emailNorm)))
+            )
+          )
+        )
+      )
+      .orderBy(sql`(${people.emailNorm} = ${emailNorm}) DESC NULLS LAST`)
+      .limit(1);
+    matchedByEmail = existing !== undefined;
+  }
+  if (!existing && keyConds.length > 0) {
+    [existing] = await tx
       .select()
       .from(people)
       .where(and(eq(people.orgId, orgId), or(...keyConds)))
       .limit(1);
-    if (existing) {
-      // Revealed at one of the person's OTHER addresses: the primary stays.
-      const keepPrimary =
-        emailNorm !== null &&
-        existing.emailNorm !== null &&
-        existing.emailNorm !== emailNorm &&
-        (
-          await tx
-            .select({ id: personEmails.id })
-            .from(personEmails)
-            .where(
-              and(
-                eq(personEmails.orgId, orgId),
-                eq(personEmails.emailNorm, emailNorm),
-                eq(personEmails.personId, existing.id)
-              )
-            )
-            .limit(1)
-        ).length > 0;
-      await tx
-        .update(people)
-        .set({
-          emailNorm: keepPrimary ? existing.emailNorm : emailNorm ?? existing.emailNorm,
-          linkedinUrlNorm: linkedinNorm ?? existing.linkedinUrlNorm,
-          apolloPersonId: apolloId ?? existing.apolloPersonId,
-          apifyPersonId: apifyId ?? existing.apifyPersonId,
-          firstName: c.firstName ?? existing.firstName,
-          lastName: c.lastName ?? existing.lastName,
-          fullName: fullName ?? existing.fullName,
-          companyDomain: c.companyDomain ?? existing.companyDomain,
-          lastSeenAt: new Date(),
-        })
-        .where(eq(people.id, existing.id));
-      return existing.id;
-    }
+  }
+  if (existing) {
+    // Revealed at one of the person's OTHER addresses: the primary stays.
+    const keepPrimary =
+      matchedByEmail && existing.emailNorm !== null && existing.emailNorm !== emailNorm;
+    await tx
+      .update(people)
+      .set({
+        emailNorm: keepPrimary ? existing.emailNorm : emailNorm ?? existing.emailNorm,
+        linkedinUrlNorm: linkedinNorm ?? existing.linkedinUrlNorm,
+        apolloPersonId: apolloId ?? existing.apolloPersonId,
+        apifyPersonId: apifyId ?? existing.apifyPersonId,
+        firstName: c.firstName ?? existing.firstName,
+        lastName: c.lastName ?? existing.lastName,
+        fullName: fullName ?? existing.fullName,
+        companyDomain: c.companyDomain ?? existing.companyDomain,
+        lastSeenAt: new Date(),
+      })
+      .where(eq(people.id, existing.id));
+    return existing.id;
   }
 
   // No match — insert. ON CONFLICT (org_id, email_norm) covers the race where a

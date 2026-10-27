@@ -779,7 +779,9 @@ emails/people in?". `src/services/audiences.ts` owns the engine;
   on structured filters only, tagged `confidence:'locally_inferred'` (the
   `confidence` column exists for it). v1 only writes `provider_confirmed`.
 - **Dedup (multi-source).** `resolvePersonId` (in a transaction) matches an
-  incoming served contact to a canonical `people` row by `email_norm` (canonical)
+  incoming served contact to a canonical `people` row by `email_norm` (canonical;
+  the row HOLDING the address always wins over one matched by another key, else
+  the write 23505s on `idx_people_org_email`)
   → `linkedin_url_norm` → `apollo_person_id`/`apify_person_id`, merging
   newly-learned fields (coalesce). So an apollo teaser (no email, has person id +
   linkedin) and its later apify reveal (same linkedin, now with email) collapse
@@ -1715,8 +1717,13 @@ live in prod and it stops calling serve-next (relayed by lead-service session
 - **History**: `GET …/screenings` reads bronze `audience_teaser_screenings`;
   every rejection the screen already bought stays in `audience_screened_out`,
   which this path honours, so nothing judged is re-judged or re-bought.
+- **A reveal always answers** (DOCDINNERS-REVEAL-HANG-1027): a throw is handed back
+  (`offered_at = now`, back of the queue) on an outage, or CLOSED like a decline
+  (`reveal_failed: <reason>`, never re-offered) on a Postgres class 22/23 error in
+  our own data (`releaseFailedReveal`). Doc Dinners 2026-10-26: one candidate whose
+  address sat on another `people` row 23505'd and stayed at the audience head 30 h.
 - No cost declared (apollo-service bills the reveal). Tests:
-  `tests/integration/audiences-candidates.test.ts`.
+  `tests/integration/audiences-candidates.test.ts`, `candidate-reveal-failures.test.ts`.
 
 ### CRM candidates — qualified first, email looked up at reveal (`src/services/crm-candidates.ts`, CRM-SERVE-FIND-EMAIL-1021)
 
@@ -3140,6 +3147,14 @@ key-service, `scraping.ts` → scraping-service, `chat-client.ts` → chat-servi
 - Note: `lead_serves.audience_id` (bronze, provenance) is the audience a serve
   was recorded UNDER (membership tagging) — distinct from the `x-audience-id`
   cost-attribution header, though in the serve-next campaign flow they coincide.
+
+## Async route errors always answer (`src/lib/async-route-errors.ts`)
+
+Express 4 never awaits a handler: a rejected async handler left the request open
+until the CALLER's timeout (lead-service 300 s). The module patches Express's
+layer so a rejection goes to `next(err)`, and `internalErrorHandler` (last, after
+`queryErrorHandler`) answers JSON 500 `{error, reason: "internal_error"}`.
+Imported by `src/index.ts` and `tests/helpers/test-app.ts`.
 
 ## Boot sequence — the port binds BEFORE migrations (slow first DB connect)
 

@@ -37,6 +37,8 @@
 
 import { and, asc, desc, eq, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import { db, sql as pg } from "../db/index.js";
+import { errorMessage } from "../lib/db-error.js";
+import { pgErrorCode } from "../lib/pg-error.js";
 import {
   audienceCandidates,
   audienceScreenedOut,
@@ -682,11 +684,7 @@ export async function revealCandidate(
       : await revealFresh(audienceIn, identity, claimed.providerPersonId);
     if (result.status === "served" && existing.sourceId) await markSourceServed(existing.sourceId);
   } catch (err) {
-    // Nothing recorded: hand the candidate back so a retry can reveal it.
-    await db
-      .update(audienceCandidates)
-      .set({ status: "offered", decidedAt: null, basis: null })
-      .where(and(eq(audienceCandidates.id, candidateId), eq(audienceCandidates.status, "revealing")));
+    await releaseFailedReveal(identity.orgId, audienceIn.id, claimed, err);
     throw err;
   }
   await db
@@ -738,7 +736,7 @@ async function revealCrmCandidateRow(
   try {
     crm = await revealCrmCandidate(audience, identity, claimed);
   } catch (err) {
-    await handBack();
+    await releaseFailedReveal(identity.orgId, audience.id, claimed, err);
     throw err;
   }
   const { handBack: back, ...result } = crm;
@@ -754,6 +752,54 @@ async function revealCrmCandidateRow(
     `[human-service] audience.candidate_revealed org=${identity.orgId} audience=${audience.id} candidate=${existing.id} status=${result.status}${result.reason ? ` reason=${result.reason}` : ""} path=crm`
   );
   return { ...result, replayed: false };
+}
+
+// A reveal that threw. An outage (a provider, a gate's source) hands the
+// candidate back, re-offered at the BACK of the queue (offered_at = now), so a
+// retry reveals it once the source answers and the audience keeps moving
+// meanwhile. A failure in our OWN data (a constraint or data error: SQLSTATE
+// class 22 / 23) would fail the same way on every retry, so the candidate is
+// closed exactly like a decline (reason `reveal_failed: <driver reason>`): never
+// offered again, the next one comes. DOCDINNERS-REVEAL-HANG-1027: one candidate
+// failing on a unique email was handed back at the head of its audience for 30 h.
+async function releaseFailedReveal(
+  orgId: string,
+  audienceId: string,
+  candidate: AudienceCandidate,
+  err: unknown
+): Promise<void> {
+  if (/^2[23][0-9A-Z]{3}$/.test(pgErrorCode(err) ?? "")) {
+    const reason = `reveal_failed: ${errorMessage(err)}`.slice(0, 500);
+    await db.transaction(async (tx) => {
+      await tx
+        .update(audienceCandidates)
+        .set({ status: "declined", declineReason: reason, decidedAt: new Date() })
+        .where(and(eq(audienceCandidates.id, candidate.id), eq(audienceCandidates.status, "revealing")));
+      await tx
+        .insert(audienceScreenedOut)
+        .values({
+          orgId,
+          audienceId,
+          providerPersonId: candidate.providerPersonId,
+          linkedinUrl: candidate.linkedinUrl,
+          reason: `declined: ${reason}`,
+        })
+        .onConflictDoNothing({
+          target: [audienceScreenedOut.audienceId, audienceScreenedOut.providerPersonId],
+        });
+    });
+    console.error(
+      `[human-service] audience.candidate_reveal_failed org=${orgId} audience=${audienceId} candidate=${candidate.id} closed=true reason=${errorMessage(err)}`
+    );
+    return;
+  }
+  await db
+    .update(audienceCandidates)
+    .set({ status: "offered", offeredAt: new Date(), decidedAt: null, basis: null })
+    .where(and(eq(audienceCandidates.id, candidate.id), eq(audienceCandidates.status, "revealing")));
+  console.error(
+    `[human-service] audience.candidate_reveal_failed org=${orgId} audience=${audienceId} candidate=${candidate.id} closed=false reason=${errorMessage(err)}`
+  );
 }
 
 // The billed reveal of a fresh candidate, recorded as served exactly as
