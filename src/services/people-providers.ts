@@ -32,6 +32,7 @@ import {
   type EmailVerdict,
   type EmailVerification,
 } from "../lib/email-verification.js";
+import type { ExcludeEmailedWithin } from "../lib/recontact-window.js";
 import type { RelationshipPolicy } from "../lib/relationship-policy.js";
 import type { StepFilter } from "../lib/step-filter.js";
 import {
@@ -374,6 +375,11 @@ export interface Identity {
   // `acceptedEmails`). Absent = valid only (the provider's `deliverable`).
   // Never serialized downstream: apollo-service keeps verifying as it does.
   acceptedEmails?: AcceptedEmails;
+  // The serve's per-brand re-contact window (body `excludeEmailedWithin`,
+  // src/lib/recontact-window.ts). Absent = 3 months. Read by EVERY suppression
+  // check this serve makes (teaser filter, exclude-set, claimServe); never sent
+  // downstream.
+  excludeEmailedWithin?: ExcludeEmailedWithin;
   // The serving pipe's relationship policy (body `relationships`). Pushed down to
   // crm-service on a CRM serve only (src/lib/relationship-policy.ts); never sent to
   // a search provider.
@@ -1167,7 +1173,7 @@ export async function peopleSearch(args: {
       people = await filterBounced(args.identity, people);
       const droppedBounced = people.length < beforeBounce;
       if (brandIds.length > 0) {
-        const split = await partitionSuppressed(args.identity.orgId, brandIds, people);
+        const split = await partitionSuppressed(args.identity.orgId, brandIds, people, args.identity.excludeEmailedWithin);
         people = split.fresh;
         // Searched UNDER an audience: the teasers already taken for the brand
         // stay unserved, but the audience found them — record it (multi-source
@@ -1218,7 +1224,7 @@ export async function peopleSearch(args: {
   const limit = args.limit ?? APIFY_DEFAULT_LIMIT;
   const suppression =
     brandIds.length > 0
-      ? await getSuppressionSet(args.identity.orgId, brandIds)
+      ? await getSuppressionSet(args.identity.orgId, brandIds, args.identity.excludeEmailedWithin)
       : { emails: [], linkedinUrls: [] };
   // apify BILLS per returned lead, so the org's standing opt-outs ride the same
   // push-down as the brand exclude-set: the actor never returns — never bills —
@@ -1348,7 +1354,7 @@ async function finalizeResolved(
       audienceId,
       emailVerdict,
       audienceSourceId: identity.audienceSourceId ?? null,
-    }))
+    }, identity.excludeEmailedWithin))
   ) {
     // Taken for the brand by a concurrent serve: not handed back, but the
     // audience this reveal ran under found them too (multi-source provenance).

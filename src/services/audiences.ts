@@ -85,6 +85,8 @@ import { crmPeopleServeStats, crmServeNext, normalizeCrmContact } from "../lib/c
 import { normalizeReach, personReaches, providerCanReach, type Reach } from "../lib/reach.js";
 import { widenedVerdicts, type EmailVerdict } from "../lib/email-verification.js";
 import { takeRereachForServe } from "./catch-all-rereach.js";
+import { passLapsedFreeGates, selectLapsed, type LapsedCursor } from "./recontact-rereach.js";
+import { isShortenedWindow } from "../lib/recontact-window.js";
 import { tagMemberSource } from "./audience-member-sources.js";
 import { markSourceServed, persistSourceExhaustion, pickServeSource, sourceView, type AudienceSource } from "./audience-sources.js";
 import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
@@ -2754,6 +2756,17 @@ async function serveFromList(
     }
   }
 
+  // A serve stating a window shorter than 3 months (`excludeEmailedWithin`)
+  // first gets the people THIS audience already served whose brand window has
+  // lapsed under it (recontact-rereach.ts): already judged on target, so no
+  // screen; re-revealed through apollo-service's person cache (no credit), every
+  // gate and the windowed claim exactly as a fresh reveal. Before the yield read,
+  // like the catch-all re-reach. Absent / 3 months: never runs.
+  if (isShortenedWindow(identity.excludeEmailedWithin)) {
+    const again = await serveLapsed(audience, identity, sourceId, deadline, optOuts, ownCompany);
+    if (again) return again;
+  }
+
   const yieldAtStart = await readScreenYield(audience, sourceId);
   if (yieldAtStart?.spent) return exhaustOnScreenYield(identity, audience, yieldAtStart);
 
@@ -2804,7 +2817,8 @@ async function serveFromList(
     const popped = await partitionSuppressed(
       identity.orgId,
       [audience.brandId],
-      [{ linkedinUrl: teaser.linkedinUrl, providerPersonId: teaser.providerPersonId }]
+      [{ linkedinUrl: teaser.linkedinUrl, providerPersonId: teaser.providerPersonId }],
+      identity.excludeEmailedWithin
     );
     if (popped.taken.length > 0) {
       await tagFoundAlreadyTaken(identity.orgId, audience.id, "apollo", popped.taken, sourceId);
@@ -2894,6 +2908,50 @@ async function serveFromList(
     }
     // Reveal yielded no usable email, or was post-pay suppressed → drop, pop the
     // next buffered teaser.
+  }
+}
+
+// serve-next's re-contact walk (FRESH-2-MONTHS-1027): the oldest lapsed person
+// of this audience that passes the free gates and reveals with a usable address
+// is served. null ⟹ nobody left (the caller walks the teaser buffer as usual);
+// `pending` ⟹ the budget ran out mid-walk. The keyset only moves forward inside
+// one call, so a person blocked by a gate is never asked twice in it.
+async function serveLapsed(
+  audience: typeof audiences.$inferSelect,
+  identity: Identity,
+  sourceId: string | null,
+  deadline: number,
+  optOuts: Awaited<ReturnType<typeof loadServeExclusions>>,
+  ownCompany: Awaited<ReturnType<typeof loadOwnCompany>>
+): Promise<ServeNextResult | null> {
+  const window = identity.excludeEmailedWithin!;
+  let after: LapsedCursor | null = null;
+  let walked = 0;
+  for (;;) {
+    // Budget spent on gated-out pages: leave the rest to the next call.
+    if (after !== null && Date.now() >= deadline) return null;
+    const page = await selectLapsed(identity.orgId, audience.brandId, audience.id, sourceId, window, after);
+    if (page.length === 0) return null;
+    after = { anchor: page[page.length - 1].anchor, emailNorm: page[page.length - 1].emailNorm };
+    for (const lapsed of await passLapsedFreeGates(identity, audience.brandId, page, optOuts, ownCompany)) {
+      if (walked > 0 && Date.now() >= deadline) return { status: "pending", person: null };
+      walked += 1;
+      const revealed = await resolveEmail({
+        provider: "apollo",
+        providerPersonId: lapsed.providerPersonId,
+        audienceId: audience.id,
+        identity,
+      });
+      if (revealed.person && hasUsableEmail(revealed.person)) {
+        console.log(
+          `[human-service] recontact.handed org=${identity.orgId} audience=${audience.id} window=${window} path=serve_next`
+        );
+        return servedWithPersonId(identity.orgId, audience.id, revealed.person, revealed.emailVerdict ?? null, sourceId);
+      }
+      console.log(
+        `[human-service] recontact.dropped org=${identity.orgId} audience=${audience.id} window=${window} reason=${revealed.blocked?.reason ?? "no_email"} path=serve_next`
+      );
+    }
   }
 }
 
