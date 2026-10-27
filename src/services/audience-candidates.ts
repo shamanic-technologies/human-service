@@ -48,6 +48,8 @@ import {
   type TeaserSnapshot,
 } from "../db/schema.js";
 import { partitionSuppressed } from "./suppression.js";
+import { passLapsedFreeGates, selectLapsed, type LapsedCursor, type LapsedServe } from "./recontact-rereach.js";
+import { isShortenedWindow } from "../lib/recontact-window.js";
 import { tagFoundAlreadyTaken } from "./audience-provenance.js";
 import { bufferTeasers, popTeaser, type BufferedTeaser } from "./teaser-buffer.js";
 import { isScreenYieldSpent, SCREEN_YIELD_WINDOW } from "./teaser-screening.js";
@@ -305,7 +307,7 @@ async function passesFreeChecks(
   const key = { linkedinUrl: teaser.linkedinUrl, providerPersonId: teaser.providerPersonId };
   // Already taken for the brand (served under another audience): never offered,
   // but this audience found them too (multi-source provenance, no spend).
-  const { taken } = await partitionSuppressed(identity.orgId, [audience.brandId], [key]);
+  const { taken } = await partitionSuppressed(identity.orgId, [audience.brandId], [key], identity.excludeEmailedWithin);
   if (taken.length > 0) {
     await tagFoundAlreadyTaken(identity.orgId, audience.id, "apollo", taken, identity.audienceSourceId ?? null);
     return false;
@@ -438,6 +440,16 @@ async function nextCandidateFromList(
   if (!sourceId && widenedVerdicts(identity.acceptedEmails).length > 0) {
     const rereach = await offerRereach(audience, identity);
     if (rereach) return { status: "candidate", candidate: toView(rereach), target };
+  }
+
+  // A caller stating a window shorter than 3 months (`excludeEmailedWithin`) is
+  // first offered the people THIS audience already served whose brand window has
+  // lapsed under it (recontact-rereach.ts). Their reveal is an ordinary reveal:
+  // apollo-service answers it from its person cache (no credit) and the claim
+  // runs under the reveal's window. Absent / 3 months: never runs.
+  if (isShortenedWindow(identity.excludeEmailedWithin)) {
+    const lapsed = await offerLapsed(audience, identity, sourceId);
+    if (lapsed) return { status: "candidate", candidate: toView(lapsed), target };
   }
 
   const yieldNow = await readCandidateYield(audience.id, sourceId);
@@ -581,6 +593,66 @@ async function offerRereach(
       return row;
     }
   }
+}
+
+// Offer the oldest lapsed person of this audience that passes the free checks:
+// their decided candidate row (a `revealed` one) is re-opened in place, else a
+// row is written from the stored teaser. null ⟹ nobody left. A person blocked by
+// a gate is passed over (the keyset only moves forward inside one call).
+async function offerLapsed(
+  audience: AudienceRow,
+  identity: Identity,
+  sourceId: string | null
+): Promise<AudienceCandidate | null> {
+  const window = identity.excludeEmailedWithin!;
+  const exclusions = await loadServeExclusions(identity);
+  const ownCompany = await loadOwnCompany(identity.orgId, [audience.brandId]);
+  let after: LapsedCursor | null = null;
+  for (;;) {
+    const page = await selectLapsed(identity.orgId, audience.brandId, audience.id, sourceId, window, after);
+    if (page.length === 0) return null;
+    after = { anchor: page[page.length - 1].anchor, emailNorm: page[page.length - 1].emailNorm };
+    for (const lapsed of await passLapsedFreeGates(identity, audience.brandId, page, exclusions, ownCompany)) {
+      const row = await reopenLapsedCandidate(identity.orgId, audience.id, sourceId, lapsed);
+      if (!row) continue;
+      console.log(
+        `[human-service] recontact.offered org=${identity.orgId} audience=${audience.id} candidate=${row.id} window=${window}`
+      );
+      return row;
+    }
+  }
+}
+
+async function reopenLapsedCandidate(
+  orgId: string,
+  audienceId: string,
+  sourceId: string | null,
+  lapsed: LapsedServe
+): Promise<AudienceCandidate | undefined> {
+  if (lapsed.candidateId) {
+    const [row] = await db
+      .update(audienceCandidates)
+      .set({ status: "offered", offeredAt: new Date(), decidedAt: null, basis: null, revealResult: null })
+      .where(and(eq(audienceCandidates.id, lapsed.candidateId), eq(audienceCandidates.status, "revealed")))
+      .returning();
+    return row;
+  }
+  const [row] = await db
+    .insert(audienceCandidates)
+    .values({
+      orgId,
+      audienceId,
+      providerPersonId: lapsed.providerPersonId,
+      linkedinUrl: lapsed.linkedinUrl,
+      teaser: lapsed.teaser,
+      organizationDomain: lapsed.organizationDomain,
+      sourceId,
+    })
+    .onConflictDoNothing({
+      target: [audienceCandidates.audienceId, audienceCandidates.providerPersonId],
+    })
+    .returning();
+  return row;
 }
 
 async function loadCandidate(

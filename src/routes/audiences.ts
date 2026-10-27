@@ -122,6 +122,7 @@ import {
 } from "../services/audience-preview-companies.js";
 
 import type { AcceptedEmails } from "../lib/email-verification.js";
+import type { ExcludeEmailedWithin } from "../lib/recontact-window.js";
 import type { RelationshipPolicy } from "../lib/relationship-policy.js";
 import type { StepFilter } from "../lib/step-filter.js";
 import { shapeEmailVerdict } from "../lib/serve-email-policy.js";
@@ -1199,6 +1200,7 @@ function parseServeReach(
       ok: true;
       reach: Reach[];
       acceptedEmails?: AcceptedEmails;
+      excludeEmailedWithin?: ExcludeEmailedWithin;
       relationships?: RelationshipPolicy;
       stepFilter?: StepFilter;
     }
@@ -1211,6 +1213,8 @@ function parseServeReach(
       error:
         field === "acceptedEmails"
           ? "acceptedEmails must be valid_only, valid_and_catch_all or valid_catch_all_and_unknown"
+          : field === "excludeEmailedWithin"
+            ? "excludeEmailedWithin must be 3_months or 2_months"
           : field === "relationships"
             ? "relationships must be business_only"
             : field === "stepFilter"
@@ -1222,6 +1226,7 @@ function parseServeReach(
     ok: true,
     reach: normalizeReach(parsed.data.reachableBy),
     ...(parsed.data.acceptedEmails ? { acceptedEmails: parsed.data.acceptedEmails } : {}),
+    ...(parsed.data.excludeEmailedWithin ? { excludeEmailedWithin: parsed.data.excludeEmailedWithin } : {}),
     ...(parsed.data.relationships ? { relationships: parsed.data.relationships } : {}),
     ...(parsed.data.stepFilter ? { stepFilter: parsed.data.stepFilter as StepFilter } : {}),
   };
@@ -1273,13 +1278,14 @@ router.post(
       return;
     }
     if (reachParse.acceptedEmails) identity.acceptedEmails = reachParse.acceptedEmails;
+    if (reachParse.excludeEmailedWithin) identity.excludeEmailedWithin = reachParse.excludeEmailedWithin;
     if (reachParse.relationships) identity.relationships = reachParse.relationships;
     if (reachParse.stepFilter) identity.stepFilter = reachParse.stepFilter;
 
     try {
       const result = await serveNextPerson(audience, identity, undefined, reachParse.reach);
       console.log(
-        `[human-service] audience.serve_next org=${orgId} audience=${audience.id} provider=${audience.provider} status=${result.status}${reachParse.acceptedEmails ? ` acceptedEmails=${reachParse.acceptedEmails} emailVerdict=${result.emailVerdict ?? "none"}` : ""}`
+        `[human-service] audience.serve_next org=${orgId} audience=${audience.id} provider=${audience.provider} status=${result.status}${reachParse.excludeEmailedWithin ? ` excludeEmailedWithin=${reachParse.excludeEmailedWithin}` : ""}${reachParse.acceptedEmails ? ` acceptedEmails=${reachParse.acceptedEmails} emailVerdict=${result.emailVerdict ?? "none"}` : ""}`
       );
       res.json(shapeEmailVerdict(result, reachParse.acceptedEmails));
     } catch (err) {
@@ -1328,6 +1334,7 @@ router.post(
       return;
     }
     if (reachParse.acceptedEmails) identity.acceptedEmails = reachParse.acceptedEmails;
+    if (reachParse.excludeEmailedWithin) identity.excludeEmailedWithin = reachParse.excludeEmailedWithin;
     // A CRM-sourced candidate serve pushes both down to crm-service, as serve-next
     // does; an apollo audience refuses a stepFilter (422, before any search).
     if (reachParse.relationships) identity.relationships = reachParse.relationships;
@@ -1372,6 +1379,7 @@ router.post(
       ...buildIdentity(res),
       brandIds: [audience.brandId],
       ...(parsed.data.acceptedEmails ? { acceptedEmails: parsed.data.acceptedEmails } : {}),
+      ...(parsed.data.excludeEmailedWithin ? { excludeEmailedWithin: parsed.data.excludeEmailedWithin } : {}),
     };
     try {
       const result = await revealCandidate(

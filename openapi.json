@@ -3078,6 +3078,15 @@
             "description": "Which email verification verdicts this serve may hand out, as the calling workflow states it. 'valid_only' (the default when omitted) = only an address the verifier confirmed (verdict valid, <1% bounce). 'valid_and_catch_all' = also an address on a catch-all domain (verdict catch_all, ~7% bounce), so a market that ran out of confirmed mailboxes keeps reaching people. 'valid_catch_all_and_unknown' = also an address the verifier could not judge (verdict unknown, ~15% bounce), a knowing choice. invalid and risky are never handed out, whatever the value. With 'valid_and_catch_all' (resp. 'valid_catch_all_and_unknown'), the catch-all (resp. catch-all and unknown) people this audience already revealed, verified and dropped for the brand are handed out FIRST, from what is stored: no new reveal, no new verification, no second charge, each person once, each with their own verdict. Accepted on serve-next, candidates/next and candidates/{candidateId}/reveal (send the same value on all three). Stating it (either value) also adds `emailVerdict` to every served answer. Providers without verification (crm, apify): no effect.",
             "example": "valid_and_catch_all"
           },
+          "excludeEmailedWithin": {
+            "type": "string",
+            "enum": [
+              "3_months",
+              "2_months"
+            ],
+            "description": "How long after a person was last served OR emailed for the audience's brand this serve may hand them out again, as the calling workflow states it (same field and values as lead-service's buffer/next, forwarded verbatim). '3_months' (the default when omitted) = today's per-brand suppression. '2_months' = a person last served or emailed for the brand more than 2 months ago may be handed again, on every check this serve makes (teaser filter before paying, the reveal's claim, the apify exclude-set). With '2_months', the people THIS audience already served whose window lapsed are handed FIRST (oldest first), re-revealed from apollo-service's person cache: no second reveal credit (only the email verification re-runs when its verdict is older than 30 days), every gate (opt-out, won, own company, bounce, verdict policy) as a fresh reveal, and the hand-out records a new serve (the window restarts from it). Accepted on serve-next, candidates/next and candidates/{candidateId}/reveal (send the same value on all three). Providers that own their own no-re-serve (crm): no effect.",
+            "example": "2_months"
+          },
           "relationships": {
             "type": "string",
             "enum": [
@@ -3398,6 +3407,15 @@
             ],
             "description": "Which email verification verdicts this serve may hand out, as the calling workflow states it. 'valid_only' (the default when omitted) = only an address the verifier confirmed (verdict valid, <1% bounce). 'valid_and_catch_all' = also an address on a catch-all domain (verdict catch_all, ~7% bounce), so a market that ran out of confirmed mailboxes keeps reaching people. 'valid_catch_all_and_unknown' = also an address the verifier could not judge (verdict unknown, ~15% bounce), a knowing choice. invalid and risky are never handed out, whatever the value. With 'valid_and_catch_all' (resp. 'valid_catch_all_and_unknown'), the catch-all (resp. catch-all and unknown) people this audience already revealed, verified and dropped for the brand are handed out FIRST, from what is stored: no new reveal, no new verification, no second charge, each person once, each with their own verdict. Accepted on serve-next, candidates/next and candidates/{candidateId}/reveal (send the same value on all three). Stating it (either value) also adds `emailVerdict` to every served answer. Providers without verification (crm, apify): no effect.",
             "example": "valid_and_catch_all"
+          },
+          "excludeEmailedWithin": {
+            "type": "string",
+            "enum": [
+              "3_months",
+              "2_months"
+            ],
+            "description": "How long after a person was last served OR emailed for the audience's brand this serve may hand them out again, as the calling workflow states it (same field and values as lead-service's buffer/next, forwarded verbatim). '3_months' (the default when omitted) = today's per-brand suppression. '2_months' = a person last served or emailed for the brand more than 2 months ago may be handed again, on every check this serve makes (teaser filter before paying, the reveal's claim, the apify exclude-set). With '2_months', the people THIS audience already served whose window lapsed are handed FIRST (oldest first), re-revealed from apollo-service's person cache: no second reveal credit (only the email verification re-runs when its verdict is older than 30 days), every gate (opt-out, won, own company, bounce, verdict policy) as a fresh reveal, and the hand-out records a new serve (the window restarts from it). Accepted on serve-next, candidates/next and candidates/{candidateId}/reveal (send the same value on all three). Providers that own their own no-re-serve (crm): no effect.",
+            "example": "2_months"
           }
         },
         "additionalProperties": false
