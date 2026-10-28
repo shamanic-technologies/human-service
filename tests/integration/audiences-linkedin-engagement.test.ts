@@ -372,6 +372,36 @@ describe("serve-next on a linkedin_engagement audience", () => {
     expect(out.body.reason).toBe("pool_exhausted");
   });
 
+  // SLOW-SOURCING-BEYONDLOGIC-1028: a competitor page whose read fails every time
+  // keeps apollo-service's harvest incomplete, so it answers `people: [], done:
+  // false` on every /search/next. The walk used to page that answer in a tight
+  // loop that never ended (~13 calls a second in prod, the caller long gone).
+  it("answers pending at once when apollo holds nobody yet but is not done, and persists nothing", async () => {
+    const audience = await createAudience();
+    let searches = 0;
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).endsWith("/search/next")) {
+        searches += 1;
+        return ok({ people: [], done: false, totalEntries: 0, source: "linkedin_engagement" });
+      }
+      throw new Error("unexpected url " + url);
+    });
+
+    const served = await request(app).post(`/orgs/audiences/${audience.id}/serve-next`).set(getAuthHeaders());
+    expect(served.status).toBe(200);
+    expect(served.body).toEqual({ status: "pending", person: null });
+    expect(searches).toBe(1);
+
+    const next = await request(app).post(`/orgs/audiences/${audience.id}/candidates/next`).set(getAuthHeaders());
+    expect(next.status).toBe(200);
+    expect(next.body.status).toBe("pending");
+    expect(searches).toBe(2);
+
+    // Not exhaustion: no ceiling persisted, Size stays unknown.
+    const [row] = await db.select().from(audiences).where(eq(audiences.id, audience.id));
+    expect(row.reachableCount).toBeNull();
+  });
+
   it("is not previewable (no Apollo sample exists for it)", async () => {
     const audience = await createAudience();
     const res = await request(app).get(`/orgs/audiences/${audience.id}/preview`).set(getAuthHeaders());
