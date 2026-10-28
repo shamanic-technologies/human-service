@@ -2043,6 +2043,13 @@ owns the criterion, the harvest, the per-audience no-repeat and the spend.
   `audience_exhausted` (campaign not stopped). The other two stay honest exhaustion. Prod
   2026-10-13: Doc Dinners' ChiroCandy / MaxLiving pages have zero posts (scrapecreators and
   harvestapi agree).
+- **Empty but NOT done = `pending`, never a walk** (SLOW-SOURCING-BEYONDLOGIC-1028): a competitor
+  page whose read always fails keeps apollo-service's harvest incomplete, so `/search/next` answers
+  `people: [], done: false` forever. `peopleSearch` stops on such a page (or past the serve's
+  `deadline`) with `notReady`; serve-next / candidates/next answer `pending`, persist nothing, and a
+  sources serve tries the next source. Before: an endless tight loop (~13 calls/s, Beyond Logic
+  2026-10-28, 2-4 leads/h). candidates/next walks 60 s (`CANDIDATE_NEXT_BUDGET_MS`, lead-service hangs
+  up at 90 s). Test: "pending at once" in `audiences-linkedin-engagement.test.ts`.
 - **No Apollo count / dry-run / preview exists** (named 400 there): refresh-count
   and the stale refresh skip it, previews answer `provider_not_previewable`,
   refill treats it as unmeasurable. The list OMITS `sizeCount` /

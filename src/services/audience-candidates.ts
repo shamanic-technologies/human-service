@@ -100,7 +100,6 @@ import {
   persistReachableCountOnExhaustion,
   noRecentPostsAnswer,
   servedWithPersonId,
-  SERVE_NEXT_BUDGET_MS,
 } from "./audiences.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
@@ -346,6 +345,11 @@ async function passesFreeChecks(
   return !rejected;
 }
 
+// lead-service hangs up on candidates/next after 90 s (CANDIDATE_CALL_TIMEOUT_MS):
+// the walk answers `pending` well before that, never after the caller left
+// (SLOW-SOURCING-BEYONDLOGIC-1028: a 120 s budget outlived the caller).
+export const CANDIDATE_NEXT_BUDGET_MS = 60_000;
+
 /**
  * The next candidate of an apollo audience, free: no screen, no reveal. The
  * caller (route) MUST pass identity.brandIds = [audience.brandId].
@@ -353,7 +357,7 @@ async function passesFreeChecks(
 export async function nextCandidate(
   audienceIn: AudienceRow,
   identityIn: Identity,
-  budgetMs: number = SERVE_NEXT_BUDGET_MS,
+  budgetMs: number = CANDIDATE_NEXT_BUDGET_MS,
   reach: readonly Reach[] = []
 ): Promise<NextCandidateResult> {
   const deadline = Date.now() + budgetMs;
@@ -389,16 +393,24 @@ async function nextCandidateFromSources(
   reach: readonly Reach[]
 ): Promise<NextCandidateResult> {
   let last: NextCandidateResult | null = null;
+  let pending: NextCandidateResult | null = null;
   // `null` = the audience's own list (a Lead Sourcing serve mixes both).
   for (const source of sources) {
     const result = source
       ? await nextCandidateFromList(sourceView(audience, source), { ...identity, audienceSourceId: source.id }, deadline, budgetMs, reach)
       : await nextCandidateFromList(audience, identity, deadline, budgetMs, reach);
-    if (result.status !== "exhausted") return result;
+    if (result.status === "candidate") return result;
+    if (result.status === "pending") {
+      // Budget spent: stop. A source with nothing to hand out YET (not exhaustion,
+      // SLOW-SOURCING-BEYONDLOGIC-1028) lets the next source try within the budget.
+      if (Date.now() >= deadline) return result;
+      pending = result;
+      continue;
+    }
     if (source && result.reason === "no_recent_posts") await persistSourceExhaustion(source.id, { reachable: false });
     last = result;
   }
-  return last!;
+  return pending ?? last!;
 }
 
 async function nextCandidateFromList(
@@ -482,8 +494,12 @@ async function nextCandidateFromList(
         filters: apolloFilters,
         apolloSearchParams,
         audienceId: audience.id,
+        deadline,
         identity,
       });
+      if (search.people.length === 0 && search.notReady) {
+        return { status: "pending", candidate: null, target };
+      }
       if (search.people.length === 0) {
         if (search.noRecentPosts) {
           noRecentPostsAnswer(identity.orgId, audience.id, "candidates");
