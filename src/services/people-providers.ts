@@ -330,6 +330,12 @@ export interface PeopleSearchResult {
   // read engagers from. Not exhaustion (the pool fills when the competitor
   // posts), so callers name it instead of persisting a reachable ceiling.
   noRecentPosts?: true;
+  // Set only when the apollo walk stopped WITHOUT a fresh teaser and WITHOUT
+  // apollo's `done` (SLOW-SOURCING-BEYONDLOGIC-1028): apollo answered a page
+  // holding nobody at all while saying it is not done (a linkedin_engagement
+  // source whose competitor page read keeps failing), or the caller's deadline
+  // passed mid-walk. Not exhaustion: nothing is persisted, the next call asks again.
+  notReady?: true;
 }
 
 // Why a reveal handed nobody back. Internal: the candidate API names it on
@@ -1095,6 +1101,9 @@ export async function peopleSearch(args: {
   // Audience to record bronze serves under (membership tagging is done by the
   // route after the result returns). Audit-only here.
   audienceId?: string;
+  // apollo only: epoch ms past which the saturation walk stops paging and
+  // answers `notReady` (the serve's own budget; the caller hangs up after it).
+  deadline?: number;
   identity: Identity;
 }): Promise<PeopleSearchResult> {
   const provider = resolveProvider(args);
@@ -1125,6 +1134,7 @@ export async function peopleSearch(args: {
     let total = 0;
     let done = false;
     let noRecentPosts = false;
+    let notReady = false;
 
     // Standing opt-outs — ORG-wide and permanent, so this is loaded even when
     // the request names no brand, and it is read live from instantly-service so
@@ -1162,6 +1172,7 @@ export async function peopleSearch(args: {
         args.identity
       )) as { people: ApolloPerson[]; done: boolean; totalEntries: number };
       total = data.totalEntries;
+      const pageWasEmpty = data.people.length === 0;
 
       let people = data.people.map((p) => normalizeApolloPerson(p));
       people = filterOptedOut(optOuts, people);
@@ -1197,6 +1208,19 @@ export async function peopleSearch(args: {
         people.length > 0
       )
         break;
+      // A page holding NOBODY while apollo says it is not done is not a
+      // saturated stretch to walk through: the next page is the same empty
+      // answer, in a tight loop that never ends (SLOW-SOURCING-BEYONDLOGIC-1028:
+      // a linkedin_engagement source whose competitor page read failed every
+      // time answered `people: [], done: false` ~13 times a second, and the
+      // walk outlived every caller). Stop and say so; the next serve asks again.
+      if (pageWasEmpty || (args.deadline !== undefined && Date.now() >= args.deadline)) {
+        notReady = true;
+        console.log(
+          `[human-service] people_search.walk_not_ready org=${args.identity.orgId} audience=${args.audienceId ?? "none"} pages=${page + 1} reason=${pageWasEmpty ? "empty_page_not_done" : "deadline"}`
+        );
+        break;
+      }
       // Whole page already served for the brand, opted out, or bounced → walk to
       // the next free page.
     }
@@ -1208,6 +1232,7 @@ export async function peopleSearch(args: {
       total,
       nextOffset: null,
       ...(noRecentPosts ? { noRecentPosts: true as const } : {}),
+      ...(notReady ? { notReady: true as const } : {}),
     };
   }
 

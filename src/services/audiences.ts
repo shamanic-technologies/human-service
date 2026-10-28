@@ -2601,6 +2601,7 @@ async function serveFromSources(
   reach: readonly Reach[]
 ): Promise<ServeNextResult> {
   let last: ServeNextResult = { status: "exhausted", person: null };
+  let pending: ServeNextResult | null = null;
   // `null` = the audience's own list (a Lead Sourcing serve mixes both).
   for (const source of sources) {
     const result = source
@@ -2610,11 +2611,17 @@ async function serveFromSources(
       if (source) await markSourceServed(source.id);
       return result;
     }
-    if (result.status === "pending") return result;
+    if (result.status === "pending") {
+      // Budget spent: stop. A source with nothing to hand out YET (not exhaustion,
+      // SLOW-SOURCING-BEYONDLOGIC-1028) lets the next source try within the budget.
+      if (Date.now() >= deadline) return result;
+      pending = result;
+      continue;
+    }
     if (source && result.reason === "no_recent_posts") await persistSourceExhaustion(source.id, { reachable: false });
     last = result;
   }
-  return last;
+  return pending ?? last;
 }
 
 // Where the walk stopped for good: the audience's own list persists its reachable
@@ -2799,8 +2806,10 @@ async function serveFromList(
         filters: apolloFilters,
         apolloSearchParams,
         audienceId: audience.id,
+        deadline,
         identity,
       });
+      if (search.people.length === 0 && search.notReady) return { status: "pending", person: null };
       if (search.people.length === 0) {
         if (search.noRecentPosts) return noRecentPostsAnswer(identity.orgId, audience.id, "serve_next");
         await persistExhaustion(identity, audience.id);
