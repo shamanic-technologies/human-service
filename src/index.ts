@@ -14,6 +14,7 @@ import audienceRefillRoutes from "./routes/audience-refill.js";
 import competitorEngagementRoutes from "./routes/competitor-engagement.js";
 import sendSuppressionSyncRoutes from "./routes/send-suppression-sync.js";
 import candidateWalkRoutes from "./routes/candidate-walks.js";
+import audienceSplitRoutes from "./routes/audience-splits.js";
 import sourceCampaignRoutes from "./routes/source-campaigns.js";
 import leadSourcingRoutes from "./routes/lead-sourcing.js";
 import listsRoutes from "./routes/lists.js";
@@ -78,7 +79,8 @@ app.use(leadSourcingRoutes);
 app.use(suppressionRecoveryRoutes);
 app.use(sourceAudienceMergeRoutes);
 app.use(sendSuppressionSyncRoutes);
-app.use(candidateWalkRoutes); // FACTORY-P3 next outcomes: the stored walk script's doors + recorded walks
+app.use(candidateWalkRoutes);
+app.use(audienceSplitRoutes); // FACTORY-P3 next outcomes: the stored split script's doors + recorded proposals // FACTORY-P3 next outcomes: the stored walk script's doors + recorded walks
 app.use(listsRoutes);
 app.use(personEmailRoutes);
 app.use(humanIdentityRoutes);

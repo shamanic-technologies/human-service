@@ -351,6 +351,13 @@
       "when": 1771933579399,
       "tag": "0049_candidate_walks",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1771933580399,
+      "tag": "0050_audience_split_proposals",
+      "breakpoints": true
     }
   ]
 }

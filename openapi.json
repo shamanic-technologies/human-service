@@ -16102,6 +16102,86 @@
         }
       }
     },
+    "/internal/audience-splits/{door}": {
+      "post": {
+        "summary": "A door of the stored split script (FACTORY-P3 next outcomes, audience_built; service key)",
+        "description": "`door` = complete (our exact chat-service completion, retries included: {proposal, message, systemPrompt, provider, model, responseSchema, disableThinking} -> the parsed JSON) or judge (our icon judgment: {proposal, state, questions} -> {segment_N: {choice, confidence}}). Serves ONLY a proposal in flight here (`proposal` = the token handed as material); spend on the script's run (`x-run-id`). 409 nothing in flight, 502 refused.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "complete",
+                "judge"
+              ]
+            },
+            "required": true,
+            "name": "door",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "proposal": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "proposal"
+                ],
+                "additionalProperties": {
+                  "nullable": true
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The call's answer"
+          },
+          "409": {
+            "description": "No proposal in flight"
+          },
+          "502": {
+            "description": "Refused"
+          }
+        }
+      }
+    },
+    "/internal/audience-splits/recorded": {
+      "get": {
+        "summary": "Every recorded split proposal in the stored split script's words (service key; workflow-service's case recorder)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "after",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{decisions, nextAfter, hasMore}"
+          }
+        }
+      }
+    },
     "/internal/research/teaser-screenings": {
       "get": {
         "summary": "Staff research: per month, the people the pre-pay Jev screen judged while human-service ran it, by verdict and P(yes) bucket, fleet-wide since inception.",
