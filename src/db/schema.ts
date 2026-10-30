@@ -1003,6 +1003,27 @@ export const candidateWalks = pgTable(
   (table) => [uniqueIndex("idx_candidate_walks_seq").on(table.seq), index("idx_candidate_walks_created").on(table.createdAt)]
 );
 
+// FACTORY-P3 next outcomes (audience_built, migration 0050): every split proposal in the stored split script's words.
+// Read only by GET /internal/audience-splits/recorded. Never logged.
+export const audienceSplitProposals = pgTable(
+  "audience_split_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    seq: bigserial("seq", { mode: "number" }).notNull(),
+    orgId: uuid("org_id").notNull(),
+    callerRunId: text("caller_run_id"),
+    runId: text("run_id"),
+    path: text("path").notNull(),
+    targetAudience: text("target_audience").notNull(),
+    allowEmpty: boolean("allow_empty").notNull(),
+    calls: jsonb("calls").notNull(),
+    proposal: jsonb("proposal"),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("idx_audience_split_proposals_seq").on(table.seq)]
+);
+
 export const audienceScreenedOut = pgTable(
   "audience_screened_out",
   {

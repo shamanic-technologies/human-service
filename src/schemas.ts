@@ -5095,6 +5095,24 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "post",
+  path: "/internal/audience-splits/{door}",
+  summary: "A door of the stored split script (FACTORY-P3 next outcomes, audience_built; service key)",
+  description:
+    "`door` = complete (our exact chat-service completion, retries included: {proposal, message, systemPrompt, provider, model, responseSchema, disableThinking} -> the parsed JSON) or judge (our icon judgment: {proposal, state, questions} -> {segment_N: {choice, confidence}}). Serves ONLY a proposal in flight here (`proposal` = the token handed as material); spend on the script's run (`x-run-id`). 409 nothing in flight, 502 refused.",
+  request: { params: z.object({ door: z.enum(["complete", "judge"]) }), body: { required: true, content: { "application/json": { schema: z.object({ proposal: z.string() }).passthrough() } } } },
+  responses: { 200: { description: "The call's answer" }, 409: { description: "No proposal in flight" }, 502: { description: "Refused" } },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/audience-splits/recorded",
+  summary: "Every recorded split proposal in the stored split script's words (service key; workflow-service's case recorder)",
+  request: { query: z.object({ after: z.string().optional(), limit: z.string().optional() }) },
+  responses: { 200: { description: "{decisions, nextAfter, hasMore}" } },
+});
+
+registry.registerPath({
   method: "get",
   path: "/internal/research/teaser-screenings",
   summary: "Staff research: per month, the people the pre-pay Jev screen judged while human-service ran it, by verdict and P(yes) bucket, fleet-wide since inception.",
