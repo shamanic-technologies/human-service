@@ -5074,6 +5074,27 @@ export const TeaserScreeningResearchResponseSchema = z
   .openapi("TeaserScreeningResearchResponse");
 
 registry.registerPath({
+  method: "post",
+  path: "/internal/candidate-walks/{door}",
+  summary: "A door of the stored walk script (FACTORY-P3 next outcomes, lead_found; service key)",
+  description:
+    "`door` = page ({walk, limit}: up to `limit` teasers with the facts each free rule reads (`lastServedAt` for the brand, `optedOut`, `organizationName`, `bounced`, `rejected`) and the walk's `now`, or `{status: pending|exhausted, reason}`) or decide ({walk, verdicts: [{ref, verdict: taken|opted_out|own_company|bounced|rejected|offer}]} in the page's order: applied as our own walk applies them; the first offer is offered once per (audience, person), a teaser after it goes back to the buffer where it was). Serves ONLY a walk in flight here (`walk` = the token handed to the script). 409 no such walk, 502 refused.",
+  request: {
+    params: z.object({ door: z.enum(["page", "decide"]) }),
+    body: { required: true, content: { "application/json": { schema: z.object({ walk: z.string(), limit: z.number().int().optional(), verdicts: z.array(z.object({ ref: z.string(), verdict: z.string() })).optional() }) } } },
+  },
+  responses: { 200: { description: "The page / the offer" }, 409: { description: "No walk in flight" }, 502: { description: "Refused" } },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/candidate-walks/recorded",
+  summary: "Every recorded walk in the stored walk script's words (service key; workflow-service's case recorder)",
+  request: { query: z.object({ after: z.string().optional(), limit: z.string().optional() }) },
+  responses: { 200: { description: "{decisions, nextAfter, hasMore}" } },
+});
+
+registry.registerPath({
   method: "get",
   path: "/internal/research/teaser-screenings",
   summary: "Staff research: per month, the people the pre-pay Jev screen judged while human-service ran it, by verdict and P(yes) bucket, fleet-wide since inception.",

@@ -981,6 +981,28 @@ export type NewAudienceTeaserScreening = typeof audienceTeaserScreenings.$inferI
 // the AUDIENCE and not the brand: the verdict is relative to the audience that
 // defined the target, so a person rejected here may be right for another
 // audience of the same brand. Brand-wide no-repeat remains brand_suppressions'.
+// FACTORY-P3 next outcomes (lead_found, migration 0049): a walk in the stored walk script's words, on either path.
+// Read only by GET /internal/candidate-walks/recorded. Personal data: never logged.
+export const candidateWalks = pgTable(
+  "candidate_walks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    seq: bigserial("seq", { mode: "number" }).notNull(),
+    orgId: uuid("org_id").notNull(),
+    audienceId: uuid("audience_id").notNull(),
+    serveRunId: text("serve_run_id"),
+    runId: text("run_id"),
+    path: text("path").notNull(),
+    units: jsonb("units").notNull(),
+    calls: jsonb("calls").notNull(),
+    candidateId: text("candidate_id"),
+    status: text("status").notNull(),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("idx_candidate_walks_seq").on(table.seq), index("idx_candidate_walks_created").on(table.createdAt)]
+);
+
 export const audienceScreenedOut = pgTable(
   "audience_screened_out",
   {

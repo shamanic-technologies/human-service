@@ -115,3 +115,79 @@ export async function popTeaser(
       }
     : null;
 }
+
+// FACTORY-P3 next outcomes (lead_found): a popped teaser as its stored row, so a page the stored walk script
+// popped but did not decide goes back EXACTLY where it was (same id, same created_at: the drain order is unchanged).
+export interface PoppedTeaserRow extends BufferedTeaser {
+  id: string;
+  orgId: string;
+  audienceId: string;
+  sourceId: string | null;
+  createdAt: Date;
+}
+
+export async function popTeaserRow(
+  orgId: string,
+  audienceId: string,
+  sourceId: string | null = null
+): Promise<PoppedTeaserRow | null> {
+  const ofSource = sourceId ? pg`AND source_id = ${sourceId}` : pg`AND source_id IS NULL`;
+  const rows = await pg<
+    {
+      id: string;
+      org_id: string;
+      audience_id: string;
+      source_id: string | null;
+      created_at: Date;
+      provider_person_id: string;
+      linkedin_url: string | null;
+      teaser: TeaserSnapshot | null;
+      organization_domain: string | null;
+    }[]
+  >`
+    DELETE FROM audience_teaser_buffer
+    WHERE id = (
+      SELECT id FROM audience_teaser_buffer
+      WHERE org_id = ${orgId} AND audience_id = ${audienceId} ${ofSource}
+      ORDER BY created_at ASC
+      FOR UPDATE SKIP LOCKED
+      LIMIT 1
+    )
+    RETURNING id, org_id, audience_id, source_id, created_at, provider_person_id, linkedin_url, teaser, organization_domain
+  `;
+  const r = rows[0];
+  return r
+    ? {
+        id: r.id,
+        orgId: r.org_id,
+        audienceId: r.audience_id,
+        sourceId: r.source_id,
+        createdAt: new Date(r.created_at),
+        providerPersonId: r.provider_person_id,
+        linkedinUrl: r.linkedin_url,
+        teaser: r.teaser,
+        organizationDomain: r.organization_domain,
+      }
+    : null;
+}
+
+/** Put popped-but-undecided teasers back with their own id and created_at (a re-surfaced one is ignored). */
+export async function restoreTeasers(rows: PoppedTeaserRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  await db
+    .insert(audienceTeaserBuffer)
+    .values(
+      rows.map((r) => ({
+        id: r.id,
+        orgId: r.orgId,
+        audienceId: r.audienceId,
+        providerPersonId: r.providerPersonId,
+        linkedinUrl: r.linkedinUrl,
+        teaser: r.teaser,
+        organizationDomain: r.organizationDomain,
+        sourceId: r.sourceId,
+        createdAt: r.createdAt,
+      }))
+    )
+    .onConflictDoNothing();
+}
