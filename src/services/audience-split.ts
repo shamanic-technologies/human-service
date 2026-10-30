@@ -27,7 +27,7 @@
 
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { audiences } from "../db/schema.js";
+import { audiences, audienceSplitProposals } from "../db/schema.js";
 import {
   ChatServiceError,
   completeJson,
@@ -41,6 +41,19 @@ import {
 } from "../lib/audience-split-vocab.js";
 import { audienceTargetFields } from "./audience-target-text.js";
 import { noteListBuilt } from "./run-outputs.js";
+import { completeRun, createRun } from "./runs.js";
+import {
+  doorCall,
+  findInFlight,
+  messageOf,
+  registerInFlight,
+  releaseInFlight,
+  runServiceScript,
+  scriptSwitch,
+  ServiceScriptError,
+  type InFlight,
+  type ScriptCall,
+} from "../lib/script-switch.js";
 
 export { SPLIT_AXES, SPLIT_ICONS, type SplitAxis };
 
@@ -241,21 +254,32 @@ export async function proposeAudienceSplit(
     allowEmpty?: boolean;
   } = {}
 ): Promise<SplitProposal> {
-  const { axes, segments } = parseSplit(
-    await completeJson({
-      message: targetAudience,
-      systemPrompt: buildSplitSystemPrompt(),
-      identity,
-      provider: SPLIT_LLM_PROVIDER,
-      model: SPLIT_LLM_MODEL,
-      responseSchema: SPLIT_RESPONSE_SCHEMA,
-      disableThinking: SPLIT_DISABLE_THINKING,
-    }),
-    opts.allowEmpty ?? false
-  );
-  if (segments.length === 0) return { axes: [], segments: [] };
+  const allowEmpty = opts.allowEmpty ?? false;
+  // FACTORY-P3 next outcomes (audience_built): the split runs as the stored script while switched.
+  const choose = await scriptSwitch(AUDIENCE_BUILT_OUTCOME);
+  if (choose.switched && choose.dynasty && identity.runId) return proposeByScript(choose.dynasty, targetAudience, identity, allowEmpty);
+  return proposeHere(targetAudience, identity, allowEmpty);
+}
 
-  const questions = Object.fromEntries(
+export const AUDIENCE_BUILT_OUTCOME = "audience_built";
+export const SPLIT_COMPLETE_CALL = "human.split.complete";
+export const SPLIT_JUDGE_CALL = "human.split.judge";
+export const SPLIT_PROPOSAL_TASK = "audience-split-proposal";
+
+/** The split's completion request, exactly as our code sends it (the stored script states the same). */
+function splitCompletion(targetAudience: string) {
+  return {
+    message: targetAudience,
+    systemPrompt: buildSplitSystemPrompt(),
+    provider: SPLIT_LLM_PROVIDER,
+    model: SPLIT_LLM_MODEL,
+    responseSchema: SPLIT_RESPONSE_SCHEMA,
+    disableThinking: SPLIT_DISABLE_THINKING,
+  };
+}
+
+function iconQuestions(segments: Array<{ name: string; description: string }>) {
+  return Object.fromEntries(
     segments.map((s, i) => [
       `segment_${i + 1}`,
       {
@@ -264,23 +288,139 @@ export async function proposeAudienceSplit(
       },
     ])
   );
-  const icons = await judgeChoices({
-    state: {
-      target: targetAudience,
-      segments: segments.map(({ name, description }) => ({ name, description })),
-    },
-    questions,
-    identity,
-  });
+}
 
-  return {
-    axes: segments.length === 1 ? [] : axes,
-    segments: segments.map((s, i) => ({
-      ...s,
-      icon: icons[`segment_${i + 1}`].choice,
-      iconConfidence: icons[`segment_${i + 1}`].confidence,
-    })),
+/**
+ * Propose the split, our own code. Two calls, both through chat-service (which
+ * owns their cost): one completion writes the segments, one typed judgment picks
+ * the icons. Persists nothing but its record in the stored script's words
+ * (`audience_split_proposals`). Fails loud (ChatServiceError → 502) on any bad answer.
+ */
+async function proposeHere(targetAudience: string, identity: ChatIdentity, allowEmpty: boolean): Promise<SplitProposal> {
+  const calls: ScriptCall[] = [];
+  const request = splitCompletion(targetAudience);
+  // One `audience-split-proposal` run per proposal of our own made for a caller's run (Monitoring's service path; the
+  // chat calls keep the caller's run, as before). Fail-soft like every run of this service.
+  const proposalRunId =
+    identity.runId && identity.userId
+      ? await createRun({ orgId: identity.orgId, userId: identity.userId, workflowTracking: identity.workflowTracking, parentRunId: identity.runId, taskName: SPLIT_PROPOSAL_TASK })
+      : null;
+  const record = async (proposal: SplitProposal | null, error: string | null) => {
+    if (proposalRunId) await completeRun(proposalRunId, error ? "failed" : "completed", { orgId: identity.orgId, userId: identity.userId!, workflowTracking: identity.workflowTracking });
+    await recordProposal({ identity, path: "service", runId: proposalRunId, targetAudience, allowEmpty, calls, proposal, error });
   };
+  try {
+    const written = await completeJson({ ...request, identity });
+    calls.push({ name: SPLIT_COMPLETE_CALL, args: { ...request }, answer: { ok: true, data: written } });
+    const { axes, segments } = parseSplit(written, allowEmpty);
+    if (segments.length === 0) {
+      const empty = { axes: [], segments: [] };
+      await record(empty, null);
+      return empty;
+    }
+    const state = { target: targetAudience, segments: segments.map(({ name, description }) => ({ name, description })) };
+    const questions = iconQuestions(segments);
+    const icons = await judgeChoices({ state, questions, identity });
+    calls.push({ name: SPLIT_JUDGE_CALL, args: { state, questions }, answer: { ok: true, data: icons as unknown as Record<string, unknown> } });
+    const proposal: SplitProposal = {
+      axes: segments.length === 1 ? [] : axes,
+      segments: segments.map((s, i) => ({
+        ...s,
+        icon: icons[`segment_${i + 1}`].choice,
+        iconConfidence: icons[`segment_${i + 1}`].confidence,
+      })),
+    };
+    await record(proposal, null);
+    return proposal;
+  } catch (error) {
+    await record(null, messageOf(error));
+    throw error;
+  }
+}
+
+/** The stored script proposes; its two doors run our exact chat calls (retries included) for this proposal. */
+async function proposeByScript(dynasty: string, targetAudience: string, identity: ChatIdentity, allowEmpty: boolean): Promise<SplitProposal> {
+  const entry = registerInFlight({ identity });
+  try {
+    const out = await runServiceScript({
+      outcome: AUDIENCE_BUILT_OUTCOME,
+      dynasty,
+      identity: { orgId: identity.orgId, userId: identity.userId ?? null, runId: identity.runId ?? null },
+      subject: { service: "human", id: entry.token },
+      units: { offer_described: { content: { proposal: entry.token, targetAudience, allowEmpty, icons: SPLIT_ICONS } } },
+      billing: "org",
+    });
+    const proposal = out.content as unknown as SplitProposal | null;
+    if (!proposal || !Array.isArray(proposal.axes) || !Array.isArray(proposal.segments)) throw new ServiceScriptError("the split script answered no proposal", out.runId);
+    await recordProposal({ identity, path: "script", runId: out.runId, targetAudience, allowEmpty, calls: entry.calls, proposal, error: null });
+    return proposal;
+  } catch (error) {
+    await recordProposal({ identity, path: "script", runId: error instanceof ServiceScriptError ? error.runId : null, targetAudience, allowEmpty, calls: entry.calls, proposal: null, error: messageOf(error) });
+    if (entry.thrown) throw entry.thrown;
+    // A bad answer of the model (the script's `unmade`): our own code's loud 502.
+    if (error instanceof ServiceScriptError && error.unmade) throw new ChatServiceError(502, error.message);
+    throw error;
+  } finally {
+    releaseInFlight(entry as InFlight<unknown>);
+  }
+}
+
+/** The split script's doors: our exact completion / icon judgment for a proposal in flight. */
+export async function splitDoor(token: string, scriptRunId: string, call: string, args: Record<string, unknown>): Promise<{ status: number; body: Record<string, unknown> }> {
+  const entry = findInFlight<{ identity: ChatIdentity }>(token);
+  if (!entry) return { status: 409, body: { error: "no proposal in flight for this token" } };
+  // Our exact call, its spend on the SCRIPT's run (a child of the caller's).
+  const identity = { ...entry.work.identity, runId: scriptRunId };
+  if (call === SPLIT_COMPLETE_CALL) {
+    return doorCall(entry as InFlight<unknown>, call, args, () =>
+      completeJson({
+        message: String(args.message ?? ""),
+        systemPrompt: String(args.systemPrompt ?? ""),
+        identity,
+        ...(args.provider ? { provider: args.provider as "anthropic" } : {}),
+        ...(args.model ? { model: String(args.model) } : {}),
+        ...(args.responseSchema ? { responseSchema: args.responseSchema as Record<string, unknown> } : {}),
+        ...(args.disableThinking !== undefined ? { disableThinking: args.disableThinking === true } : {}),
+      })
+    );
+  }
+  if (call === SPLIT_JUDGE_CALL) {
+    return doorCall(entry as InFlight<unknown>, call, args, async () =>
+      (await judgeChoices({
+        state: args.state as Record<string, unknown>,
+        questions: args.questions as Record<string, { instructions: string; criteria: Record<string, string> }>,
+        identity,
+      })) as unknown as Record<string, unknown>
+    );
+  }
+  return { status: 400, body: { error: `no call named ${call}` } };
+}
+
+async function recordProposal(r: {
+  identity: ChatIdentity;
+  path: "service" | "script";
+  runId: string | null;
+  targetAudience: string;
+  allowEmpty: boolean;
+  calls: ScriptCall[];
+  proposal: SplitProposal | null;
+  error: string | null;
+}): Promise<void> {
+  try {
+    await db.insert(audienceSplitProposals).values({
+      orgId: r.identity.orgId,
+      callerRunId: r.identity.runId ?? null,
+      runId: r.runId,
+      path: r.path,
+      targetAudience: r.targetAudience,
+      allowEmpty: r.allowEmpty,
+      calls: r.calls,
+      proposal: r.proposal,
+      error: r.error ? r.error.slice(0, 1000) : null,
+    });
+  } catch (error) {
+    console.error(`[human-service] split proposal NOT recorded (the proposal stands): ${messageOf(error)}`);
+  }
 }
 
 export class SplitNameConflictError extends Error {
