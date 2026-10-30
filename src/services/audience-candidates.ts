@@ -51,7 +51,24 @@ import { partitionSuppressed } from "./suppression.js";
 import { passLapsedFreeGates, selectLapsed, type LapsedCursor, type LapsedServe } from "./recontact-rereach.js";
 import { isShortenedWindow } from "../lib/recontact-window.js";
 import { tagFoundAlreadyTaken } from "./audience-provenance.js";
-import { bufferTeasers, popTeaser, type BufferedTeaser } from "./teaser-buffer.js";
+import { bufferTeasers, popTeaserRow, restoreTeasers, type BufferedTeaser, type PoppedTeaserRow } from "./teaser-buffer.js";
+import {
+  SCRIPT_PAGE_SIZE,
+  SERVICE_RECORD_SHARE,
+  WalkScriptError,
+  errorMessageOf,
+  findWalk,
+  recordWalk,
+  registerWalk,
+  releaseWalk,
+  teaserFacts,
+  walkNow,
+  walkScriptSwitch,
+  walkWithScript,
+  type DecisionCall,
+  type InFlightWalk,
+  type WalkVerdict,
+} from "./candidate-walk.js";
 import { isScreenYieldSpent, SCREEN_YIELD_WINDOW } from "./teaser-screening.js";
 import { loadServeExclusions, matchesOptOut } from "./opt-outs.js";
 import { filterBounced } from "./bounces.js";
@@ -295,40 +312,41 @@ async function retakeLapsedOffer(
 
 // The free checks serve-next runs at POP time, minus the screen. Each one is
 // read live, so a teaser buffered before a person opted out / bounced / was
-// served under another audience never reaches the caller.
-async function passesFreeChecks(
+// served under another audience never reaches the caller. Answers the FIRST rule
+// it fails (the stored walk script's verdict words), or null when it passes all.
+async function firstFailedFreeCheck(
   audience: AudienceRow,
   identity: Identity,
   teaser: BufferedTeaser,
   exclusions: Awaited<ReturnType<typeof loadServeExclusions>>,
   ownCompany: Awaited<ReturnType<typeof loadOwnCompany>>
-): Promise<boolean> {
+): Promise<Exclude<WalkVerdict, "offer"> | null> {
   const key = { linkedinUrl: teaser.linkedinUrl, providerPersonId: teaser.providerPersonId };
   // Already taken for the brand (served under another audience): never offered,
   // but this audience found them too (multi-source provenance, no spend).
   const { taken } = await partitionSuppressed(identity.orgId, [audience.brandId], [key], identity.excludeEmailedWithin);
   if (taken.length > 0) {
     await tagFoundAlreadyTaken(identity.orgId, audience.id, "apollo", taken, identity.audienceSourceId ?? null);
-    return false;
+    return "taken";
   }
   if (matchesOptOut(exclusions, key)) {
     console.log(
       `[human-service] opt_out.blocked_candidate org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`
     );
-    return false;
+    return "opted_out";
   }
   if (isOwnCompany(ownCompany, { name: teaser.teaser?.organizationName ?? null })) {
     console.log(
       `[human-service] own_company.blocked_candidate org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`
     );
-    return false;
+    return "own_company";
   }
   const [reachable] = await filterBounced(identity, [key]);
   if (!reachable) {
     console.log(
       `[human-service] bounce.blocked_candidate org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`
     );
-    return false;
+    return "bounced";
   }
   // Rejected for this audience already (by the screen, or declined): a teaser
   // buffered before that verdict must not come back.
@@ -342,7 +360,7 @@ async function passesFreeChecks(
       )
     )
     .limit(1);
-  return !rejected;
+  return rejected ? "rejected" : null;
 }
 
 // lead-service hangs up on candidates/next after 90 s (CANDIDATE_CALL_TIMEOUT_MS):
@@ -478,65 +496,299 @@ async function nextCandidateFromList(
   const apolloSearchParams = hasApolloNativeFilters(audience) ? storedFilters : undefined;
   const apolloFilters = hasApolloNativeFilters(audience) ? {} : (storedFilters as PeopleSearchFilters);
 
-  let walked = 0;
-  for (;;) {
-    if (walked > 0 && Date.now() >= deadline) {
-      console.log(
-        `[human-service] audience.candidate_budget_spent org=${identity.orgId} audience=${audience.id} walked=${walked} budgetMs=${budgetMs}`
-      );
-      return { status: "pending", candidate: null, target };
-    }
-    walked += 1;
-    const teaser = await popTeaser(identity.orgId, audience.id, sourceId);
-    if (!teaser) {
-      const search = await peopleSearch({
-        provider: "apollo",
-        filters: apolloFilters,
-        apolloSearchParams,
-        audienceId: audience.id,
-        deadline,
-        identity,
-      });
-      if (search.people.length === 0 && search.notReady) {
-        return { status: "pending", candidate: null, target };
-      }
-      if (search.people.length === 0) {
-        if (search.noRecentPosts) {
-          noRecentPostsAnswer(identity.orgId, audience.id, "candidates");
-          return { status: "exhausted", candidate: null, reason: "no_recent_posts", target };
-        }
-        if (sourceId) await persistSourceExhaustion(sourceId, { reachable: true });
-        else await persistReachableCountOnExhaustion(identity.orgId, audience.id);
-        return { status: "exhausted", candidate: null, reason: "pool_exhausted", target };
-      }
-      await bufferTeasers(identity.orgId, audience.id, search.people, sourceId);
-      continue;
-    }
-    if (!(await passesFreeChecks(audience, identity, teaser, exclusions, ownCompany))) continue;
+  const walk: Walk = {
+    audience,
+    identity,
+    sourceId,
+    deadline,
+    budgetMs,
+    exclusions,
+    ownCompany,
+    apolloFilters,
+    apolloSearchParams,
+    target,
+    walked: 0,
+    held: [],
+    terminal: null,
+    offered: null,
+  };
+  // FACTORY-P3 next outcomes (lead_found): the walk itself runs as the stored script while switched (candidate-walk.ts).
+  const choose = await walkScriptSwitch();
+  if (choose.switched && choose.dynasty && identity.runId) return walkByScript(choose.dynasty, walk);
+  return walkHere(walk);
+}
 
-    // Once per (audience, person): a person already offered / decided is never
-    // handed out twice.
-    const [row] = await db
-      .insert(audienceCandidates)
-      .values({
+// ─── The walk (FACTORY-P3 next outcomes: lead_found) ──────────────────────────────────────────────────────────────
+
+/** One walk of an apollo audience's teasers, as both our own walk and the stored script's doors hold it. */
+interface Walk {
+  audience: AudienceRow;
+  identity: Identity;
+  sourceId: string | null;
+  deadline: number;
+  budgetMs: number;
+  exclusions: Awaited<ReturnType<typeof loadServeExclusions>>;
+  ownCompany: Awaited<ReturnType<typeof loadOwnCompany>>;
+  apolloFilters: PeopleSearchFilters;
+  apolloSearchParams: Record<string, unknown> | undefined;
+  target: ReturnType<typeof screenTarget>;
+  walked: number;
+  /** Teasers popped for the script's current page, not decided yet (restored where they were if undecided). */
+  held: PoppedTeaserRow[];
+  /** How the walk ended without a candidate (pending: budget / search not ready; exhausted: why). */
+  terminal: NextCandidateResult | null;
+  offered: AudienceCandidate | null;
+}
+
+/**
+ * The next teaser of the walk, refilling the buffer from the search when it is empty, or how the walk ends:
+ * `pending` (budget spent, search not ready) or `exhausted` (with why). Exactly our walk's own steps.
+ */
+async function nextTeaser(w: Walk): Promise<{ teaser: PoppedTeaserRow } | { end: NextCandidateResult }> {
+  const { audience, identity, sourceId, deadline, budgetMs, target } = w;
+  for (;;) {
+    if (w.walked > 0 && Date.now() >= deadline) {
+      console.log(
+        `[human-service] audience.candidate_budget_spent org=${identity.orgId} audience=${audience.id} walked=${w.walked} budgetMs=${budgetMs}`
+      );
+      return { end: { status: "pending", candidate: null, target } };
+    }
+    w.walked += 1;
+    const teaser = await popTeaserRow(identity.orgId, audience.id, sourceId);
+    if (teaser) return { teaser };
+    const search = await peopleSearch({
+      provider: "apollo",
+      filters: w.apolloFilters,
+      apolloSearchParams: w.apolloSearchParams,
+      audienceId: audience.id,
+      deadline,
+      identity,
+    });
+    if (search.people.length === 0 && search.notReady) {
+      return { end: { status: "pending", candidate: null, target } };
+    }
+    if (search.people.length === 0) {
+      if (search.noRecentPosts) {
+        noRecentPostsAnswer(identity.orgId, audience.id, "candidates");
+        return { end: { status: "exhausted", candidate: null, reason: "no_recent_posts", target } };
+      }
+      if (sourceId) await persistSourceExhaustion(sourceId, { reachable: true });
+      else await persistReachableCountOnExhaustion(identity.orgId, audience.id);
+      return { end: { status: "exhausted", candidate: null, reason: "pool_exhausted", target } };
+    }
+    await bufferTeasers(identity.orgId, audience.id, search.people, sourceId);
+  }
+}
+
+/** Once per (audience, person): the candidate row, or null when this person was already offered / decided. */
+async function offerTeaser(w: Walk, teaser: BufferedTeaser): Promise<AudienceCandidate | null> {
+  const { audience, identity, sourceId } = w;
+  const [row] = await db
+    .insert(audienceCandidates)
+    .values({
+      orgId: identity.orgId,
+      audienceId: audience.id,
+      providerPersonId: teaser.providerPersonId,
+      linkedinUrl: teaser.linkedinUrl,
+      teaser: teaser.teaser,
+      organizationDomain: teaser.organizationDomain,
+      sourceId,
+    })
+    .onConflictDoNothing({
+      target: [audienceCandidates.audienceId, audienceCandidates.providerPersonId],
+    })
+    .returning();
+  if (!row) return null;
+  console.log(
+    `[human-service] audience.candidate_offered org=${identity.orgId} audience=${audience.id} candidate=${row.id} domain=${row.organizationDomain ? "yes" : "no"}`
+  );
+  return row;
+}
+
+const terminalAnswer = (end: NextCandidateResult): Record<string, unknown> =>
+  end.status === "exhausted" ? { status: "exhausted", reason: end.reason ?? null } : { status: "pending" };
+
+/** The walk's material for the stored script (and the record of our own walks, in the same words). */
+const walkUnits = (w: Walk, pageSize: number) => ({ ownNames: [...w.ownCompany.names].sort(), window: w.identity.excludeEmailedWithin ?? "3_months", pageSize });
+
+/** Our own walk, one teaser at a time; a share of walks is recorded in the stored script's words (pages of one). */
+async function walkHere(w: Walk): Promise<NextCandidateResult> {
+  const { audience, identity, sourceId, exclusions, ownCompany, target } = w;
+  const calls: DecisionCall[] | null = Math.random() < SERVICE_RECORD_SHARE ? [] : null;
+  const finish = async (result: NextCandidateResult, error: string | null = null) => {
+    if (calls) {
+      await recordWalk({
         orgId: identity.orgId,
         audienceId: audience.id,
-        providerPersonId: teaser.providerPersonId,
-        linkedinUrl: teaser.linkedinUrl,
-        teaser: teaser.teaser,
-        organizationDomain: teaser.organizationDomain,
-        sourceId,
-      })
-      .onConflictDoNothing({
-        target: [audienceCandidates.audienceId, audienceCandidates.providerPersonId],
-      })
-      .returning();
-    if (!row) continue;
-    console.log(
-      `[human-service] audience.candidate_offered org=${identity.orgId} audience=${audience.id} candidate=${row.id} domain=${row.organizationDomain ? "yes" : "no"}`
-    );
-    return { status: "candidate", candidate: toView(row), target };
+        serveRunId: identity.runId ?? null,
+        runId: null,
+        path: "service",
+        units: walkUnits(w, 1),
+        calls,
+        candidateId: result.status === "candidate" ? result.candidate!.candidateId : null,
+        status: result.status,
+        error,
+      });
+    }
+    return result;
+  };
+  try {
+    for (;;) {
+      const next = await nextTeaser(w);
+      if ("end" in next) {
+        calls?.push({ name: PAGE_CALL, args: { limit: 1 }, answer: { ok: true, data: terminalAnswer(next.end) } });
+        return finish(next.end);
+      }
+      const teaser = next.teaser;
+      if (calls) {
+        const facts = await teaserFacts(identity, audience.id, [teaser], exclusions);
+        calls.push({ name: PAGE_CALL, args: { limit: 1 }, answer: { ok: true, data: { status: "teasers", now: await walkNow(), teasers: facts } } });
+      }
+      const failed = await firstFailedFreeCheck(audience, identity, teaser, exclusions, ownCompany);
+      if (failed) {
+        calls?.push({ name: DECIDE_CALL, args: { verdicts: [{ ref: teaser.providerPersonId, verdict: failed }] }, answer: { ok: true, data: { offered: null } } });
+        continue;
+      }
+      const row = await offerTeaser(w, teaser);
+      calls?.push({ name: DECIDE_CALL, args: { verdicts: [{ ref: teaser.providerPersonId, verdict: "offer" }] }, answer: { ok: true, data: { offered: row ? { candidateId: row.id } : null } } });
+      if (!row) continue;
+      return finish({ status: "candidate", candidate: toView(row), target });
+    }
+  } catch (error) {
+    await finish({ status: "pending", candidate: null, target }, errorMessageOf(error));
+    throw error;
   }
+  void sourceId;
+}
+
+/** The stored script walks; its doors (below) run each page and each decision here. */
+async function walkByScript(dynasty: string, w: Walk): Promise<NextCandidateResult> {
+  const entry = registerWalk(w);
+  const units = walkUnits(w, SCRIPT_PAGE_SIZE);
+  try {
+    const out = await walkWithScript({ dynasty, identity: w.identity, token: entry.token, ...units });
+    const result: NextCandidateResult = w.offered
+      ? { status: "candidate", candidate: toView(w.offered), target: w.target }
+      : (w.terminal ?? { status: "pending", candidate: null, target: w.target });
+    if (out.candidateId && out.candidateId !== w.offered?.id) {
+      throw new WalkScriptError(`the walk answered candidate ${out.candidateId}, which it did not offer here`, out.runId);
+    }
+    await recordWalk({ orgId: w.identity.orgId, audienceId: w.audience.id, serveRunId: w.identity.runId ?? null, runId: out.runId, path: "script", units, calls: entry.calls, candidateId: w.offered?.id ?? null, status: result.status, error: null });
+    return result;
+  } catch (error) {
+    await recordWalk({ orgId: w.identity.orgId, audienceId: w.audience.id, serveRunId: w.identity.runId ?? null, runId: error instanceof WalkScriptError ? error.runId : null, path: "script", units, calls: entry.calls, candidateId: null, status: "error", error: errorMessageOf(error) });
+    if (entry.thrown) throw entry.thrown;
+    throw error;
+  } finally {
+    // A page popped and never decided goes back where it was.
+    const held = w.held;
+    w.held = [];
+    await restoreTeasers(held).catch((e) => console.error(`[human-service] walk: undecided teasers NOT restored: ${errorMessageOf(e)}`));
+    releaseWalk(entry as InFlightWalk<unknown>);
+  }
+}
+
+export const PAGE_CALL = "human.walk.page";
+export const DECIDE_CALL = "human.walk.decide";
+
+/** The script's page door: up to `limit` teasers with their facts, or how the walk ends. */
+export async function walkPageDoor(token: string, limit: number): Promise<{ status: number; body: Record<string, unknown> }> {
+  const entry = findWalk<Walk>(token);
+  if (!entry) return { status: 409, body: { error: "no walk in flight for this token" } };
+  const w = entry.walk;
+  const args = { limit };
+  try {
+    if (w.held.length > 0) return { status: 409, body: { error: "the previous page is not decided" } };
+    let data: Record<string, unknown>;
+    if (w.terminal) data = terminalAnswer(w.terminal);
+    else {
+      // The first teaser exactly as our walk takes it (budget, refill from the search, how it ends); the rest of the
+      // page only from what the buffer already holds: never a search (nor an exhaustion) our walk would not have made
+      // before reaching the person it offers.
+      const page: PoppedTeaserRow[] = [];
+      const first = await nextTeaser(w);
+      if ("end" in first) w.terminal = first.end;
+      else {
+        page.push(first.teaser);
+        while (page.length < Math.max(1, Math.min(limit, 100))) {
+          const more = await popTeaserRow(w.identity.orgId, w.audience.id, w.sourceId);
+          if (!more) break;
+          w.walked += 1;
+          page.push(more);
+        }
+      }
+      w.held = page;
+      data =
+        page.length === 0
+          ? terminalAnswer(w.terminal!)
+          : { status: "teasers", now: await walkNow(), teasers: await teaserFacts(w.identity, w.audience.id, page, w.exclusions) };
+    }
+    entry.calls.push({ name: PAGE_CALL, args, answer: { ok: true, data } });
+    return { status: 200, body: data };
+  } catch (error) {
+    entry.thrown = error instanceof Error ? error : new Error(String(error));
+    entry.calls.push({ name: PAGE_CALL, args, answer: { ok: false, data: { error: errorMessageOf(error) } } });
+    return { status: 502, body: { error: errorMessageOf(error) } };
+  }
+}
+
+const VERDICTS: readonly WalkVerdict[] = ["taken", "opted_out", "own_company", "bounced", "rejected", "offer"];
+
+/**
+ * The script's decide door: the page's verdicts, applied in order as our walk applies them (a taken person tagged as
+ * found, the others logged, the first `offer` offered once per (audience, person); a teaser after it goes back).
+ */
+export async function walkDecideDoor(token: string, verdicts: Array<{ ref: string; verdict: string }>): Promise<{ status: number; body: Record<string, unknown> }> {
+  const entry = findWalk<Walk>(token);
+  if (!entry) return { status: 409, body: { error: "no walk in flight for this token" } };
+  const w = entry.walk;
+  const args = { verdicts };
+  const page = w.held;
+  if (verdicts.length !== page.length || verdicts.some((v, i) => v.ref !== page[i]!.providerPersonId || !VERDICTS.includes(v.verdict as WalkVerdict))) {
+    return { status: 400, body: { error: "one known verdict per teaser of the page, in its order" } };
+  }
+  try {
+    let offered: AudienceCandidate | null = null;
+    let i = 0;
+    for (; i < page.length; i++) {
+      const teaser = page[i]!;
+      const verdict = verdicts[i]!.verdict as WalkVerdict;
+      if (verdict !== "offer") {
+        await applyFailedCheck(w, teaser, verdict);
+        continue;
+      }
+      offered = await offerTeaser(w, teaser);
+      if (offered) {
+        i++;
+        break;
+      }
+    }
+    w.held = [];
+    if (i < page.length) await restoreTeasers(page.slice(i));
+    if (offered) w.offered = offered;
+    const data = { offered: offered ? { candidateId: offered.id } : null };
+    entry.calls.push({ name: DECIDE_CALL, args, answer: { ok: true, data } });
+    return { status: 200, body: data };
+  } catch (error) {
+    entry.thrown = error instanceof Error ? error : new Error(String(error));
+    entry.calls.push({ name: DECIDE_CALL, args, answer: { ok: false, data: { error: errorMessageOf(error) } } });
+    return { status: 502, body: { error: errorMessageOf(error) } };
+  }
+}
+
+/** What our walk does when a free rule fails (the person found already taken is tagged; the rest are logged). */
+async function applyFailedCheck(w: Walk, teaser: BufferedTeaser, verdict: WalkVerdict): Promise<void> {
+  const { audience, identity } = w;
+  if (verdict === "taken") {
+    const key = { linkedinUrl: teaser.linkedinUrl, providerPersonId: teaser.providerPersonId };
+    const { taken } = await partitionSuppressed(identity.orgId, [audience.brandId], [key], identity.excludeEmailedWithin);
+    if (taken.length > 0) await tagFoundAlreadyTaken(identity.orgId, audience.id, "apollo", taken, identity.audienceSourceId ?? null);
+    else console.error(`[human-service] walk: the script judged ${teaser.providerPersonId} taken; our suppression read finds no serve in the window (skipped as judged)`);
+    return;
+  }
+  if (verdict === "opted_out") console.log(`[human-service] opt_out.blocked_candidate org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`);
+  if (verdict === "own_company") console.log(`[human-service] own_company.blocked_candidate org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`);
+  if (verdict === "bounced") console.log(`[human-service] bounce.blocked_candidate org=${identity.orgId} audience=${audience.id} person=${teaser.providerPersonId}`);
 }
 
 // Offer the next re-reachable catch-all person of this audience as a candidate:

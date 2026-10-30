@@ -16004,6 +16004,104 @@
         }
       }
     },
+    "/internal/candidate-walks/{door}": {
+      "post": {
+        "summary": "A door of the stored walk script (FACTORY-P3 next outcomes, lead_found; service key)",
+        "description": "`door` = page ({walk, limit}: up to `limit` teasers with the facts each free rule reads (`lastServedAt` for the brand, `optedOut`, `organizationName`, `bounced`, `rejected`) and the walk's `now`, or `{status: pending|exhausted, reason}`) or decide ({walk, verdicts: [{ref, verdict: taken|opted_out|own_company|bounced|rejected|offer}]} in the page's order: applied as our own walk applies them; the first offer is offered once per (audience, person), a teaser after it goes back to the buffer where it was). Serves ONLY a walk in flight here (`walk` = the token handed to the script). 409 no such walk, 502 refused.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "page",
+                "decide"
+              ]
+            },
+            "required": true,
+            "name": "door",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "walk": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "integer"
+                  },
+                  "verdicts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "ref": {
+                          "type": "string"
+                        },
+                        "verdict": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "ref",
+                        "verdict"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "walk"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The page / the offer"
+          },
+          "409": {
+            "description": "No walk in flight"
+          },
+          "502": {
+            "description": "Refused"
+          }
+        }
+      }
+    },
+    "/internal/candidate-walks/recorded": {
+      "get": {
+        "summary": "Every recorded walk in the stored walk script's words (service key; workflow-service's case recorder)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "after",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{decisions, nextAfter, hasMore}"
+          }
+        }
+      }
+    },
     "/internal/research/teaser-screenings": {
       "get": {
         "summary": "Staff research: per month, the people the pre-pay Jev screen judged while human-service ran it, by verdict and P(yes) bucket, fleet-wide since inception.",
