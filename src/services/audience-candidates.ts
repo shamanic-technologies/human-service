@@ -48,6 +48,7 @@ import {
   type TeaserSnapshot,
 } from "../db/schema.js";
 import { partitionSuppressed } from "./suppression.js";
+import { completeRun, createRun } from "./runs.js";
 import { passLapsedFreeGates, selectLapsed, type LapsedCursor, type LapsedServe } from "./recontact-rereach.js";
 import { isShortenedWindow } from "../lib/recontact-window.js";
 import { tagFoundAlreadyTaken } from "./audience-provenance.js";
@@ -615,7 +616,13 @@ const walkUnits = (w: Walk, pageSize: number) => ({ ownNames: [...w.ownCompany.n
 async function walkHere(w: Walk): Promise<NextCandidateResult> {
   const { audience, identity, sourceId, exclusions, ownCompany, target } = w;
   const calls: DecisionCall[] | null = Math.random() < SERVICE_RECORD_SHARE ? [] : null;
+  // One `candidate-walk` run per walk of our own (Monitoring's service path, beside the stored script's run). It
+  // spends nothing; fail-soft like every run of this service.
+  const walkRunId = identity.runId && identity.userId
+    ? await createRun({ orgId: identity.orgId, userId: identity.userId!, workflowTracking: identity.workflowTracking, parentRunId: identity.runId, taskName: WALK_TASK })
+    : null;
   const finish = async (result: NextCandidateResult, error: string | null = null) => {
+    if (walkRunId) await completeRun(walkRunId, error ? "failed" : "completed", { orgId: identity.orgId, userId: identity.userId!, workflowTracking: identity.workflowTracking });
     if (calls) {
       await recordWalk({
         orgId: identity.orgId,
@@ -689,6 +696,7 @@ async function walkByScript(dynasty: string, w: Walk): Promise<NextCandidateResu
 }
 
 export const PAGE_CALL = "human.walk.page";
+export const WALK_TASK = "candidate-walk";
 export const DECIDE_CALL = "human.walk.decide";
 
 /** The script's page door: up to `limit` teasers with their facts, or how the walk ends. */
