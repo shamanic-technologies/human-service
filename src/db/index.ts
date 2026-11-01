@@ -22,12 +22,15 @@ if (!connectionString) {
 
 // Connections are RECYCLED (BOX-LOAD-1028-PG-CONNS). A Postgres backend keeps the
 // memory of the biggest query it ever ran until it exits; at postgres.js's default
-// lifetime (30-60 min) human_service's 10 backends held ~0.2 GB private memory on
+// lifetime (30-60 min) human_service's backends held ~0.2 GB private memory on
 // the shared box (2026-10-28). `max_lifetime` 5 min
 // ends a connection after its current query (postgres.js never cuts a running
 // query or a reserved connection); `idle_timeout` 60 s closes the ones a quiet
 // stretch leaves unused. The reconnect is a local-network handshake, cheap next
-// to holding that memory for an hour. `max` stays postgres.js's 10, now stated.
-export const POOL_OPTIONS = { max: 10, idle_timeout: 60, max_lifetime: 300 } as const;
+// to holding that memory for an hour.
+// PG-CONN-1101: the box Postgres has 300 slots shared by ~30 pools; 5 is this
+// service's share. postgres.js queues beyond max, it does not fail. (Measured
+// peak: 2 active.)
+export const POOL_OPTIONS = { max: 5, idle_timeout: 60, max_lifetime: 300 } as const;
 export const sql = postgres(connectionString, POOL_OPTIONS);
 export const db = drizzle(sql, { schema });
