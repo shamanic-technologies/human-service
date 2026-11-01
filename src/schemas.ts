@@ -3673,6 +3673,70 @@ registry.registerPath({
   },
 });
 
+// --- POST /internal/rejudge-blank-candidates (+ /revert) — BLANK-CANDIDATES-1101 ---
+
+export const RejudgeBlankCandidatesQuerySchema = z.object({
+  dryRun: z
+    .enum(["true", "false"])
+    .optional()
+    .openapi({ description: "When 'true', report what the repair would change WITHOUT writing. Defaults to false." }),
+});
+
+export const RejudgeBlankCandidatesRequestSchema = z
+  .object({
+    reason: z.string().trim().min(1).max(200).openapi({ description: "Incident tag: the ledger key (idempotency, revert)." }),
+  })
+  .openapi("RejudgeBlankCandidatesRequest");
+
+const RejudgeBlankCandidatesResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    reason: z.string(),
+    blank: z.number().int().describe("Apollo candidates declined or offered with no facts about the person."),
+    reoffered: z.number().int().describe("Declined blank candidates re-offered with the person's stored teaser (their decline's rejection lifted)."),
+    teaserFilled: z.number().int().describe("Still-offered blank candidates given the person's stored teaser."),
+    noPersonFacts: z.number().int().describe("Blank candidates whose person has no stored teaser anywhere: left as they are."),
+    keptRejection: z.number().int().describe("Left as they are: the pre-pay screen rejected the person on a real snapshot."),
+    alreadyRejudged: z.number().int(),
+    byAudience: z.array(
+      z.object({ audienceId: z.string(), reoffered: z.number().int(), teaserFilled: z.number().int(), noPersonFacts: z.number().int() })
+    ),
+  })
+  .openapi("RejudgeBlankCandidatesResponse");
+
+const RejudgeBlankCandidatesRevertResponseSchema = z
+  .object({ dryRun: z.boolean(), reason: z.string(), restored: z.number().int(), rejectionsRestored: z.number().int() })
+  .openapi("RejudgeBlankCandidatesRevertResponse");
+
+for (const [path, summary, schema] of [
+  [
+    "/internal/rejudge-blank-candidates",
+    "One-time data repair: re-offer every apollo candidate declined (or still offered) with no facts about the person, carrying the person's stored teaser (idempotent per reason, dry-runnable, reversible)",
+    RejudgeBlankCandidatesResponseSchema,
+  ],
+  [
+    "/internal/rejudge-blank-candidates/revert",
+    "Undo the blank-candidate repair of this reason: candidates and lifted rejections put back verbatim",
+    RejudgeBlankCandidatesRevertResponseSchema,
+  ],
+] as const) {
+  registry.registerPath({
+    method: "post",
+    path,
+    summary,
+    security: [{ apiKey: [] }],
+    request: {
+      query: RejudgeBlankCandidatesQuerySchema,
+      body: { content: { "application/json": { schema: RejudgeBlankCandidatesRequestSchema } } },
+    },
+    responses: {
+      200: { description: "Repair result", content: { "application/json": { schema } } },
+      400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
+      401: { description: "Unauthorized" },
+    },
+  });
+}
+
 // --- GET /health ---
 
 export const HealthResponseSchema = z

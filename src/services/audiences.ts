@@ -547,6 +547,7 @@ export async function computeAudienceContactability(
     .select({
       audienceId: audienceMembers.audienceId,
       suppressed: sql<number>`count(distinct ${audienceMembers.personId})`,
+      suppressedServed: sql<number>`count(distinct ${audienceMembers.personId}) filter (where ${audienceMembers.provenance} = 'served')`,
     })
     .from(audienceMembers)
     .innerJoin(audiences, eq(audienceMembers.audienceId, audiences.id))
@@ -581,6 +582,31 @@ export async function computeAudienceContactability(
   const suppressedByAudience = new Map<string, number>(
     suppressedRows.map((r) => [r.audienceId, Number(r.suppressed)])
   );
+  const suppressedServedByAudience = new Map<string, number>(
+    suppressedRows.map((r) => [r.audienceId, Number(r.suppressedServed)])
+  );
+
+  // BLANK-CANDIDATES-1101: once its provider walk is exhausted (reachable_count set), an audience finds nobody new;
+  // what it can still hand out is the people IT served, again, once their window lapses (the re-contact re-reach).
+  // A person it only FOUND already taken (`found_taken`) was never served under it and never comes back through its
+  // walk, so it is not "left" here (prod 2026-11-01: 5,868 of 6,879 members of an exhausted audience were
+  // found_taken, Remaining read thousands while every serve answered pool_exhausted).
+  const exhaustedIds = rows.filter((r) => r.reachableCount !== null && r.reachableCount !== undefined).map((r) => r.id);
+  const servedRows =
+    exhaustedIds.length === 0
+      ? []
+      : await db
+          .select({
+            audienceId: audienceMembers.audienceId,
+            served: sql<number>`count(distinct ${audienceMembers.personId})`,
+          })
+          .from(audienceMembers)
+          .where(and(inArray(audienceMembers.audienceId, exhaustedIds), eq(audienceMembers.provenance, "served")))
+          .groupBy(audienceMembers.audienceId);
+  const servedByAudience = new Map<string, number>(servedRows.map((r) => [r.audienceId, Number(r.served)]));
+  /** Exhausted: the people this audience served whose window lapsed (re-contactable), never a found_taken one. */
+  const leftAfterExhaustion = (id: string) =>
+    Math.max(0, (servedByAudience.get(id) ?? 0) - (suppressedServedByAudience.get(id) ?? 0));
 
   // One grouped query: per audience, the people the pre-pay screen judged OFF
   // TARGET. They are not members of the audience — the screen established that
@@ -613,7 +639,7 @@ export async function computeAudienceContactability(
         continue;
       }
       const size = row.reachableCount;
-      const available = Math.max(0, size - suppressedHere);
+      const available = Math.min(Math.max(0, size - suppressedHere), leftAfterExhaustion(row.id));
       result.set(row.id, {
         sizeCount: size,
         availableToContactCount: available,
@@ -665,7 +691,8 @@ export async function computeAudienceContactability(
     if (row.reachableCount !== null && row.reachableCount !== undefined) {
       availableToContactCount = Math.min(
         availableToContactCount,
-        Math.max(0, row.reachableCount - suppressed)
+        Math.max(0, row.reachableCount - suppressed),
+        leftAfterExhaustion(row.id)
       );
     }
 

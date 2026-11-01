@@ -51,6 +51,7 @@ import { partitionSuppressed } from "./suppression.js";
 import { completeRun, createRun } from "./runs.js";
 import { passLapsedFreeGates, selectLapsed, type LapsedCursor, type LapsedServe } from "./recontact-rereach.js";
 import { isShortenedWindow } from "../lib/recontact-window.js";
+import { isJudgeableTeaser, withPersonTeasers } from "./person-teaser.js";
 import { tagFoundAlreadyTaken } from "./audience-provenance.js";
 import { bufferTeasers, popTeaserRow, restoreTeasers, type BufferedTeaser, type PoppedTeaserRow } from "./teaser-buffer.js";
 import {
@@ -582,8 +583,17 @@ async function nextTeaser(w: Walk): Promise<{ teaser: PoppedTeaserRow } | { end:
 }
 
 /** Once per (audience, person): the candidate row, or null when this person was already offered / decided. */
-async function offerTeaser(w: Walk, teaser: BufferedTeaser): Promise<AudienceCandidate | null> {
+async function offerTeaser(w: Walk, popped: BufferedTeaser): Promise<AudienceCandidate | null> {
   const { audience, identity, sourceId } = w;
+  // Never offered for judgment without facts about the PERSON (person-teaser.ts): a teaser buffered with no snapshot
+  // takes the person's stored one, else the person is passed over.
+  const teaser = isJudgeableTeaser(popped.teaser) ? popped : (await withPersonTeasers([popped])).judgeable[0];
+  if (!teaser) {
+    console.log(
+      `[human-service] audience.candidate_no_person_facts org=${identity.orgId} audience=${audience.id} person=${popped.providerPersonId} path=walk`
+    );
+    return null;
+  }
   const [row] = await db
     .insert(audienceCandidates)
     .values({
@@ -815,8 +825,19 @@ async function offerRereach(
       widenedVerdicts(identity.acceptedEmails)
     );
     if (page.length === 0) return null;
+    const { judgeable } = await withPersonTeasers(page);
+    const factsOf = new Map(judgeable.map((j) => [j.providerPersonId, j.teaser]));
     for (const serve of page) {
       if (!(await claimRereach(identity.orgId, audience.brandId, audience.id, serve, "candidates", "offered"))) {
+        continue;
+      }
+      // Never offered blank (person-teaser.ts): no facts about the person anywhere ⟹ blocked for good.
+      const personTeaser = factsOf.get(serve.providerPersonId) ?? null;
+      if (!personTeaser) {
+        await markRereach(identity.orgId, audience.brandId, serve.emailNorm, "blocked", "no_person_facts");
+        console.log(
+          `[human-service] audience.candidate_no_person_facts org=${identity.orgId} audience=${audience.id} person=${serve.providerPersonId} path=catch_all_rereach`
+        );
         continue;
       }
       const block = await rereachBlock(identity, audience.brandId, rereachPerson(serve));
@@ -837,7 +858,7 @@ async function offerRereach(
         previous = before?.revealResult ?? null;
         [row] = await db
           .update(audienceCandidates)
-          .set({ status: "offered", offeredAt: new Date(), decidedAt: null, basis: null, revealResult: null })
+          .set({ status: "offered", offeredAt: new Date(), decidedAt: null, basis: null, revealResult: null, teaser: personTeaser })
           .where(and(eq(audienceCandidates.id, serve.candidateId), eq(audienceCandidates.status, "revealed")))
           .returning();
       } else {
@@ -848,7 +869,7 @@ async function offerRereach(
             audienceId: audience.id,
             providerPersonId: serve.providerPersonId,
             linkedinUrl: serve.linkedinUrl,
-            teaser: serve.teaser,
+            teaser: personTeaser,
             organizationDomain: serve.teaserDomain ?? serve.companyDomain,
           })
           .onConflictDoNothing({
@@ -888,7 +909,14 @@ async function offerLapsed(
     const page = await selectLapsed(identity.orgId, audience.brandId, audience.id, sourceId, window, after);
     if (page.length === 0) return null;
     after = { anchor: page[page.length - 1].anchor, emailNorm: page[page.length - 1].emailNorm };
-    for (const lapsed of await passLapsedFreeGates(identity, audience.brandId, page, exclusions, ownCompany)) {
+    // Never offered blank (person-teaser.ts): the person's stored teaser, else passed over.
+    const { judgeable, blank } = await withPersonTeasers(page);
+    for (const b of blank) {
+      console.log(
+        `[human-service] audience.candidate_no_person_facts org=${identity.orgId} audience=${audience.id} person=${b.providerPersonId} path=recontact`
+      );
+    }
+    for (const lapsed of await passLapsedFreeGates(identity, audience.brandId, judgeable, exclusions, ownCompany)) {
       const row = await reopenLapsedCandidate(identity.orgId, audience.id, sourceId, lapsed);
       if (!row) continue;
       console.log(
@@ -908,7 +936,7 @@ async function reopenLapsedCandidate(
   if (lapsed.candidateId) {
     const [row] = await db
       .update(audienceCandidates)
-      .set({ status: "offered", offeredAt: new Date(), decidedAt: null, basis: null, revealResult: null })
+      .set({ status: "offered", offeredAt: new Date(), decidedAt: null, basis: null, revealResult: null, teaser: lapsed.teaser })
       .where(and(eq(audienceCandidates.id, lapsed.candidateId), eq(audienceCandidates.status, "revealed")))
       .returning();
     return row;

@@ -1488,3 +1488,22 @@ export const humanIdentityEvents = pgTable(
   },
   (table) => [index("idx_human_identity_events_org").on(table.orgId, table.id)]
 );
+
+// BLANK-CANDIDATES-1101 (migration 0051): the reversible ledger of the blank-candidate repair
+// (POST /internal/rejudge-blank-candidates). One row per candidate the repair re-offered with the person's stored
+// teaser: the candidate as it was + the rejection it lifted. No org_id: it follows its audience (cascade).
+export const candidateRejudges = pgTable(
+  "candidate_rejudges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    reason: text("reason").notNull(),
+    candidateId: uuid("candidate_id").notNull(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    previous: jsonb("previous").notNull(),
+    screenedOut: jsonb("screened_out"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("idx_candidate_rejudges_unique").on(table.reason, table.candidateId)]
+);
