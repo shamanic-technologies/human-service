@@ -8,10 +8,12 @@
 //
 // THE PERSON'S FACTS DO NOT DEPEND ON THE AUDIENCE: a teaser snapshot is what the provider's free search said about
 // that apollo person (title, headline, employer...). So a person with no snapshot under THIS audience is looked up
-// under every audience that ever held one (a screening, a candidate, a buffered teaser), latest first. No provider
-// call, nothing paid. Still none ⟹ the person is NOT offered (logged), never offered blank.
+// under every audience that ever held one (a screening, a candidate, a buffered teaser), latest first, then in what
+// apollo-service's stored paid reveal said about them (free read, no Apollo call). Still none ⟹ the person is NOT
+// offered (logged), never offered blank.
 import { sql as pg } from "../db/index.js";
 import type { TeaserSnapshot } from "../db/schema.js";
+import { readApolloPersonFacts } from "../lib/apollo-person-facts.js";
 
 const filled = (v: string | null | undefined): boolean => typeof v === "string" && v.trim().length > 0;
 
@@ -40,6 +42,12 @@ export async function storedTeasers(providerPersonIds: string[]): Promise<Map<st
     ORDER BY pid, created_at DESC
   `;
   for (const r of rows) out.set(r.pid, r.teaser);
+  // Nothing stored here (people served before snapshots were stored): what apollo-service's stored paid reveal said
+  // about them, free (an id it never revealed answers "not known").
+  const missing = ids.filter((id) => !out.has(id));
+  if (missing.length > 0) {
+    for (const [pid, t] of await readApolloPersonFacts(missing)) if (isJudgeableTeaser(t)) out.set(pid, t);
+  }
   return out;
 }
 

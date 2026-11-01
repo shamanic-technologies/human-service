@@ -1771,7 +1771,7 @@ mostly from 10-27) carried NONE and were all declined (Doc Dinners: 0 emails 10-
 re-contact (`selectLapsed`) rebuilt the candidate from a stored teaser that people served Jul-Sep never had.
 - **Rule** (`isJudgeableTeaser`): a candidate is offered only with a snapshot naming the person's role (title or
   headline). Missing ⟹ the person's latest stored snapshot under ANY audience (screenings, candidates, buffer; person
-  facts are audience-independent, no provider call) via `withPersonTeasers`; still none ⟹ not offered, logged
+  facts are audience-independent), then apollo-service's stored paid reveal (`POST /internal/reveal-records/person-facts`, free, `src/lib/apollo-person-facts.ts`, fail loud; mocked to "nothing known" in `tests/setup.ts`) via `withPersonTeasers`; still none ⟹ not offered, logged
   `audience.candidate_no_person_facts` (path walk / recontact / catch_all_rereach; the catch-all ledger row is blocked
   `no_person_facts`). Applied in `offerTeaser` (our walk + the script's decide door), `offerLapsed` (+ the re-opened
   row gets the teaser), `offerRereach`. serve-next is untouched (no judge there). Key-only indexes in `0051`.
@@ -1779,7 +1779,7 @@ re-contact (`selectLapsed`) rebuilt the candidate from a stored teaser that peop
   `candidate_rejudges`): every blank apollo candidate `declined` / `offered` whose person has a stored snapshot gets
   it; a declined one goes back to `offered` (old `offered_at`, so the lapsed-offer retake re-offers it at once) and its
   `declined: …` rejection is lifted (yield window + Size stop counting it). A rejection the screen made itself is kept
-  (`keptRejection`); no snapshot anywhere ⟹ untouched (`noPersonFacts`). Idempotent, reversible verbatim.
+  (`keptRejection`); no snapshot anywhere ⟹ untouched (`noPersonFacts`). Idempotent, reversible verbatim. Prod 2026-11-01 run `blank-candidates-1101`: 4,296 blank, 2,912 re-offered + 3 filled, 1,381 without local facts (re-run `blank-candidates-1101-apollo` once the apollo read shipped).
 - **Remaining after exhaustion**: `reachable_count` counts `found_taken` members, which the audience never hands out;
   once set, Remaining is also capped by the `served` members out of the window (re-contactable). Prod 2026-11-01
   "US Chiropractic Practice Owners": 6,879 reachable = 5,868 found_taken + 1,011 served.

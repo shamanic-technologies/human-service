@@ -225,6 +225,23 @@ describe("candidates — never offered for judgment without facts about the pers
     expect(await blankRowsOf(id)).toHaveLength(0);
   });
 
+  it("a person with nothing stored here gets what apollo-service's stored reveal said about them", async () => {
+    const id = await createAudience();
+    await seedServed(id, "jace", 70, { sent: true });
+    (globalThis as { apolloPersonFacts?: Map<string, unknown> }).apolloPersonFacts = new Map([
+      ["jace", { ...SNAPSHOT, name: null, title: "Doctor of Chiropractic" }],
+    ]);
+    try {
+      mockApollo([[]]);
+      const res = await next(id, TWO);
+      expect(res.body.status).toBe("candidate");
+      const [row] = await db.select().from(audienceCandidates).where(eq(audienceCandidates.audienceId, id));
+      expect(row.teaser?.title).toBe("Doctor of Chiropractic");
+    } finally {
+      delete (globalThis as { apolloPersonFacts?: unknown }).apolloPersonFacts;
+    }
+  });
+
   it("a buffered teaser with no snapshot takes the person's stored one, else is passed over", async () => {
     const id = await createAudience();
     await seedTeaserElsewhere("known");
