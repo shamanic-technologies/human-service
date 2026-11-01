@@ -66,6 +66,7 @@ section — the port binds first).
 | Internal | `POST /internal/backfill-audience-offers` | apiKey | One-time data fix: attribute every pre-existing offer-less audience to the offer its `(org, brand)` holds, read from brand-service. A pair with no offer — or with several — stays NULL and is reported, never guessed (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/recover-suppressions` | apiKey | One-time data repair: for a caller-supplied set of `{orgId, brandId, email}`, archive the `brand_suppressions` row into the reversible `suppression_recoveries` ledger (tagged with a `reason`) and DELETE it, so people who were served but never actually contacted become emittable again for their brand. Idempotent (unique `(reason, org, brand, email_norm)`), `?dryRun=true`, reversible. NOT a sweep — the set is supplied, never inferred |
 | Internal | `POST /internal/merge-source-audiences` (+ `/revert`) | apiKey | One-time data fix (AUDIENCE-SOURCES-1016): each per-source audience row becomes a SOURCE of its profile, the row deprecated -> canonical = profile. `?dryRun&orgId&brandId`, reversible, nothing archived. See "Audience x source" |
+| Internal | `POST /internal/rejudge-blank-candidates` (+ `/revert`) | apiKey | One-time repair (BLANK-CANDIDATES-1101): re-offer candidates declined with no facts about the person, with the person's stored teaser (`?dryRun`, reversible). See "Never a blank candidate" |
 | Internal | `POST /internal/recover-suppressions/revert` | apiKey | Undo a recovery: restore every archived suppression row carrying `reason` verbatim + drop the ledger rows. A person re-suppressed by a fresh serve keeps the newer row |
 | Internal | `POST /internal/backfill-sent-suppressions` | apiKey | One-time data repair (the INVERSE of the recovery above): for a caller-supplied set of `{orgId, brandId, email, sentAt}`, create the missing `brand_suppressions` row dated from the REAL send, so people actually EMAILED before per-brand suppression existed (2026-06-15) stop being re-served and re-bought for the remainder of their own window. Idempotent (reversible `suppression_backfills` ledger keyed on `reason`), `?dryRun=true`. Dedicated **25 MB** body parser. NOT a sweep — the set is supplied, never inferred, and never derived from bare serves |
 | Internal | `POST /internal/backfill-sent-suppressions/revert` | apiKey | Undo a backfill: delete exactly the suppression rows that `reason` created + drop the ledger rows. A row re-served since (its `last_served_at` moved) records a real emission and is kept |
@@ -1762,6 +1763,27 @@ live in prod and it stops calling serve-next (relayed by lead-service session
   address sat on another `people` row 23505'd and stayed at the audience head 30 h.
 - No cost declared (apollo-service bills the reveal). Tests:
   `tests/integration/audiences-candidates.test.ts`, `candidate-reveal-failures.test.ts`.
+
+### Never a blank candidate — `src/services/person-teaser.ts` (BLANK-CANDIDATES-1101)
+
+lead-service judges a candidate on its teaser snapshot before paying. 4,275 apollo candidates (2026-10-11..11-01,
+mostly from 10-27) carried NONE and were all declined (Doc Dinners: 0 emails 10-31..11-01). Cause: the 2-month
+re-contact (`selectLapsed`) rebuilt the candidate from a stored teaser that people served Jul-Sep never had.
+- **Rule** (`isJudgeableTeaser`): a candidate is offered only with a snapshot naming the person's role (title or
+  headline). Missing ⟹ the person's latest stored snapshot under ANY audience (screenings, candidates, buffer; person
+  facts are audience-independent, no provider call) via `withPersonTeasers`; still none ⟹ not offered, logged
+  `audience.candidate_no_person_facts` (path walk / recontact / catch_all_rereach; the catch-all ledger row is blocked
+  `no_person_facts`). Applied in `offerTeaser` (our walk + the script's decide door), `offerLapsed` (+ the re-opened
+  row gets the teaser), `offerRereach`. serve-next is untouched (no judge there). Key-only indexes in `0051`.
+- **Repair** `POST /internal/rejudge-blank-candidates?dryRun` (+ `/revert`, body `{reason}`, ledger
+  `candidate_rejudges`): every blank apollo candidate `declined` / `offered` whose person has a stored snapshot gets
+  it; a declined one goes back to `offered` (old `offered_at`, so the lapsed-offer retake re-offers it at once) and its
+  `declined: …` rejection is lifted (yield window + Size stop counting it). A rejection the screen made itself is kept
+  (`keptRejection`); no snapshot anywhere ⟹ untouched (`noPersonFacts`). Idempotent, reversible verbatim.
+- **Remaining after exhaustion**: `reachable_count` counts `found_taken` members, which the audience never hands out;
+  once set, Remaining is also capped by the `served` members out of the window (re-contactable). Prod 2026-11-01
+  "US Chiropractic Practice Owners": 6,879 reachable = 5,868 found_taken + 1,011 served.
+- Tests: `tests/integration/blank-candidates.test.ts`.
 
 ### CRM candidates — qualified first, email looked up at reveal (`src/services/crm-candidates.ts`, CRM-SERVE-FIND-EMAIL-1021)
 

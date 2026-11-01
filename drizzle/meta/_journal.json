@@ -358,6 +358,13 @@
       "when": 1771933580399,
       "tag": "0050_audience_split_proposals",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1771933581399,
+      "tag": "0051_candidate_rejudges",
+      "breakpoints": true
     }
   ]
 }
