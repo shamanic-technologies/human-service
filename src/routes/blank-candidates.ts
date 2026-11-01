@@ -12,13 +12,17 @@ function parse(req: { query: unknown; body: unknown }) {
   if (!q.success) return { error: q.error.message } as const;
   const b = RejudgeBlankCandidatesRequestSchema.safeParse(req.body);
   if (!b.success) return { error: b.error.issues[0]?.message ?? "Invalid request" } as const;
-  return { reason: b.data.reason, dryRun: q.data.dryRun === "true" } as const;
+  return {
+    reason: b.data.reason,
+    dryRun: q.data.dryRun === "true",
+    ...(b.data.declinedBefore ? { declinedBefore: new Date(b.data.declinedBefore) } : {}),
+  } as const;
 }
 
 router.post("/internal/rejudge-blank-candidates", requireApiKey, async (req, res) => {
   const p = parse(req);
   if ("error" in p) return void res.status(400).json({ error: p.error });
-  res.json(await rejudgeBlankCandidates(p.reason, { dryRun: p.dryRun }));
+  res.json(await rejudgeBlankCandidates(p.reason, { dryRun: p.dryRun, declinedBefore: p.declinedBefore }));
 });
 
 router.post("/internal/rejudge-blank-candidates/revert", requireApiKey, async (req, res) => {
