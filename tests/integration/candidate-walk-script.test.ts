@@ -215,7 +215,7 @@ async function insertAudience(v: {
 async function bufferAll(audienceId: string, ids: string[]) {
   const t0 = Date.now() - 60_000;
   await db.insert(audienceTeaserBuffer).values(
-    ids.map((id, i) => ({ orgId: ORG, audienceId, providerPersonId: id, linkedinUrl: `linkedin.com/in/${id}`, teaser: { organizationName: `Clinic ${id}` } as never, organizationDomain: `${id}.example`, createdAt: new Date(t0 + i * 1000) }))
+    ids.map((id, i) => ({ orgId: ORG, audienceId, providerPersonId: id, linkedinUrl: `linkedin.com/in/${id}`, teaser: { title: `Chiropractor ${id}`, organizationName: `Clinic ${id}` } as never, organizationDomain: `${id}.example`, createdAt: new Date(t0 + i * 1000) }))
   );
 }
 

@@ -5377,6 +5377,114 @@
           "reason"
         ]
       },
+      "RejudgeBlankCandidatesResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "blank": {
+            "type": "integer",
+            "description": "Apollo candidates declined or offered with no facts about the person."
+          },
+          "reoffered": {
+            "type": "integer",
+            "description": "Declined blank candidates re-offered with the person's stored teaser (their decline's rejection lifted)."
+          },
+          "teaserFilled": {
+            "type": "integer",
+            "description": "Still-offered blank candidates given the person's stored teaser."
+          },
+          "noPersonFacts": {
+            "type": "integer",
+            "description": "Blank candidates whose person has no stored teaser anywhere: left as they are."
+          },
+          "keptRejection": {
+            "type": "integer",
+            "description": "Left as they are: the pre-pay screen rejected the person on a real snapshot."
+          },
+          "alreadyRejudged": {
+            "type": "integer"
+          },
+          "byAudience": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string"
+                },
+                "reoffered": {
+                  "type": "integer"
+                },
+                "teaserFilled": {
+                  "type": "integer"
+                },
+                "noPersonFacts": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "audienceId",
+                "reoffered",
+                "teaserFilled",
+                "noPersonFacts"
+              ]
+            }
+          }
+        },
+        "required": [
+          "dryRun",
+          "reason",
+          "blank",
+          "reoffered",
+          "teaserFilled",
+          "noPersonFacts",
+          "keptRejection",
+          "alreadyRejudged",
+          "byAudience"
+        ]
+      },
+      "RejudgeBlankCandidatesRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Incident tag: the ledger key (idempotency, revert)."
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "RejudgeBlankCandidatesRevertResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "restored": {
+            "type": "integer"
+          },
+          "rejectionsRestored": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "dryRun",
+          "reason",
+          "restored",
+          "rejectionsRestored"
+        ]
+      },
       "HealthResponse": {
         "type": "object",
         "properties": {
@@ -13920,6 +14028,126 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RevertSuppressionRecoveryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/rejudge-blank-candidates": {
+      "post": {
+        "summary": "One-time data repair: re-offer every apollo candidate declined (or still offered) with no facts about the person, carrying the person's stored teaser (idempotent per reason, dry-runnable, reversible)",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', report what the repair would change WITHOUT writing. Defaults to false."
+            },
+            "required": false,
+            "description": "When 'true', report what the repair would change WITHOUT writing. Defaults to false.",
+            "name": "dryRun",
+            "in": "query"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RejudgeBlankCandidatesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Repair result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RejudgeBlankCandidatesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/rejudge-blank-candidates/revert": {
+      "post": {
+        "summary": "Undo the blank-candidate repair of this reason: candidates and lifted rejections put back verbatim",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "When 'true', report what the repair would change WITHOUT writing. Defaults to false."
+            },
+            "required": false,
+            "description": "When 'true', report what the repair would change WITHOUT writing. Defaults to false.",
+            "name": "dryRun",
+            "in": "query"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RejudgeBlankCandidatesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Repair result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RejudgeBlankCandidatesRevertResponse"
                 }
               }
             }
