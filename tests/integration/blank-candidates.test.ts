@@ -347,6 +347,30 @@ describe("POST /internal/rejudge-blank-candidates", () => {
   });
 });
 
+describe("a lapsed offer is re-checked before it is handed back (BLIND-SCREEN-CACHE-1101)", () => {
+  async function seedLapsedOffer(audienceId: string, pid: string) {
+    const [row] = await db.insert(audienceCandidates).values({
+      orgId: ORG, audienceId, providerPersonId: pid, linkedinUrl: `linkedin.com/in/${pid}`, teaser: SNAPSHOT,
+      organizationDomain: `${pid}.example`, status: "offered", offeredAt: daysAgo(5),
+    }).returning();
+    return row;
+  }
+
+  it("a person served for the brand under another audience since the offer is withdrawn, never handed back; the next lapsed one is", async () => {
+    const id = await createAudience();
+    const other = await createAudience();
+    const taken = await seedLapsedOffer(id, "taken");
+    await db.update(audienceCandidates).set({ offeredAt: daysAgo(6) }).where(eq(audienceCandidates.id, taken.id));
+    const fresh = await seedLapsedOffer(id, "fresh");
+    await seedServed(other, "taken", 1);
+    mockApollo([[]]);
+    const res = await next(id);
+    expect(res.body.status).toBe("candidate");
+    expect(res.body.candidate.candidateId).toBe(fresh.id);
+    expect(await db.select().from(audienceCandidates).where(eq(audienceCandidates.id, taken.id))).toHaveLength(0);
+  });
+});
+
 describe("Remaining of an exhausted audience — nobody new from its provider", () => {
   it("counts only the people it served whose window lapsed, never the ones it found already taken", async () => {
     const id = await createAudience();
