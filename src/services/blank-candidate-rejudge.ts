@@ -12,6 +12,12 @@
 // A rejection the pre-pay screen itself wrote (not a `declined: …` reason) was made on a real snapshot: kept, and its
 // candidate left untouched (`keptRejection`).
 //
+// BLIND-SCREEN-CACHE-1101: the first repair's re-offers were declined again within minutes by lead-service serving the
+// verdict it had stored on the BLANK input (fixed there: a verdict is reused only for the same judged input). So a
+// candidate a PRIOR repair re-offered (ledger row of another reason) and declined since is picked up too
+// (`reDeclined`): re-offered again with its teaser, rejection lifted, for a judgment on its real facts. `declinedBefore`
+// bounds it to the declines made before that fix went live (a decline after it was judged on the real facts).
+//
 // Idempotent (ledger `candidate_rejudges`, unique (reason, candidate)), dry-runnable, reversible (`/revert` puts the
 // candidate and the rejection back verbatim). The set is computed, not supplied: "was this candidate offered with no
 // facts?" is a fact of our own rows.
@@ -25,6 +31,8 @@ interface BlankRow {
   audience_id: string;
   provider_person_id: string;
   status: string;
+  /** Set on a candidate a prior repair re-offered and that was declined again since: the teaser it now carries. */
+  current_teaser?: TeaserSnapshot | null;
 }
 
 export interface RejudgeResult {
@@ -36,19 +44,32 @@ export interface RejudgeResult {
   noPersonFacts: number;
   keptRejection: number;
   alreadyRejudged: number;
-  byAudience: Array<{ audienceId: string; reoffered: number; teaserFilled: number; noPersonFacts: number }>;
+  /** Re-offered by a prior repair, then declined again (a verdict stored on the blank input): re-offered again. */
+  reDeclined: number;
+  byAudience: Array<{ audienceId: string; reoffered: number; teaserFilled: number; noPersonFacts: number; reDeclined: number }>;
 }
 
 const BLANK = pg`(c.teaser IS NULL OR (COALESCE(btrim(c.teaser->>'title'), '') = '' AND COALESCE(btrim(c.teaser->>'headline'), '') = ''))`;
 const CHUNK = 1000;
 
-export async function rejudgeBlankCandidates(reason: string, opts: { dryRun: boolean }): Promise<RejudgeResult> {
+export async function rejudgeBlankCandidates(reason: string, opts: { dryRun: boolean; declinedBefore?: Date }): Promise<RejudgeResult> {
   if (!reason.trim()) throw new Error("reason is required");
   const rows = await pg<(BlankRow & { done: boolean })[]>`
     SELECT c.id, c.org_id, c.audience_id, c.provider_person_id, c.status,
            EXISTS (SELECT 1 FROM candidate_rejudges r WHERE r.reason = ${reason} AND r.candidate_id = c.id) AS done
       FROM audience_candidates c
      WHERE ${BLANK} AND c.crm_contact IS NULL AND c.status IN ('declined', 'offered')
+     ORDER BY c.created_at
+  `;
+  const before = opts.declinedBefore ? opts.declinedBefore.toISOString() : null;
+  const reDeclined = await pg<(BlankRow & { done: boolean })[]>`
+    SELECT c.id, c.org_id, c.audience_id, c.provider_person_id, c.status, c.teaser AS current_teaser,
+           EXISTS (SELECT 1 FROM candidate_rejudges r WHERE r.reason = ${reason} AND r.candidate_id = c.id) AS done
+      FROM audience_candidates c
+     WHERE NOT ${BLANK} AND c.crm_contact IS NULL AND c.status = 'declined'
+       AND EXISTS (SELECT 1 FROM candidate_rejudges p
+                    WHERE p.candidate_id = c.id AND p.reason <> ${reason} AND c.decided_at > p.created_at)
+       AND (${before}::timestamptz IS NULL OR c.decided_at < ${before}::timestamptz)
      ORDER BY c.created_at
   `;
   const result: RejudgeResult = {
@@ -60,11 +81,12 @@ export async function rejudgeBlankCandidates(reason: string, opts: { dryRun: boo
     noPersonFacts: 0,
     keptRejection: 0,
     alreadyRejudged: 0,
+    reDeclined: 0,
     byAudience: [],
   };
-  const per = new Map<string, { reoffered: number; teaserFilled: number; noPersonFacts: number }>();
-  const tally = (audienceId: string, k: "reoffered" | "teaserFilled" | "noPersonFacts") => {
-    const e = per.get(audienceId) ?? { reoffered: 0, teaserFilled: 0, noPersonFacts: 0 };
+  const per = new Map<string, { reoffered: number; teaserFilled: number; noPersonFacts: number; reDeclined: number }>();
+  const tally = (audienceId: string, k: "reoffered" | "teaserFilled" | "noPersonFacts" | "reDeclined") => {
+    const e = per.get(audienceId) ?? { reoffered: 0, teaserFilled: 0, noPersonFacts: 0, reDeclined: 0 };
     e[k] += 1;
     per.set(audienceId, e);
     result[k] += 1;
@@ -88,9 +110,18 @@ export async function rejudgeBlankCandidates(reason: string, opts: { dryRun: boo
       else tally(row.audience_id, outcome);
     }
   }
+  for (const row of reDeclined) {
+    if (row.done) {
+      result.alreadyRejudged += 1;
+      continue;
+    }
+    const outcome = await rejudgeOne(reason, row, row.current_teaser as TeaserSnapshot, opts.dryRun);
+    if (outcome === "kept_rejection") result.keptRejection += 1;
+    else tally(row.audience_id, "reDeclined");
+  }
   result.byAudience = [...per.entries()].map(([audienceId, e]) => ({ audienceId, ...e })).sort((a, b) => b.reoffered - a.reoffered);
   console.log(
-    `[human-service] blank_candidates.rejudge reason=${reason} dryRun=${opts.dryRun} blank=${result.blank} reoffered=${result.reoffered} teaserFilled=${result.teaserFilled} noPersonFacts=${result.noPersonFacts} keptRejection=${result.keptRejection} already=${result.alreadyRejudged}`
+    `[human-service] blank_candidates.rejudge reason=${reason} dryRun=${opts.dryRun} blank=${result.blank} reoffered=${result.reoffered} reDeclined=${result.reDeclined} teaserFilled=${result.teaserFilled} noPersonFacts=${result.noPersonFacts} keptRejection=${result.keptRejection} already=${result.alreadyRejudged}`
   );
   return result;
 }

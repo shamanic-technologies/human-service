@@ -5409,6 +5409,10 @@
           "alreadyRejudged": {
             "type": "integer"
           },
+          "reDeclined": {
+            "type": "integer",
+            "description": "Re-offered by a prior repair, then declined again on the verdict stored for the blank input: re-offered again (BLIND-SCREEN-CACHE-1101)."
+          },
           "byAudience": {
             "type": "array",
             "items": {
@@ -5425,13 +5429,17 @@
                 },
                 "noPersonFacts": {
                   "type": "integer"
+                },
+                "reDeclined": {
+                  "type": "integer"
                 }
               },
               "required": [
                 "audienceId",
                 "reoffered",
                 "teaserFilled",
-                "noPersonFacts"
+                "noPersonFacts",
+                "reDeclined"
               ]
             }
           }
@@ -5445,6 +5453,7 @@
           "noPersonFacts",
           "keptRejection",
           "alreadyRejudged",
+          "reDeclined",
           "byAudience"
         ]
       },
@@ -5456,6 +5465,11 @@
             "minLength": 1,
             "maxLength": 200,
             "description": "Incident tag: the ledger key (idempotency, revert)."
+          },
+          "declinedBefore": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Only re-offer candidates a PRIOR repair re-offered that were declined again BEFORE this instant (a verdict reused from the blank input). Omitted = every such decline."
           }
         },
         "required": [
