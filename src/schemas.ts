@@ -3685,6 +3685,14 @@ export const RejudgeBlankCandidatesQuerySchema = z.object({
 export const RejudgeBlankCandidatesRequestSchema = z
   .object({
     reason: z.string().trim().min(1).max(200).openapi({ description: "Incident tag: the ledger key (idempotency, revert)." }),
+    declinedBefore: z
+      .string()
+      .datetime({ offset: true })
+      .optional()
+      .openapi({
+        description:
+          "Only re-offer candidates a PRIOR repair re-offered that were declined again BEFORE this instant (a verdict reused from the blank input). Omitted = every such decline.",
+      }),
   })
   .openapi("RejudgeBlankCandidatesRequest");
 
@@ -3698,8 +3706,18 @@ const RejudgeBlankCandidatesResponseSchema = z
     noPersonFacts: z.number().int().describe("Blank candidates whose person has no stored teaser anywhere: left as they are."),
     keptRejection: z.number().int().describe("Left as they are: the pre-pay screen rejected the person on a real snapshot."),
     alreadyRejudged: z.number().int(),
+    reDeclined: z
+      .number()
+      .int()
+      .describe("Re-offered by a prior repair, then declined again on the verdict stored for the blank input: re-offered again (BLIND-SCREEN-CACHE-1101)."),
     byAudience: z.array(
-      z.object({ audienceId: z.string(), reoffered: z.number().int(), teaserFilled: z.number().int(), noPersonFacts: z.number().int() })
+      z.object({
+        audienceId: z.string(),
+        reoffered: z.number().int(),
+        teaserFilled: z.number().int(),
+        noPersonFacts: z.number().int(),
+        reDeclined: z.number().int(),
+      })
     ),
   })
   .openapi("RejudgeBlankCandidatesResponse");

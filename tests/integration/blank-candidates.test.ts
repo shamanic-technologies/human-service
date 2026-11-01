@@ -307,6 +307,37 @@ describe("POST /internal/rejudge-blank-candidates", () => {
     expect(await db.select().from(audienceScreenedOut).where(eq(audienceScreenedOut.providerPersonId, "jace"))).toHaveLength(1);
   });
 
+  it("BLIND-SCREEN-CACHE-1101: a re-offered candidate declined again on the verdict stored for its blank input is re-offered again, bounded by declinedBefore", async () => {
+    const id = await createAudience();
+    await seedDeclinedBlank(id, "jace");
+    await seedTeaserElsewhere("jace");
+    expect((await rejudge()).body).toMatchObject({ reoffered: 1 });
+    // lead-service then declined it within minutes with the verdict judged on the blank teaser.
+    const [row] = await db.select().from(audienceCandidates).where(and(eq(audienceCandidates.audienceId, id), eq(audienceCandidates.providerPersonId, "jace")));
+    const declinedAt = new Date(Date.now() + 1000);
+    await db.update(audienceCandidates).set({ status: "declined", declineReason: "screen_rejected P(yes)=0.110", basis: "screen:lead-v1;must:none", decidedAt: declinedAt }).where(eq(audienceCandidates.id, row.id));
+    await db.insert(audienceScreenedOut).values({ orgId: ORG, audienceId: id, providerPersonId: "jace", reason: "declined: screen_rejected P(yes)=0.110" });
+
+    const again = (body: Record<string, unknown>, q = "") =>
+      request(app).post(`/internal/rejudge-blank-candidates${q}`).set(getAuthHeaders()).send({ reason: "blind-1101", ...body });
+    // A decline made after the fix went live was judged on the real facts: left alone.
+    expect((await again({ declinedBefore: new Date(declinedAt.getTime() - 1).toISOString() })).body).toMatchObject({ reDeclined: 0 });
+    expect((await again({ declinedBefore: new Date(declinedAt.getTime() + 60_000).toISOString() }, "?dryRun=true")).body).toMatchObject({ dryRun: true, reDeclined: 1, blank: 0 });
+    const real = await again({});
+    expect(real.body).toMatchObject({ reDeclined: 1, keptRejection: 0 });
+    expect(real.body.byAudience).toEqual([expect.objectContaining({ audienceId: id, reDeclined: 1 })]);
+    const [back] = await db.select().from(audienceCandidates).where(eq(audienceCandidates.id, row.id));
+    expect(back).toMatchObject({ status: "offered", decidedAt: null, declineReason: null, basis: null });
+    expect(back.teaser?.title).toBe("Chiropractor");
+    expect(await db.select().from(audienceScreenedOut).where(eq(audienceScreenedOut.providerPersonId, "jace"))).toHaveLength(0);
+    expect((await again({})).body).toMatchObject({ reDeclined: 0 });
+
+    const revert = await request(app).post("/internal/rejudge-blank-candidates/revert").set(getAuthHeaders()).send({ reason: "blind-1101" });
+    expect(revert.body).toMatchObject({ restored: 1, rejectionsRestored: 1 });
+    const [reverted] = await db.select().from(audienceCandidates).where(eq(audienceCandidates.id, row.id));
+    expect(reverted).toMatchObject({ status: "declined", declineReason: "screen_rejected P(yes)=0.110" });
+  });
+
   it("keeps a candidate whose rejection the pre-pay screen made on a real snapshot", async () => {
     const id = await createAudience();
     await seedDeclinedBlank(id, "jace");
