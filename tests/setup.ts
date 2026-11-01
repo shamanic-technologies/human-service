@@ -28,6 +28,19 @@ vi.mock("../src/lib/brand-identity.js", () => ({
 // by every list build (pointer build, refill, portfolio, competitor engagement,
 // preview companies). Default answer: the features-service catalogue as shipped
 // 2026-10-07. tests/**/sourcing-origin*.test.ts drive it themselves.
+// apollo-service's stored person facts (person-teaser.ts): nothing known by default; a suite that needs facts sets
+// `apolloPersonFacts` (tests/integration/blank-candidates.test.ts).
+vi.mock("../src/lib/apollo-person-facts.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/apollo-person-facts.js")>();
+  return {
+    ...actual,
+    readApolloPersonFacts: vi.fn(async (ids: string[]) => {
+      const known = (globalThis as { apolloPersonFacts?: Map<string, unknown> }).apolloPersonFacts ?? new Map();
+      return new Map(ids.filter((id) => known.has(id)).map((id) => [id, known.get(id)]));
+    }),
+  };
+});
+
 vi.mock("../src/lib/features-sourcing.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/features-sourcing.js")>();
   return {
