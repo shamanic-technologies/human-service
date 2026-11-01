@@ -490,11 +490,24 @@ async function nextCandidateFromList(
     return { status: "exhausted", candidate: null, reason: "yield_exhausted", target };
   }
 
-  const lapsed = await retakeLapsedOffer(identity.orgId, audience.id, sourceId);
-  if (lapsed) return { status: "candidate", candidate: toView(lapsed), target };
-
   const exclusions = await loadServeExclusions(identity);
   const ownCompany = await loadOwnCompany(identity.orgId, [audience.brandId]);
+  // BLIND-SCREEN-CACHE-1101: a lapsed offer is re-checked against the free gates before it is handed back. An offer
+  // can lapse for days (a repair re-offers rows declined a week ago), and the person may have been served for the
+  // brand under another audience meanwhile: handed back, it cost a screen and a reveal to end `already_served`
+  // (1,606 of 4,186 re-offered Doc Dinners candidates, 2026-11-01). A row failing a gate is withdrawn, exactly as the
+  // walk never offers such a teaser (the `taken` gate records this audience's provenance, no spend).
+  while (Date.now() < deadline) {
+    const lapsed = await retakeLapsedOffer(identity.orgId, audience.id, sourceId);
+    if (!lapsed) break;
+    const failed = await firstFailedFreeCheck(audience, identity, lapsed, exclusions, ownCompany);
+    if (!failed) return { status: "candidate", candidate: toView(lapsed), target };
+    await db.delete(audienceCandidates).where(and(eq(audienceCandidates.id, lapsed.id), eq(audienceCandidates.status, "offered")));
+    console.log(
+      `[human-service] audience.lapsed_offer_withdrawn org=${identity.orgId} audience=${audience.id} candidate=${lapsed.id} gate=${failed}`
+    );
+  }
+  if (Date.now() >= deadline) return { status: "pending", candidate: null, target };
   const apolloSearchParams = hasApolloNativeFilters(audience) ? storedFilters : undefined;
   const apolloFilters = hasApolloNativeFilters(audience) ? {} : (storedFilters as PeopleSearchFilters);
 
