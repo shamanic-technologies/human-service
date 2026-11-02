@@ -537,12 +537,13 @@ async function postProvider(
   apiKey: string,
   path: string,
   body: unknown,
-  identity: Identity
+  identity: Identity,
+  method: "POST" | "PATCH" = "POST"
 ): Promise<unknown> {
   let res: Response;
   try {
     res = await fetchWithConnectRetry(`${baseUrl}${path}`, {
-      method: "POST",
+      method,
       headers: downstreamHeaders(apiKey, identity),
       body: JSON.stringify(body),
     });
@@ -600,6 +601,15 @@ export async function apolloPost(
 ): Promise<unknown> {
   const { url, key } = requireApollo();
   return postProvider("apollo", url, key, path, body, identity);
+}
+
+export async function apolloPatch(
+  path: string,
+  body: unknown,
+  identity: Identity
+): Promise<unknown> {
+  const { url, key } = requireApollo();
+  return postProvider("apollo", url, key, path, body, identity, "PATCH");
 }
 
 export async function apolloGet(

@@ -17,6 +17,13 @@
 // named as out. Both directions matter: stop emailing the wrong people, and do
 // not reject the ones who should be kept.
 //
+// And, by default, one sentence putting OUT the people at companies that
+// themselves sell what the client sells (its competitors), COMPETITOR-EXCLUDE-1102:
+// AscendQE (test automation, "B2B software companies of 500-5,000 people")
+// emailed BrowserStack, Copado and TestDevLab, who fit the target and passed the
+// screen. Owner 2026-11-02: in the audience's own text, like the assistants
+// sentence, so the client can delete it and the screen then follows the edit.
+//
 // The roles are DERIVED BY THE MODEL from what the client sells (the offer's own
 // description, read from brand-service) — there is no role list here, because
 // the roles differ per product. Nothing about the companies changes: the
@@ -66,7 +73,7 @@ export function buildTargetSystemPrompt(): string {
     "company is not the right person. A person is in the target when their JOB",
     "makes them decide on, buy, use or care about what this company sells.",
     "",
-    "Write it in three parts:",
+    "Write it in four parts:",
     "  1. The people whose job makes them decide on or care about what this",
     "     company sells, at the companies the customer named. Derive those roles",
     "     from what is sold: think about who, inside such a company, would choose,",
@@ -79,17 +86,25 @@ export function buildTargetSystemPrompt(): string {
     "  3. The functions at those companies that have no stake in this purchase,",
     "     named as OUT. Seniority alone never puts someone in: the head of a",
     "     function with no stake in this purchase is out, however senior.",
+    "  4. Always, as its own sentence: people at companies that themselves sell",
+    "     the same kind of product or service as this company (its competitors)",
+    "     are OUT, whatever their role. Say in plain words what such companies",
+    "     sell. They may fit every other part of the target; they would never",
+    "     buy what this company sells. Then say that a company selling something",
+    "     else stays in, so only real competitors are out.",
     "",
     "RESTATE, NEVER REDEFINE THE COMPANIES:",
     "  - Keep every constraint the customer stated (kind of company, sector,",
     "    geography, size) and add none. Do not add kinds of companies, places or",
-    "    sizes the customer did not name, and do not drop any they did.",
+    "    sizes the customer did not name, and do not drop any they did. The",
+    "    competitors of part 4 are the one exclusion you always add.",
     "  - If the customer already named the people (roles, titles, seniority),",
-    "    keep exactly those people as part 1 and add their entourage (part 2)",
-    "    and the out functions (part 3). Do not add other buyer roles.",
+    "    keep exactly those people as part 1 and add their entourage (part 2),",
+    "    the out functions (part 3) and the competitors (part 4). Do not add",
+    "    other buyer roles.",
     "",
     "FORM:",
-    "  - Plain English, one to three sentences, no bullet points, no em dashes.",
+    "  - Plain English, two to four sentences, no bullet points, no em dashes.",
     "  - Positive and specific: name the roles, never \"relevant people\" or",
     "    \"the right stakeholders\".",
     "  - Say nothing about how many people this is. Write no search-tool field",
@@ -205,7 +220,7 @@ async function withTargetRun<T>(
 // same firms: both were judged against "Managing Partners, Solo Practitioners
 // and Legal Administrators at ...". The segment target restates the shared
 // target narrowed to what THIS audience's own segment sentence covers, in the
-// same three-part person-level form. It is what the dashboard shows as the
+// same four-part person-level form. It is what the dashboard shows as the
 // audience and what the screen judges against (audiences.target_text).
 //
 // The segment sentence is an INPUT, never the output: on older rows it can

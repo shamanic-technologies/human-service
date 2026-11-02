@@ -13,6 +13,7 @@
 
 import {
   apolloGet,
+  apolloPatch,
   apolloPost,
   ProviderError,
   type Identity,
@@ -634,4 +635,74 @@ export async function createApolloLinkedinEngagementAudience(args: {
     description: o.description,
     filters: o.filters as ApolloFilters,
   };
+}
+
+// --- Serve source (QuickEnrich) — QE-CHIRO-1102 ---
+
+export type ApolloServeSource = "apollo" | "quickenrich";
+
+export interface ApolloServeSourceState {
+  apolloAudienceId: string;
+  serveSource: ApolloServeSource;
+  quickenrich: { expressible: boolean; reasons: string[] };
+}
+
+function asServeSourceState(data: unknown, op: string): ApolloServeSourceState {
+  const o = (data ?? {}) as Record<string, unknown>;
+  const qe = (o.quickenrich ?? {}) as Record<string, unknown>;
+  if (
+    typeof o.apolloAudienceId !== "string" ||
+    (o.serveSource !== "apollo" && o.serveSource !== "quickenrich") ||
+    typeof qe.expressible !== "boolean" ||
+    !Array.isArray(qe.reasons)
+  ) {
+    throw new ProviderError(
+      "apollo",
+      502,
+      `apollo-service ${op} returned an unusable body: ${JSON.stringify(o).slice(0, 200)}`
+    );
+  }
+  return {
+    apolloAudienceId: o.apolloAudienceId,
+    serveSource: o.serveSource,
+    quickenrich: { expressible: qe.expressible, reasons: qe.reasons.map(String) },
+  };
+}
+
+// POST /audiences — persist native filters VERBATIM on apollo-service's side (no
+// LLM). /search/next recognises the row by jsonb equality with the filters this
+// service forwards, so the stored filters are sent as they are.
+export async function createApolloAudienceFromFilters(args: {
+  name: string;
+  description: string;
+  brandId: string;
+  filters: ApolloFilters;
+  identity: Identity;
+}): Promise<ApolloServeSourceState & { count: number }> {
+  const data = await apolloPost(
+    "/audiences",
+    { name: args.name, description: args.description, brandId: args.brandId, filters: args.filters },
+    args.identity
+  );
+  const state = asServeSourceState(data, "create-audience");
+  const count = (data as Record<string, unknown>).count;
+  if (typeof count !== "number") {
+    throw new ProviderError("apollo", 502, `apollo-service create-audience returned no numeric count`);
+  }
+  return { ...state, count };
+}
+
+// PATCH /audiences/{id}/serve-source — apollo-service refuses (422, with every
+// reason) an audience QuickEnrich cannot enforce faithfully.
+export async function setApolloServeSource(
+  apolloAudienceId: string,
+  serveSource: ApolloServeSource,
+  identity: Identity
+): Promise<ApolloServeSourceState> {
+  const data = await apolloPatch(
+    `/audiences/${encodeURIComponent(apolloAudienceId)}/serve-source`,
+    { serveSource },
+    identity
+  );
+  return asServeSourceState(data, "serve-source");
 }
