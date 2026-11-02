@@ -9,13 +9,14 @@ import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import { audiences, audienceSources, audienceTeaserBuffer } from "../../src/db/schema.js";
-import { createApolloSignalAudience, measureSignalCoverage } from "../../src/lib/apollo-audiences.js";
+import { createApolloAudienceFromFilters, createApolloSignalAudience, measureSignalCoverage } from "../../src/lib/apollo-audiences.js";
 import { getPaymentOutlook } from "../../src/lib/billing-outlook.js";
 
 vi.mock("../../src/lib/apollo-audiences.js", async (orig) => ({
   ...(await orig<typeof import("../../src/lib/apollo-audiences.js")>()),
   measureSignalCoverage: vi.fn(),
   createApolloSignalAudience: vi.fn(),
+  createApolloAudienceFromFilters: vi.fn(),
 }));
 vi.mock("../../src/services/audiences.js", async (orig) => ({
   ...(await orig<typeof import("../../src/services/audiences.js")>()),
@@ -105,6 +106,10 @@ beforeEach(async () => {
     },
     count: 120,
   }));
+  vi.mocked(createApolloAudienceFromFilters).mockReset().mockResolvedValue({
+    apolloAudienceId: "native-record-1",
+    count: 777,
+  } as never);
   vi.mocked(getPaymentOutlook).mockReset().mockResolvedValue({ orgId: ORG, state: "will_charge" } as never);
   await cleanTestData();
 });
@@ -209,6 +214,20 @@ describe("POST /orgs/audiences/:id/sources", () => {
       .send({ type: "hiring", jobTitles: ["SDET"] });
     expect(again.status).toBe(409);
     expect(again.body.sourceId).toBe(res.body.sourceId);
+  });
+
+  it("a profile stated in raw Apollo filters (no apollo-service record) gets one from its filters, then the source on it", async () => {
+    const profile = await insertProfile("Heads of QA");
+    await db.update(audiences).set({ apolloAudienceId: null }).where(eq(audiences.id, profile.id));
+    const res = await request(app)
+      .post(`/orgs/audiences/${profile.id}/sources`)
+      .set(getAuthHeaders())
+      .send({ type: "hiring", jobTitles: TITLES });
+    expect(res.status).toBe(201);
+    expect(vi.mocked(createApolloAudienceFromFilters).mock.calls[0][0]).toMatchObject({ filters: { person_titles: ["head of qa"] } });
+    expect(vi.mocked(createApolloSignalAudience).mock.calls[0][0].baseApolloAudienceId).toBe("native-record-1");
+    const [row] = await db.select().from(audiences).where(eq(audiences.id, profile.id));
+    expect(row.apolloAudienceId).toBe("native-record-1");
   });
 
   it("jobTitles on a non-hiring signal is a 400, nothing built", async () => {
