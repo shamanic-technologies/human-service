@@ -2474,6 +2474,62 @@
         ],
         "additionalProperties": false
       },
+      "AudienceServeSourceResponse": {
+        "type": "object",
+        "properties": {
+          "audience": {
+            "$ref": "#/components/schemas/Audience"
+          },
+          "serveSource": {
+            "type": "string",
+            "enum": [
+              "apollo",
+              "quickenrich"
+            ]
+          },
+          "quickenrich": {
+            "type": "object",
+            "properties": {
+              "expressible": {
+                "type": "boolean"
+              },
+              "reasons": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Every filter QuickEnrich cannot enforce; empty when expressible."
+              }
+            },
+            "required": [
+              "expressible",
+              "reasons"
+            ]
+          }
+        },
+        "required": [
+          "audience",
+          "serveSource",
+          "quickenrich"
+        ]
+      },
+      "ChangeAudienceServeSourceRequest": {
+        "type": "object",
+        "properties": {
+          "serveSource": {
+            "type": "string",
+            "enum": [
+              "apollo",
+              "quickenrich"
+            ],
+            "description": "quickenrich: people are found by a FREE QuickEnrich search (title + person location), their email found and verified before use; once QuickEnrich has nobody left the Apollo search serves as before. apollo: the default Apollo search."
+          }
+        },
+        "required": [
+          "serveSource"
+        ],
+        "additionalProperties": false
+      },
       "AudiencePreviewResponse": {
         "type": "object",
         "properties": {
@@ -11090,6 +11146,125 @@
           },
           "404": {
             "description": "Audience not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/{id}/serve-source": {
+      "patch": {
+        "summary": "Choose where an Apollo audience finds its people: Apollo or the free QuickEnrich search",
+        "description": "For an audience stated in Apollo-native filters. An audience with no apollo-service record gets one first, from its stored filters, unchanged. quickenrich is refused (422, every reason listed) when QuickEnrich cannot enforce every filter faithfully: it supports job titles (+ excluded titles), person location, employee and revenue bands; keyword tags, industries, seniorities and organization locations are not.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeAudienceServeSourceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Serve source set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudienceServeSourceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, or not an audience stated in Apollo filters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "QuickEnrich cannot enforce this audience's filters (reasons listed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "apollo-service failed",
             "content": {
               "application/json": {
                 "schema": {

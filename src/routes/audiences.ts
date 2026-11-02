@@ -23,6 +23,7 @@ import {
   CreateAudienceRequestSchema,
   UpdateAudienceRequestSchema,
   ChangeAudienceStatusRequestSchema,
+  ChangeAudienceServeSourceRequestSchema,
   ListAudiencesQuerySchema,
   AudienceMembersQuerySchema,
   AudienceStatsRequestSchema,
@@ -50,7 +51,11 @@ import {
   revealCandidate,
 } from "../services/audience-candidates.js";
 import { createLinkedinEngagementAudience } from "../services/linkedin-engagement-audience.js";
-import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
+import {
+  isLinkedinEngagementFilters,
+  createApolloAudienceFromFilters,
+  setApolloServeSource,
+} from "../lib/apollo-audiences.js";
 import { launchAudiencePortfolio } from "../services/audience-portfolio.js";
 import { estimateSplitSegments } from "../services/audience-split-estimate.js";
 import { serveListKind, sourcingOriginSlug, SourcingOriginError } from "../services/sourcing-origin.js";
@@ -969,6 +974,105 @@ router.patch(
           err
         )
       );
+    }
+  }
+);
+
+// --- PATCH /orgs/audiences/:id/serve-source (QE-CHIRO-1102) ---
+// Where an apollo audience finds its people: Apollo (default) or the free
+// QuickEnrich search. apollo-service owns the switch and the faithfulness check;
+// it keys the switch on an apollo_audiences row whose filters EQUAL what this
+// service forwards to /search/next, so an audience with no pointer gets one
+// first, built from its own stored filters, sent verbatim. Needs x-user-id
+// (apollo-service counts the new record with the org's Apollo key).
+router.patch(
+  "/orgs/audiences/:id/serve-source",
+  requireApiKey,
+  requireOrgAndUser,
+  async (req, res) => {
+    const parsed = ChangeAudienceServeSourceRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.message });
+      return;
+    }
+    const orgId = res.locals.orgId as string;
+    let audience = await getAudienceInOrg(orgId, req.params.id);
+    if (!audience) {
+      res.status(404).json({ error: "Audience not found" });
+      return;
+    }
+    const filters = (audience.filters ?? null) as Record<string, unknown> | null;
+    if (
+      audience.provider !== "apollo" ||
+      !filters ||
+      Object.keys(filters).length === 0 ||
+      !hasApolloNativeFilters(audience) ||
+      isLinkedinEngagementFilters(filters)
+    ) {
+      res.status(400).json({
+        error: "Only an audience stated in Apollo search filters has a serve source.",
+      });
+      return;
+    }
+    const identity: Identity = {
+      ...buildIdentity(res),
+      brandIds: [audience.brandId],
+    };
+    try {
+      if (!audience.apolloAudienceId) {
+        const created = await createApolloAudienceFromFilters({
+          name: audience.name,
+          description:
+            audience.description ?? audience.targetText ?? audience.nlPrompt ?? audience.name,
+          brandId: audience.brandId,
+          filters,
+          identity,
+        });
+        [audience] = await db
+          .update(audiences)
+          .set({
+            apolloAudienceId: created.apolloAudienceId,
+            apolloCount: created.count,
+            countedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(and(eq(audiences.id, audience.id), eq(audiences.orgId, orgId)))
+          .returning();
+        console.log(
+          `[human-service] audience.apollo_record org=${orgId} audience=${audience.id} apolloAudience=${created.apolloAudienceId} count=${created.count}`
+        );
+      }
+      const state = await setApolloServeSource(
+        audience.apolloAudienceId!,
+        parsed.data.serveSource,
+        identity
+      );
+      console.log(
+        `[human-service] audience.serve_source org=${orgId} audience=${audience.id} serveSource=${state.serveSource}`
+      );
+      res.json({
+        audience: (await serializeAudiences([audience]))[0],
+        serveSource: state.serveSource,
+        quickenrich: state.quickenrich,
+      });
+    } catch (err) {
+      // apollo-service's own refusal (not expressible in QuickEnrich, or filters
+      // it rejects) is the caller's to read: relayed with its reasons.
+      if (err instanceof ProviderError && (err.status === 422 || err.status === 400)) {
+        let body: Record<string, unknown> = {};
+        try {
+          body = JSON.parse(err.body) as Record<string, unknown>;
+        } catch {
+          body = { error: err.body };
+        }
+        res.status(err.status).json({
+          error: typeof body.error === "string" ? body.error : `apollo-service refused: ${err.body}`,
+          ...(Array.isArray(body.reasons) ? { reasons: body.reasons } : {}),
+          provider: "apollo",
+        });
+        return;
+      }
+      sendProviderError(res, err);
     }
   }
 );
