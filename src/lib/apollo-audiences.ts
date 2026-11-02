@@ -484,11 +484,17 @@ export interface SignalCoverage {
 export async function measureSignalCoverage(args: {
   apolloAudienceId: string;
   windowDays: number[];
+  /** Posted job titles narrowing the hiring signal (apollo-service applies them to hiring only). */
+  jobTitles?: string[] | null;
   identity: Identity;
 }): Promise<{ baseCount: number; signals: SignalCoverage[] }> {
   const data = await apolloPost(
     "/audiences/signal-coverage",
-    { apolloAudienceId: args.apolloAudienceId, windowDays: args.windowDays },
+    {
+      apolloAudienceId: args.apolloAudienceId,
+      windowDays: args.windowDays,
+      ...(args.jobTitles?.length ? { jobTitles: args.jobTitles } : {}),
+    },
     args.identity
   );
   const o = (data ?? {}) as Record<string, unknown>;
@@ -535,6 +541,12 @@ export async function createApolloSignalAudience(args: {
   name: string;
   type: BuyingSignalType;
   windowDays: number;
+  /**
+   * hiring only: the posted job titles the employer must be hiring for
+   * (apollo-service narrows the search with them and picks a posting naming one
+   * as the signal fact). Omitted / empty = any role, byte-identical to before.
+   */
+  jobTitles?: string[] | null;
   identity: Identity;
 }): Promise<{ apolloAudienceId: string; filters: ApolloFilters; count: number }> {
   const data = await apolloPost(
@@ -543,7 +555,11 @@ export async function createApolloSignalAudience(args: {
       apolloAudienceId: args.baseApolloAudienceId,
       brandId: args.brandId,
       name: args.name,
-      signal: { type: args.type, windowDays: args.windowDays },
+      signal: {
+        type: args.type,
+        windowDays: args.windowDays,
+        ...(args.type === "hiring" && args.jobTitles?.length ? { jobTitles: args.jobTitles } : {}),
+      },
     },
     args.identity
   );
@@ -564,6 +580,22 @@ export async function createApolloSignalAudience(args: {
     );
   }
   return { apolloAudienceId: o.apolloAudienceId, filters: filters as ApolloFilters, count: o.count };
+}
+
+/**
+ * The posted job titles a stored hiring signal is narrowed to
+ * (`buying_signal.job_titles`, apollo-service's own spelling), or null when the
+ * filters carry no hiring signal or it targets any role. The stored filters are
+ * the single record of it: no column duplicates them.
+ */
+export function readSignalJobTitles(filters: unknown): string[] | null {
+  if (!filters || typeof filters !== "object" || Array.isArray(filters)) return null;
+  const s = (filters as Record<string, unknown>).buying_signal;
+  if (!s || typeof s !== "object" || Array.isArray(s)) return null;
+  const o = s as Record<string, unknown>;
+  if (o.type !== "hiring" || !Array.isArray(o.job_titles)) return null;
+  const titles = o.job_titles.filter((t): t is string => typeof t === "string" && t.length > 0);
+  return titles.length > 0 ? titles : null;
 }
 
 // --- linkedin_engagement: competitor LinkedIn post engagers (apollo-service v0.39.29) ---

@@ -120,6 +120,8 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `GET /orgs/audiences` | apiKey + `x-org-id` | List audiences (paginated, optional `brandId` / `offerId` / `profileAudienceId` filter) — each item also carries server-computed `sizeCount` / `availableToContactCount` / `availableToContactPct` (Size / Remaining, see below) |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/{id}` | apiKey + `x-org-id` | Get an audience |
 | Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}` | apiKey + `x-org-id` | Update metadata (name / nlPrompt only) — immutable otherwise |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/sources` | apiKey + `x-org-id` + `x-user-id` | Add a buying-signal source (hiring / job_change / funding) to a profile; hiring optionally `jobTitles`. 409 if that type exists. See "Hiring titles" |
+| Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}/sources/{sourceId}` | apiKey + `x-org-id` + `x-user-id` | Set a hiring source's posted `jobTitles` (null = any role): rebuilt on apollo-service, its queued teasers dropped |
 | Org-scoped (Audiences v1) | `PATCH /orgs/audiences/{id}/status` | apiKey + `x-org-id` | Change status (active / paused / archived) — mutates only status; pausing an audience stops every source of it (see "Audience x source") |
 | Org-scoped (Audiences v1) | `DELETE /orgs/audiences/{id}` | apiKey + `x-org-id` | Hard delete (cascades members) — archive is a soft state, not delete |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/{id}/refresh-count` | apiKey + `x-org-id` + `x-user-id` | Re-snapshot apollo + apify counts via free dry-run |
@@ -2247,6 +2249,21 @@ targets + 27 such rows + 3.
   origin slug (or reads `channels[]`): run the merge after that ships.
 - Tests: `tests/integration/audience-sources.test.ts`, the "profile x source" block of
   `source-campaigns.test.ts`, `audiences-portfolio.test.ts`, `competitor-engagement-audience.test.ts`.
+
+### Hiring titles — a hiring source says WHICH roles are posted (`src/services/signal-source-titles.ts`, HIRING-TITLES-1102)
+
+A client selling test automation wants companies POSTING QA / SDET jobs, not hiring any role. apollo-service owns
+the criterion (`signal.jobTitles` on `POST /audiences/signal`: search narrowed by `q_organization_job_titles`, the
+signal fact = a posting naming one of them). Titles live ONLY in the source's stored filters
+(`buying_signal.job_titles`, read by `readSignalJobTitles`), shown as `channels[].signal.jobTitles` (null = any role).
+- `POST /orgs/audiences/{id}/sources` adds a source to a PROFILE (apollo search audience with an offer), born in the
+  Buying Signals source campaign's state; `PATCH .../sources/{sourceId}` re-states a hiring source's titles: a new
+  apollo-service signal audience on the profile's pointer (new cursor), count reset, `reachable_count` / `exhausted_at`
+  cleared, that source's buffered teasers deleted; same titles = no call (`changed:false`).
+- Automatic hiring sources (portfolio, Buying Signals ON, 6h sweep) inherit the titles of the offer's most recently
+  changed titled hiring source (`offerHiringJobTitles`), coverage measured WITH them. None set = byte-identical wire.
+- Never a titled AUDIENCE as the path (a source is not an audience, owner 2026-10-16). No cost. Tests:
+  `tests/integration/hiring-source-titles.test.ts`, `tests/unit/signal-job-titles-wire.test.ts`.
 
 ### Audience refill — a paying brand never runs dry (`src/services/audience-refill.ts`)
 

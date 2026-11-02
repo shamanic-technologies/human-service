@@ -43,6 +43,7 @@ import { isSystemResumable, systemStatus } from "./audience-status-origin.js";
 export { tagMemberSource } from "./audience-member-sources.js";
 import { LEAD_SOURCING_SLUG, readLeadSourcingChoice } from "./lead-sourcing.js";
 import { pgErrorCode } from "../lib/pg-error.js";
+import { readSignalJobTitles } from "../lib/apollo-audiences.js";
 import { noteListBuilt } from "./run-outputs.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
@@ -487,7 +488,11 @@ export function describeSourceChannels(audienceId: string, sources: AudienceSour
         sourceId: s.id,
         name: s.name,
         status: s.status as "active" | "paused",
-        signal: { type: s.signalType ?? "linkedin_engagement", windowDays: s.windowDays },
+        signal: {
+          type: s.signalType ?? "linkedin_engagement",
+          windowDays: s.windowDays,
+          jobTitles: readSignalJobTitles(s.filters),
+        },
         size,
         sizeUnknownReason:
           size !== null ? null : s.list === "linkedin_engagement" ? ("unknown_until_walked" as const) : ("not_counted" as const),
