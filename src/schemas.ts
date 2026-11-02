@@ -1076,6 +1076,10 @@ export const AudienceChannelSchema = z
       .object({
         type: z.string(),
         windowDays: z.number().int().nullable(),
+        jobTitles: z.array(z.string()).nullable().openapi({
+          description:
+            "hiring only: the posted job titles the employer must be hiring for (a company with such a posting in the window). null = any role, and always null for the other signals. Set with PATCH /orgs/audiences/{id}/sources/{sourceId}.",
+        }),
       })
       .nullable()
       .openapi({ description: "The buying signal that narrows the list, with its rolling window. null for a plain list." }),
@@ -1298,6 +1302,37 @@ export const ChangeAudienceServeSourceRequestSchema = z
   })
   .strict()
   .openapi("ChangeAudienceServeSourceRequest");
+
+// HIRING-TITLES-1102: the posted job titles a hiring source looks for.
+const SourceJobTitlesSchema = z
+  .array(z.string().trim().min(1).max(100))
+  .max(30)
+  .openapi({
+    description:
+      "hiring only: job titles the employer must have POSTED in the window (e.g. [\"QA\", \"Test Automation\", \"SDET\"]). Only people at companies with such a posting are served, and the served person's signal fact names that posting. Matched as words inside the posted title. Empty / null = any role.",
+    example: ["QA", "Test Automation", "SDET", "Quality Engineering"],
+  });
+
+export const AddAudienceSignalSourceRequestSchema = z
+  .object({
+    type: z.enum(["hiring", "job_change", "funding"]).openapi({
+      description:
+        "hiring: the employer posted a job in the window. job_change: the person started their current role in the window. funding: the employer raised a round in the window.",
+    }),
+    windowDays: z.number().int().min(1).max(365).optional().openapi({
+      description: "Rolling window, in days. Omitted = hiring 30, job_change 90, funding 90.",
+    }),
+    jobTitles: SourceJobTitlesSchema.optional(),
+  })
+  .strict()
+  .openapi("AddAudienceSignalSourceRequest");
+
+export const SetSourceJobTitlesRequestSchema = z
+  .object({
+    jobTitles: SourceJobTitlesSchema.nullable(),
+  })
+  .strict()
+  .openapi("SetSourceJobTitlesRequest");
 
 export const ListAudiencesQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
@@ -1981,6 +2016,59 @@ registry.registerPath({
     400: { description: "Invalid request, or not an audience stated in Apollo filters", content: { "application/json": { schema: ErrorSchema } } },
     404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
     422: { description: "QuickEnrich cannot enforce this audience's filters (reasons listed)", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "apollo-service failed", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+const AudienceSourceResponseSchema = z
+  .object({
+    audience: AudienceSchema,
+    sourceId: z.string().uuid().openapi({
+      description: "The source added or changed: its entry in audience.channels[] carries the same sourceId, with signal.jobTitles.",
+    }),
+    changed: z.boolean().openapi({ description: "false when the source already carried exactly these titles (nothing rebuilt)." }),
+  })
+  .openapi("AudienceSourceResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/{id}/sources",
+  summary: "Add a buying-signal source (hiring / job_change / funding) to an audience, a hiring one optionally narrowed to posted job titles",
+  description:
+    "The audience says WHO; a source says WHERE we also look for them. The source is built on the audience's own Apollo search narrowed to the signal (free count), screened against the audience's text, and born in the state of the offer's Buying Signals source campaign. One source per signal type per audience: a second is a 409 naming the existing one (change its titles with PATCH .../sources/{sourceId}).",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: peopleHeaders,
+    params: z.object({ id: z.string().uuid() }),
+    body: { content: { "application/json": { schema: AddAudienceSignalSourceRequestSchema } } },
+  },
+  responses: {
+    201: { description: "Source added", content: { "application/json": { schema: AudienceSourceResponseSchema } } },
+    400: { description: "Invalid request, jobTitles on a non-hiring signal, or not an Apollo search audience of an offer", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "The audience already has a source of this signal type (sourceId given)", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "apollo-service or features-service failed", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "patch",
+  path: "/orgs/audiences/{id}/sources/{sourceId}",
+  summary: "Set the posted job titles a hiring source looks for (null = any role)",
+  description:
+    "For a hiring source of the audience. Rebuilds the source's search with the titles (only companies with such a posting in the window are served; the served person's signal fact names that posting), drops the people it had queued under the old search, and keeps its on/off. New hiring sources built later for the same offer inherit the titles. Unchanged titles = nothing rebuilt (changed=false).",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: peopleHeaders,
+    params: z.object({ id: z.string().uuid(), sourceId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: SetSourceJobTitlesRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Titles set", content: { "application/json": { schema: AudienceSourceResponseSchema } } },
+    400: { description: "Invalid request, or not a hiring source", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Audience or source not found", content: { "application/json": { schema: ErrorSchema } } },
     502: { description: "apollo-service failed", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
   },

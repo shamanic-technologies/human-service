@@ -24,6 +24,8 @@ import {
   UpdateAudienceRequestSchema,
   ChangeAudienceStatusRequestSchema,
   ChangeAudienceServeSourceRequestSchema,
+  AddAudienceSignalSourceRequestSchema,
+  SetSourceJobTitlesRequestSchema,
   ListAudiencesQuerySchema,
   AudienceMembersQuerySchema,
   AudienceStatsRequestSchema,
@@ -55,10 +57,16 @@ import {
   isLinkedinEngagementFilters,
   createApolloAudienceFromFilters,
   setApolloServeSource,
+  readSignalJobTitles,
 } from "../lib/apollo-audiences.js";
 import { launchAudiencePortfolio } from "../services/audience-portfolio.js";
 import { estimateSplitSegments } from "../services/audience-split-estimate.js";
 import { serveListKind, sourcingOriginSlug, SourcingOriginError } from "../services/sourcing-origin.js";
+import {
+  addProfileSignalSource,
+  setSourceJobTitles,
+  SignalSourceRequestError,
+} from "../services/signal-source-titles.js";
 import {
   proposeAudienceSplit,
   confirmAudienceSplit,
@@ -1077,6 +1085,79 @@ router.patch(
   }
 );
 
+// --- Buying-signal sources of an audience (HIRING-TITLES-1102) ---
+// A hiring source can be narrowed to posted job titles. apollo-service owns the
+// criterion; its own 4xx (a filter it refuses) is relayed with its body.
+function sendSignalSourceError(res: import("express").Response, err: unknown): void {
+  if (err instanceof SignalSourceRequestError) {
+    res.status(err.status).json({ error: err.message, reason: err.code, ...(err.sourceId ? { sourceId: err.sourceId } : {}) });
+    return;
+  }
+  if (err instanceof SourcingOriginError) {
+    res.status(502).json({ error: messageOf(err), source: "features-service" });
+    return;
+  }
+  if (err instanceof ProviderError && err.status >= 400 && err.status < 500) {
+    let upstream: unknown = err.body;
+    try {
+      upstream = JSON.parse(err.body);
+    } catch {
+      // non-JSON body: relay the text as-is
+    }
+    const named =
+      upstream && typeof upstream === "object" && typeof (upstream as { error?: unknown }).error === "string"
+        ? (upstream as { error: string }).error
+        : err.body;
+    res.status(err.status).json({ error: named, provider: "apollo", upstreamStatus: err.status, upstream });
+    return;
+  }
+  sendProviderError(res, err);
+}
+
+router.post("/orgs/audiences/:id/sources", requireApiKey, requireOrgAndUser, async (req, res) => {
+  const parsed = AddAudienceSignalSourceRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+  const orgId = res.locals.orgId as string;
+  try {
+    const { audience, source } = await addProfileSignalSource({
+      orgId,
+      audienceId: req.params.id,
+      type: parsed.data.type,
+      windowDays: parsed.data.windowDays,
+      jobTitles: parsed.data.jobTitles,
+      userId: res.locals.userId as string,
+      identity: buildIdentity(res),
+    });
+    res.status(201).json({ audience: (await serializeAudiences([audience]))[0], sourceId: source.id, changed: true });
+  } catch (err) {
+    sendSignalSourceError(res, err);
+  }
+});
+
+router.patch("/orgs/audiences/:id/sources/:sourceId", requireApiKey, requireOrgAndUser, async (req, res) => {
+  const parsed = SetSourceJobTitlesRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+  const orgId = res.locals.orgId as string;
+  try {
+    const { audience, source, changed } = await setSourceJobTitles({
+      orgId,
+      audienceId: req.params.id,
+      sourceId: req.params.sourceId,
+      jobTitles: parsed.data.jobTitles,
+      identity: buildIdentity(res),
+    });
+    res.json({ audience: (await serializeAudiences([audience]))[0], sourceId: source.id, changed });
+  } catch (err) {
+    sendSignalSourceError(res, err);
+  }
+});
+
 // --- DELETE /orgs/audiences/:id ---
 router.delete("/orgs/audiences/:id", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const orgId = res.locals.orgId as string;
@@ -1832,13 +1913,19 @@ function describeOwnChannel(
   return [{ ...base, list, signal, size: contact?.sizeCount ?? null, sizeUnknownReason: contact ? null : ("not_counted" as const) }];
 }
 
-function readSignal(filters: unknown): { type: string; windowDays: number | null } | null {
+function readSignal(
+  filters: unknown
+): { type: string; windowDays: number | null; jobTitles: string[] | null } | null {
   if (!filters || typeof filters !== "object" || Array.isArray(filters)) return null;
   const s = (filters as Record<string, unknown>).buying_signal;
   if (!s || typeof s !== "object" || Array.isArray(s)) return null;
   const o = s as Record<string, unknown>;
   if (typeof o.type !== "string") return null;
-  return { type: o.type, windowDays: typeof o.window_days === "number" ? o.window_days : null };
+  return {
+    type: o.type,
+    windowDays: typeof o.window_days === "number" ? o.window_days : null,
+    jobTitles: readSignalJobTitles(filters),
+  };
 }
 
 function serializeAudience(

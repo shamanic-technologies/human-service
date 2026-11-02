@@ -24,14 +24,15 @@
 
 import { errorMessage } from "../lib/db-error.js";
 import { systemResumable, systemStatus } from "./audience-status-origin.js";
-import { and, eq, inArray, isNull, notInArray } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, notInArray } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { audienceProfileHolds, audiences, sourceCampaignAudienceHolds } from "../db/schema.js";
+import { audienceProfileHolds, audiences, audienceSources, sourceCampaignAudienceHolds } from "../db/schema.js";
 import {
   BUYING_SIGNAL_TYPES,
   createApolloSignalAudience,
   isLinkedinEngagementFilters,
   measureSignalCoverage,
+  readSignalJobTitles,
   type BuyingSignalType,
   type SignalCoverage,
 } from "../lib/apollo-audiences.js";
@@ -320,11 +321,19 @@ async function ensureSignalsForProfile(
 
   let ready: { row: AudienceRow; text: string };
   let coverage: SignalCoverage[];
+  // Posted job titles the offer's hiring sources were narrowed to (HIRING-TITLES-1102):
+  // a profile born later looks for the same postings. None set = any role.
+  const jobTitles = missing.includes("hiring") ? await offerHiringJobTitles(scope) : null;
   try {
     ready = await readyProfile(profile, args.identity);
     const windows = [...new Set(Object.values(SIGNAL_WINDOW_DAYS))].sort((a, b) => a - b);
     coverage = (
-      await measureSignalCoverage({ apolloAudienceId: ready.row.apolloAudienceId!, windowDays: windows, identity: args.identity })
+      await measureSignalCoverage({
+        apolloAudienceId: ready.row.apolloAudienceId!,
+        windowDays: windows,
+        jobTitles,
+        identity: args.identity,
+      })
     ).signals;
   } catch (err) {
     return [...done, ...failAll(missing, errMessage(err))];
@@ -343,7 +352,14 @@ async function ensureSignalsForProfile(
       continue;
     }
     try {
-      const source = await createSignalSource({ scope, profile: ready.row, type, windowDays, args });
+      const source = await createSignalSource({
+        scope,
+        profile: ready.row,
+        type,
+        windowDays,
+        jobTitles: type === "hiring" ? jobTitles : null,
+        args,
+      });
       done.push({ ...common, outcome: "created", audienceId: profile.id, sourceId: source.id });
     } catch (err) {
       const [failed] = failAll([type], errMessage(err));
@@ -353,14 +369,17 @@ async function ensureSignalsForProfile(
   return done;
 }
 
-async function createSignalSource(input: {
+export async function createSignalSource(input: {
   scope: OfferScope;
   profile: AudienceRow;
   type: BuyingSignalType;
   windowDays: number;
-  args: EnsureProfileSignalsArgs;
+  /** hiring only: posted job titles to look for. null / empty = any role. */
+  jobTitles?: string[] | null;
+  args: Pick<EnsureProfileSignalsArgs, "userId" | "identity" | "originSlug" | "status">;
 }): Promise<AudienceSource> {
   const { scope, profile, type, windowDays, args } = input;
+  const jobTitles = type === "hiring" && input.jobTitles?.length ? input.jobTitles : null;
   const status = args.status ?? (await sourceBornStatus(scope, "apollo_buying_signal", args.originSlug, "active"));
   // apollo-service's signal audience on the profile's own Apollo audience: the
   // source looks for the PROFILE's people, narrowed to the signal.
@@ -370,6 +389,7 @@ async function createSignalSource(input: {
     name: `${profile.name} (${SIGNAL_NAMES[type]})`,
     type,
     windowDays,
+    jobTitles,
     identity: args.identity,
   });
   const { source } = await addSource({
@@ -385,9 +405,36 @@ async function createSignalSource(input: {
     userId: args.userId,
   });
   console.log(
-    `[human-service] profile_sources.signal_source_created org=${scope.orgId} brand=${scope.brandId} profile=${profile.id} type=${type} source=${source.id} status=${source.status} count=${apollo.count}`
+    `[human-service] profile_sources.signal_source_created org=${scope.orgId} brand=${scope.brandId} profile=${profile.id} type=${type} source=${source.id} status=${source.status} count=${apollo.count} jobTitles=${JSON.stringify(jobTitles)}`
   );
   return source;
+}
+
+/**
+ * The posted job titles the offer's hiring sources look for: those of the most
+ * recently changed hiring source carrying some (a client states them once for the
+ * offer). null = none set, any role.
+ */
+export async function offerHiringJobTitles(scope: OfferScope): Promise<string[] | null> {
+  const rows = await db
+    .select({ filters: audienceSources.filters })
+    .from(audienceSources)
+    .where(
+      and(
+        eq(audienceSources.orgId, scope.orgId),
+        eq(audienceSources.brandId, scope.brandId),
+        eq(audienceSources.offerId, scope.offerId),
+        eq(audienceSources.list, "apollo_buying_signal"),
+        eq(audienceSources.signalType, "hiring"),
+        ne(audienceSources.status, "archived")
+      )
+    )
+    .orderBy(desc(audienceSources.updatedAt));
+  for (const r of rows) {
+    const titles = readSignalJobTitles(r.filters);
+    if (titles) return titles;
+  }
+  return null;
 }
 
 // ── A person changes a profile (or a list) ───────────────────────────────────
