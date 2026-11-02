@@ -2260,6 +2260,8 @@ signal fact = a posting naming one of them). Titles live ONLY in the source's st
   Buying Signals source campaign's state; `PATCH .../sources/{sourceId}` re-states a hiring source's titles: a new
   apollo-service signal audience on the profile's pointer (new cursor), count reset, `reachable_count` / `exhausted_at`
   cleared, that source's buffered teasers deleted; same titles = no call (`changed:false`).
+- A profile stated in raw Apollo filters with no apollo-service record (born through `POST /orgs/audiences`) gets
+  one from its filters first (`recordNativeFilters` in `readyProfile`), same as the serve-source switch.
 - Automatic hiring sources (portfolio, Buying Signals ON, 6h sweep) inherit the titles of the offer's most recently
   changed titled hiring source (`offerHiringJobTitles`), coverage measured WITH them. None set = byte-identical wire.
 - Never a titled AUDIENCE as the path (a source is not an audience, owner 2026-10-16). No cost. Tests:

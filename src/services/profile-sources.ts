@@ -29,6 +29,7 @@ import { db } from "../db/index.js";
 import { audienceProfileHolds, audiences, audienceSources, sourceCampaignAudienceHolds } from "../db/schema.js";
 import {
   BUYING_SIGNAL_TYPES,
+  createApolloAudienceFromFilters,
   createApolloSignalAudience,
   isLinkedinEngagementFilters,
   measureSignalCoverage,
@@ -38,7 +39,7 @@ import {
 } from "../lib/apollo-audiences.js";
 import { audienceListKind } from "./audience-snapshot.js";
 import { ensureTargetText, audienceTargetFields } from "./audience-target-text.js";
-import { ensureApolloPointer } from "./audiences.js";
+import { ensureApolloPointer, hasApolloNativeFilters } from "./audiences.js";
 import { addSource, sourceBornStatus, sourceKind, sourcesOf, type AudienceSource } from "./audience-sources.js";
 import type { Identity } from "./people-providers.js";
 
@@ -197,6 +198,37 @@ export async function retireWholeIcpLists(scope: OfferScope, key: SourceKey): Pr
 }
 
 /** The profile with its Apollo audience and its own text, built if missing. */
+/**
+ * A profile stated in Apollo-native filters with no apollo-service record (created
+ * through POST /orgs/audiences with raw filters) gets one, from its stored filters
+ * sent verbatim (same as the serve-source switch): a source is built ON that record.
+ * Anything else is returned unchanged.
+ */
+async function recordNativeFilters(profile: AudienceRow, identity: Identity): Promise<AudienceRow> {
+  const filters = (profile.filters ?? null) as Record<string, unknown> | null;
+  if (profile.apolloAudienceId || !filters || Object.keys(filters).length === 0 || !hasApolloNativeFilters(profile)) {
+    return profile;
+  }
+  const created = await createApolloAudienceFromFilters({
+    name: profile.name,
+    description: profile.description ?? profile.targetText ?? profile.nlPrompt ?? profile.name,
+    brandId: profile.brandId,
+    filters,
+    identity,
+  });
+  const [row] = await db
+    .update(audiences)
+    .set({ apolloAudienceId: created.apolloAudienceId, apolloCount: created.count, countedAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(audiences.id, profile.id), isNull(audiences.apolloAudienceId)))
+    .returning();
+  console.log(
+    `[human-service] profile_sources.native_record org=${profile.orgId} audience=${profile.id} apolloAudience=${created.apolloAudienceId} count=${created.count}`
+  );
+  if (row) return row;
+  const [fresh] = await db.select().from(audiences).where(eq(audiences.id, profile.id));
+  return fresh ?? profile;
+}
+
 export async function readyProfile(
   profile: AudienceRow,
   identity: Identity
@@ -204,7 +236,7 @@ export async function readyProfile(
   // The profile's own builds open their own runs, labelled as the profile's (Apollo
   // search) work, never as the source list being built on top of it.
   const own = { orgId: profile.orgId, userId: identity.userId };
-  const built = await ensureApolloPointer(profile, own);
+  const built = await ensureApolloPointer(await recordNativeFilters(profile, identity), own);
   if (!built.apolloAudienceId) {
     throw new Error(`profile ${profile.id} has no Apollo audience to build its source lists on`);
   }
