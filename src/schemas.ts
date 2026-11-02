@@ -1289,6 +1289,16 @@ export const ChangeAudienceStatusRequestSchema = z
   .strict()
   .openapi("ChangeAudienceStatusRequest");
 
+export const ChangeAudienceServeSourceRequestSchema = z
+  .object({
+    serveSource: z.enum(["apollo", "quickenrich"]).openapi({
+      description:
+        "quickenrich: people are found by a FREE QuickEnrich search (title + person location), their email found and verified before use; once QuickEnrich has nobody left the Apollo search serves as before. apollo: the default Apollo search.",
+    }),
+  })
+  .strict()
+  .openapi("ChangeAudienceServeSourceRequest");
+
 export const ListAudiencesQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
   offset: z.coerce.number().int().min(0).optional(),
@@ -1939,6 +1949,39 @@ registry.registerPath({
     200: { description: "Status changed", content: { "application/json": { schema: GetAudienceResponseSchema } } },
     400: { description: "Invalid request", content: { "application/json": { schema: ErrorSchema } } },
     404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+const AudienceServeSourceResponseSchema = z
+  .object({
+    audience: AudienceSchema,
+    serveSource: z.enum(["apollo", "quickenrich"]),
+    quickenrich: z.object({
+      expressible: z.boolean(),
+      reasons: z.array(z.string()).openapi({ description: "Every filter QuickEnrich cannot enforce; empty when expressible." }),
+    }),
+  })
+  .openapi("AudienceServeSourceResponse");
+
+registry.registerPath({
+  method: "patch",
+  path: "/orgs/audiences/{id}/serve-source",
+  summary: "Choose where an Apollo audience finds its people: Apollo or the free QuickEnrich search",
+  description:
+    "For an audience stated in Apollo-native filters. An audience with no apollo-service record gets one first, from its stored filters, unchanged. quickenrich is refused (422, every reason listed) when QuickEnrich cannot enforce every filter faithfully: it supports job titles (+ excluded titles), person location, employee and revenue bands; keyword tags, industries, seniorities and organization locations are not.",
+  security: [{ apiKey: [] }],
+  request: {
+    headers: peopleHeaders,
+    params: z.object({ id: z.string().uuid() }),
+    body: { content: { "application/json": { schema: ChangeAudienceServeSourceRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Serve source set", content: { "application/json": { schema: AudienceServeSourceResponseSchema } } },
+    400: { description: "Invalid request, or not an audience stated in Apollo filters", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Audience not found", content: { "application/json": { schema: ErrorSchema } } },
+    422: { description: "QuickEnrich cannot enforce this audience's filters (reasons listed)", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "apollo-service failed", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
   },
 });
