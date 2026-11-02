@@ -2046,11 +2046,20 @@
               "windowDays": {
                 "type": "integer",
                 "nullable": true
+              },
+              "jobTitles": {
+                "type": "array",
+                "nullable": true,
+                "items": {
+                  "type": "string"
+                },
+                "description": "hiring only: the posted job titles the employer must be hiring for (a company with such a posting in the window). null = any role, and always null for the other signals. Set with PATCH /orgs/audiences/{id}/sources/{sourceId}."
               }
             },
             "required": [
               "type",
-              "windowDays"
+              "windowDays",
+              "jobTitles"
             ],
             "description": "The buying signal that narrows the list, with its rolling window. null for a plain list."
           },
@@ -2527,6 +2536,94 @@
         },
         "required": [
           "serveSource"
+        ],
+        "additionalProperties": false
+      },
+      "AudienceSourceResponse": {
+        "type": "object",
+        "properties": {
+          "audience": {
+            "$ref": "#/components/schemas/Audience"
+          },
+          "sourceId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The source added or changed: its entry in audience.channels[] carries the same sourceId, with signal.jobTitles."
+          },
+          "changed": {
+            "type": "boolean",
+            "description": "false when the source already carried exactly these titles (nothing rebuilt)."
+          }
+        },
+        "required": [
+          "audience",
+          "sourceId",
+          "changed"
+        ]
+      },
+      "AddAudienceSignalSourceRequest": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "hiring",
+              "job_change",
+              "funding"
+            ],
+            "description": "hiring: the employer posted a job in the window. job_change: the person started their current role in the window. funding: the employer raised a round in the window."
+          },
+          "windowDays": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365,
+            "description": "Rolling window, in days. Omitted = hiring 30, job_change 90, funding 90."
+          },
+          "jobTitles": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "maxItems": 30,
+            "description": "hiring only: job titles the employer must have POSTED in the window (e.g. [\"QA\", \"Test Automation\", \"SDET\"]). Only people at companies with such a posting are served, and the served person's signal fact names that posting. Matched as words inside the posted title. Empty / null = any role.",
+            "example": [
+              "QA",
+              "Test Automation",
+              "SDET",
+              "Quality Engineering"
+            ]
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "additionalProperties": false
+      },
+      "SetSourceJobTitlesRequest": {
+        "type": "object",
+        "properties": {
+          "jobTitles": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "maxItems": 30,
+            "description": "hiring only: job titles the employer must have POSTED in the window (e.g. [\"QA\", \"Test Automation\", \"SDET\"]). Only people at companies with such a posting are served, and the served person's signal fact names that posting. Matched as words inside the posted title. Empty / null = any role.",
+            "example": [
+              "QA",
+              "Test Automation",
+              "SDET",
+              "Quality Engineering"
+            ]
+          }
+        },
+        "required": [
+          "jobTitles"
         ],
         "additionalProperties": false
       },
@@ -11255,6 +11352,243 @@
           },
           "422": {
             "description": "QuickEnrich cannot enforce this audience's filters (reasons listed)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "apollo-service failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/{id}/sources": {
+      "post": {
+        "summary": "Add a buying-signal source (hiring / job_change / funding) to an audience, a hiring one optionally narrowed to posted job titles",
+        "description": "The audience says WHO; a source says WHERE we also look for them. The source is built on the audience's own Apollo search narrowed to the signal (free count), screened against the audience's text, and born in the state of the offer's Buying Signals source campaign. One source per signal type per audience: a second is a 409 naming the existing one (change its titles with PATCH .../sources/{sourceId}).",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddAudienceSignalSourceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Source added",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudienceSourceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, jobTitles on a non-hiring signal, or not an Apollo search audience of an offer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The audience already has a source of this signal type (sourceId given)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "apollo-service or features-service failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/audiences/{id}/sources/{sourceId}": {
+      "patch": {
+        "summary": "Set the posted job titles a hiring source looks for (null = any role)",
+        "description": "For a hiring source of the audience. Rebuilds the source's search with the titles (only companies with such a posting in the window are served; the served person's signal fact names that posting), drops the people it had queued under the old search, and keeps its on/off. New hiring sources built later for the same offer inherit the titles. Unchanged titles = nothing rebuilt (changed=false).",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "sourceId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal org UUID from client-service"
+            },
+            "required": true,
+            "description": "Internal org UUID from client-service",
+            "name": "x-org-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Internal user UUID — required; forwarded to apollo/apify"
+            },
+            "required": true,
+            "description": "Internal user UUID — required; forwarded to apollo/apify",
+            "name": "x-user-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "Caller's run ID — forwarded for downstream cost tracking when present"
+            },
+            "required": false,
+            "description": "Caller's run ID — forwarded for downstream cost tracking when present",
+            "name": "x-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetSourceJobTitlesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Titles set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudienceSourceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request, or not a hiring source",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Audience or source not found",
             "content": {
               "application/json": {
                 "schema": {
