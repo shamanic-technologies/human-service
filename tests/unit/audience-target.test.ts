@@ -61,6 +61,20 @@ describe("audience target prompt", () => {
     expect(lower).toContain("seniority alone never puts someone in");
   });
 
+  it("COMPETITOR-EXCLUDE-1102: always puts OUT, in its own sentence, people at companies that sell what the company sells", () => {
+    expect(prompt).toContain("Write it in four parts:");
+    expect(lower).toContain("always, as its own sentence: people at companies that themselves sell");
+    expect(lower).toContain("the same kind of product or service as this company (its competitors)");
+    expect(prompt).toContain("are OUT, whatever their role");
+    expect(lower).toContain("competitors of part 4 are the one exclusion you always add");
+    // Both halves: a company selling something else stays in (replay 2026-11-02: without it 3 of 80 real buyers dropped).
+    expect(lower).toContain("else stays in, so only real competitors are out");
+    // Even when the customer named the people themselves.
+    expect(lower).toContain("the out functions (part 3) and the competitors (part 4)");
+    // A segment target is written in the same form, so it carries the sentence too.
+    expect(buildSegmentTargetSystemPrompt()).toContain("are OUT, whatever their role");
+  });
+
   it("restates the companies, never redefines them", () => {
     expect(prompt).toContain("RESTATE, NEVER REDEFINE THE COMPANIES");
     expect(lower).toContain("add none");

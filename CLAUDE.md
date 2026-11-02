@@ -1866,7 +1866,13 @@ SELLS (the offer's own `description`, read from brand-service
 2026-09-29), both directions: (1) the roles whose job makes them decide on or
 care about what is sold, (2) the people around them are IN too (executive
 assistants, chiefs of staff, advisors, coaches, managers of those teams),
-(3) no-stake functions named OUT, seniority alone never qualifies.
+(3) no-stake functions named OUT, seniority alone never qualifies, (4) ALWAYS its own
+sentence: people at companies that themselves sell what the brand sells (its competitors) are OUT, and a company
+selling something else stays in (COMPETITOR-EXCLUDE-1102, owner 2026-11-02: AscendQE emailed BrowserStack, Copado,
+TestDevLab). Visible words in the target text only, never a hidden rule: the client deletes the sentence and the
+screen follows the edit. New audiences only, no rewrite of existing ones. Replay (staff org, AscendQE's card + 80 real
+revealed candidates): competitor people 0.83-0.94 -> 0.03-0.19, 1 of 80 buyers borderline (0.49); without the
+"something else stays in" half, 3 of 80.
 
 - **The model derives the roles; there is NO role list in code** (the unit test
   asserts the prompt names no function or industry). Companies are restated,
