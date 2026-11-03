@@ -822,7 +822,7 @@ export const PersonSchema = z
       description:
         "Language(s) this person plausibly conducts business in, as ISO 639-1 codes (e.g. 'de', 'fr', 'it'). ORDERED, most plausible first — the ordering is a guarantee, consumers may select by position (index 0 = the single most plausible business language). An EMPTY array means UNKNOWN: we had no usable signal and deliberately do not fabricate one, which is distinct from ['en'] (= known to be English). Derived from the person's own city/state/country, falling back to their organization's; region beats country wherever a country is genuinely multilingual (Swiss cantons, Belgian regions, Canadian provinces).",
     }),
-    provider: providerEnum,
+    provider: z.enum(["apollo", "apify", "crm", "google_maps"]).openapi({ description: "Who served the person. google_maps = a local business found on Google Maps (GMAPS-SOURCE-1103): no person name, no email, its phone and website." }),
     providerPersonId: z.string().nullable().openapi({
       description: "apollo person id (usable for a later enrich). null for apify.",
     }),
@@ -1043,6 +1043,7 @@ export const AUDIENCE_LIST_KINDS = [
   "linkedin_engagement",
   "crm_contacts",
   "apify_search",
+  "google_maps_search",
 ] as const;
 export const AudienceListKindSchema = z.enum(AUDIENCE_LIST_KINDS);
 
@@ -1232,9 +1233,9 @@ export const CreateAudienceRequestSchema = z
   .object({
     name: z.string().min(1),
     brandId: z.string().uuid(),
-    provider: z.enum(["apollo", "apify", "crm"]).optional().openapi({
+    provider: z.enum(["apollo", "apify", "crm", "google_maps"]).optional().openapi({
       description:
-        "The provider this audience commits to. apollo/apify when persisting a candidate from /suggest; crm for a brand whose audience is its uploaded contact list (served by crm-service — no filters/apolloAudienceId, brand-scoped). Omit for a neutral audience.",
+        "The provider this audience commits to. apollo/apify when persisting a candidate from /suggest; crm for a brand whose audience is its uploaded contact list (served by crm-service — no filters/apolloAudienceId, brand-scoped); google_maps for local businesses found on Google Maps (GMAPS-SOURCE-1103): state `nlPrompt` in plain words (\"restaurants and cafes in Astana\") and the Google Maps searches are written for you (needs x-user-id), or pass `filters: {google_maps: {queries, country, language}}` yourself. Each serve hands out one business: phone (E.164), website, address, no email, no person name. Omit for a neutral audience.",
     }),
     nlPrompt: z.string().min(1).optional(),
     // Opaque, provider-native filter object stored as-is. For apollo audiences
@@ -1610,6 +1611,14 @@ export const ServeNextRequestSchema = z
     excludeEmailedWithin: ExcludeEmailedWithinFieldSchema.optional(),
     relationships: RelationshipsFieldSchema.optional(),
     stepFilter: StepFilterFieldSchema.optional(),
+    reachableOn: z
+      .array(z.enum(MESSAGING_NETWORKS))
+      .min(1)
+      .optional()
+      .openapi({
+        description:
+          "The messaging network(s) the serving pipe writes on (GMAPS-SOURCE-1103). `whatsapp`: a phone-only find (a Google Maps business) is served only when crm-service says its number is on WhatsApp; a number not on WhatsApp is never served nor claimed for the brand. A network no owner can check yet is never served on a guess (exhausted). Omitted = no network check (bytes unchanged).",
+      }),
   })
   .openapi("ServeNextRequest");
 
@@ -4788,13 +4797,15 @@ export const AudienceStillFitsRequestSchema = z
     orgId: z.string().regex(LAX_UUID_REGEX, "orgId must be a valid UUID").openapi({ description: "Internal org UUID the audience belongs to." }),
     audienceId: z.string().regex(LAX_UUID_REGEX, "audienceId must be a valid UUID").openapi({ description: "The audience the person was found for." }),
     brandId: z.string().regex(LAX_UUID_REGEX, "brandId must be a valid UUID").openapi({ description: "The audience's brand (a mismatch is a 404)." }),
-    email: z.string().trim().min(3).max(320).regex(/@/, "email must be an address").openapi({ description: "The person's address (any address of the person resolves them)." }),
+    email: z.string().trim().min(3).max(320).regex(/@/, "email must be an address").nullable().openapi({ description: "The person's address (any address of the person resolves them). null for a phone-only find (a Google Maps business): send `phone` instead." }),
+    phone: z.string().trim().regex(/^\+[1-9]\d{6,14}$/, "phone must be E.164").optional().openapi({ description: "A phone-only find (email null): the E.164 phone serve-next served (GMAPS-SOURCE-1103)." }),
     personId: z.string().regex(LAX_UUID_REGEX).nullable().optional().openapi({ description: "The personId serve-next returned at find time, when there was one." }),
     stepFilter: StepFilterFieldSchema.optional().openapi({
       description:
         "The pipe's CRM step filter (same value as on serve-next), forwarded verbatim to crm-service's still-fits for a CRM audience, ANDed with its pool rule. A search audience cannot judge it: 422 `step_filter_needs_crm`. Omitted = unchanged.",
     }),
   })
+  .refine((b) => b.email !== null || !!b.phone, { message: "email or phone is required", path: ["email"] })
   .openapi("AudienceStillFitsRequest");
 
 export const AudienceStillFitsResponseSchema = z

@@ -30,6 +30,7 @@ import { crmStillFits } from "../lib/crm-contacts.js";
 import type { StepFilter } from "../lib/step-filter.js";
 import { normalizeEmail } from "./suppression.js";
 import { emailsOfPersons, personIdsByEmail } from "./person-emails.js";
+import { googleMapsStillFits, isGoogleMapsAudience } from "./google-maps-source.js";
 
 export type StillFitsBasis = "crm_people_pool" | "crm_list" | "found_by_search";
 
@@ -57,7 +58,9 @@ export interface StillFitsQuestion {
   orgId: string;
   brandId: string;
   audienceId: string;
-  email: string;
+  email: string | null;
+  // A phone-only find (Google Maps business, email null): its E.164 phone.
+  phone?: string;
   personId: string | null;
   // The pipe's CRM step filter (src/lib/step-filter.ts), forwarded verbatim.
   stepFilter?: StepFilter;
@@ -72,7 +75,10 @@ export async function audienceStillFits(q: StillFitsQuestion): Promise<StillFits
   if (!audience) throw new StillFitsAudienceNotFoundError();
 
   const isCrm = audience.provider === "crm" || !!audience.crmUploadId || !!audience.crmPeopleFilter;
-  if (isCrm) return crmFit(q, audience);
+  if (isCrm) {
+    if (!q.email) throw new CannotJudgeError("email_required", "A CRM audience judges a person by address; this find carries none");
+    return crmFit(q, audience);
+  }
   // A search audience knows nothing of the brand's funnel: never "fits" a step filter.
   if (q.stepFilter) {
     throw new CannotJudgeError(
@@ -80,13 +86,31 @@ export async function audienceStillFits(q: StillFitsQuestion): Promise<StillFits
       "A stepFilter can only be judged by the brand's CRM; this is a search audience"
     );
   }
+  // A Google Maps business (GMAPS-SOURCE-1103): found by this audience's search,
+  // held by its phone. Fit was decided at find time; nothing re-searched.
+  if (isGoogleMapsAudience(audience)) return googleMapsFit(q, audience);
   return searchFit(q, audience.id);
+}
+
+async function googleMapsFit(q: StillFitsQuestion, audience: typeof audiences.$inferSelect): Promise<StillFitsAnswer> {
+  if (q.personId) {
+    const [member] = await db
+      .select({ id: audienceMembers.id })
+      .from(audienceMembers)
+      .where(and(eq(audienceMembers.personId, q.personId), eq(audienceMembers.audienceId, audience.id), eq(audienceMembers.orgId, q.orgId)))
+      .limit(1);
+    if (member) return { fits: true, basis: "found_by_search" };
+  }
+  if (q.phone && (await googleMapsStillFits(audience.id, q.orgId, audience.brandId, q.phone))) {
+    return { fits: true, basis: "found_by_search" };
+  }
+  throw new CannotJudgeError("not_found_by_audience", "This audience never found this business, so it cannot say whether it still fits");
 }
 
 // Every address we know for the person (the asked one first), so crm-service
 // can find them by whichever address its own person holds.
 async function addressesToAsk(q: StillFitsQuestion): Promise<string[]> {
-  const asked = q.email.trim();
+  const asked = (q.email ?? "").trim();
   const out = [asked];
   const personId = await resolvePersonId(q);
   if (personId) {

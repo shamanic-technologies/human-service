@@ -52,6 +52,7 @@ vi.mock("../src/lib/features-sourcing.js", async (importOriginal) => {
         ["linkedin_engagement", "sourcing-linkedin-engagement-signals"],
         ["crm_contacts", "sourcing-crm-contacts"],
         ["apify_search", "sourcing-apify-search"],
+        ["google_maps_search", "sourcing-google-maps"],
       ])
     ),
     // Lead Sourcing (owner 2026-10-11): the origins it may choose among, as features-service ships them.

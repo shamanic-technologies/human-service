@@ -31,10 +31,12 @@ export function normalizeReach(value: ReachableBy | undefined | null): Reach[] {
 // What a person served by each provider can carry. apollo / apify reveal an email and
 // nothing else (no phone on their Person); crm-service holds phones and emails and
 // filters on both itself (pushed down, so it burns nobody it skips).
-export const PROVIDER_REACH: Readonly<Record<"apollo" | "apify" | "crm", readonly Reach[]>> = {
+// A Google Maps business carries a phone, never an email (GMAPS-SOURCE-1103).
+export const PROVIDER_REACH: Readonly<Record<"apollo" | "apify" | "crm" | "google_maps", readonly Reach[]>> = {
   apollo: ["email"],
   apify: ["email"],
   crm: ["email", "phone"],
+  google_maps: ["phone"],
 };
 
 /** True when every required channel is one the provider's people can carry. */

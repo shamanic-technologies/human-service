@@ -1507,3 +1507,75 @@ export const candidateRejudges = pgTable(
   },
   (table) => [uniqueIndex("idx_candidate_rejudges_unique").on(table.reason, table.candidateId)]
 );
+
+// GMAPS-SOURCE-1103 (migration 0052): the Google Maps lead source
+// (src/services/google-maps-source.ts). Every search an audience runs, once.
+export const googleMapsQueries = pgTable(
+  "google_maps_queries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    position: integer("position").notNull(),
+    query: text("query").notNull(),
+    ranAt: timestamp("ran_at", { withTimezone: true }),
+    runId: text("run_id"),
+    servedBy: text("served_by"),
+    chargedMicro: integer("charged_micro"),
+    placesCount: integer("places_count"),
+    newPlacesCount: integer("new_places_count"),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("idx_google_maps_queries_unique").on(table.audienceId, table.query)]
+);
+
+// Every business a search returned for the audience, and what became of it.
+export const googleMapsPlaces = pgTable(
+  "google_maps_places",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    placeId: text("place_id").notNull(),
+    queryId: uuid("query_id"),
+    rank: integer("rank").notNull().default(0),
+    place: jsonb("place").$type<Record<string, unknown>>().notNull(),
+    phoneE164: text("phone_e164"),
+    // waiting | checking | served | taken | no_phone | not_on_whatsapp | own_company
+    status: text("status").notNull().default("waiting"),
+    foundRunId: text("found_run_id"),
+    servedRunId: text("served_run_id"),
+    personId: uuid("person_id"),
+    foundAt: timestamp("found_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("idx_google_maps_places_unique").on(table.audienceId, table.placeId),
+    index("idx_google_maps_places_drain").on(table.audienceId, table.status, table.foundAt, table.rank),
+  ]
+);
+
+// One business (its place id, and its phone) is served at most once per brand.
+export const googleMapsBrandClaims = pgTable(
+  "google_maps_brand_claims",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    placeId: text("place_id").notNull(),
+    phoneE164: text("phone_e164"),
+    audienceId: uuid("audience_id"),
+    personId: uuid("person_id"),
+    runId: text("run_id"),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_google_maps_brand_claims_place").on(table.orgId, table.brandId, table.placeId),
+    index("idx_google_maps_brand_claims_org_place").on(table.orgId, table.placeId),
+  ]
+);

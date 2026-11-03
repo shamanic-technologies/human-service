@@ -172,7 +172,7 @@ export async function loadBrandPools(opts: { brandId?: string } = {}): Promise<B
     // switch the refill off fleet-wide. Only a brand with nothing else active is
     // unmeasurable.
     const measured = active.filter(
-      (a) => !(isLinkedinEngagementFilters(a.filters) && a.reachableCount == null)
+      (a) => !((isLinkedinEngagementFilters(a.filters) || a.provider === "google_maps") && a.reachableCount == null)
     );
     if (measured.length === 0) {
       pools.push({ ...base, remaining: 0, low: false, unmeasurable: "linkedin_engagement_unsized" });
