@@ -88,6 +88,9 @@ const TABLES = [
   "audience_source_merges",
   "lead_sourcing_choices",
   "lead_sourcing_choice_changes",
+  "google_maps_queries",
+  "google_maps_places",
+  "google_maps_brand_claims",
   "lists",
   "list_members",
 ] as const;
@@ -160,6 +163,8 @@ export async function transferBrand(
     ] as const) {
       add(child, await moveAudienceChildren(tx, child, sourceOrgId, targetOrgId, targetBrandId));
     }
+    // Before the people move: its person map re-points the Google Maps person ids.
+    await moveGoogleMaps(tx, origins, sourceOrgId, targetOrgId, targetBrandId, add);
     await movePeopleAndMembers(tx, sourceOrgId, targetOrgId, targetBrandId, add);
 
     if (await tableExists(tx, "list_members")) {
@@ -182,6 +187,40 @@ export async function transferBrand(
     `[human-service] transfer-brand: sourceBrandId=${sourceBrandId} targetBrandId=${targetBrandId} sourceOrgId=${sourceOrgId} targetOrgId=${targetOrgId} — ${JSON.stringify(updatedTables)}`
   );
   return { updatedTables };
+}
+
+// GMAPS-SOURCE-1103: the Google Maps walk (children of an audience) and the
+// per-brand claims follow the brand; a business the target already claimed keeps
+// the target's claim. person ids follow the person map of movePeopleAndMembers.
+async function moveGoogleMaps(
+  tx: Tx,
+  origins: [string, string][],
+  sourceOrgId: string,
+  toOrg: string,
+  toBrand: string,
+  add: (t: TableName, n: number) => void
+): Promise<void> {
+  for (const table of ["google_maps_queries", "google_maps_places"] as const) {
+    const rows =
+      table === "google_maps_queries"
+        ? await tx`UPDATE google_maps_queries c SET org_id = ${toOrg} FROM audiences a
+                   WHERE c.audience_id = a.id AND c.org_id = ${sourceOrgId}
+                     AND a.org_id = ${toOrg} AND a.brand_id = ${toBrand} RETURNING c.id`
+        : await tx`UPDATE google_maps_places c SET org_id = ${toOrg} FROM audiences a
+                   WHERE c.audience_id = a.id AND c.org_id = ${sourceOrgId}
+                     AND a.org_id = ${toOrg} AND a.brand_id = ${toBrand} RETURNING c.id`;
+    add(table, rows.length);
+  }
+  for (const [fromOrg, fromBrand] of origins) {
+    if (fromOrg === toOrg && fromBrand === toBrand) continue;
+    await tx`DELETE FROM google_maps_brand_claims s USING google_maps_brand_claims t
+             WHERE s.org_id = ${fromOrg} AND s.brand_id = ${fromBrand}
+               AND t.org_id = ${toOrg} AND t.brand_id = ${toBrand}
+               AND (t.place_id = s.place_id OR (t.phone_e164 IS NOT NULL AND t.phone_e164 = s.phone_e164))`;
+    const moved = await tx`UPDATE google_maps_brand_claims SET org_id = ${toOrg}, brand_id = ${toBrand}
+                           WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`;
+    add("google_maps_brand_claims", moved.length);
+  }
 }
 
 async function tableExists(tx: Tx, name: string): Promise<boolean> {
@@ -485,6 +524,11 @@ async function movePeopleAndMembers(
     RETURNING p.id`;
   add("people", movedPeople.length + copiedPeople.length + collapsed.length);
 
+  // GMAPS-SOURCE-1103: the moved Google Maps rows follow their person.
+  await tx`UPDATE google_maps_brand_claims c SET person_id = m.new_id FROM transfer_person_map m
+           WHERE c.person_id = m.old_id AND c.org_id = ${toOrg} AND c.brand_id = ${toBrand}`;
+  await tx`UPDATE google_maps_places c SET person_id = m.new_id FROM transfer_person_map m, audiences a
+           WHERE c.person_id = m.old_id AND c.audience_id = a.id AND a.org_id = ${toOrg} AND a.brand_id = ${toBrand}`;
   await tx`DROP TABLE transfer_person_map`;
 }
 

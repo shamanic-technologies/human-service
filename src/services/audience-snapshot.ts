@@ -47,6 +47,7 @@ export function audienceListKind(row: {
   if (!row.provider) return null;
   if (row.provider === "crm") return "crm_contacts";
   if (row.provider === "apify") return "apify_search";
+  if (row.provider === "google_maps") return "google_maps_search";
   if (isLinkedinEngagementFilters(row.filters)) return "linkedin_engagement";
   return hasBuyingSignal(row.filters) ? "apollo_buying_signal" : "apollo_search";
 }

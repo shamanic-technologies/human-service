@@ -47,7 +47,7 @@ const FREE_MAIL_DOMAINS = new Set([
   "163.com",
 ]);
 
-const HOSTING_PLATFORMS = new Set([
+export const HOSTING_PLATFORMS = new Set([
   "facebook.com", "instagram.com", "linkedin.com", "linktr.ee", "google.com",
   "youtube.com", "x.com", "twitter.com", "tiktok.com", "medium.com",
   "substack.com", "wix.com", "squarespace.com", "notion.site", "notion.so",
