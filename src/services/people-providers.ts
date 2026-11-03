@@ -43,6 +43,7 @@ import {
 } from "./opt-outs.js";
 import { filterBounced, isEmailBounced } from "./bounces.js";
 import { isOwnCompanyPerson, loadOwnCompany } from "./own-company.js";
+import type { MessagingNetwork } from "../lib/messaging-networks.js";
 
 // apify bills per RETURNED lead (each search hit carries a verified email — there
 // is no free teaser list like apollo's). So the gateway takes the strict minimum
@@ -56,7 +57,7 @@ const APIFY_DEFAULT_LIMIT = 1;
 // dedicated crm branch (src/lib/crm-contacts.ts → crm-service serve-next), which
 // owns its own no-re-serve. The people-search gateway functions below reject
 // "crm" fail-loud (ProviderUnsupportedError) — crm is not searchable here.
-export type Provider = "apollo" | "apify" | "crm";
+export type Provider = "apollo" | "apify" | "crm" | "google_maps";
 
 // --- Errors (fail-loud) ---
 
@@ -398,6 +399,10 @@ export interface Identity {
   // src/services/audience-sources.ts); absent / null = the audience's own list.
   // Recorded on the bronze serve and the per-source provenance; never sent downstream.
   audienceSourceId?: string | null;
+  // The messaging network(s) the serving pipe writes on (body `reachableOn`,
+  // GMAPS-SOURCE-1103). `whatsapp` = a phone-only find is served only when
+  // crm-service says the number is on WhatsApp. Never sent downstream.
+  reachableOn?: MessagingNetwork[];
 }
 
 // Map a normalized neutral Person to the suppression/membership contact shape.
@@ -1395,7 +1400,7 @@ async function finalizeResolved(
     // audience this reveal ran under found them too (multi-source provenance).
     // The address is the one just revealed; the credit was already spent.
     const emailNorm = normalizeEmail(person.email);
-    if (audienceId && emailNorm && provider !== "crm") {
+    if (audienceId && emailNorm && provider !== "crm" && provider !== "google_maps") {
       await tagFoundAlreadyTaken(identity.orgId, audienceId, provider, [
         {
           item: { linkedinUrl: person.linkedinUrl, providerPersonId: person.providerPersonId },

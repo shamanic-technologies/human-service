@@ -139,6 +139,11 @@ import type { ExcludeEmailedWithin } from "../lib/recontact-window.js";
 import type { RelationshipPolicy } from "../lib/relationship-policy.js";
 import type { StepFilter } from "../lib/step-filter.js";
 import { shapeEmailVerdict } from "../lib/serve-email-policy.js";
+import { MESSAGING_NETWORKS, type MessagingNetwork } from "../lib/messaging-networks.js";
+import { draftGoogleMapsFilters, readGoogleMapsFilters, GoogleMapsSourceError } from "../services/google-maps-source.js";
+import { createRun, completeRun } from "../services/runs.js";
+import { TregInsufficientCreditError, TregMeterError } from "../lib/treg-meter.js";
+import { addRunOutputs } from "../services/run-outputs.js";
 const router = Router();
 
 const DEFAULT_LIMIT = 50;
@@ -165,6 +170,21 @@ function sendProviderError(
 ): void {
   if (err instanceof ChatConfigError) {
     res.status(502).json({ error: messageOf(err) });
+    return;
+  }
+  // GMAPS-SOURCE-1103: the Google Maps source and its metered treg calls.
+  if (err instanceof GoogleMapsSourceError) {
+    console.error(`[human-service] audiences.google_maps_error status=${err.status}: ${messageOf(err)}`);
+    res.status(err.status).json({ error: messageOf(err), source: "google_maps" });
+    return;
+  }
+  if (err instanceof TregInsufficientCreditError) {
+    res.status(402).json({ error: messageOf(err), source: "billing-service" });
+    return;
+  }
+  if (err instanceof TregMeterError) {
+    console.error(`[human-service] audiences.treg_error: ${messageOf(err)}`);
+    res.status(502).json({ error: messageOf(err), source: "treg" });
     return;
   }
   if (err instanceof ChatServiceError) {
@@ -357,6 +377,48 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
     }
   }
 
+  // GOOGLE MAPS (GMAPS-SOURCE-1103): the list is the Google Maps searches its
+  // plain-words target expands to. Given verbatim, or written now from nlPrompt
+  // (one chat-service call, org-billed, on a run of ours that declares the list).
+  let storedFilters: Record<string, unknown> | null = parsed.data.filters ?? null;
+  let mapsRun: { runId: string; own: boolean } | null = null;
+  if (parsed.data.provider === "google_maps") {
+    const given = readGoogleMapsFilters(parsed.data.filters);
+    if (given) {
+      storedFilters = { google_maps: given };
+    } else {
+      if (!parsed.data.nlPrompt) {
+        res.status(400).json({ error: "A google_maps audience needs nlPrompt (who, in plain words) or filters.google_maps.queries." });
+        return;
+      }
+      if (!userId) {
+        res.status(400).json({ error: "Writing the Google Maps searches needs x-user-id." });
+        return;
+      }
+      const identity = buildIdentity(res);
+      const inbound = identity.runId ?? null;
+      const runId =
+        inbound ??
+        (await createRun({ orgId, userId, taskName: "google-maps-list-build", workflowTracking: { ...(identity.workflowTracking ?? {}), brandIds: [parsed.data.brandId] } }));
+      if (!runId) {
+        res.status(502).json({ error: "runs-service did not open a run for the Google Maps list build" });
+        return;
+      }
+      mapsRun = { runId, own: !inbound };
+      try {
+        storedFilters = { google_maps: await draftGoogleMapsFilters(parsed.data.nlPrompt, { ...identity, runId }) };
+      } catch (err) {
+        if (mapsRun.own) await completeRun(runId, "failed", { orgId, userId });
+        if (err instanceof GoogleMapsSourceError) {
+          res.status(502).json({ error: messageOf(err) });
+          return;
+        }
+        sendProviderError(res, err);
+        return;
+      }
+    }
+  }
+
   let audience;
   try {
     [audience] = await db
@@ -377,7 +439,7 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
         offerId: parsed.data.offerId ?? null,
         nlPrompt: parsed.data.nlPrompt ?? null,
         ...audienceTargetFields(parsed.data.nlPrompt),
-        filters: parsed.data.filters ?? null,
+        filters: storedFilters,
         apolloCount: parsed.data.apolloCount ?? bornApolloCount,
         apifyCount: parsed.data.apifyCount ?? null,
         countedAt:
@@ -391,6 +453,7 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
       })
       .returning();
   } catch (err) {
+    if (mapsRun?.own) await completeRun(mapsRun.runId, "failed", { orgId, userId: userId! });
     if (isUniqueViolation(err)) {
       res
         .status(409)
@@ -398,6 +461,10 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
       return;
     }
     throw err;
+  }
+  if (mapsRun?.own) {
+    addRunOutputs(mapsRun.runId, [audience.id]);
+    await completeRun(mapsRun.runId, "completed", { orgId, userId: userId! });
   }
 
   console.log(
@@ -1388,6 +1455,7 @@ function parseServeReach(
       excludeEmailedWithin?: ExcludeEmailedWithin;
       relationships?: RelationshipPolicy;
       stepFilter?: StepFilter;
+      reachableOn?: MessagingNetwork[];
     }
   | { ok: false; error: string } {
   const parsed = ServeNextRequestSchema.safeParse(body ?? {});
@@ -1404,7 +1472,9 @@ function parseServeReach(
             ? "relationships must be business_only"
             : field === "stepFilter"
               ? "stepFilter must be an object ({reached?, notReached?})"
-              : "reachableBy must be phone, email, or a list of them",
+              : field === "reachableOn"
+                ? `reachableOn must be a list of messaging networks (${MESSAGING_NETWORKS.join(", ")})`
+                : "reachableBy must be phone, email, or a list of them",
     };
   }
   return {
@@ -1414,6 +1484,7 @@ function parseServeReach(
     ...(parsed.data.excludeEmailedWithin ? { excludeEmailedWithin: parsed.data.excludeEmailedWithin } : {}),
     ...(parsed.data.relationships ? { relationships: parsed.data.relationships } : {}),
     ...(parsed.data.stepFilter ? { stepFilter: parsed.data.stepFilter as StepFilter } : {}),
+    ...(parsed.data.reachableOn ? { reachableOn: [...new Set(parsed.data.reachableOn)] } : {}),
   };
 }
 
@@ -1466,6 +1537,7 @@ router.post(
     if (reachParse.excludeEmailedWithin) identity.excludeEmailedWithin = reachParse.excludeEmailedWithin;
     if (reachParse.relationships) identity.relationships = reachParse.relationships;
     if (reachParse.stepFilter) identity.stepFilter = reachParse.stepFilter;
+    if (reachParse.reachableOn) identity.reachableOn = reachParse.reachableOn;
 
     try {
       const result = await serveNextPerson(audience, identity, undefined, reachParse.reach);
@@ -1901,6 +1973,9 @@ function describeOwnChannel(
   const signal = readSignal(row.filters);
   if (row.provider === "apify") {
     return [{ ...base, list: "apify_search" as const, signal: null, size: contact?.sizeCount ?? null, sizeUnknownReason: contact ? null : ("not_counted" as const) }];
+  }
+  if (row.provider === "google_maps") {
+    return [{ ...base, list: "google_maps_search" as const, signal: null, size: contact?.sizeCount ?? null, sizeUnknownReason: contact ? null : ("unknown_until_walked" as const) }];
   }
   if (isLinkedinEngagementFilters(row.filters)) {
     return [{ ...base, list: "linkedin_engagement" as const, signal, size: contact?.sizeCount ?? null, sizeUnknownReason: contact ? null : ("unknown_until_walked" as const) }];

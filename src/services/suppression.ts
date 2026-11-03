@@ -79,7 +79,8 @@ export interface ServedContact {
   // "crm" is a valid source for MEMBERSHIP tagging (tagAudienceServe). It never
   // reaches recordServe below — crm-service owns per-brand suppression, so the
   // gateway never writes crm serves into brand_suppressions.
-  provider: "apollo" | "apify" | "crm";
+  // "google_maps" never reaches either: its no-repeat is google_maps_brand_claims.
+  provider: "apollo" | "apify" | "crm" | "google_maps";
   providerPersonId: string | null;
 }
 

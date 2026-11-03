@@ -820,9 +820,10 @@
             "enum": [
               "apollo",
               "apify",
-              "crm"
+              "crm",
+              "google_maps"
             ],
-            "description": "Lead provider. apollo/apify are the searchable people-gateway providers; crm is a client's uploaded contact list (served via an audience's serve-next, not searchable here)."
+            "description": "Who served the person. google_maps = a local business found on Google Maps (GMAPS-SOURCE-1103): no person name, no email, its phone and website."
           },
           "providerPersonId": {
             "type": "string",
@@ -2010,7 +2011,8 @@
               "apollo_buying_signal",
               "linkedin_engagement",
               "crm_contacts",
-              "apify_search"
+              "apify_search",
+              "google_maps_search"
             ],
             "description": "What the list is. apollo_search: an Apollo people search. apollo_buying_signal: the same search narrowed to people showing a buying signal (see signal). linkedin_engagement: people who engaged with competitor LinkedIn posts (see signal). crm_contacts: the client's own uploaded contacts. apify_search: legacy search provider."
           },
@@ -2105,9 +2107,10 @@
             "enum": [
               "apollo",
               "apify",
-              "crm"
+              "crm",
+              "google_maps"
             ],
-            "description": "The provider this audience commits to. apollo/apify when persisting a candidate from /suggest; crm for a brand whose audience is its uploaded contact list (served by crm-service — no filters/apolloAudienceId, brand-scoped). Omit for a neutral audience."
+            "description": "The provider this audience commits to. apollo/apify when persisting a candidate from /suggest; crm for a brand whose audience is its uploaded contact list (served by crm-service — no filters/apolloAudienceId, brand-scoped); google_maps for local businesses found on Google Maps (GMAPS-SOURCE-1103): state `nlPrompt` in plain words (\"restaurants and cafes in Astana\") and the Google Maps searches are written for you (needs x-user-id), or pass `filters: {google_maps: {queries, country, language}}` yourself. Each serve hands out one business: phone (E.164), website, address, no email, no person name. Omit for a neutral audience."
           },
           "nlPrompt": {
             "type": "string",
@@ -3278,6 +3281,22 @@
                 "disqualified"
               ]
             }
+          },
+          "reachableOn": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "whatsapp",
+                "linkedin",
+                "telegram",
+                "signal",
+                "instagram",
+                "messenger"
+              ]
+            },
+            "minItems": 1,
+            "description": "The messaging network(s) the serving pipe writes on (GMAPS-SOURCE-1103). `whatsapp`: a phone-only find (a Google Maps business) is served only when crm-service says its number is on WhatsApp; a number not on WhatsApp is never served nor claimed for the brand. A network no owner can check yet is never served on a guess (exhausted). Omitted = no network check (bytes unchanged)."
           }
         }
       },
@@ -3626,7 +3645,8 @@
               "apollo_buying_signal",
               "linkedin_engagement",
               "crm_contacts",
-              "apify_search"
+              "apify_search",
+              "google_maps_search"
             ],
             "description": "The list a serve-next of this audience draws from under the request's x-feature-slug: crm_contacts when it names the CRM outreach channel (sales-crm-email-outreach) or the CRM origin (sourcing-crm-contacts), whatever the audience's provider; else the audience's own list (channels[].list)."
           },
@@ -6260,6 +6280,7 @@
                     "linkedin_engagement",
                     "crm_contacts",
                     "apify_search",
+                    "google_maps_search",
                     null
                   ],
                   "description": "What list this audience holds (same vocabulary as Audience.channels[].list). null ⟹ no committed provider."
@@ -6462,6 +6483,7 @@
                           "linkedin_engagement",
                           "crm_contacts",
                           "apify_search",
+                          "google_maps_search",
                           null
                         ],
                         "description": "What list this audience holds (same vocabulary as Audience.channels[].list). null ⟹ no committed provider."
@@ -6532,6 +6554,7 @@
                           "linkedin_engagement",
                           "crm_contacts",
                           "apify_search",
+                          "google_maps_search",
                           null
                         ],
                         "description": "What list this audience holds (same vocabulary as Audience.channels[].list). null ⟹ no committed provider."
@@ -6720,6 +6743,7 @@
                           "linkedin_engagement",
                           "crm_contacts",
                           "apify_search",
+                          "google_maps_search",
                           null
                         ],
                         "description": "What list this audience holds (same vocabulary as Audience.channels[].list). null ⟹ no committed provider."
@@ -6773,6 +6797,7 @@
                           "linkedin_engagement",
                           "crm_contacts",
                           "apify_search",
+                          "google_maps_search",
                           null
                         ],
                         "description": "What list this audience holds (same vocabulary as Audience.channels[].list). null ⟹ no committed provider."
@@ -6978,6 +7003,7 @@
                           "linkedin_engagement",
                           "crm_contacts",
                           "apify_search",
+                          "google_maps_search",
                           null
                         ]
                       },
@@ -7109,6 +7135,7 @@
                           "linkedin_engagement",
                           "crm_contacts",
                           "apify_search",
+                          "google_maps_search",
                           null
                         ]
                       },
@@ -7204,6 +7231,7 @@
                     "linkedin_engagement",
                     "crm_contacts",
                     "apify_search",
+                    "google_maps_search",
                     null
                   ]
                 },
@@ -7276,6 +7304,7 @@
               "linkedin_engagement",
               "crm_contacts",
               "apify_search",
+              "google_maps_search",
               null
             ]
           },
@@ -7658,10 +7687,16 @@
           },
           "email": {
             "type": "string",
+            "nullable": true,
             "minLength": 3,
             "maxLength": 320,
             "pattern": "@",
-            "description": "The person's address (any address of the person resolves them)."
+            "description": "The person's address (any address of the person resolves them). null for a phone-only find (a Google Maps business): send `phone` instead."
+          },
+          "phone": {
+            "type": "string",
+            "pattern": "^\\+[1-9]\\d{6,14}$",
+            "description": "A phone-only find (email null): the E.164 phone serve-next served (GMAPS-SOURCE-1103)."
           },
           "personId": {
             "type": "string",

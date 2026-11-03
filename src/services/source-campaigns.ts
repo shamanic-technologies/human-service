@@ -19,6 +19,8 @@
 //             linkedin_engagement   per client profile, competitors' LinkedIn pages
 //                                   brand-service found (competitor-engagement-audience.ts)
 //             crm_contacts          one audience per CRM file the brand uploaded
+//             google_maps_search    one list of Google Maps searches written from the
+//                                   offer's validated target (google-maps-source.ts)
 //   - OFF = every active audience of that list under the offer is PAUSED, history kept,
 //           and HELD (source_campaign_audience_holds) so the next ON resumes exactly those.
 //   SOURCES (AUDIENCE-SOURCES-1016, audience-sources.ts): a buying signal / competitor
@@ -70,7 +72,8 @@ import { ensureProfileSignalLists, profileHeldIds, profileListsDue } from "./pro
 import { confirmAudienceSplit, proposeAudienceSplit } from "./audience-split.js";
 import { dedupeSegmentNames, pickValidatedTarget } from "./audience-refill.js";
 import { ensureApolloPointer } from "./audiences.js";
-import { ensureTargetText } from "./audience-target-text.js";
+import { audienceTargetFields, ensureTargetText } from "./audience-target-text.js";
+import { draftGoogleMapsFilters } from "./google-maps-source.js";
 import { completeRun, createRun } from "./runs.js";
 import type { Identity } from "./people-providers.js";
 import { getMigrationState } from "../lib/migration-state.js";
@@ -611,6 +614,7 @@ async function createList(args: ApplySourceArgs, list: AudienceListKind, result:
       else if (list === "apollo_search") await createColdFilters(args, userId, identity, result);
       else if (list === "apollo_buying_signal") await createBuyingSignals(args, userId, identity, result);
       else if (list === "crm_contacts") await createCrmAudiences(args, userId, identity, result);
+      else if (list === "google_maps_search") await createGoogleMapsList(args, userId, identity, result);
       else {
         result.outcome = "retired_origin";
         result.reason = `nothing builds a ${list} list any more`;
@@ -777,6 +781,42 @@ async function createCrmAudiences(args: ApplySourceArgs, userId: string, identit
     .returning();
   for (const r of rows) noteListBuilt(r.id);
   result.outcome = rows.length > 0 ? "created" : "no_target";
+}
+
+// GMAPS-SOURCE-1103: the Google Maps list of the offer, its searches written from
+// the offer's validated target (who the client sells to, in plain words).
+async function createGoogleMapsList(args: ApplySourceArgs, userId: string, identity: Identity, result: ApplySourceResult) {
+  const target = await offerTarget(args);
+  if (!target) {
+    result.outcome = "no_target";
+    result.reason = "the offer has no validated target to write Google Maps searches from";
+    return;
+  }
+  const filters = await draftGoogleMapsFilters(target, identity);
+  const taken = await db
+    .select({ name: audiences.name })
+    .from(audiences)
+    .where(and(eq(audiences.orgId, args.orgId), eq(audiences.brandId, args.brandId)));
+  const [name] = dedupeSegmentNames(["Local businesses on Google Maps"], taken.map((t) => t.name));
+  const [row] = await db
+    .insert(audiences)
+    .values({
+      orgId: args.orgId,
+      brandId: args.brandId,
+      offerId: args.offerId,
+      name,
+      description: `Businesses found on Google Maps: ${filters.queries.slice(0, 3).join("; ")}${filters.queries.length > 3 ? "; ..." : ""}.`,
+      provider: "google_maps",
+      filters: { google_maps: filters },
+      nlPrompt: target,
+      ...audienceTargetFields(target),
+      status: "active",
+      source: SOURCE_CAMPAIGN_SOURCE,
+      createdByUserId: userId,
+    })
+    .returning();
+  noteListBuilt(row.id);
+  result.outcome = "created";
 }
 
 // ── Reconcile (campaign-service is the truth; apply what changed) ────────────────

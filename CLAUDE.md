@@ -2250,6 +2250,39 @@ targets + 27 such rows + 3.
 - Tests: `tests/integration/audience-sources.test.ts`, the "profile x source" block of
   `source-campaigns.test.ts`, `audiences-portfolio.test.ts`, `competitor-engagement-audience.test.ts`.
 
+### Google Maps — local businesses as leads (`src/services/google-maps-source.ts`, GMAPS-SOURCE-1103)
+
+A brand selling to local merchants (restaurants, shops, clinics in one city; first: Agent Base, Astana, WhatsApp
+only) finds them on Google Maps: they carry a phone and a website, rarely a person in Apollo. An audience with
+`provider='google_maps'` (list kind `google_maps_search`, origin `sourcing-google-maps` in features-service's
+catalogue) holds `filters.google_maps = {queries[], country (ISO2), language}`: the Google Maps searches its
+plain-words target expands to (`POST /orgs/audiences {provider:"google_maps", nlPrompt}` writes them, one
+chat-service call on a `google-maps-list-build` run declaring the list; or pass the filters; a source campaign ON
+writes them from the offer's validated target).
+- **Serve (serve-next only; candidates/next 422)**: one business per call: `email`/names null, `phone` E.164
+  (`libphonenumber-js`, read in the audience's country), `providerPersonId` = Google place id, `organization`
+  {name, domain (none for a facebook/instagram page), websiteUrl, streetAddress, city (from Google's address),
+  country, primaryPhone, industry}. Walk: oldest undecided business of the audience (`google_maps_places`,
+  lease 5 min) ⟹ none: the next search, ONCE each (`google_maps_queries`) ⟹ none left: `exhausted`,
+  `reachable_count` = businesses served. No phone / own company ⟹ never served; already served to the brand
+  (same place OR same phone, any audience) ⟹ `taken`; one atomic claim per (org, brand, place) and (org, brand,
+  phone) in `google_maps_brand_claims`: forever, not the 3-month window. Bronze `lead_serves` row, `people` row
+  (one per business per org), membership.
+- **WhatsApp**: body `reachableOn: ["whatsapp"]` (lead-service sends features-service's
+  `messagingNetworkByChannel[channel]`): crm-service `POST /orgs/whatsapp/reach` answers per number;
+  `not_on_whatsapp` ⟹ kept aside (`not_on_whatsapp`), never claimed; the BRAND cannot send (not linked /
+  connected / automation refused) ⟹ business back to waiting, `exhausted`, nobody consumed. Never guessed from the
+  number. Another network ⟹ exhausted (no owner checks it). `reachableBy` email ⟹ exhausted, nothing searched.
+- **Cost**: treg `treg.google.serp.maps` (routed, cheapest first, ~$0.00015 a search of ~20 places), metered by
+  `src/lib/treg-meter.ts` (apollo-service's linkedin-engagement pattern): a `google-maps-search` child run of the
+  serve's run, `treg-micro-usd` ceiling 5,000 provisioned + authorized (platform key) + sent as
+  `X-Treg-Route-Max-Cost`, treg's `X-Treg-Cost-Micro` posted actual, hold cancelled. No x-run-id ⟹ 400. Fail loud:
+  treg / key / runs / billing failure ⟹ 502 (402 on a refused authorization); a routed miss leaves the search
+  unrun (asked again).
+- **still-fits**: `email: null` + `phone` (E.164) answers from the brand's claim of that phone under the audience.
+- Brand transfer moves the three tables. Size/Remaining unknown until exhausted (like linkedin_engagement).
+  Tests: `tests/integration/google-maps-source.test.ts`.
+
 ### Hiring titles — a hiring source says WHICH roles are posted (`src/services/signal-source-titles.ts`, HIRING-TITLES-1102)
 
 A client selling test automation wants companies POSTING QA / SDET jobs, not hiring any role. apollo-service owns

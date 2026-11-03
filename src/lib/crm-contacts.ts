@@ -426,3 +426,45 @@ export function normalizeCrmContact(c: CrmContact): Person {
     ...(c.phoneE164 ? { phone: c.phoneE164 } : {}),
   };
 }
+
+// Can the brand's WhatsApp reach this number right now? crm-service OWNS the
+// answer (POST /orgs/whatsapp/reach: the brand's linked + connected accounts, then
+// one WhatsApp bridge lookup of the number). Checks only: no message, no send row,
+// no cost. Never guessed from the number here (GMAPS-SOURCE-1103).
+export type WhatsappReach =
+  | { reachable: true }
+  | {
+      reachable: false;
+      code:
+        | "whatsapp_not_linked"
+        | "whatsapp_not_connected"
+        | "automation_not_allowed"
+        | "no_phone_known"
+        | "not_on_whatsapp"
+        | "person_replied"
+        | "human_in_conversation";
+      error: string;
+    };
+
+export async function crmWhatsappReach(brandId: string, phone: string, identity: Identity): Promise<WhatsappReach> {
+  const { url, key } = requireCrm();
+  const endpoint = `${url}/orgs/whatsapp/reach`;
+  let res: Response;
+  try {
+    res = await fetchWithConnectRetry(endpoint, {
+      method: "POST",
+      headers: { ...downstreamHeaders(key, identity), "x-brand-id": brandId },
+      body: JSON.stringify({ brandId, phone }),
+    });
+  } catch (err) {
+    throw new ProviderError("crm", 0, `crm-service whatsapp/reach unreachable: ${errorString(err)}`);
+  }
+  const text = await res.text();
+  if (!res.ok) throw new ProviderError("crm", res.status, text.slice(0, 500));
+  const body = JSON.parse(text) as { reachable?: unknown; code?: unknown; error?: unknown };
+  if (body.reachable === true) return { reachable: true };
+  if (body.reachable === false && typeof body.code === "string") {
+    return { reachable: false, code: body.code as Extract<WhatsappReach, { reachable: false }>["code"], error: String(body.error ?? "") };
+  }
+  throw new ProviderError("crm", 502, `crm-service whatsapp/reach answered an unreadable body: ${text.slice(0, 300)}`);
+}

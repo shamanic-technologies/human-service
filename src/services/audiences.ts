@@ -82,6 +82,7 @@ import { chooseAudienceCandidate, buildChooserTrace } from "./audience-chooser.j
 import { createRun, completeRun } from "./runs.js";
 import { audienceSourcingOriginSlug, isCrmSourcedFeature, withSourcingOrigin } from "./sourcing-origin.js";
 import { crmPeopleServeStats, crmServeNext, normalizeCrmContact } from "../lib/crm-contacts.js";
+import { isGoogleMapsAudience, serveNextGoogleMaps } from "./google-maps-source.js";
 import { normalizeReach, personReaches, providerCanReach, type Reach } from "../lib/reach.js";
 import { widenedVerdicts, type EmailVerdict } from "../lib/email-verification.js";
 import { takeRereachForServe } from "./catch-all-rereach.js";
@@ -632,8 +633,9 @@ export async function computeAudienceContactability(
     const suppressedHere = suppressedByAudience.get(row.id) ?? 0;
     // linkedin_engagement: no provider count exists. Its pool is known only
     // once serve-next has walked it to exhaustion (reachable_count); before
-    // that it is UNKNOWN, never 0.
-    if (isLinkedinEngagementFilters(row.filters)) {
+    // that it is UNKNOWN, never 0. Same for a Google Maps list (GMAPS-SOURCE-1103):
+    // its size is what its searches find, known once they all ran.
+    if (isLinkedinEngagementFilters(row.filters) || row.provider === "google_maps") {
       if (row.reachableCount === null || row.reachableCount === undefined) {
         result.set(row.id, null);
         continue;
@@ -2600,6 +2602,12 @@ export async function serveNextPerson(
     throw new AudienceNotServableError(
       `A stepFilter needs a CRM-sourced serve; audience provider '${provider ?? "none"}' cannot honour it.`
     );
+  }
+
+  // GOOGLE MAPS (GMAPS-SOURCE-1103): a list of local businesses found on Google
+  // Maps; its own walk, its own per-brand no-repeat (google-maps-source.ts).
+  if (isGoogleMapsAudience(audience)) {
+    return serveNextGoogleMaps(audience, identity, reach, identity.reachableOn ?? [], deadline);
   }
 
   // SOURCES (audience-sources.ts): the slug lead-service serves under names WHERE
