@@ -1546,7 +1546,7 @@ export const googleMapsPlaces = pgTable(
     rank: integer("rank").notNull().default(0),
     place: jsonb("place").$type<Record<string, unknown>>().notNull(),
     phoneE164: text("phone_e164"),
-    // waiting | checking | served | taken | no_phone | not_on_whatsapp | own_company
+    // waiting | checking | served | taken | no_phone | not_on_whatsapp | stated_not_to_brand | own_company
     status: text("status").notNull().default("waiting"),
     foundRunId: text("found_run_id"),
     servedRunId: text("served_run_id"),

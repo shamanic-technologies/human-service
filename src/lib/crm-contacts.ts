@@ -441,6 +441,7 @@ export type WhatsappReach =
         | "automation_not_allowed"
         | "no_phone_known"
         | "not_on_whatsapp"
+        | "stated_not_to_brand"
         | "person_replied"
         | "human_in_conversation";
       error: string;
