@@ -102,7 +102,8 @@ describe("POST /internal/backfill-audience-avatars", () => {
       .select({ avatarUrl: audiences.avatarUrl })
       .from(audiences)
       .where(eq(audiences.id, NO_AV_A));
-    expect(a.avatarUrl).toBe("https://cdn.test/audiences/1.png");
+    // Rows fill in parallel: which call lands on which row is not ordered.
+    expect(a.avatarUrl).toMatch(/^https:\/\/cdn\.test\/audiences\/[123]\.png$/);
 
     const [existingHttp] = await db
       .select({ avatarUrl: audiences.avatarUrl })
@@ -114,7 +115,8 @@ describe("POST /internal/backfill-audience-avatars", () => {
       .select({ avatarUrl: audiences.avatarUrl })
       .from(audiences)
       .where(eq(audiences.id, NO_USER));
-    expect(n.avatarUrl).toBe("https://cdn.test/audiences/3.png");
+    expect(n.avatarUrl).toMatch(/^https:\/\/cdn\.test\/audiences\/[123]\.png$/);
+    expect(n.avatarUrl).not.toBe(a.avatarUrl);
 
     const reRun = await request(app)
       .post("/internal/backfill-audience-avatars?dryRun=false")
