@@ -28,7 +28,10 @@
 // phone): a business is served at most once per brand, forever.
 //
 // A business crm-service says is NOT on WhatsApp is kept aside for that audience
-// (`not_on_whatsapp`) and never claimed for the brand. When the brand itself
+// (`not_on_whatsapp`) and never claimed for the brand; same for a number the
+// brand's user stated is not someone of the brand (`stated_not_to_brand`, a
+// people correction crm-service owns): that one business is skipped, sourcing
+// goes on. When the brand itself
 // cannot send on WhatsApp (no linked / connected account), nobody is consumed:
 // the business goes back to waiting and the serve answers exhausted, logged.
 
@@ -480,8 +483,8 @@ export async function serveNextGoogleMaps(
           throw err;
         });
         if (!wa.reachable) {
-          if (wa.code === "not_on_whatsapp") {
-            await decide(row.id, "not_on_whatsapp");
+          if (wa.code === "not_on_whatsapp" || wa.code === "stated_not_to_brand") {
+            await decide(row.id, wa.code);
             continue;
           }
           // The BRAND cannot send on WhatsApp now: nobody is consumed.
