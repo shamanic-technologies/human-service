@@ -210,6 +210,36 @@ describe("Google Maps source — serve-next", () => {
     expect(skipped.status).toBe("not_on_whatsapp");
   });
 
+  it("skips for good a business the brand stated is not theirs, serves the next, never exhausts on it", async () => {
+    placesByQuery["restaurants in Astana"] = [place("ChIJ-a", "Not ours", "+7 701 155 1322"), place("ChIJ-c", "Next one", "+7 701 800 7718")];
+    whatsapp["+77011551322"] = { reachable: false, code: "stated_not_to_brand", error: "The brand stated this person is not someone of the brand." };
+    const audience = await createAudience();
+    const res = await serve(audience.id, { reachableBy: "phone", reachableOn: ["whatsapp"] });
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.providerPersonId).toBe("ChIJ-c");
+    const [skipped] = await db.select().from(googleMapsPlaces).where(eq(googleMapsPlaces.placeId, "ChIJ-a"));
+    expect(skipped.status).toBe("stated_not_to_brand");
+    const claims = await db.select().from(googleMapsBrandClaims);
+    expect(claims.map((c) => c.placeId)).toEqual(["ChIJ-c"]);
+    // Never offered again: the next serve does not ask crm-service about it.
+    calls.length = 0;
+    await serve(audience.id, { reachableBy: "phone", reachableOn: ["whatsapp"] });
+    expect(calls.some((c) => c.url === "http://crm/orgs/whatsapp/reach" && c.body?.phone === "+77011551322")).toBe(false);
+  });
+
+  for (const code of ["whatsapp_not_linked", "whatsapp_not_connected", "automation_not_allowed", "no_phone_known", "person_replied", "human_in_conversation"]) {
+    it(`keeps today's behaviour on ${code}: nobody consumed, exhausted`, async () => {
+      placesByQuery["restaurants in Astana"] = [place("ChIJ-a", "Line Brew", "+7 701 155 1322"), place("ChIJ-c", "Next one", "+7 701 800 7718")];
+      whatsapp["+77011551322"] = { reachable: false, code, error: code };
+      const audience = await createAudience();
+      const res = await serve(audience.id, { reachableOn: ["whatsapp"] });
+      expect(res.body.status).toBe("exhausted");
+      const [row] = await db.select().from(googleMapsPlaces).where(eq(googleMapsPlaces.placeId, "ChIJ-a"));
+      expect(row.status).toBe("waiting");
+      expect(await db.select().from(googleMapsBrandClaims)).toHaveLength(0);
+    });
+  }
+
   it("consumes nobody when the brand itself cannot send on WhatsApp", async () => {
     placesByQuery["restaurants in Astana"] = [place("ChIJ-a", "Line Brew", "+7 701 155 1322")];
     whatsapp["+77011551322"] = { reachable: false, code: "whatsapp_not_linked", error: "no linked account" };

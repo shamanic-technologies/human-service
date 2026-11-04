@@ -2270,7 +2270,8 @@ writes them from the offer's validated target).
   (one per business per org), membership.
 - **WhatsApp**: body `reachableOn: ["whatsapp"]` (lead-service sends features-service's
   `messagingNetworkByChannel[channel]`): crm-service `POST /orgs/whatsapp/reach` answers per number;
-  `not_on_whatsapp` ⟹ kept aside (`not_on_whatsapp`), never claimed; the BRAND cannot send (not linked /
+  `not_on_whatsapp` ⟹ kept aside (`not_on_whatsapp`), never claimed; `stated_not_to_brand` (the brand's user
+  tagged the person not someone of the brand, crm-service v0.112.0) ⟹ same, row `stated_not_to_brand`, sourcing goes on; the BRAND cannot send (not linked /
   connected / automation refused) ⟹ business back to waiting, `exhausted`, nobody consumed. Never guessed from the
   number. Another network ⟹ exhausted (no owner checks it). `reachableBy` email ⟹ exhausted, nothing searched.
 - **Cost**: treg `treg.google.serp.maps` (routed, cheapest first, ~$0.00015 a search of ~20 places), metered by
