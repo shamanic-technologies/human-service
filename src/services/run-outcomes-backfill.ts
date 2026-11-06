@@ -46,7 +46,7 @@
 import { and, gte, inArray, isNotNull, lte, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audienceSources, audiences, leadServes } from "../db/schema.js";
-import { AUDIENCE_BUILT, SUBJECT_SERVICE, TASK_SUPPORT, type RunSupport } from "./runs.js";
+import { AUDIENCE_BUILT, SUBJECT_SERVICE, TASK_SUPPORT, listBuiltPerformer, type OutcomePerformer, type RunSupport } from "./runs.js";
 
 export const LEAD_SUBJECT_SERVICE = "lead-service";
 /** Verdicts whose check is KEPT (fleet doctrine, same as apollo-service). */
@@ -92,6 +92,8 @@ export interface PastRun {
   organizationId: string;
   brandIds: string[];
   audienceId: string | null;
+  /** The script the run carries (null = none). */
+  workflowSlug?: string | null;
   taskName: string;
   status: string;
   startedAt: string;
@@ -104,6 +106,8 @@ export interface Occurrence {
   outcomeKey: string;
   subjectService: string;
   subjectId: string;
+  /** PRODUCED only: who performed it (OUTCOME-PERFORMER-1106). */
+  performer?: OutcomePerformer;
 }
 
 export interface PlannedRun {
@@ -225,7 +229,12 @@ export function attributeLists(runs: PastRun[], lists: BuiltList[]): { byRun: Ma
   return { byRun, shared };
 }
 
-const audienceBuilt = (subjectId: string): Occurrence => ({ outcomeKey: AUDIENCE_BUILT, subjectService: SUBJECT_SERVICE, subjectId });
+const audienceBuilt = (r: PastRun) => (subjectId: string): Occurrence => ({
+  outcomeKey: AUDIENCE_BUILT,
+  subjectService: SUBJECT_SERVICE,
+  subjectId,
+  performer: listBuiltPerformer(r.workflowSlug),
+});
 
 /**
  * Plan the declarations of every spending run. `leadOf` answers the lead of a
@@ -284,11 +293,11 @@ export function planRunOutcomes(input: {
     }
     if (r.taskName === "audience-pointer-build") {
       if (r.status !== "completed" || !r.audienceId || !input.pointerAudiencesWithPointer.has(r.audienceId)) skip(r, "no_list_built");
-      else plan(r, [audienceBuilt(r.audienceId)]);
+      else plan(r, [audienceBuilt(r)(r.audienceId)]);
       continue;
     }
     const ids = byRun.get(r.id) ?? [];
-    if (ids.length > 0) plan(r, ids.sort().map(audienceBuilt));
+    if (ids.length > 0) plan(r, ids.sort().map(audienceBuilt(r)));
     else skip(r, shared.has(r.id) ? "list_shared_with_another_run" : "no_list_built");
   }
   return { planned, notDeclared, support };
@@ -342,6 +351,7 @@ interface ApiRun {
   organizationId: string;
   brandIds: string[] | null;
   audienceId: string | null;
+  workflowSlug?: string | null;
   serviceName: string;
   taskName: string;
   status: string;
@@ -368,6 +378,7 @@ export async function listOrgRuns(orgId: string): Promise<PastRun[]> {
         organizationId: r.organizationId,
         brandIds: r.brandIds ?? [],
         audienceId: r.audienceId,
+        workflowSlug: r.workflowSlug ?? null,
         taskName: r.taskName,
         status: r.status,
         startedAt: r.startedAt,

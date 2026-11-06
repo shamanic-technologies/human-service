@@ -33,6 +33,7 @@ import { register as runInstrumentation } from "./instrumentation.js";
 import { startOfferAttributionSweep } from "./services/offer-attribution-sweep.js";
 import { startAudienceRefillSweep } from "./services/audience-refill.js";
 import { startCompetitorEngagementSweep } from "./services/competitor-engagement-audience.js";
+import { startListPerformerCompletion } from "./services/list-performer-completion.js";
 import { startSourceCampaignReconcile } from "./services/source-campaigns.js";
 import { startSendSuppressionSync } from "./services/send-suppression-sync.js";
 import { startHumanLinkSweep } from "./services/human-identity-people.js";
@@ -145,6 +146,10 @@ if (process.env.NODE_ENV !== "test") {
   // LEAD-REFONTE-1013: every per-org person hangs off ONE fleet-wide human
   // (people.human_id), linked here, off the serve path. Timers only.
   startHumanLinkSweep();
+
+  // OUTCOME-PERFORMER-1106: the audience_built occurrences declared before we stated who performed them
+  // take their performer once (runs-service batch door). Timers only; idle once complete.
+  startListPerformerCompletion();
 }
 
 export default app;
