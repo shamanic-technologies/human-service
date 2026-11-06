@@ -80,6 +80,9 @@ describe("who performed a list we built (OUTCOME-PERFORMER-1106)", () => {
       process.env.RUNS_SERVICE_API_KEY = "k";
       vi.stubGlobal("fetch", async (url: string, init: { body?: string; headers: Record<string, string> }) => {
         calls.push({ url, body: init?.body ? JSON.parse(init.body) : null, headers: init?.headers });
+        if (url.includes("/internal/outcome-occurrences") && url.includes("performerKind=client_team")) {
+          return Response.json({ occurrences: [occ({ runId: "rc", subjectId: "c1" }), occ({ runId: "rc", subjectId: "c1", serviceName: "lead-service" })], nextCursor: null });
+        }
         if (url.includes("/internal/outcome-occurrences")) {
           const page2 = url.includes("cursor=c1");
           return Response.json({
@@ -89,21 +92,31 @@ describe("who performed a list we built (OUTCOME-PERFORMER-1106)", () => {
             nextCursor: page2 ? null : "c1",
           });
         }
-        return Response.json({ recordedCount: 0, alreadyRecordedCount: 0, performerStatedCount: 2 });
+        const b = JSON.parse(init.body!) as { runs: Array<{ correctPerformer?: boolean }> };
+        return b.runs.some((r) => r.correctPerformer)
+          ? Response.json({ recordedCount: 0, alreadyRecordedCount: 0, performerStatedCount: 0, performerCorrectedCount: 1 })
+          : Response.json({ recordedCount: 0, alreadyRecordedCount: 0, performerStatedCount: 3 });
       });
     });
 
     it("dry run reads and counts, states nothing", async () => {
       const r = await completeListPerformers({ dryRun: true });
-      expect(r).toMatchObject({ dryRun: true, runs: 3, occurrences: 3, stated: 0 });
+      expect(r).toMatchObject({ dryRun: true, runs: 4, occurrences: 4, toCorrect: 1, stated: 0, corrected: 0 });
       expect(calls.every((c) => c.url.includes("/internal/outcome-occurrences"))).toBe(true);
       expect(calls[0].url).toContain("performerKind=none");
+      expect(calls.some((c) => c.url.includes("performerKind=client_team"))).toBe(true);
     });
 
     it("states the performer through the batch door, as the run's own service; the timer run included", async () => {
       const r = await completeListPerformers({ dryRun: false });
-      expect(r).toMatchObject({ runs: 3, occurrences: 3, stated: 2, failedBatches: 0 });
-      const post = calls.find((c) => c.url === "http://runs/v1/platform-runs/outcomes/batch")!;
+      expect(r).toMatchObject({ runs: 4, occurrences: 4, toCorrect: 1, stated: 3, corrected: 1, failedBatches: 0 });
+      const posts = calls.filter((c) => c.url === "http://runs/v1/platform-runs/outcomes/batch");
+      expect(posts).toHaveLength(2);
+      const post = posts[0];
+      // client_team moved to platform through the correction door, in its own call, ours only.
+      expect(posts[1].body).toEqual({
+        runs: [{ runId: "rc", correctPerformer: true, produced: [{ outcomeKey: "audience_built", subjectService: "human-service", subjectId: "c1", performer: PLATFORM }] }],
+      });
       expect(post.headers["x-service-name"]).toBe("human-service");
       expect(post.body).toEqual({
         runs: [

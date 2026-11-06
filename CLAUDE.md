@@ -3212,7 +3212,8 @@ declared = "produced none". Our one duty: every run human-service OPENS names th
   staff route or a serve-path refill alike; same rule for every org, never `client_team`, never a guessed script).
   runs-service must serve the `platform` kind before a deploy (unknown kind = 400 on the whole declaration). Past
   occurrences: `list-performer-completion.ts` (boot + 60 s, every 6 h; runs-service `performerKind=none`, batch door,
-  `performerOfPastRun` = the same rule); one already stored with another performer is never re-stated.
+  `performerOfPastRun` = the same rule); an occurrence stored `client_team` (the pre-2026-11-07 rule) is re-stated
+  once through runs-service's correction (`correctPerformer: true`, own batch); any other stored performer is never touched.
 - **Runs that declare**: audience-pointer-build, audience-refill (explicit `addRunOutputs`), audience-portfolio-
   launch, source-campaign-audience, competitor-engagement-audience, profile-signal-lists.
 - **Runs SUPPORT by design** (LEDGER-HISTORY-1024): audience-target-draft, audience-split-estimate,
