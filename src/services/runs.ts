@@ -6,6 +6,28 @@ import type { PlatformSupportKind } from "../lib/chat-client.js";
 /** Catalogue step of every list human-service builds (see run-outputs.ts). */
 export const AUDIENCE_BUILT = "audience_built";
 export const SUBJECT_SERVICE = "human-service";
+/**
+ * WHO performed an occurrence (runs-service `produced[].performer`, OUTCOME-PERFORMER-1106, owner 2026-11-06:
+ * "la provenance est clé pour les stats, mais doit être stockée de façon généralisée, par outcome").
+ */
+export type OutcomePerformer =
+  | { kind: "script"; workflowSlug: string; name?: string }
+  | { kind: "client_team" | "crm" | "tracker" | "mailbox" | "organic"; name?: string };
+
+/** The tool label stated when no script asked for the list: our service built it on the client's own account. */
+export const LIST_BUILDER_NAME = "human-service";
+
+/**
+ * Who performed a list we built (`audience_built`): the script whose run asked for it (the workflow slug the
+ * run carries), else nobody's script: the list was built on the client's own account (their user opens and
+ * bills the run: an onboarding launch, a split confirm, a source switched on, the refill of their running
+ * audiences), stated `client_team` with our service as the tool. Never a guessed script.
+ */
+export function listBuiltPerformer(workflowSlug: string | null | undefined): OutcomePerformer {
+  const slug = workflowSlug?.trim();
+  return slug ? { kind: "script", workflowSlug: slug } : { kind: "client_team", name: LIST_BUILDER_NAME };
+}
+
 /** runs-service caps one declaration at 1000 occurrences. */
 const DECLARE_CHUNK = 1000;
 
@@ -148,6 +170,7 @@ export async function declareListsBuilt(
     console.error(`[human-service] run_outcomes.unconfigured run=${runId} lists=${listIds.join(",")}`);
     return;
   }
+  const performer = listBuiltPerformer(identity.workflowTracking?.workflowSlug);
   for (let i = 0; i < listIds.length; i += DECLARE_CHUNK) {
     const chunk = listIds.slice(i, i + DECLARE_CHUNK);
     try {
@@ -162,7 +185,7 @@ export async function declareListsBuilt(
           ...workflowTrackingToHeaders(identity.workflowTracking ?? {}),
         },
         body: JSON.stringify({
-          produced: chunk.map((subjectId) => ({ outcomeKey: AUDIENCE_BUILT, subjectService: SUBJECT_SERVICE, subjectId })),
+          produced: chunk.map((subjectId) => ({ outcomeKey: AUDIENCE_BUILT, subjectService: SUBJECT_SERVICE, subjectId, performer })),
         }),
       });
       if (!res.ok) {
