@@ -1,5 +1,4 @@
 import { messageOf } from "../lib/db-error.js";
-import { clientPersonRequest } from "../lib/list-trigger.js";
 import { Router } from "express";
 import { requireApiKey, requireOrgIdOnly } from "../middleware/auth.js";
 import { SourceCampaignReconcileQuerySchema, SourceCampaignStateRequestSchema } from "../schemas.js";
@@ -14,7 +13,7 @@ const router = Router();
 
 // POST /orgs/source-campaigns/state — a source campaign of an offer was turned ON / OFF
 // (src/services/source-campaigns.ts). Always applied (the explicit "it changed").
-router.post("/orgs/source-campaigns/state", requireApiKey, clientPersonRequest, requireOrgIdOnly, async (req, res) => {
+router.post("/orgs/source-campaigns/state", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsed = SourceCampaignStateRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
