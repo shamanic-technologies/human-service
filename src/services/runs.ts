@@ -2,6 +2,7 @@ import type { WorkflowTrackingHeaders } from "../middleware/auth.js";
 import { workflowTrackingToHeaders } from "../middleware/auth.js";
 import { takeRunOutputs } from "./run-outputs.js";
 import type { PlatformSupportKind } from "../lib/chat-client.js";
+import { triggeredByClientPerson } from "../lib/list-trigger.js";
 
 /** Catalogue step of every list human-service builds (see run-outputs.ts). */
 export const AUDIENCE_BUILT = "audience_built";
@@ -14,19 +15,26 @@ export type OutcomePerformer =
   | { kind: "script"; workflowSlug: string; name?: string }
   | { kind: "client_team" | "crm" | "tracker" | "mailbox" | "organic"; name?: string };
 
-/** The tool label stated when no script asked for the list: our service built it on the client's own account. */
+/** The tool label stated when the client's own person asked for the list (no script). */
 export const LIST_BUILDER_NAME = "human-service";
 
+/** Logged (and counted) for a list nobody we can name performed. */
+export const PERFORMER_UNKNOWN = "performer_unknown: no script, no person";
+
 /**
- * Who performed a list we built (`audience_built`): the script whose run asked for it (the workflow slug the
- * run carries), else nobody's script: the list was built on the client's own account (their user opens and
- * bills the run: an onboarding launch, a split confirm, a source switched on, the refill of their running
- * audiences), stated `client_team` with our service as the tool. Never a guessed script.
+ * Who performed a list we built (`audience_built`). A performer is PERMANENT at runs-service, so only what we
+ * know: the script whose run asked (the workflow slug the run carries), else the client's own person when one
+ * triggered the run (`client_team`, our service as the tool), else NOBODY we can name (a timer sweep, a staff
+ * route): null, no performer stated. Never a guessed script, never a person who did not act.
  */
-export function listBuiltPerformer(workflowSlug: string | null | undefined): OutcomePerformer {
+export function listBuiltPerformer(workflowSlug: string | null | undefined, byClientPerson: boolean): OutcomePerformer | null {
   const slug = workflowSlug?.trim();
-  return slug ? { kind: "script", workflowSlug: slug } : { kind: "client_team", name: LIST_BUILDER_NAME };
+  if (slug) return { kind: "script", workflowSlug: slug };
+  return byClientPerson ? { kind: "client_team", name: LIST_BUILDER_NAME } : null;
 }
+
+/** Runs a client's person triggered (recorded at create, read when the run declares). */
+const clientPersonRuns = new Set<string>();
 
 /** runs-service caps one declaration at 1000 occurrences. */
 const DECLARE_CHUNK = 1000;
@@ -121,6 +129,7 @@ export async function createRun(
 
     if (!res.ok) return null;
     const data = (await res.json()) as { id: string };
+    if (triggeredByClientPerson()) clientPersonRuns.add(data.id);
     return data.id;
   } catch {
     return null;
@@ -170,7 +179,8 @@ export async function declareListsBuilt(
     console.error(`[human-service] run_outcomes.unconfigured run=${runId} lists=${listIds.join(",")}`);
     return;
   }
-  const performer = listBuiltPerformer(identity.workflowTracking?.workflowSlug);
+  const performer = listBuiltPerformer(identity.workflowTracking?.workflowSlug, clientPersonRuns.has(runId));
+  if (!performer) console.log(`[human-service] run_outcomes.${PERFORMER_UNKNOWN} run=${runId} lists=${listIds.join(",")}`);
   for (let i = 0; i < listIds.length; i += DECLARE_CHUNK) {
     const chunk = listIds.slice(i, i + DECLARE_CHUNK);
     try {
@@ -185,7 +195,7 @@ export async function declareListsBuilt(
           ...workflowTrackingToHeaders(identity.workflowTracking ?? {}),
         },
         body: JSON.stringify({
-          produced: chunk.map((subjectId) => ({ outcomeKey: AUDIENCE_BUILT, subjectService: SUBJECT_SERVICE, subjectId, performer })),
+          produced: chunk.map((subjectId) => ({ outcomeKey: AUDIENCE_BUILT, subjectService: SUBJECT_SERVICE, subjectId, ...(performer ? { performer } : {}) })),
         }),
       });
       if (!res.ok) {
@@ -207,6 +217,7 @@ export async function completeRun(
   // What the run built is declared whatever its status: a failed run that still
   // created some lists made them (a failure itself is never an outcome).
   await declareListsBuilt(runId, takeRunOutputs(runId), identity);
+  clientPersonRuns.delete(runId);
   const { url: RUNS_SERVICE_URL, key: RUNS_SERVICE_API_KEY } = runsEnv();
   if (!RUNS_SERVICE_URL || !RUNS_SERVICE_API_KEY) return;
 
