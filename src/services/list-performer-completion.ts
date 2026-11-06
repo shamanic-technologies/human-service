@@ -5,14 +5,15 @@
 // one takes a stated one once (`performer_stated`), the same again is `already_recorded`, another one is a
 // 409 `performer_conflict` (never overwritten). This pass reads OUR `audience_built` occurrences that have
 // no performer (`GET /internal/outcome-occurrences?performerKind=none`), states the one the live
-// declaration's rule gives (`performerOfPastRun`: script, else client_team for a person-only task, else NONE:
-// counted `performer_unknown`, never sent), through the batch door, per run.
+// declaration's rule gives (`performerOfPastRun`: script, else platform = our own system, owner 2026-11-07),
+// through the batch door, per run. An occurrence already stored with another performer (e.g. client_team)
+// is never read here (`performerKind=none`) and never overwritten.
 // No `occurredAt`: an already recorded occurrence keeps its date.
 //
 // Runs on its own (boot + 60 s, then every 6 h): once every occurrence has its performer the read answers
 // nothing and the pass does nothing. Nothing is stored here; a refused batch is logged loud and retried on
 // the next pass (a 409 conflict would repeat: logged with the runs, never forced).
-import { AUDIENCE_BUILT, PERFORMER_UNKNOWN, SUBJECT_SERVICE, type OutcomePerformer } from "./runs.js";
+import { AUDIENCE_BUILT, SUBJECT_SERVICE, type OutcomePerformer } from "./runs.js";
 import { performerOfPastRun } from "./run-outcomes-backfill.js";
 
 export interface PastOccurrence {
@@ -33,18 +34,14 @@ export interface PerformerStatement {
 
 export interface PerformerPlan {
   statements: PerformerStatement[];
-  /** Occurrences nobody we can name performed (no script, no person): left with no performer, counted. */
-  unknown: Array<{ runId: string; taskName: string; subjectId: string }>;
 }
 
 /**
  * Our `audience_built` occurrences, grouped per run, each with the performer the live rule states for that run
- * (`performerOfPastRun`: the run's script, else client_team for a task only a client's person triggers, else
- * none). A run with no nameable performer is never sent.
+ * (`performerOfPastRun`: the run's script, else platform).
  */
 export function planPerformerStatements(occurrences: PastOccurrence[]): PerformerPlan {
   const byRun = new Map<string, PerformerStatement>();
-  const unknown: PerformerPlan["unknown"] = [];
   const seen = new Set<string>();
   for (const o of occurrences) {
     if (o.serviceName !== SUBJECT_SERVICE || o.direction !== "produced" || o.outcomeKey !== AUDIENCE_BUILT) continue;
@@ -52,11 +49,7 @@ export function planPerformerStatements(occurrences: PastOccurrence[]): Performe
     const key = `${o.runId}|${o.subjectId}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const { performer } = performerOfPastRun(o.taskName, o.tags?.workflowSlug);
-    if (!performer) {
-      unknown.push({ runId: o.runId, taskName: o.taskName, subjectId: o.subjectId });
-      continue;
-    }
+    const { performer } = performerOfPastRun(o.tags?.workflowSlug);
     let s = byRun.get(o.runId);
     if (!s) {
       s = { runId: o.runId, produced: [] };
@@ -64,7 +57,7 @@ export function planPerformerStatements(occurrences: PastOccurrence[]): Performe
     }
     s.produced.push({ outcomeKey: AUDIENCE_BUILT, subjectService: SUBJECT_SERVICE, subjectId: o.subjectId, performer });
   }
-  return { statements: [...byRun.values()], unknown };
+  return { statements: [...byRun.values()] };
 }
 
 /** Batch door limits: <= 500 runs and <= 1000 occurrences per call. */
@@ -116,8 +109,6 @@ export interface PerformerCompletionResult {
   dryRun: boolean;
   runs: number;
   occurrences: number;
-  /** Left with no performer: no script asked, no client's person triggered the run. */
-  performerUnknown: number;
   stated: number;
   alreadyRecorded: number;
   failedBatches: number;
@@ -126,17 +117,11 @@ export interface PerformerCompletionResult {
 export async function completeListPerformers(opts: { dryRun: boolean }): Promise<PerformerCompletionResult | null> {
   const env = runsEnv();
   if (!env) return null;
-  const { statements: plan, unknown } = planPerformerStatements(await readUnperformed(env));
-  if (unknown.length > 0) {
-    const byTask: Record<string, number> = {};
-    for (const u of unknown) byTask[u.taskName] = (byTask[u.taskName] ?? 0) + 1;
-    console.log(`[human-service] list_performers.${PERFORMER_UNKNOWN} occurrences=${unknown.length} byTask=${JSON.stringify(byTask)}`);
-  }
+  const { statements: plan } = planPerformerStatements(await readUnperformed(env));
   const result: PerformerCompletionResult = {
     dryRun: opts.dryRun,
     runs: plan.length,
     occurrences: plan.reduce((n, s) => n + s.produced.length, 0),
-    performerUnknown: unknown.length,
     stated: 0,
     alreadyRecorded: 0,
     failedBatches: 0,
@@ -174,7 +159,7 @@ export function startListPerformerCompletion(): () => void {
     running = true;
     void completeListPerformers({ dryRun: false })
       .then((r) => {
-        if (r && (r.occurrences > 0 || r.performerUnknown > 0)) console.log(`[human-service] list_performers.completed ${JSON.stringify(r)}`);
+        if (r && r.occurrences > 0) console.log(`[human-service] list_performers.completed ${JSON.stringify(r)}`);
       })
       .catch((err) => console.error("[human-service] list_performers.failed", err))
       .finally(() => {

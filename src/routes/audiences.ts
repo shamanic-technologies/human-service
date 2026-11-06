@@ -1,5 +1,4 @@
 import { messageOf } from "../lib/db-error.js";
-import { clientPersonRequest } from "../lib/list-trigger.js";
 import { Router } from "express";
 import { randomUUID } from "node:crypto";
 import { personStatus } from "../services/audience-status-origin.js";
@@ -270,7 +269,7 @@ function sendProviderError(
 }
 
 // --- POST /orgs/audiences ---
-router.post("/orgs/audiences", requireApiKey, clientPersonRequest, requireOrgIdOnly, async (req, res) => {
+router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsed = CreateAudienceRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
@@ -582,7 +581,6 @@ router.post(
 router.post(
   "/orgs/audiences/split/confirm",
   requireApiKey,
-  clientPersonRequest,
   requireOrgIdOnly,
   async (req, res) => {
     const parsed = ConfirmAudienceSplitRequestSchema.safeParse(req.body);
@@ -714,7 +712,6 @@ router.post(
 router.post(
   "/orgs/audiences/portfolio",
   requireApiKey,
-  clientPersonRequest,
   requireOrgAndUser,
   async (req, res) => {
     const parsed = LaunchAudiencePortfolioRequestSchema.safeParse(req.body);
@@ -772,7 +769,6 @@ router.post(
 router.post(
   "/orgs/audiences/signal",
   requireApiKey,
-  clientPersonRequest,
   requireOrgAndUser,
   async (req, res) => {
     const parsed = CreateLinkedinEngagementAudienceRequestSchema.safeParse(req.body);
@@ -1185,7 +1181,7 @@ function sendSignalSourceError(res: import("express").Response, err: unknown): v
   sendProviderError(res, err);
 }
 
-router.post("/orgs/audiences/:id/sources", requireApiKey, clientPersonRequest, requireOrgAndUser, async (req, res) => {
+router.post("/orgs/audiences/:id/sources", requireApiKey, requireOrgAndUser, async (req, res) => {
   const parsed = AddAudienceSignalSourceRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });

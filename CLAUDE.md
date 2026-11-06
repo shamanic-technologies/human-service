@@ -3206,14 +3206,13 @@ declared = "produced none". Our one duty: every run human-service OPENS names th
   runs-service books ABNORMAL `repeat_production`, never a unit cost, LEDGER-RESIDUAL-1025); `completeRun` declares the set (`POST /v1/runs/:id/outcomes`), whatever the
   status, before closing. A write under a CALLER's run (inbound x-run-id) is in no context: the caller declares.
   Declaration failure = logged loud with the ids, never thrown. A list noted after its run closed is logged.
-- **Every list states WHO performed it, only when we KNOW** (OUTCOME-PERFORMER-1106, runs-service `produced[].performer`,
-  PERMANENT there): the script whose run asked (`{kind: script, workflowSlug}` of the run's tracking), else the client's
-  person who triggered the run (`{kind: client_team, name: human-service}`: the run was created under a route marked
-  `clientPersonRequest`, `src/lib/list-trigger.ts`: create audience, split confirm, portfolio, signal, add source, source
-  campaign state), else NO performer, logged `performer_unknown: no script, no person` (timer sweeps, staff routes, a
-  refill fired from the serve path). Never a guessed script, never a person who did not act. Past occurrences:
-  `list-performer-completion.ts` (boot + 60 s, every 6 h; runs-service `performerKind=none`, batch door) with the same
-  rule per task (`performerOfPastRun`: only `audience-portfolio-launch` is person-only; others counted `performerUnknown`).
+- **Every list states WHO performed it** (OUTCOME-PERFORMER-1106, runs-service `produced[].performer`, PERMANENT
+  there): the script whose run asked (`{kind: script, workflowSlug}` of the run's tracking), else OUR system
+  (`{kind: platform, name: human-service}`, owner 2026-11-07 "platform for all": a client's click, a timer sweep, a
+  staff route or a serve-path refill alike; same rule for every org, never `client_team`, never a guessed script).
+  runs-service must serve the `platform` kind before a deploy (unknown kind = 400 on the whole declaration). Past
+  occurrences: `list-performer-completion.ts` (boot + 60 s, every 6 h; runs-service `performerKind=none`, batch door,
+  `performerOfPastRun` = the same rule); one already stored with another performer is never re-stated.
 - **Runs that declare**: audience-pointer-build, audience-refill (explicit `addRunOutputs`), audience-portfolio-
   launch, source-campaign-audience, competitor-engagement-audience, profile-signal-lists.
 - **Runs SUPPORT by design** (LEDGER-HISTORY-1024): audience-target-draft, audience-split-estimate,
