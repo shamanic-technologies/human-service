@@ -13,7 +13,7 @@ afterAll(() => {
   globalThis.fetch = fetchBefore;
 });
 
-const CLIENT = { kind: "client_team", name: "human-service" };
+const PLATFORM = { kind: "platform", name: "human-service" };
 const occ = (p: Partial<PastOccurrence> & { runId: string; subjectId: string }): PastOccurrence => ({
   serviceName: "human-service",
   taskName: "audience-portfolio-launch",
@@ -25,23 +25,19 @@ const occ = (p: Partial<PastOccurrence> & { runId: string; subjectId: string }):
 });
 
 describe("who performed a list we built (OUTCOME-PERFORMER-1106)", () => {
-  it("the script whose run asked, else the client's person who triggered it, else NOBODY (null); never a guess", () => {
-    expect(listBuiltPerformer("lead-sourcing-v3", false)).toEqual({ kind: "script", workflowSlug: "lead-sourcing-v3" });
-    expect(listBuiltPerformer("lead-sourcing-v3", true)).toEqual({ kind: "script", workflowSlug: "lead-sourcing-v3" });
-    expect(listBuiltPerformer(null, true)).toEqual(CLIENT);
-    expect(listBuiltPerformer(null, false)).toBeNull();
-    expect(listBuiltPerformer("  ", false)).toBeNull();
+  it("the script whose run asked, else OUR system (platform, human-service), whoever started it (owner 2026-11-07)", () => {
+    expect(listBuiltPerformer("lead-sourcing-v3")).toEqual({ kind: "script", workflowSlug: "lead-sourcing-v3" });
+    expect(listBuiltPerformer(null)).toEqual(PLATFORM);
+    expect(listBuiltPerformer(undefined)).toEqual(PLATFORM);
+    expect(listBuiltPerformer("  ")).toEqual(PLATFORM);
   });
 
-  it("a past run: client_team only for a task only a client's person triggers; timers and staff tasks state none", () => {
-    expect(performerOfPastRun("audience-portfolio-launch", null)).toEqual({ performer: CLIENT });
-    for (const t of ["audience-refill", "competitor-engagement-audience", "profile-signal-lists", "audience-pointer-build", "source-campaign-audience"]) {
-      expect(performerOfPastRun(t, null)).toEqual({});
-    }
-    expect(performerOfPastRun("audience-refill", "wf-1")).toEqual({ performer: { kind: "script", workflowSlug: "wf-1" } });
+  it("a past run: the same rule, every task (portfolio launch included); never client_team", () => {
+    expect(performerOfPastRun(null)).toEqual({ performer: PLATFORM });
+    expect(performerOfPastRun("wf-1")).toEqual({ performer: { kind: "script", workflowSlug: "wf-1" } });
   });
 
-  it("plans our occurrences per run with the same rule; a nameless one is counted unknown, never sent", () => {
+  it("plans our occurrences per run with the same rule; every one states a performer", () => {
     const plan = planPerformerStatements([
       occ({ runId: "r1", subjectId: "a1" }),
       occ({ runId: "r1", subjectId: "a2" }),
@@ -53,24 +49,25 @@ describe("who performed a list we built (OUTCOME-PERFORMER-1106)", () => {
       occ({ runId: "r4", subjectId: "y", direction: "consumed" }),
       occ({ runId: "r5", subjectId: "z", outcomeKey: "lead_found" }),
     ]);
-    expect(plan.statements).toEqual([
+    expect(plan.statements.slice(0, 2)).toEqual([
       {
         runId: "r1",
         produced: [
-          { outcomeKey: "audience_built", subjectService: "human-service", subjectId: "a1", performer: CLIENT },
-          { outcomeKey: "audience_built", subjectService: "human-service", subjectId: "a2", performer: CLIENT },
+          { outcomeKey: "audience_built", subjectService: "human-service", subjectId: "a1", performer: PLATFORM },
+          { outcomeKey: "audience_built", subjectService: "human-service", subjectId: "a2", performer: PLATFORM },
         ],
       },
       { runId: "r2", produced: [{ outcomeKey: "audience_built", subjectService: "human-service", subjectId: "a3", performer: { kind: "script", workflowSlug: "wf-1" } }] },
     ]);
-    expect(plan.unknown).toEqual([
-      { runId: "r6", taskName: "audience-refill", subjectId: "t1" },
-      { runId: "r7", taskName: "competitor-engagement-audience", subjectId: "t2" },
+    expect(plan.statements).toHaveLength(4);
+    expect(plan.statements.slice(2)).toEqual([
+      { runId: "r6", produced: [{ outcomeKey: "audience_built", subjectService: "human-service", subjectId: "t1", performer: PLATFORM }] },
+      { runId: "r7", produced: [{ outcomeKey: "audience_built", subjectService: "human-service", subjectId: "t2", performer: PLATFORM }] },
     ]);
   });
 
   it("batches stay inside the door's limits", () => {
-    const s = (n: number, k: number) => ({ runId: `r${n}`, produced: Array.from({ length: k }, (_, i) => ({ outcomeKey: "audience_built", subjectService: "human-service", subjectId: `${n}-${i}`, performer: CLIENT as never })) });
+    const s = (n: number, k: number) => ({ runId: `r${n}`, produced: Array.from({ length: k }, (_, i) => ({ outcomeKey: "audience_built", subjectService: "human-service", subjectId: `${n}-${i}`, performer: PLATFORM as never })) });
     expect(performerBatches([s(1, 600), s(2, 600)]).map((b) => b.length)).toEqual([1, 1]);
     expect(performerBatches(Array.from({ length: 501 }, (_, i) => s(i, 1))).map((b) => b.length)).toEqual([500, 1]);
   });
@@ -83,6 +80,9 @@ describe("who performed a list we built (OUTCOME-PERFORMER-1106)", () => {
       process.env.RUNS_SERVICE_API_KEY = "k";
       vi.stubGlobal("fetch", async (url: string, init: { body?: string; headers: Record<string, string> }) => {
         calls.push({ url, body: init?.body ? JSON.parse(init.body) : null, headers: init?.headers });
+        if (url.includes("/internal/outcome-occurrences") && url.includes("performerKind=client_team")) {
+          return Response.json({ occurrences: [occ({ runId: "rc", subjectId: "c1" }), occ({ runId: "rc", subjectId: "c1", serviceName: "lead-service" })], nextCursor: null });
+        }
         if (url.includes("/internal/outcome-occurrences")) {
           const page2 = url.includes("cursor=c1");
           return Response.json({
@@ -92,26 +92,37 @@ describe("who performed a list we built (OUTCOME-PERFORMER-1106)", () => {
             nextCursor: page2 ? null : "c1",
           });
         }
-        return Response.json({ recordedCount: 0, alreadyRecordedCount: 0, performerStatedCount: 2 });
+        const b = JSON.parse(init.body!) as { runs: Array<{ correctPerformer?: boolean }> };
+        return b.runs.some((r) => r.correctPerformer)
+          ? Response.json({ recordedCount: 0, alreadyRecordedCount: 0, performerStatedCount: 0, performerCorrectedCount: 1 })
+          : Response.json({ recordedCount: 0, alreadyRecordedCount: 0, performerStatedCount: 3 });
       });
     });
 
     it("dry run reads and counts, states nothing", async () => {
       const r = await completeListPerformers({ dryRun: true });
-      expect(r).toMatchObject({ dryRun: true, runs: 2, occurrences: 2, performerUnknown: 1, stated: 0 });
+      expect(r).toMatchObject({ dryRun: true, runs: 4, occurrences: 4, toCorrect: 1, stated: 0, corrected: 0 });
       expect(calls.every((c) => c.url.includes("/internal/outcome-occurrences"))).toBe(true);
       expect(calls[0].url).toContain("performerKind=none");
+      expect(calls.some((c) => c.url.includes("performerKind=client_team"))).toBe(true);
     });
 
-    it("states the performer through the batch door, as the run's own service; the timer run is not sent", async () => {
+    it("states the performer through the batch door, as the run's own service; the timer run included", async () => {
       const r = await completeListPerformers({ dryRun: false });
-      expect(r).toMatchObject({ runs: 2, occurrences: 2, performerUnknown: 1, stated: 2, failedBatches: 0 });
-      const post = calls.find((c) => c.url === "http://runs/v1/platform-runs/outcomes/batch")!;
+      expect(r).toMatchObject({ runs: 4, occurrences: 4, toCorrect: 1, stated: 3, corrected: 1, failedBatches: 0 });
+      const posts = calls.filter((c) => c.url === "http://runs/v1/platform-runs/outcomes/batch");
+      expect(posts).toHaveLength(2);
+      const post = posts[0];
+      // client_team moved to platform through the correction door, in its own call, ours only.
+      expect(posts[1].body).toEqual({
+        runs: [{ runId: "rc", correctPerformer: true, produced: [{ outcomeKey: "audience_built", subjectService: "human-service", subjectId: "c1", performer: PLATFORM }] }],
+      });
       expect(post.headers["x-service-name"]).toBe("human-service");
       expect(post.body).toEqual({
         runs: [
-          { runId: "r1", produced: [{ outcomeKey: "audience_built", subjectService: "human-service", subjectId: "a1", performer: CLIENT }] },
-          { runId: "r2", produced: [{ outcomeKey: "audience_built", subjectService: "human-service", subjectId: "b1", performer: CLIENT }] },
+          { runId: "r1", produced: [{ outcomeKey: "audience_built", subjectService: "human-service", subjectId: "a1", performer: PLATFORM }] },
+          { runId: "r2", produced: [{ outcomeKey: "audience_built", subjectService: "human-service", subjectId: "b1", performer: PLATFORM }] },
+          { runId: "r9", produced: [{ outcomeKey: "audience_built", subjectService: "human-service", subjectId: "t9", performer: PLATFORM }] },
         ],
       });
     });
