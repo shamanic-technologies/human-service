@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { addRunOutputs, noteListBuilt, takeRunOutputs, withRunOutputs } from "../../src/services/run-outputs.js";
+import { asClientPersonWork } from "../../src/lib/list-trigger.js";
 import {
   attributeLists,
   batchesOf,
@@ -91,8 +92,14 @@ describe("run outputs: what a run we opened built", () => {
       });
     });
 
-    it("posts audience_built for each list, then closes the run", async () => {
-      const { completeRun } = await import("../../src/services/runs.js");
+    it("posts audience_built for each list, then closes the run (a client's person asked: client_team)", async () => {
+      const { completeRun, createRun } = await import("../../src/services/runs.js");
+      vi.stubGlobal("fetch", async (url: string, init: { body?: string; headers: Record<string, string> }) => {
+        calls.push({ url, body: init.body ? JSON.parse(init.body) : null, headers: init.headers });
+        return new Response(JSON.stringify({ id: "run-x" }), { status: 201 });
+      });
+      await asClientPersonWork(() => createRun({ orgId: "org-1", userId: "user-1", taskName: "audience-portfolio-launch" }));
+      calls.length = 0;
       await withRunOutputs("run-x", async () => {
         noteListBuilt("aud-1");
         noteListBuilt("src-1");
@@ -108,7 +115,20 @@ describe("run outputs: what a run we opened built", () => {
       });
     });
 
-    it("every list states WHO performed it: the script whose run asked, else the client's account (OUTCOME-PERFORMER-1106)", async () => {
+    it("a run no person triggered and no script asked (timer sweep) states NO performer", async () => {
+      const { completeRun, createRun } = await import("../../src/services/runs.js");
+      vi.stubGlobal("fetch", async (url: string, init: { body?: string; headers: Record<string, string> }) => {
+        calls.push({ url, body: init.body ? JSON.parse(init.body) : null, headers: init.headers });
+        return new Response(JSON.stringify({ id: "run-timer" }), { status: 201 });
+      });
+      await createRun({ orgId: "org-1", userId: "user-1", taskName: "audience-refill" });
+      calls.length = 0;
+      await withRunOutputs("run-timer", async () => noteListBuilt("aud-t"));
+      await completeRun("run-timer", "completed", { orgId: "org-1", userId: "user-1" });
+      expect(calls[0].body).toEqual({ produced: [{ outcomeKey: "audience_built", subjectService: "human-service", subjectId: "aud-t" }] });
+    });
+
+    it("every list states WHO performed it: the script whose run asked (OUTCOME-PERFORMER-1106)", async () => {
       const { completeRun } = await import("../../src/services/runs.js");
       await withRunOutputs("run-wf", async () => noteListBuilt("aud-wf"));
       await completeRun("run-wf", "completed", { orgId: "org-1", userId: "user-1", workflowTracking: { workflowSlug: "lead-sourcing-v3" } });
@@ -274,11 +294,11 @@ describe("backfill planning", () => {
       ["refill", ["r1"]],
       ["launch-a", ["cold", "src"]],
     ]);
-    // Every planned list states its performer (OUTCOME-PERFORMER-1106).
-    expect(planned.flatMap((p) => p.produced.map((o) => o.performer))).toEqual([
-      { kind: "client_team", name: "human-service" },
-      { kind: "client_team", name: "human-service" },
-      { kind: "client_team", name: "human-service" },
+    // OUTCOME-PERFORMER-1106: a refill may be a timer: no performer; a portfolio launch is always a client's person.
+    expect(planned.flatMap((p) => p.produced.map((o) => [p.taskName, o.performer ?? null]))).toEqual([
+      ["audience-refill", null],
+      ["audience-portfolio-launch", { kind: "client_team", name: "human-service" }],
+      ["audience-portfolio-launch", { kind: "client_team", name: "human-service" }],
     ]);
     expect(Object.fromEntries(notDeclared.map((n) => [n.runId, n.reason]))).toEqual({
       "launch-b": "list_shared_with_another_run",
