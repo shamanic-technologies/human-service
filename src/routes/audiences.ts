@@ -1467,7 +1467,7 @@ function parseServeReach(
         field === "acceptedEmails"
           ? "acceptedEmails must be valid_only, valid_and_catch_all or valid_catch_all_and_unknown"
           : field === "excludeEmailedWithin"
-            ? "excludeEmailedWithin must be 3_months or 2_months"
+            ? "excludeEmailedWithin must be 3_months, 2_months or never"
           : field === "relationships"
             ? "relationships must be business_only"
             : field === "stepFilter"

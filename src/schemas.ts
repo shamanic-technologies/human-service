@@ -1580,7 +1580,7 @@ export const AcceptedEmailsFieldSchema = z.enum(ACCEPTED_EMAILS).openapi({
 // The serve's per-brand re-contact window (FRESH-2-MONTHS-1027).
 export const ExcludeEmailedWithinFieldSchema = z.enum(EXCLUDE_EMAILED_WITHIN).openapi({
   description:
-    "How long after a person was last served OR emailed for the audience's brand this serve may hand them out again, as the calling workflow states it (same field and values as lead-service's buffer/next, forwarded verbatim). '3_months' (the default when omitted) = today's per-brand suppression. '2_months' = a person last served or emailed for the brand more than 2 months ago may be handed again, on every check this serve makes (teaser filter before paying, the reveal's claim, the apify exclude-set). With '2_months', the people THIS audience already served whose window lapsed are handed FIRST (oldest first), re-revealed from apollo-service's person cache: no second reveal credit (only the email verification re-runs when its verdict is older than 30 days), every gate (opt-out, won, own company, bounce, verdict policy) as a fresh reveal, and the hand-out records a new serve (the window restarts from it). Accepted on serve-next, candidates/next and candidates/{candidateId}/reveal (send the same value on all three). Providers that own their own no-re-serve (crm): no effect.",
+    "How long after a person was last served OR emailed for the audience's brand this serve may hand them out again, as the calling workflow states it (same field and values as lead-service's buffer/next, forwarded verbatim). '3_months' (the default when omitted) = today's per-brand suppression. '2_months' = a person last served or emailed for the brand more than 2 months ago may be handed again, on every check this serve makes (teaser filter before paying, the reveal's claim, the apify exclude-set). With '2_months', the people THIS audience already served whose window lapsed are handed FIRST (oldest first), re-revealed from apollo-service's person cache: no second reveal credit (only the email verification re-runs when its verdict is older than 30 days), every gate (opt-out, won, own company, bounce, verdict policy) as a fresh reveal, and the hand-out records a new serve (the window restarts from it). Accepted on serve-next, candidates/next and candidates/{candidateId}/reveal (send the same value on all three). 'never' (FRESH-NEVER-1106) = a person this brand EVER emailed (any date, any registered address of the person; the sends copied from instantly-service) is never handed out, on the same checks; a person only served (never emailed) keeps the default 3-month hold. 'never' never re-walks lapsed people. Providers that own their own no-re-serve (crm): no effect.",
   example: "2_months",
 });
 
@@ -3362,7 +3362,7 @@ export const SendSuppressionSyncResponseSchema = z
     sends: z.number().int(),
     applied: z.number().int(),
     created: z.number().int(),
-    skippedOutsideWindow: z.number().int(),
+    olderThanWindow: z.number().int().openapi({ description: "Sends older than the default 3-month window: copied as ever-emailed evidence (read by excludeEmailedWithin 'never'), re-anchoring no window." }),
     skippedUnattributed: z.number().int(),
     hasMore: z.boolean(),
   })

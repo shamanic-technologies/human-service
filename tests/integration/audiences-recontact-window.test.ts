@@ -8,6 +8,7 @@ import { and, eq } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
+import { getSuppressionSet, isEmailSuppressed } from "../../src/services/suppression.js";
 import {
   audienceCandidates,
   audienceMembers,
@@ -181,7 +182,7 @@ describe("excludeEmailedWithin — validation", () => {
     for (const r of [serveNext(id, { excludeEmailedWithin: "1_month" }), next(id, { excludeEmailedWithin: "1_month" })]) {
       const res = await r;
       expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/excludeEmailedWithin/);
+      expect(res.body.error).toBe("excludeEmailedWithin must be 3_months, 2_months or never");
     }
     const rv = await reveal(id, "00000000-0000-4000-8000-000000000001", { excludeEmailedWithin: "1_month" });
     expect(rv.status).toBe(400);
@@ -288,5 +289,112 @@ describe("candidates — the same re-contact under the serve's window", () => {
     await seedServed(id, "c40", 40, { sent: true });
     mockApollo([[]]);
     expect((await next(id, TWO)).body).toMatchObject({ status: "exhausted" });
+  });
+});
+
+// FRESH-NEVER-1106 (owner 2026-11-06, Doc Dinners): a cold first email goes only
+// to people the brand has NEVER emailed. `never` refuses anyone the brand ever
+// emailed (any date); a person only served keeps the default 3-month hold.
+const NEVER = { excludeEmailedWithin: "never" };
+
+// A brand row as the send sync writes it for a person emailed but never served
+// here: the address only, no pre-pay key, dated from the send.
+async function seedEmailedOnly(email: string, days: number) {
+  const at = daysAgo(days);
+  await db.insert(brandSuppressions).values({
+    orgId: ORG, brandId: BRAND, emailNorm: email, firstServedAt: at, lastServedAt: at, lastSentAt: at,
+  });
+}
+
+describe("excludeEmailedWithin never — nobody the brand ever emailed", () => {
+  // Candidate path: no screen in between, the free teaser filter and the claim alone.
+  it("refuses people emailed 1 year ago and last week before paying, hands the never-emailed person", async () => {
+    const other = await createAudience();
+    await db.update(audiences).set({ name: "Other" }).where(eq(audiences.id, other));
+    await seedServed(other, "e365", 365, { sent: true });
+    await seedServed(other, "e7", 7, { sent: true });
+    const id = await createAudience();
+    const fleet = mockApollo([["e365", "e7", "fresh"], []]);
+
+    const offered = await next(id, NEVER);
+    expect(offered.body.status).toBe("candidate");
+    expect(offered.body.candidate.providerPersonId).toBe("fresh");
+    // The emailed teasers were dropped by the free filter: never revealed.
+    expect(fleet.enriched).toEqual([]);
+    const res = await reveal(id, offered.body.candidate.candidateId, NEVER);
+    expect(res.body).toMatchObject({ status: "served" });
+    expect(res.body.person.email).toBe("fresh@x.com");
+    expect(fleet.enriched).toEqual(["fresh"]);
+  });
+
+  it("3_months (and absent) would hand the person emailed 1 year ago: unchanged", async () => {
+    for (const body of [{}, THREE]) {
+      await cleanTestData();
+      const other = await createAudience();
+      await db.update(audiences).set({ name: "Other" }).where(eq(audiences.id, other));
+      await seedServed(other, "e365", 365, { sent: true });
+      const id = await createAudience();
+      const fleet = mockApollo([["e365"], []]);
+      const offered = await next(id, body);
+      expect(offered.body.status).toBe("candidate");
+      expect(offered.body.candidate.providerPersonId).toBe("e365");
+      const res = await reveal(id, offered.body.candidate.candidateId, body);
+      expect(res.body).toMatchObject({ status: "served" });
+      expect(fleet.enriched).toEqual(["e365"]);
+    }
+  });
+
+  it("a person only SERVED keeps the default 3-month hold: 120 days ago handed, 40 days ago held", async () => {
+    const other = await createAudience();
+    await db.update(audiences).set({ name: "Other" }).where(eq(audiences.id, other));
+    await seedServed(other, "s120", 120);
+    await seedServed(other, "s40", 40);
+    const id = await createAudience();
+    const fleet = mockApollo([["s40", "s120"], []]);
+    const offered = await next(id, NEVER);
+    expect(offered.body.status).toBe("candidate");
+    expect(offered.body.candidate.providerPersonId).toBe("s120");
+    const res = await reveal(id, offered.body.candidate.candidateId, NEVER);
+    expect(res.body).toMatchObject({ status: "served" });
+    expect(fleet.enriched).toEqual(["s120"]);
+  });
+
+  it("never re-walks lapsed people this audience served (it is not a shortened window)", async () => {
+    const id = await createAudience();
+    await seedServed(id, "old120", 120);
+    const fleet = mockApollo([[]]);
+    expect((await serveNext(id, NEVER)).body).toEqual({ status: "exhausted", person: null });
+    expect((await next(id, NEVER)).body).toMatchObject({ status: "exhausted" });
+    expect(fleet.enriched).toEqual([]);
+  });
+
+  it("the reveal's claim refuses an address emailed 1 year ago that no pre-pay key matched; 3_months serves it", async () => {
+    const id = await createAudience();
+    await seedEmailedOnly("c1@x.com", 365);
+    const fleet = mockApollo([["c1"], []]);
+    const offered = await next(id, NEVER);
+    expect(offered.body.status).toBe("candidate");
+    const c = offered.body.candidate.candidateId as string;
+    expect((await reveal(id, c, NEVER)).body).toMatchObject({ status: "not_served", reason: "already_served" });
+    await db.update(audienceCandidates).set({ status: "offered" });
+    const res = await reveal(id, c, THREE);
+    expect(res.body).toMatchObject({ status: "served" });
+    expect(res.body.person.email).toBe("c1@x.com");
+    expect(fleet.enriched).toEqual(["c1", "c1"]);
+  });
+
+  it("the apify exclude-set and the resolve-email block hold every ever-emailed address under never only", async () => {
+    await seedEmailedOnly("year@x.com", 365);
+    await seedEmailedOnly("week@x.com", 7);
+    await db.insert(brandSuppressions).values({
+      orgId: ORG, brandId: BRAND, emailNorm: "served120@x.com", firstServedAt: daysAgo(120), lastServedAt: daysAgo(120),
+    });
+    const never = await getSuppressionSet(ORG, [BRAND], "never");
+    expect(never.emails.sort()).toEqual(["week@x.com", "year@x.com"]);
+    const three = await getSuppressionSet(ORG, [BRAND], "3_months");
+    expect(three.emails).toEqual(["week@x.com"]);
+    expect(await isEmailSuppressed(ORG, [BRAND], "year@x.com", "never")).toBe(true);
+    expect(await isEmailSuppressed(ORG, [BRAND], "year@x.com")).toBe(false);
+    expect(await isEmailSuppressed(ORG, [BRAND], "served120@x.com", "never")).toBe(false);
   });
 });
