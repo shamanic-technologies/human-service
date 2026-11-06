@@ -11,6 +11,7 @@ import { db } from "../../src/db/index.js";
 import { audiences, leadSourcingChoiceChanges, leadSourcingChoices, sourceCampaignStates } from "../../src/db/schema.js";
 import { fetchOfferSourceCampaigns, type OfferSourceCampaign } from "../../src/lib/campaign-source-campaigns.js";
 import { fetchOfferSourcingEvidence } from "../../src/lib/features-offer-sourcing.js";
+import { resetLeadSourcingAsks } from "../../src/services/lead-sourcing.js";
 
 vi.mock("../../src/lib/campaign-source-campaigns.js", async (orig) => ({
   ...(await orig<typeof import("../../src/lib/campaign-source-campaigns.js")>()),
@@ -101,6 +102,7 @@ function switchToLeadSourcing() {
 beforeEach(async () => {
   vi.mocked(fetchOfferSourceCampaigns).mockReset();
   vi.mocked(fetchOfferSourcingEvidence).mockReset();
+  resetLeadSourcingAsks();
   await cleanTestData();
   await db.delete(leadSourcingChoiceChanges);
   await db.delete(leadSourcingChoices);
@@ -168,6 +170,42 @@ describe("Lead Sourcing", () => {
     expect(res.body.entries).toEqual([expect.objectContaining({ originSlug: SIGNALS, status: "off", action: "paused" })]);
     expect(await statusOf(signal.id)).toBe("paused");
     expect(await statusOf(cold.id)).toBe("active");
+  });
+
+  it("a re-decision stuck on features-service never holds a serve's read (INCIDENT 2026-11-06)", async () => {
+    await brandRunningTwoSources();
+    switchToLeadSourcing();
+    await reconcile();
+    let release: (v: Map<string, never>) => void = () => {};
+    vi.mocked(fetchOfferSourcingEvidence).mockReturnValue(new Promise((r) => (release = r as never)));
+    const headers = { "x-api-key": "test-api-key", "x-org-id": ORG, "x-user-id": USER };
+    const first = await request(app).get(`/orgs/lead-sourcing/sources?brandId=${BRAND}&offerId=${OFFER}`).set({ ...headers, "x-run-id": "run-1" });
+    expect(first.status).toBe(200);
+    // Ten serves while the evidence read hangs: each answers at once, none asks features again.
+    const started = Date.now();
+    const reads = await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        request(app).get(`/orgs/lead-sourcing/sources?brandId=${BRAND}&offerId=${OFFER}`).set({ ...headers, "x-run-id": `run-${i + 2}` })
+      )
+    );
+    expect(reads.every((r) => r.status === 200 && r.body.chosenOriginSlugs.length === 2)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(vi.mocked(fetchOfferSourcingEvidence)).toHaveBeenCalledTimes(1);
+    release(new Map());
+  });
+
+  it("an unreadable evidence is asked again only after the hour, never on every read", async () => {
+    await brandRunningTwoSources();
+    switchToLeadSourcing();
+    await reconcile();
+    vi.mocked(fetchOfferSourcingEvidence).mockRejectedValue(new Error("features-service answered 502"));
+    const headers = { "x-api-key": "test-api-key", "x-org-id": ORG, "x-user-id": USER };
+    for (let i = 0; i < 5; i++) {
+      const res = await request(app).get(`/orgs/lead-sourcing/sources?brandId=${BRAND}&offerId=${OFFER}`).set({ ...headers, "x-run-id": `run-${i}` });
+      expect(res.status).toBe(200);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(vi.mocked(fetchOfferSourcingEvidence)).toHaveBeenCalledTimes(1);
   });
 
   it("Lead Sourcing OFF turns its chosen sources OFF; back ON resumes exactly those", async () => {
