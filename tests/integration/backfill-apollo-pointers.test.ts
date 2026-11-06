@@ -302,7 +302,7 @@ describe("pointer build: a concurrent duplicate declares the list it built again
     const declared = fetchSpy.mock.calls.filter(([u]) => String(u).endsWith("/outcomes"));
     expect(declared).toHaveLength(1);
     expect(JSON.parse(declared[0][1].body).produced).toEqual([
-      { outcomeKey: "audience_built", subjectService: "human-service", subjectId: APOLLO_NOPTR },
+      { outcomeKey: "audience_built", subjectService: "human-service", subjectId: APOLLO_NOPTR, performer: { kind: "client_team", name: "human-service" } },
     ]);
   });
 });
