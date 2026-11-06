@@ -115,16 +115,22 @@ describe("send → suppression sync", () => {
     expect((await row("b@x.com")).lastProvider).toBeNull();
   });
 
-  it("skips sends outside the window, non-send facts and unattributed sends; advances the cursor", async () => {
+  it("copies a send older than the window as evidence only, skips non-send facts and unattributed sends; advances the cursor", async () => {
     feed = [
-      sent(1, "old@x.com", daysAgo(120)),
+      sent(1, "old@x.com", daysAgo(365)),
       { ...sent(2, "open@x.com", daysAgo(1)), type: "email_opened" },
       sent(3, "noorg@x.com", daysAgo(1), { orgId: null }),
       sent(4, "nobrand@x.com", daysAgo(1), { brandIds: [] }),
     ];
     const res = await sync();
-    expect(res.body).toMatchObject({ facts: 4, sends: 3, applied: 0, skippedOutsideWindow: 1, skippedUnattributed: 2, toCursor: "4" });
-    expect(await db.select().from(brandSuppressions)).toHaveLength(0);
+    expect(res.body).toMatchObject({ facts: 4, sends: 3, applied: 1, created: 1, olderThanWindow: 1, skippedUnattributed: 2, toCursor: "4" });
+    // FRESH-NEVER-1106: the old send is recorded (ever emailed), dated from the send:
+    // lapsed for the default window, held under `never`.
+    const r = await row("old@x.com");
+    expect(Math.abs(r.lastSentAt!.getTime() - daysAgo(365).getTime())).toBeLessThan(5_000);
+    expect(Math.abs(r.lastServedAt.getTime() - daysAgo(365).getTime())).toBeLessThan(5_000);
+    expect(await isEmailSuppressed(ORG, [BRAND], "old@x.com")).toBe(false);
+    expect(await isEmailSuppressed(ORG, [BRAND], "old@x.com", "never")).toBe(true);
     const [state] = await db.select().from(suppressionSendSyncState);
     expect(state.cursor).toBe(4);
   });

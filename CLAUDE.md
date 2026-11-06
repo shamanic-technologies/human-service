@@ -653,7 +653,8 @@ were anchored before their send and **4,613 were servable again**.
   `SEND_SUPPRESSION_SYNC_INTERVAL_MS=0` off) + `POST /internal/sync-send-suppressions`.
   Reads instantly-service `GET /internal/outreach-facts` by cursor
   (`suppression_send_sync_state`, migration `0042`), keeps `email_sent` facts
-  inside the window, per (org, atomic brand, email): `last_sent_at` = the send,
+  of ANY age (FRESH-NEVER-1106; older than 3 months = `olderThanWindow`, evidence
+  only, migration `0053` re-walked the feed once), per (org, atomic brand, email): `last_sent_at` = the send,
   `last_served_at` (THE anchor every read uses) = `GREATEST(last_served_at, send)`.
   Emailed but never served here ⟹ row created, dated from the send. Cursor moves
   in the page's own transaction; feed failure = 502 / logged, cursor kept.
@@ -667,7 +668,7 @@ prospecting by writing again to people emailed MORE than 2 months ago (owner
 2026-10-27, every client). `src/lib/recontact-window.ts` owns the vocabulary.
 
 - **Field = lead-service's, forwarded verbatim**: body `excludeEmailedWithin`
-  `"3_months" | "2_months"` on `POST /orgs/audiences/{id}/serve-next`,
+  `"3_months" | "2_months" | "never"` on `POST /orgs/audiences/{id}/serve-next`,
   `/candidates/next` and `/candidates/{candidateId}/reveal` (send the same value on
   all three; unknown = 400). Absent / `3_months` = today's serve, byte-identical
   (`windowCutoff()` prints the same SQL). One value per REQUEST, chosen by the
@@ -697,6 +698,17 @@ prospecting by writing again to people emailed MORE than 2 months ago (owner
   post-reveal gate and the verdict policy apply as for a fresh reveal.
 - Tests: `tests/integration/audiences-recontact-window.test.ts` (70 days handed,
   40 days refused, absent/3_months refuses 70 days).
+- **`never` (FRESH-NEVER-1106, owner 2026-11-06)**: a cold first email goes only
+  to people the brand NEVER emailed (emailed people get a follow-up in their last
+  thread). Every read path holds a row through ONE predicate, `heldUnder(window)`
+  (`suppression.ts`): `last_sent_at IS NOT NULL` (any date, any address of the
+  person) OR served inside the default 3 months (a person only SERVED keeps
+  today's hold); the reveal's re-claim is its exact negation. NOT a shortened
+  window: no lapsed re-walk (`isShortenedWindow` false). The stored walk script's
+  page carries no "ever emailed" fact, so a `never` walk runs our own walk and is
+  never recorded for the script's proof. A person emailed at an address no
+  pre-pay key matches (send-only row) is caught by the reveal's claim (after the
+  reveal), like 3 months.
 
 ### Brand transfer — `POST /internal/transfer-brand`
 

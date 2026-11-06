@@ -21,7 +21,12 @@
 // this gateway (another path) gets a row dated from the send. Nothing about any
 // read path changes, so there is still ONE window and one definition of it.
 //
-// Sends older than the window are skipped (they would suppress nobody). The
+// EVERY send is copied, whatever its age (FRESH-NEVER-1106): a serve stating
+// `excludeEmailedWithin: "never"` refuses anyone the brand ever emailed, read off
+// `last_sent_at`. A send older than the window re-anchors nothing (GREATEST, and
+// a row it creates is dated from the send, so already lapsed for every interval
+// window); it is counted as `olderThanWindow`. Migration 0053 re-walked the feed
+// once so the sends skipped before (older than 3 months then) are copied. The
 // cursor only advances in the same transaction as the page's writes, so a
 // failed tick re-reads the same page. Idempotent: GREATEST never moves back.
 //
@@ -50,11 +55,12 @@ export interface SendSuppressionSyncResult {
   pages: number;
   facts: number;
   sends: number;
-  // Sends inside the window, deduped on (org, brand, email): rows written.
+  // Sends deduped on (org, brand, email): rows written.
   applied: number;
   // Of `applied`, rows that did not exist (emailed, never served here).
   created: number;
-  skippedOutsideWindow: number;
+  // Of the sends, those older than the default window (copied as evidence only).
+  olderThanWindow: number;
   skippedUnattributed: number;
   hasMore: boolean;
 }
@@ -66,8 +72,8 @@ interface SendKey {
   sentAt: Date;
 }
 
-// Real sends of one page, inside the window, collapsed onto the latest send per
-// (org, brand, email). Pure.
+// Real sends of one page, collapsed onto the latest send per (org, brand, email).
+// `outsideWindow` counts the sends older than `cutoff` (still collected). Pure.
 export function collectSends(
   facts: OutreachFact[],
   cutoff: Date
@@ -88,10 +94,7 @@ export function collectSends(
       unattributed += 1;
       continue;
     }
-    if (sentAt <= cutoff) {
-      outsideWindow += 1;
-      continue;
-    }
+    if (sentAt <= cutoff) outsideWindow += 1;
     for (const brandId of brandIds) {
       const k = `${f.orgId}|${brandId}|${emailNorm}`;
       const cur = byKey.get(k);
@@ -122,7 +125,7 @@ export async function runSendSuppressionSync(): Promise<SendSuppressionSyncResul
       sends: 0,
       applied: 0,
       created: 0,
-      skippedOutsideWindow: 0,
+      olderThanWindow: 0,
       skippedUnattributed: 0,
       hasMore: true,
     };
@@ -139,7 +142,7 @@ export async function runSendSuppressionSync(): Promise<SendSuppressionSyncResul
       }[];
       const collected = collectSends(page.facts, new Date(cutoff));
       result.sends += collected.sends;
-      result.skippedOutsideWindow += collected.outsideWindow;
+      result.olderThanWindow += collected.outsideWindow;
       result.skippedUnattributed += collected.unattributed;
 
       const nextCursor = page.nextCursor;
@@ -185,7 +188,7 @@ export async function runSendSuppressionSync(): Promise<SendSuppressionSyncResul
     }
 
     console.log(
-      `[human-service] send_suppression_sync.run cursor=${result.fromCursor}->${result.toCursor} pages=${result.pages} sends=${result.sends} applied=${result.applied} created=${result.created} outsideWindow=${result.skippedOutsideWindow} unattributed=${result.skippedUnattributed} hasMore=${result.hasMore}`
+      `[human-service] send_suppression_sync.run cursor=${result.fromCursor}->${result.toCursor} pages=${result.pages} sends=${result.sends} applied=${result.applied} created=${result.created} olderThanWindow=${result.olderThanWindow} unattributed=${result.skippedUnattributed} hasMore=${result.hasMore}`
     );
     return result;
   } finally {

@@ -27,17 +27,19 @@
 // paying on both providers (apollo teaser + apify lead both carry it).
 //
 // Window = 3 months, enforced on read via last_served_at, unless the SERVE asks
-// for a shorter one (`excludeEmailedWithin`, src/lib/recontact-window.ts): every
+// for another one (`excludeEmailedWithin`, src/lib/recontact-window.ts: a shorter
+// window, or `never` = ever emailed by the brand, `heldUnder`): every
 // read path below takes the request's window as its last argument (absent = 3
 // months, byte-identical). No silent fallbacks.
 
-import { and, eq, gt, inArray, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, or, sql, type SQL } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { brandSuppressions, leadServes } from "../db/schema.js";
 import { personAddressSet } from "./person-emails.js";
 import {
   DEFAULT_EXCLUDE_EMAILED_WITHIN,
   WINDOW_INTERVAL,
+  holdsEverEmailed,
   type ExcludeEmailedWithin,
 } from "../lib/recontact-window.js";
 
@@ -49,6 +51,22 @@ import {
 // (the interval literal comes from a closed map, never from the request text).
 export const windowCutoff = (window: ExcludeEmailedWithin = DEFAULT_EXCLUDE_EMAILED_WITHIN) =>
   sql`now() - interval '${sql.raw(WINDOW_INTERVAL[window])}'`;
+
+// "This brand_suppressions row holds the person" under the serve's window: the
+// one predicate every serve read path uses. An interval window = served or
+// emailed inside it (absent / 3 months prints today's SQL byte for byte). `never`
+// (FRESH-NEVER-1106) = EVER emailed (`last_sent_at` set, any date), or only
+// served inside the default 3 months.
+export function heldUnder(window?: ExcludeEmailedWithin): SQL {
+  const recent = gt(brandSuppressions.lastServedAt, windowCutoff(window));
+  return holdsEverEmailed(window) ? or(isNotNull(brandSuppressions.lastSentAt), recent)! : recent;
+}
+
+// The exact negation, for the reveal's atomic re-claim of an existing row.
+function reclaimableUnder(window?: ExcludeEmailedWithin): SQL {
+  const lapsed = sql`${brandSuppressions.lastServedAt} <= ${windowCutoff(window)}`;
+  return holdsEverEmailed(window) ? sql`${brandSuppressions.lastSentAt} is null and ${lapsed}` : lapsed;
+}
 
 export function normalizeEmail(
   email: string | null | undefined
@@ -216,7 +234,7 @@ export async function partitionSuppressed<
       and(
         eq(brandSuppressions.orgId, orgId),
         inArray(brandSuppressions.brandId, brandIds),
-        gt(brandSuppressions.lastServedAt, windowCutoff(window)),
+        heldUnder(window),
         or(...matchConds)
       )
     );
@@ -268,7 +286,7 @@ export async function getSuppressionSet(
       and(
         eq(brandSuppressions.orgId, orgId),
         inArray(brandSuppressions.brandId, brandIds),
-        gt(brandSuppressions.lastServedAt, windowCutoff(window))
+        heldUnder(window)
       )
     );
 
@@ -318,7 +336,7 @@ async function anyAddressSuppressed(
         eq(brandSuppressions.orgId, orgId),
         inArray(brandSuppressions.brandId, brandIds),
         inArray(brandSuppressions.emailNorm, emailNorms),
-        gt(brandSuppressions.lastServedAt, windowCutoff(window))
+        heldUnder(window)
       )
     )
     .limit(1);
@@ -382,7 +400,7 @@ export async function claimServe(
               linkedinUrlNorm: sql`coalesce(excluded.linkedin_url_norm, ${brandSuppressions.linkedinUrlNorm})`,
               providerPersonId: sql`coalesce(excluded.provider_person_id, ${brandSuppressions.providerPersonId})`,
             },
-            setWhere: sql`${brandSuppressions.lastServedAt} <= ${windowCutoff(window)}`,
+            setWhere: reclaimableUnder(window),
           })
           .returning({ id: brandSuppressions.id });
         if (claimed.length === 0) throw new AlreadyServedForBrand();

@@ -50,7 +50,7 @@ import {
 import { partitionSuppressed } from "./suppression.js";
 import { completeRun, createRun } from "./runs.js";
 import { passLapsedFreeGates, selectLapsed, type LapsedCursor, type LapsedServe } from "./recontact-rereach.js";
-import { isShortenedWindow } from "../lib/recontact-window.js";
+import { holdsEverEmailed, isShortenedWindow } from "../lib/recontact-window.js";
 import { isJudgeableTeaser, withPersonTeasers } from "./person-teaser.js";
 import { tagFoundAlreadyTaken } from "./audience-provenance.js";
 import { bufferTeasers, popTeaserRow, restoreTeasers, type BufferedTeaser, type PoppedTeaserRow } from "./teaser-buffer.js";
@@ -529,7 +529,8 @@ async function nextCandidateFromList(
   };
   // FACTORY-P3 next outcomes (lead_found): the walk itself runs as the stored script while switched (candidate-walk.ts).
   const choose = await walkScriptSwitch();
-  if (choose.switched && choose.dynasty && identity.runId) return walkByScript(choose.dynasty, walk);
+  // `never` (FRESH-NEVER-1106) holds on a fact the script's page does not carry (ever emailed): our own walk.
+  if (choose.switched && choose.dynasty && identity.runId && !holdsEverEmailed(identity.excludeEmailedWithin)) return walkByScript(choose.dynasty, walk);
   return walkHere(walk);
 }
 
@@ -638,7 +639,8 @@ const walkUnits = (w: Walk, pageSize: number) => ({ ownNames: [...w.ownCompany.n
 /** Our own walk, one teaser at a time; a share of walks is recorded in the stored script's words (pages of one). */
 async function walkHere(w: Walk): Promise<NextCandidateResult> {
   const { audience, identity, sourceId, exclusions, ownCompany, target } = w;
-  const calls: DecisionCall[] | null = Math.random() < SERVICE_RECORD_SHARE ? [] : null;
+  // A `never` walk is not recorded for the script's proof: its facts cannot replay it (FRESH-NEVER-1106).
+  const calls: DecisionCall[] | null = !holdsEverEmailed(identity.excludeEmailedWithin) && Math.random() < SERVICE_RECORD_SHARE ? [] : null;
   // One `candidate-walk` run per walk of our own (Monitoring's service path, beside the stored script's run). It
   // spends nothing; fail-soft like every run of this service.
   const walkRunId = identity.runId && identity.userId
