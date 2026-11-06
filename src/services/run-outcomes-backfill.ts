@@ -233,8 +233,21 @@ const audienceBuilt = (r: PastRun) => (subjectId: string): Occurrence => ({
   outcomeKey: AUDIENCE_BUILT,
   subjectService: SUBJECT_SERVICE,
   subjectId,
-  performer: listBuiltPerformer(r.workflowSlug),
+  ...performerOfPastRun(r.taskName, r.workflowSlug),
 });
+
+/**
+ * The tasks whose runs ONLY a client's person ever triggers (OUTCOME-PERFORMER-1106): the portfolio launch opens
+ * its run only from POST /orgs/audiences/portfolio. Every other list task also runs from a timer or a staff route,
+ * and a past run does not say which: no performer (never a person who may not have acted).
+ */
+export const PERSON_ONLY_TASKS = new Set(["audience-portfolio-launch"]);
+
+/** The performer a PAST run's list states (spread into the occurrence; {} = none known). */
+export function performerOfPastRun(taskName: string, workflowSlug: string | null | undefined): { performer?: OutcomePerformer } {
+  const performer = listBuiltPerformer(workflowSlug, PERSON_ONLY_TASKS.has(taskName));
+  return performer ? { performer } : {};
+}
 
 /**
  * Plan the declarations of every spending run. `leadOf` answers the lead of a
