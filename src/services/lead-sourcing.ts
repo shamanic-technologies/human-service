@@ -131,6 +131,11 @@ async function loadChoice(scope: LeadSourcingScope): Promise<LeadSourcingChoice 
  * until evidence is read.
  */
 export async function ensureLeadSourcingChoice(scope: LeadSourcingScope, campaignId: string | null): Promise<LeadSourcingChoice> {
+  // A decision already taken is read with no lock (INCIDENT 2026-11-06 16:49 UTC: every Doc Dinners serve waited here
+  // behind a re-decision stuck on features-service, timed out at lead-service's 10 s, and rolled the cold-email Engine
+  // back). The lock only guards the FIRST write.
+  const existing = await loadChoice(scope);
+  if (existing) return existing;
   return withLock(`${scope.orgId}:${scope.brandId}:${scope.offerId}`, async () => {
     const existing = await loadChoice(scope);
     if (existing) return existing;
@@ -176,19 +181,53 @@ export async function refreshLeadSourcingChoice(
   identity: { userId: string; runId: string },
   now: Date = new Date()
 ): Promise<LeadSourcingChoice> {
-  return withLock(`${scope.orgId}:${scope.brandId}:${scope.offerId}`, async () => {
+  const key = `${scope.orgId}:${scope.brandId}:${scope.offerId}`;
+  // One re-decision per scope at a time, and at most one ASK per EVIDENCE_TTL_MS whatever its answer: an unreadable
+  // evidence never re-asks on every read (INCIDENT 2026-11-06: features-service answered 502 for hours, every serve
+  // queued one more re-decision behind the last).
+  const flying = refreshing.get(key);
+  if (flying) return flying;
+  const p = (async () => {
     const row = await loadChoice(scope);
     if (!row) throw new Error(`no lead sourcing choice for offer ${scope.offerId}: ensureLeadSourcingChoice first`);
     if (row.evidenceAt && now.getTime() - row.evidenceAt.getTime() < EVIDENCE_TTL_MS) return row;
-    let evidence: Map<string, OriginEvidence>;
-    try {
-      evidence = await fetchOfferSourcingEvidence({ ...scope, ...identity });
-    } catch (err) {
-      console.error(
-        `[human-service] lead_sourcing.evidence_unreadable org=${scope.orgId} brand=${scope.brandId} offer=${scope.offerId}: ${errorMessage(err)} (decision of ${row.decidedAt.toISOString()} stands)`
-      );
-      return row;
-    }
+    const asked = lastAsked.get(key);
+    if (asked !== undefined && now.getTime() - asked < EVIDENCE_TTL_MS) return row;
+    lastAsked.set(key, now.getTime());
+    return redecide(scope, identity, row, now);
+  })().finally(() => refreshing.delete(key));
+  refreshing.set(key, p);
+  return p;
+}
+
+/** Re-decisions in flight per scope, and when each scope last asked for evidence (this process). */
+const refreshing = new Map<string, Promise<LeadSourcingChoice>>();
+const lastAsked = new Map<string, number>();
+/** Tests: forget every ask. */
+export function resetLeadSourcingAsks(): void {
+  refreshing.clear();
+  lastAsked.clear();
+}
+
+/** The evidence is read OUTSIDE the scope's lock (never holding a serve); only the write takes it. */
+async function redecide(
+  scope: LeadSourcingScope,
+  identity: { userId: string; runId: string },
+  stale: LeadSourcingChoice,
+  now: Date
+): Promise<LeadSourcingChoice> {
+  let evidence: Map<string, OriginEvidence>;
+  try {
+    evidence = await fetchOfferSourcingEvidence({ ...scope, ...identity });
+  } catch (err) {
+    console.error(
+      `[human-service] lead_sourcing.evidence_unreadable org=${scope.orgId} brand=${scope.brandId} offer=${scope.offerId}: ${errorMessage(err)} (decision of ${stale.decidedAt.toISOString()} stands, asked again in ${EVIDENCE_TTL_MS / 60_000} min)`
+    );
+    return stale;
+  }
+  return withLock(`${scope.orgId}:${scope.brandId}:${scope.offerId}`, async () => {
+    // The decision as it stands now (the reconcile may have written meanwhile).
+    const row = (await loadChoice(scope)) ?? stale;
     const { chosen, reasons } = decideLeadSourcing(row.universeOriginSlugs, evidence);
     const changed = chosen.join(",") !== [...row.chosenOriginSlugs].sort().join(",");
     await db.transaction(async (tx) => {
