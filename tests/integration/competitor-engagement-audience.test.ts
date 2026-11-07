@@ -126,7 +126,7 @@ beforeEach(async () => {
   vi.mocked(proposeAudienceSplit).mockReset().mockResolvedValue({
     axes: ["geography"],
     segments: [
-      { name: "US SaaS founders", description: "Founders of B2B SaaS companies in the US.", icon: "x", iconConfidence: 1, estimatedLeadCount: null },
+      { name: "US SaaS founders", description: "Founders of B2B SaaS companies in the US.", icon: "x", iconConfidence: 1 },
     ],
   });
   vi.mocked(suggestApolloAudience).mockReset().mockResolvedValue({
@@ -219,8 +219,8 @@ describe("competitor-engagement audience at portfolio launch", () => {
     vi.mocked(proposeAudienceSplit).mockResolvedValue({
       axes: ["seniority_role"],
       segments: [
-        { name: "Heads of QA", description: "Heads of QA at B2B software companies.", icon: "x", iconConfidence: 1, estimatedLeadCount: null },
-        { name: "CTOs", description: "CTOs at B2B software companies.", icon: "y", iconConfidence: 1, estimatedLeadCount: null },
+        { name: "Heads of QA", description: "Heads of QA at B2B software companies.", icon: "x", iconConfidence: 1 },
+        { name: "CTOs", description: "CTOs at B2B software companies.", icon: "y", iconConfidence: 1 },
       ],
     });
     const res = await launched();

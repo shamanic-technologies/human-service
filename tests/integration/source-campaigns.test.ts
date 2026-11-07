@@ -261,7 +261,7 @@ describe("push: POST /orgs/source-campaigns/state", () => {
     await insertAudience({ name: "Engaged", filters: ENGAGEMENT_FILTERS, source: "linkedin_engagement_signal" });
     vi.mocked(proposeAudienceSplit).mockResolvedValue({
       axes: [],
-      segments: [{ name: "US clinic owners", description: "Owners of US clinics.", icon: "x", iconConfidence: 1, estimatedLeadCount: null }],
+      segments: [{ name: "US clinic owners", description: "Owners of US clinics.", icon: "x", iconConfidence: 1 }],
     } as never);
     const res = await push({ originSlug: COLD, campaignId: COLD_CAMPAIGN, status: "on" });
     expect(res.body.outcome).toBe("created");

@@ -1224,7 +1224,6 @@ export interface WideningSegment {
   name: string;
   description: string;
   icon: string | null;
-  estimatedLeadCount: number | null;
 }
 
 export const audienceWideningProposals = pgTable(
