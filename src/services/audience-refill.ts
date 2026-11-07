@@ -363,7 +363,8 @@ export function toWideningProposalView(row: WideningRow): WideningProposalView {
     status: row.status as WideningProposalView["status"],
     baseTarget: row.baseTarget,
     widenedTarget: row.widenedTarget,
-    segments: row.segments,
+    // Rows written before the size guess was dropped still hold it: serve only the named fields.
+    segments: row.segments.map(({ name, description, icon }) => ({ name, description, icon })),
     createdAt: row.createdAt.toISOString(),
     decidedAt: row.decidedAt ? row.decidedAt.toISOString() : null,
     createdAudienceIds: row.createdAudienceIds ?? [],
@@ -712,7 +713,6 @@ async function proposeWidening(args: {
         name: names[i],
         description: s.description,
         icon: s.icon ?? null,
-        estimatedLeadCount: s.estimatedLeadCount,
       })),
       status: "pending",
       createdByUserId: args.userId,
