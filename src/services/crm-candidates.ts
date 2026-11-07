@@ -32,6 +32,8 @@
 import { db } from "../db/index.js";
 import { audienceCandidates, type AudienceCandidate, type audiences, type TeaserSnapshot } from "../db/schema.js";
 import {
+  crmHandOut,
+  crmServeHandOut,
   crmServeNext,
   crmWriteEmailLookup,
   normalizeCrmContact,
@@ -60,7 +62,8 @@ export type CrmRevealReason =
   | "opted_out"
   | "own_company"
   | "bounced"
-  | "no_email";
+  | "no_email"
+  | "already_served"; // a hand-out another offer of the brand served first: never written to
 
 export interface CrmRevealResult {
   status: "served" | "not_served";
@@ -200,6 +203,72 @@ export async function nextCrmCandidate(
   }
 }
 
+/** The asker an offer audience is to crm-service's hand-outs (one per offer audience). */
+export function crmAskerOf(target: AudienceRow): string {
+  return `audience:${target.id}`;
+}
+
+/**
+ * The next CRM candidate of an offer's TARGET from one CRM list of the brand
+ * (offer-audiences.ts): crm-service hands the contact out to THIS target without
+ * burning it, so a decline leaves it for the brand's other offers. Same free
+ * gates as nextCrmCandidate; a contact failing one is declined for this asker.
+ */
+export async function nextCrmHandOutCandidate(
+  target: AudienceRow,
+  search: AudienceRow,
+  identity: Identity,
+  opts: CrmCandidateServeOptions
+): Promise<{ status: "candidate"; row: AudienceCandidate } | { status: "exhausted" }> {
+  const crmReach = crmReachOf(opts.reach);
+  const crmIdentity = crmIdentityOf(target, identity);
+  const optOuts = await loadOptOutExclusions(identity);
+  const ownCompany = await loadOwnCompany(identity.orgId, [target.brandId]);
+  const asker = crmAskerOf(target);
+  for (;;) {
+    const { contacts } = await crmHandOut(target.brandId, asker, 1, crmIdentity, {
+      uploadId: search.crmUploadId,
+      people: search.crmPeopleFilter,
+      reachableBy: crmReach,
+      relationships: identity.relationships ?? null,
+      stepFilter: identity.stepFilter ?? null,
+      includeEmailUnknown: !search.crmPeopleFilter,
+    });
+    const contact = contacts[0] ?? null;
+    if (!contact) return { status: "exhausted" };
+    const person = normalizeCrmContact(contact);
+    const unknown = isEmailUnknown(contact);
+    // A handed-out contact this asker is never handed again (open counts): passing over one is enough.
+    if (!unknown && !hasUsableEmail(person)) continue;
+    if (matchesOptOut(optOuts, { email: person.email, linkedinUrl: contact.linkedinUrl ?? null })) continue;
+    if (
+      isOwnCompanyPerson(ownCompany, person) ||
+      isOwnCompany(ownCompany, { name: contact.companyName ?? null, domain: normalizeDomain(contact.companyDomain) })
+    ) continue;
+    if (!unknown && (await isEmailBounced(identity, person.email))) continue;
+    if (!unknown && !personReaches(person, crmReach)) continue;
+    const [row] = await db
+      .insert(audienceCandidates)
+      .values({
+        orgId: identity.orgId,
+        audienceId: target.id,
+        providerPersonId: contact.id,
+        linkedinUrl: contact.linkedinUrl ?? null,
+        teaser: crmTeaser(contact),
+        organizationDomain: normalizeDomain(contact.companyDomain),
+        crmContact: contact,
+        searchAudienceId: search.id,
+      })
+      .onConflictDoNothing({ target: [audienceCandidates.audienceId, audienceCandidates.providerPersonId] })
+      .returning();
+    if (!row) continue;
+    console.log(
+      `[human-service] offer_audience.crm_candidate_offered org=${identity.orgId} audience=${target.id} list=${search.id} candidate=${row.id} email=${unknown ? "unknown" : "known"}`
+    );
+    return { status: "candidate", row };
+  }
+}
+
 /**
  * Reveal a CRM candidate: free when the contact has an email; otherwise the
  * email lookup, billed by apollo-service on this serve's run, then written back.
@@ -212,6 +281,12 @@ export async function revealCrmCandidate(
   const contact = row.crmContact!;
   const base = normalizeCrmContact(contact);
   if (hasUsableEmail(base)) {
+    // A hand-out (an offer audience's candidate) is burned for the brand only now.
+    if (contact.handOutId) {
+      const answer = await crmServeHandOut(contact.handOutId, audience.brandId, crmIdentityOf(audience, identity));
+      if (answer === "already_served") return { status: "not_served", person: null, reason: "already_served" };
+      if (answer !== "served") throw new Error(`[human-service] crm hand-out ${contact.handOutId} answered ${answer} at serve`);
+    }
     const served = await servedWithPersonId(identity.orgId, audience.id, base);
     return { status: "served", person: served.person, personId: served.personId, emailVerdict: null };
   }

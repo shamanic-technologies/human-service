@@ -54,6 +54,10 @@ export interface CrmContact {
   // known = primaryEmail is the address; unknown = handed out for its email to be
   // looked up (only with `includeEmailUnknown`).
   emailStatus?: "known" | "unknown" | "not_found" | null;
+  // A hand-out to ONE asker (crm-service v0.121.0, AUDIENCE-PER-OFFER-1107): the
+  // contact is not burned for the brand until that hand-out is served. Absent on a
+  // serve-next contact.
+  handOutId?: string;
 }
 
 // The PEOPLE pool of crm-service (contract live since crm-service v0.39.0): the
@@ -221,6 +225,108 @@ export async function crmServeNext(
     served: typeof data.served === "number" ? data.served : 0,
     exhausted: data.exhausted === true,
   };
+}
+
+// Hand out the next contact of the brand's CRM pool to ONE asker (an offer
+// audience) WITHOUT burning it (crm-service v0.121.0, AUDIENCE-PER-OFFER-1107):
+// the body is serve-next's plus `asker`. Out: anyone burned for the brand and
+// anyone already handed to this asker; another asker of the brand still gets them.
+export async function crmHandOut(
+  brandId: string,
+  asker: string,
+  limit: number,
+  identity: Identity,
+  scope: CrmServeScope = {}
+): Promise<{ contacts: CrmContact[]; exhausted: boolean }> {
+  const { url, key } = requireCrm();
+  const reachableBy = scope.reachableBy && scope.reachableBy.length > 0 ? [...scope.reachableBy] : null;
+  let res: Response;
+  try {
+    res = await fetchWithConnectRetry(`${url}/orgs/contacts/hand-outs`, {
+      method: "POST",
+      headers: downstreamHeaders(key, identity),
+      body: JSON.stringify({
+        brandId,
+        asker,
+        limit,
+        ...(scope.uploadId ? { uploadIds: [scope.uploadId] } : {}),
+        ...(scope.people ? { people: scope.people } : {}),
+        ...(reachableBy ? { reachableBy } : {}),
+        ...(scope.relationships ? { relationships: scope.relationships } : {}),
+        ...(scope.stepFilter ? { stepFilter: scope.stepFilter } : {}),
+        ...(scope.includeEmailUnknown ? { includeEmailUnknown: true } : {}),
+      }),
+    });
+  } catch (err) {
+    throw new ProviderError("crm", 0, errorString(err));
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ProviderError("crm", res.status, text);
+  }
+  const data = (await res.json()) as { contacts?: CrmContact[]; exhausted?: boolean };
+  const contacts = Array.isArray(data.contacts) ? data.contacts : [];
+  for (const c of contacts) {
+    if (typeof c.handOutId !== "string") throw new ProviderError("crm", 502, "hand-out without a handOutId");
+  }
+  return { contacts, exhausted: data.exhausted === true };
+}
+
+/** Serve a hand-out: the contact is burned for the brand. 409s are settled answers. */
+export async function crmServeHandOut(
+  handOutId: string,
+  brandId: string,
+  identity: Identity
+): Promise<"served" | "already_served" | "declined" | "email_unknown"> {
+  return handOutDecision(handOutId, "serve", { brandId }, identity, ["already_served", "declined", "email_unknown"]) as Promise<
+    "served" | "already_served" | "declined" | "email_unknown"
+  >;
+}
+
+/** Decline a hand-out: this asker is not offered the contact again; others still are. */
+export async function crmDeclineHandOut(
+  handOutId: string,
+  brandId: string,
+  reason: string,
+  identity: Identity
+): Promise<"declined" | "already_served"> {
+  return handOutDecision(handOutId, "decline", { brandId, reason }, identity, ["already_served"]) as Promise<
+    "declined" | "already_served"
+  >;
+}
+
+async function handOutDecision(
+  handOutId: string,
+  action: "serve" | "decline",
+  body: Record<string, unknown>,
+  identity: Identity,
+  settled409: string[]
+): Promise<string> {
+  const { url, key } = requireCrm();
+  let res: Response;
+  try {
+    res = await fetchWithConnectRetry(`${url}/orgs/contacts/hand-outs/${encodeURIComponent(handOutId)}/${action}`, {
+      method: "POST",
+      headers: downstreamHeaders(key, identity),
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    throw new ProviderError("crm", 0, errorString(err));
+  }
+  if (res.status === 409) {
+    const data = (await res.json().catch(() => null)) as { type?: string } | null;
+    if (data?.type && settled409.includes(data.type)) return data.type;
+    throw new ProviderError("crm", 409, JSON.stringify(data));
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ProviderError("crm", res.status, text);
+  }
+  const data = (await res.json()) as { status?: string };
+  if (data.status !== (action === "serve" ? "served" : "declined")) {
+    throw new ProviderError("crm", 502, `hand-out ${action} answered ${JSON.stringify(data)}`);
+  }
+  return data.status;
 }
 
 // Write the email lookup of a handed-out email-unknown contact back to crm-service
