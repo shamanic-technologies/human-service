@@ -343,6 +343,7 @@ describe("nobody left inside the target: a widening PROPOSAL, never active audie
       createdAudienceIds: [],
     });
     expect(outcome.proposal.segments.map((s: { name: string }) => s.name)).toEqual(["Site Engineers", "Architects"]);
+    expect(JSON.stringify(outcome.proposal.segments)).not.toContain("estimatedLeadCount");
 
     // Nothing created, the existing audience and its screen target untouched.
     const rows = await db.select().from(audiences).where(eq(audiences.brandId, BRAND_PAYING));

@@ -99,8 +99,8 @@ describe("POST /orgs/audiences/split", () => {
     expect(res.status).toBe(200);
     expect(res.body.axes).toEqual(["geography"]);
     expect(res.body.segments).toEqual([
-      { ...TWO[0], icon: "globe-hemisphere-west", iconConfidence: 0.9, estimatedLeadCount: null },
-      { ...TWO[1], icon: "globe-hemisphere-east", iconConfidence: 0.9, estimatedLeadCount: null },
+      { ...TWO[0], icon: "globe-hemisphere-west", iconConfidence: 0.9 },
+      { ...TWO[1], icon: "globe-hemisphere-east", iconConfidence: 0.9 },
     ]);
     const urls = fetchSpy.mock.calls.map((c) => String(c[0]));
     expect(urls).toEqual(["http://chat:8080/complete", "http://chat:8080/orgs/judgments"]);
@@ -112,30 +112,20 @@ describe("POST /orgs/audiences/split", () => {
     expect(await db.select().from(audiences)).toHaveLength(0);
   });
 
-  it("carries each segment's size guess from the SAME completion, null (never 0) when unusable", async () => {
+  it("never asks the model for a size guess, and never serves one it writes anyway", async () => {
     wire({
       axes: ["geography"],
       segments: [
-        { ...TWO[0], estimatedLeadCount: 14200.4 },
-        { ...TWO[1], estimatedLeadCount: 0 },
-        { name: "Asia SaaS founders", description: "Founders of B2B SaaS companies based in Asia.", estimatedLeadCount: "lots" },
+        { ...TWO[0], estimatedLeadCount: 14200 },
+        { ...TWO[1], estimatedLeadCount: 350 },
       ] as unknown as Array<{ name: string; description: string }>,
     });
-    const res = await propose("B2B SaaS founders in the US, Europe and Asia");
+    const res = await propose("B2B SaaS founders in the US and Europe");
     expect(res.status).toBe(200);
-    expect(res.body.segments.map((s: { estimatedLeadCount: unknown }) => s.estimatedLeadCount)).toEqual([
-      14200,
-      null,
-      null,
-    ]);
-    // No added call: still one completion + one judgment, and the icon judge
-    // never sees the size guess.
-    const urls = fetchSpy.mock.calls.map((c) => String(c[0]));
-    expect(urls).toEqual(["http://chat:8080/complete", "http://chat:8080/orgs/judgments"]);
-    const judgment = JSON.parse(fetchSpy.mock.calls[1][1].body);
-    expect(JSON.stringify(judgment.state)).not.toContain("estimatedLeadCount");
+    expect(JSON.stringify(res.body)).not.toContain("estimatedLeadCount");
     const completion = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(completion.responseSchema.properties.segments.items.required).toContain("estimatedLeadCount");
+    expect(completion.responseSchema.properties.segments.items.required).toEqual(["name", "description"]);
+    expect(JSON.stringify(completion)).not.toContain("estimatedLeadCount");
   });
 
   it("a narrow target may return ONE segment, with no axis", async () => {

@@ -97,8 +97,8 @@ beforeEach(async () => {
   vi.mocked(proposeAudienceSplit).mockReset().mockResolvedValue({
     axes: ["geography"],
     segments: [
-      { name: "US SaaS founders", description: "Founders of B2B SaaS companies in the US.", icon: "x", iconConfidence: 1, estimatedLeadCount: null },
-      { name: "Europe SaaS founders", description: "Founders of B2B SaaS companies in Europe.", icon: "y", iconConfidence: 1, estimatedLeadCount: null },
+      { name: "US SaaS founders", description: "Founders of B2B SaaS companies in the US.", icon: "x", iconConfidence: 1 },
+      { name: "Europe SaaS founders", description: "Founders of B2B SaaS companies in Europe.", icon: "y", iconConfidence: 1 },
     ],
   });
   vi.mocked(ensureTargetText).mockReset().mockImplementation(async (row) => row.targetText ?? `Own text of ${row.name}`);

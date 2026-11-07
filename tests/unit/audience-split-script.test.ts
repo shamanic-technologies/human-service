@@ -39,6 +39,7 @@ describe("our own split, recorded in the script's words", () => {
     switchState.mockResolvedValue({ switched: false, dynasty: null });
     const out = await proposeAudienceSplit("Clinics in the US and Europe", identity);
     expect(out.segments.map((s) => s.icon)).toEqual(["globe-hemisphere-west", "globe-hemisphere-east"]);
+    expect(JSON.stringify(out)).not.toContain("estimatedLeadCount");
     expect(recorded).toHaveLength(1);
     const r = recorded[0]!;
     expect(r).toMatchObject({ path: "service", runId: "proposal-run", targetAudience: "Clinics in the US and Europe", allowEmpty: false, proposal: out, error: null });
@@ -57,10 +58,11 @@ describe("the stored split proposes through our doors", () => {
       expect(w.status).toBe(200);
       const j = await splitDoor(token, "script-run", SPLIT_JUDGE_CALL, { state: { target: "T" }, questions: {} });
       expect(j.status).toBe(200);
-      return { runId: "script-run", scriptSlug: "audience_built/dy_split/v1", content: { axes: [], segments: [] } };
+      return { runId: "script-run", scriptSlug: "audience_built/dy_split/v1", content: { axes: [], segments: [{ name: "T", description: "T.", icon: "users", iconConfidence: 1, estimatedLeadCount: 350 }] } };
     });
     const out = await proposeAudienceSplit("T", identity);
-    expect(out).toEqual({ axes: [], segments: [] });
+    // An older dynasty's size guess never reaches the caller.
+    expect(out).toEqual({ axes: [], segments: [{ name: "T", description: "T.", icon: "users", iconConfidence: 1 }] });
     expect((completeJson.mock.calls[0]![0] as { identity: { runId: string } }).identity.runId).toBe("script-run");
     expect(recorded[0]).toMatchObject({ path: "script", runId: "script-run" });
 

@@ -3162,7 +3162,6 @@ export const WideningProposalSchema = z
           name: z.string(),
           description: z.string(),
           icon: z.string().nullable(),
-          estimatedLeadCount: z.number().int().nullable(),
         })
       )
       .openapi({ description: "The audiences accepting would create, in order. Nothing in them is contacted while pending." }),
@@ -3948,10 +3947,6 @@ export const SplitSegmentSchema = z
     iconConfidence: z.number().min(0).max(1).openapi({
       description: "The judge's own certainty about the icon (decorative: the icon is always set).",
     }),
-    estimatedLeadCount: z.number().int().positive().nullable().openapi({
-      description:
-        "Approximate number of people (decision-makers matching the segment) it would reach in a large B2B contact database, estimated by the same generation that writes the segments: no search runs, so it is available instantly with the cards. Right order of magnitude only; the real people-search count is measured after confirm. null when no estimate could be made, never 0.",
-    }),
   })
   .openapi("SplitSegment");
 
@@ -3990,7 +3985,7 @@ export const EstimateSplitSegmentsRequestSchema = z
       .max(8)
       .openapi({
         description:
-          "The proposed segments as returned by /orgs/audiences/split (or /orgs/audiences/suggest): name + description each, 1 to 8. Extra fields (icon, estimatedLeadCount) are accepted and ignored.",
+          "The proposed segments as returned by /orgs/audiences/split (or /orgs/audiences/suggest): name + description each, 1 to 8. Extra fields (such as icon) are accepted and ignored.",
       }),
   })
   .openapi("EstimateSplitSegmentsRequest");
