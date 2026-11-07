@@ -96,6 +96,7 @@ import {
   type AudienceSource,
 } from "./audience-sources.js";
 import { providerCanReach, type Reach } from "../lib/reach.js";
+import { brandListsOf, dropBufferedTeaser, isOfferTarget, peekTeaserForTarget, type BrandList } from "./offer-audiences.js";
 import { widenedVerdicts, type EmailVerdict } from "../lib/email-verification.js";
 import {
   claimRereach,
@@ -389,6 +390,9 @@ export async function nextCandidate(
       ? { status: "candidate", candidate: toView(next.row), target: next.target }
       : { status: "exhausted", candidate: null, reason: "pool_exhausted", target: next.target };
   }
+  // ONE AUDIENCE PER OFFER (offer-audiences.ts): a target has no list of its own,
+  // it walks the brand's lists.
+  if (isOfferTarget(audienceIn)) return nextCandidateForTarget(audienceIn, identityIn, deadline, budgetMs, reach);
   // SOURCES (audience-sources.ts): the slug names WHERE to look; an audience with
   // no source offers from its own list, exactly as before.
   const pick = await pickServeSource(audienceIn, identityIn.workflowTracking?.featureSlug);
@@ -515,6 +519,7 @@ async function nextCandidateFromList(
     audience,
     identity,
     sourceId,
+    pool: null,
     deadline,
     budgetMs,
     exclusions,
@@ -534,6 +539,91 @@ async function nextCandidateFromList(
   return walkHere(walk);
 }
 
+/**
+ * The next candidate of an offer's TARGET (offer-audiences.ts): the target's lapsed offers first, then each brand
+ * list in turn, read without being consumed. Candidates, decisions and yield are the target's; the candidate
+ * records the list that found it. Our own walk only (the stored walk script reads one audience's own buffer).
+ */
+async function nextCandidateForTarget(
+  target: AudienceRow,
+  identity: Identity,
+  deadline: number,
+  budgetMs: number,
+  reach: readonly Reach[]
+): Promise<NextCandidateResult> {
+  if (identity.stepFilter) {
+    throw new AudienceNotServableError("A stepFilter needs a CRM-sourced serve; an offer audience walks Apollo lists.");
+  }
+  const text = screenTarget(target);
+  if (!providerCanReach("apollo", reach)) {
+    console.log(
+      `[human-service] reach.provider_cannot_reach org=${identity.orgId} audience=${target.id} provider=apollo reach=${reach.join(",")} path=candidates`
+    );
+    return { status: "exhausted", candidate: null, reason: "unreachable_by_provider", target: null };
+  }
+  const yieldNow = await readCandidateYield(target.id, null);
+  if (yieldNow?.spent) {
+    console.log(
+      `[human-service] offer_audience.yield_exhausted org=${identity.orgId} audience=${target.id} screens=${yieldNow.screens} passes=${yieldNow.passes}`
+    );
+    return { status: "exhausted", candidate: null, reason: "yield_exhausted", target: text };
+  }
+  const exclusions = await loadServeExclusions(identity);
+  const ownCompany = await loadOwnCompany(identity.orgId, [target.brandId]);
+  while (Date.now() < deadline) {
+    const lapsed = await retakeLapsedOffer(identity.orgId, target.id, null);
+    if (!lapsed) break;
+    const failed = await firstFailedFreeCheck(target, identity, lapsed, exclusions, ownCompany);
+    if (!failed) return { status: "candidate", candidate: toView(lapsed), target: text };
+    await db.delete(audienceCandidates).where(and(eq(audienceCandidates.id, lapsed.id), eq(audienceCandidates.status, "offered")));
+  }
+  if (Date.now() >= deadline) return { status: "pending", candidate: null, target: text };
+
+  const lists = await brandListsOf(target, identity.workflowTracking?.featureSlug);
+  let pending: NextCandidateResult | null = null;
+  for (const list of lists) {
+    let view = list.view;
+    if (!list.source && needsApolloPointerBuild(view)) view = await ensureApolloPointer(view, identity);
+    const filters = (view.filters ?? null) as Record<string, unknown> | null;
+    if (!filters || Object.keys(filters).length === 0) continue;
+    const walk: Walk = {
+      audience: target,
+      identity,
+      sourceId: null,
+      pool: {
+        list: { ...list, view },
+        searchIdentity: apolloIdentity(view, { ...identity, ...(list.source ? { audienceSourceId: list.source.id } : {}) }),
+      },
+      deadline,
+      budgetMs,
+      exclusions,
+      ownCompany,
+      apolloFilters: hasApolloNativeFilters(view) ? {} : (filters as PeopleSearchFilters),
+      apolloSearchParams: hasApolloNativeFilters(view) ? filters : undefined,
+      target: text,
+      walked: 0,
+      held: [],
+      terminal: null,
+      offered: null,
+    };
+    const result = await walkHere(walk);
+    if (result.status === "candidate") {
+      if (list.source) await markSourceServed(list.source.id);
+      return result;
+    }
+    if (result.status === "pending") {
+      if (Date.now() >= deadline) return result;
+      pending = result;
+      continue;
+    }
+    if (list.source && result.reason === "no_recent_posts") await persistSourceExhaustion(list.source.id, { reachable: false });
+  }
+  console.log(
+    `[human-service] offer_audience.lists_walked org=${identity.orgId} audience=${target.id} lists=${lists.length} result=${pending ? "pending" : "exhausted"}`
+  );
+  return pending ?? { status: "exhausted", candidate: null, reason: "pool_exhausted", target: text };
+}
+
 // ─── The walk (FACTORY-P3 next outcomes: lead_found) ──────────────────────────────────────────────────────────────
 
 /** One walk of an apollo audience's teasers, as both our own walk and the stored script's doors hold it. */
@@ -541,6 +631,11 @@ interface Walk {
   audience: AudienceRow;
   identity: Identity;
   sourceId: string | null;
+  /**
+   * A TARGET's walk (offer-audiences.ts): the brand list it reads, without consuming it, and the identity its
+   * searches run under. null = the audience's own list (or source), popped as before.
+   */
+  pool: { list: BrandList; searchIdentity: Identity } | null;
   deadline: number;
   budgetMs: number;
   exclusions: Awaited<ReturnType<typeof loadServeExclusions>>;
@@ -570,15 +665,20 @@ async function nextTeaser(w: Walk): Promise<{ teaser: PoppedTeaserRow } | { end:
       return { end: { status: "pending", candidate: null, target } };
     }
     w.walked += 1;
-    const teaser = await popTeaserRow(identity.orgId, audience.id, sourceId);
+    const pool = w.pool;
+    const listAudienceId = pool ? pool.list.search.id : audience.id;
+    const listSourceId = pool ? (pool.list.source?.id ?? null) : sourceId;
+    const teaser = pool
+      ? await peekTeaserForTarget(identity.orgId, listAudienceId, listSourceId, audience.id)
+      : await popTeaserRow(identity.orgId, audience.id, sourceId);
     if (teaser) return { teaser };
     const search = await peopleSearch({
       provider: "apollo",
       filters: w.apolloFilters,
       apolloSearchParams: w.apolloSearchParams,
-      audienceId: audience.id,
+      audienceId: listAudienceId,
       deadline,
-      identity,
+      identity: pool ? pool.searchIdentity : identity,
     });
     if (search.people.length === 0 && search.notReady) {
       return { end: { status: "pending", candidate: null, target } };
@@ -588,11 +688,11 @@ async function nextTeaser(w: Walk): Promise<{ teaser: PoppedTeaserRow } | { end:
         noRecentPostsAnswer(identity.orgId, audience.id, "candidates");
         return { end: { status: "exhausted", candidate: null, reason: "no_recent_posts", target } };
       }
-      if (sourceId) await persistSourceExhaustion(sourceId, { reachable: true });
-      else await persistReachableCountOnExhaustion(identity.orgId, audience.id);
+      if (listSourceId) await persistSourceExhaustion(listSourceId, { reachable: true });
+      else await persistReachableCountOnExhaustion(identity.orgId, listAudienceId);
       return { end: { status: "exhausted", candidate: null, reason: "pool_exhausted", target } };
     }
-    await bufferTeasers(identity.orgId, audience.id, search.people, sourceId);
+    await bufferTeasers(identity.orgId, listAudienceId, search.people, listSourceId);
   }
 }
 
@@ -618,6 +718,7 @@ async function offerTeaser(w: Walk, popped: BufferedTeaser): Promise<AudienceCan
       teaser: teaser.teaser,
       organizationDomain: teaser.organizationDomain,
       sourceId,
+      ...(w.pool ? { searchAudienceId: w.pool.list.search.id, searchSourceId: w.pool.list.source?.id ?? null } : {}),
     })
     .onConflictDoNothing({
       target: [audienceCandidates.audienceId, audienceCandidates.providerPersonId],
@@ -679,10 +780,14 @@ async function walkHere(w: Walk): Promise<NextCandidateResult> {
       const failed = await firstFailedFreeCheck(audience, identity, teaser, exclusions, ownCompany);
       if (failed) {
         calls?.push({ name: DECIDE_CALL, args: { verdicts: [{ ref: teaser.providerPersonId, verdict: failed }] }, answer: { ok: true, data: { offered: null } } });
+        // A shared brand list keeps a teaser another target may take; a person no target can take leaves it.
+        if (w.pool && failed !== "rejected") await dropBufferedTeaser(teaser.id);
         continue;
       }
       const row = await offerTeaser(w, teaser);
       calls?.push({ name: DECIDE_CALL, args: { verdicts: [{ ref: teaser.providerPersonId, verdict: "offer" }] }, answer: { ok: true, data: { offered: row ? { candidateId: row.id } : null } } });
+      // Not offered without facts about the person: no target can judge them either.
+      if (!row && w.pool) await dropBufferedTeaser(teaser.id);
       if (!row) continue;
       return finish({ status: "candidate", candidate: toView(row), target });
     }
@@ -1034,9 +1139,12 @@ export async function revealCandidate(
     : null;
   const audienceView = source ? sourceView(audienceIn, source) : audienceIn;
   assertCandidateProvider(audienceView, identityIn);
-  const identity = apolloIdentity(audienceView, {
+  // A target's candidate (offer-audiences.ts): its reveal runs as the brand list that found it.
+  const listView = existing.searchAudienceId ? await brandListView(existing.searchAudienceId, existing.searchSourceId) : null;
+  const identity = apolloIdentity(listView ?? audienceView, {
     ...identityIn,
     ...(existing.sourceId ? { audienceSourceId: existing.sourceId } : {}),
+    ...(existing.searchSourceId ? { audienceSourceId: existing.searchSourceId } : {}),
   });
   if (existing.status === "revealed") {
     return { ...storedReveal(existing.revealResult), replayed: true };
@@ -1074,6 +1182,7 @@ export async function revealCandidate(
       ? await revealRereach(audienceIn, identity, rereach)
       : await revealFresh(audienceIn, identity, claimed.providerPersonId);
     if (result.status === "served" && existing.sourceId) await markSourceServed(existing.sourceId);
+    if (result.status === "served" && existing.searchSourceId) await markSourceServed(existing.searchSourceId);
   } catch (err) {
     await releaseFailedReveal(identity.orgId, audienceIn.id, claimed, err);
     throw err;
@@ -1086,6 +1195,14 @@ export async function revealCandidate(
     `[human-service] audience.candidate_revealed org=${identity.orgId} audience=${audienceIn.id} candidate=${candidateId} status=${result.status}${result.reason ? ` reason=${result.reason}` : ""}`
   );
   return { ...result, replayed: false };
+}
+
+async function brandListView(searchAudienceId: string, searchSourceId: string | null): Promise<AudienceRow | null> {
+  const [search] = await db.select().from(audiences).where(eq(audiences.id, searchAudienceId));
+  if (!search) return null;
+  if (!searchSourceId) return search;
+  const source = ((await sourcesOf([search.id])).get(search.id) ?? []).find((s) => s.id === searchSourceId);
+  return source ? sourceView(search, source) : search;
 }
 
 // A CRM candidate's reveal: the same claim / store / replay as the apollo one,

@@ -1885,6 +1885,16 @@
             "format": "uuid",
             "description": "The client PROFILE (WHO, a cold audience the client keeps or pauses on the Targeting page) this source list was built for: a buying-signal list (hiring now, new in role, recently funded) or a competitor-post engagement list finds THAT profile's people, screened against the profile's text. Pausing or archiving the profile pauses its lists; resuming it resumes them (unless the source itself is off). null on a profile itself, on a whole-ICP list built before profiles had their own (retired once they do), and on every other audience. Show profiles = rows with null here and channels[0].list = apollo_search; sources = channels[0].list."
           },
+          "role": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "target",
+              "search",
+              null
+            ],
+            "description": "AUDIENCE-PER-OFFER-1107. 'target' = THE audience of its offer: its text is who the offer targets, it has no list of its own and finds people through the brand's lists, each person judged against its text. 'search' = a list of the brand (Apollo search, signals, engagement) walked by every offer audience of it; hidden from GET /orgs/audiences unless role=search. null = an audience as before."
+          },
           "canonicalAudienceId": {
             "type": "string",
             "nullable": true,
@@ -1978,6 +1988,7 @@
           "status",
           "source",
           "profileAudienceId",
+          "role",
           "canonicalAudienceId",
           "filters",
           "avatarUrl",
@@ -8799,6 +8810,161 @@
           "totals",
           "months"
         ]
+      },
+      "RealignOfferAudiencesResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "offerId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "audienceId": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "uuid"
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "created",
+                    "would_create",
+                    "exists"
+                  ]
+                }
+              },
+              "required": [
+                "offerId",
+                "audienceId",
+                "outcome"
+              ]
+            }
+          },
+          "searches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "made_search",
+                    "would_make_search",
+                    "already_search"
+                  ]
+                }
+              },
+              "required": [
+                "audienceId",
+                "outcome"
+              ]
+            }
+          }
+        },
+        "required": [
+          "dryRun",
+          "targets",
+          "searches"
+        ]
+      },
+      "RealignOfferAudiencesRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "orgId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "brandId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "offers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "offerId": {
+                  "type": "string",
+                  "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "offerId",
+                "name",
+                "text"
+              ]
+            },
+            "maxItems": 20
+          },
+          "searchAudienceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            },
+            "maxItems": 500
+          }
+        },
+        "required": [
+          "reason",
+          "orgId",
+          "brandId",
+          "offers",
+          "searchAudienceIds"
+        ]
+      },
+      "RevertOfferAudiencesResponse": {
+        "type": "object",
+        "properties": {
+          "restoredSearches": {
+            "type": "integer"
+          },
+          "deprecatedTargets": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "restoredSearches",
+          "deprecatedTargets"
+        ]
+      },
+      "RevertOfferAudiencesRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        },
+        "required": [
+          "reason"
+        ]
       }
     },
     "parameters": {}
@@ -10694,6 +10860,18 @@
             },
             "required": false,
             "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "target",
+                "search"
+              ]
+            },
+            "required": false,
+            "name": "role",
             "in": "query"
           },
           {
@@ -16974,6 +17152,118 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TeaserScreeningResearchResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/offer-audiences/realign": {
+      "post": {
+        "summary": "AUDIENCE-PER-OFFER-1107: give each listed offer its ONE audience (role 'target', its text = the offer's text, no list of its own) and turn the listed audience rows into lists of the brand (role 'search'), walked by every offer audience of the brand, each person judged against the offer's text. One transaction, recorded under `reason`; idempotent (an offer that has its audience keeps it); `?dryRun=true` writes nothing; reversible via /realign/revert.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "dryRun",
+            "in": "query"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RealignOfferAudiencesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Realignment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RealignOfferAudiencesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body, or a deprecated / offer audience listed as a search",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "An audience not in this org and brand",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/offer-audiences/realign/revert": {
+      "post": {
+        "summary": "Undo one realignment (by `reason`): each list gets its previous role back, each offer audience it created is deprecated. Nothing deleted.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevertOfferAudiencesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Revert result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevertOfferAudiencesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }

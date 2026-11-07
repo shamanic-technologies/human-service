@@ -113,7 +113,13 @@ export interface BrandPool {
   dailyPace: number;
   low: boolean;
   /** Why the pool could not be measured. Null when it was. */
-  unmeasurable: "pointer_build_pending" | "crm_audience" | "linkedin_engagement_unsized" | "no_active_audience" | null;
+  unmeasurable:
+    | "pointer_build_pending"
+    | "crm_audience"
+    | "linkedin_engagement_unsized"
+    | "no_active_audience"
+    | "offer_audience"
+    | null;
 }
 
 /**
@@ -157,6 +163,12 @@ export async function loadBrandPools(opts: { brandId?: string } = {}): Promise<B
     // Every active audience was paused/archived by the client: their choice.
     if (active.length === 0) {
       pools.push({ ...base, remaining: 0, low: false, unmeasurable: "no_active_audience" });
+      continue;
+    }
+    // A brand whose offers have ONE audience each (offer-audiences.ts): a new list
+    // is the offer's text's business, never a refill audience beside it.
+    if (active.some((a) => a.role === "target")) {
+      pools.push({ ...base, remaining: 0, low: false, unmeasurable: "offer_audience" });
       continue;
     }
     // A CRM audience has no provider count, so its Remaining reads 0 whatever
