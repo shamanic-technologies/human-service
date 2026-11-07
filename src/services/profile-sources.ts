@@ -84,6 +84,7 @@ export function sourceKeyOf(row: Pick<AudienceRow, "filters">): SourceKey | null
 export function isProfile(row: AudienceRow): boolean {
   return (
     row.provider === "apollo" &&
+    row.role !== "target" &&
     !row.profileAudienceId &&
     row.status !== "deprecated" &&
     audienceListKind(row) === "apollo_search"

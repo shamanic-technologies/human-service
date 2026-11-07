@@ -635,6 +635,12 @@ export async function computeAudienceContactability(
     // once serve-next has walked it to exhaustion (reachable_count); before
     // that it is UNKNOWN, never 0. Same for a Google Maps list (GMAPS-SOURCE-1103):
     // its size is what its searches find, known once they all ran.
+    // An offer's target (offer-audiences.ts) finds people through the brand's lists:
+    // no pool of its own, UNKNOWN, never 0.
+    if (row.role === "target") {
+      result.set(row.id, null);
+      continue;
+    }
     if (isLinkedinEngagementFilters(row.filters) || row.provider === "google_maps") {
       if (row.reachableCount === null || row.reachableCount === undefined) {
         result.set(row.id, null);
@@ -2140,6 +2146,8 @@ export function needsApolloPointerBuild(
   const filters = audience.filters as Record<string, unknown> | null;
   return (
     audience.provider === "apollo" &&
+    // An offer's target has no list of its own (offer-audiences.ts): nothing to build.
+    audience.role !== "target" &&
     !audience.apolloAudienceId &&
     (!filters || Object.keys(filters).length === 0)
   );
@@ -2567,6 +2575,11 @@ export async function serveNextPerson(
   const deadline = Date.now() + budgetMs;
   const provider = audience.provider;
   const featureSlug = identity.workflowTracking?.featureSlug;
+  if (audience.role === "target") {
+    throw new AudienceNotServableError(
+      "An offer audience is served through candidates/next (each person judged against its text before the reveal)."
+    );
+  }
 
   // CRM sourcing — two ways in, handled before the filters guard because a crm
   // serve legitimately has no stored filters:

@@ -88,6 +88,7 @@ const TABLES = [
   "audience_source_merges",
   "lead_sourcing_choices",
   "lead_sourcing_choice_changes",
+  "offer_audience_realignments",
   "google_maps_queries",
   "google_maps_places",
   "google_maps_brand_claims",
@@ -146,6 +147,12 @@ export async function transferBrand(
       add(
         "lead_sourcing_choice_changes",
         (await tx`UPDATE lead_sourcing_choice_changes SET org_id = ${targetOrgId}, brand_id = ${targetBrandId}
+                  WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`).length
+      );
+      // The realignment ledger follows its audiences (AUDIENCE-PER-OFFER-1107).
+      add(
+        "offer_audience_realignments",
+        (await tx`UPDATE offer_audience_realignments SET org_id = ${targetOrgId}, brand_id = ${targetBrandId}
                   WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`).length
       );
       if (await tableExists(tx, "lists")) {

@@ -65,6 +65,7 @@ section — the port binds first).
 | Internal | `POST /internal/backfill-apollo-audience-pointers` | apiKey | One-time data fix ("one filter vocabulary" Wave 2): for every `provider='apollo'` audience lacking `apollo_audience_id`, build a faithful Apollo audience via apollo-service `POST /audiences/suggest-from-segment` (from the row's name + description), then store the **pointer** + cached faithful filters (replacing the old lossy neutral blob) + count. Idempotent (scoped to `apollo_audience_id IS NULL`), `?dryRun=true`, `?async=true`, reversible |
 | Internal | `POST /internal/backfill-audience-offers` | apiKey | One-time data fix: attribute every pre-existing offer-less audience to the offer its `(org, brand)` holds, read from brand-service. A pair with no offer — or with several — stays NULL and is reported, never guessed (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/recover-suppressions` | apiKey | One-time data repair: for a caller-supplied set of `{orgId, brandId, email}`, archive the `brand_suppressions` row into the reversible `suppression_recoveries` ledger (tagged with a `reason`) and DELETE it, so people who were served but never actually contacted become emittable again for their brand. Idempotent (unique `(reason, org, brand, email_norm)`), `?dryRun=true`, reversible. NOT a sweep — the set is supplied, never inferred |
+| Internal | `POST /internal/offer-audiences/realign` (+ `/revert`) | apiKey | AUDIENCE-PER-OFFER-1107: one audience per offer (`role='target'`, the offer's text), the given rows become lists of the brand (`role='search'`) walked by every offer audience (`?dryRun`, reversible). See "ONE audience per offer" |
 | Internal | `POST /internal/merge-source-audiences` (+ `/revert`) | apiKey | One-time data fix (AUDIENCE-SOURCES-1016): each per-source audience row becomes a SOURCE of its profile, the row deprecated -> canonical = profile. `?dryRun&orgId&brandId`, reversible, nothing archived. See "Audience x source" |
 | Internal | `POST /internal/rejudge-blank-candidates` (+ `/revert`) | apiKey | One-time repair (BLANK-CANDIDATES-1101): re-offer candidates declined with no facts about the person, with the person's stored teaser (`?dryRun`, reversible). See "Never a blank candidate" |
 | Internal | `POST /internal/recover-suppressions/revert` | apiKey | Undo a recovery: restore every archived suppression row carrying `reason` verbatim + drop the ledger rows. A person re-suppressed by a fresh serve keeps the newer row |
@@ -2210,6 +2211,36 @@ decides which origins the brand uses. Decision per (org, brand, offer) in `lead_
 - **Read**: `GET /orgs/lead-sourcing/sources?brandId&offerId` (x-org-id) = `chosenOriginSlugs` + per origin
   reason and evidence; lead-service files a serve under Lead Sourcing only for a chosen origin. Spends nothing.
   Tests: `tests/unit/lead-sourcing-decision.test.ts`, `tests/integration/lead-sourcing.test.ts`.
+
+### ONE audience per offer — the brand's lists serve every offer (`src/services/offer-audiences.ts`, AUDIENCE-PER-OFFER-1107)
+
+Owner 2026-11-07: an offer has ONE audience, a plain-language text (the offer's own, held by brand-service); the
+lists that find people (Apollo searches, signals, engagement) belong to the BRAND; Jev (lead-service's pre-pay
+screen) judges each person against each offer's text. No variants, no audience per source, no list hand-attached
+to an offer. `audiences.role` (migration `0054`):
+- **`target`** = THE audience of its offer (one live per (org, brand, offer), partial unique index): `nl_prompt` =
+  `target_text` = the offer's text, `provider='apollo'`, no filters / pointer of its own. Served by
+  `candidates/next` only (serve-next 422). Size / Remaining UNKNOWN (omitted). Never a profile (no source build,
+  no avatar sweep), never a pointer build. A brand with one makes the refill skip it (`offer_audience`).
+- **`search`** = a list of the brand (a former audience row: filters / pointer, cursor, buffer, sources intact).
+  Hidden from `GET /orgs/audiences` unless `?role=search`. Its own walk (if any caller still serves it) unchanged.
+- **NULL** = an audience as before, byte-identical.
+- **The shared walk** (`nextCandidateForTarget`, `audience-candidates.ts`): the target's lapsed offers, then each
+  ACTIVE search's own list + ON apollo sources (`brandListsOf`: origin slug narrows to that kind, `lead-sourcing`
+  to its stored choice; random order, recently walked-out sources last). A teaser is READ, not popped
+  (`peekTeaserForTarget`: skips persons this target already has a candidate / rejection for); a person no target
+  can take (taken for the brand, opted out, won, own company, bounced, no person facts) is deleted from the buffer;
+  a refill advances the search's cursor for every target. Candidate / decision / yield on the TARGET; the
+  candidate records `search_audience_id` / `search_source_id`, its reveal runs as that list. A person offer A
+  declines is offered to offer B from the same page; one A revealed is `taken` for B.
+- **CRM files are NOT walked yet**: crm-service burns a contact brand-wide at hand-out, so a person one offer
+  declines would be lost for the others. They stay searches, unwalked, until crm-service hands out without burning.
+- **Realign** `POST /internal/offer-audiences/realign?dryRun` `{reason, orgId, brandId, offers[{offerId, name,
+  text}], searchAudienceIds[]}`: creates each offer's target (an existing one is kept), turns the rows into
+  searches; one transaction, ledger `offer_audience_realignments` (in the brand transfer); `/realign/revert
+  {reason}` gives each row its previous role back and deprecates the targets it created. Nothing deleted.
+- The text is edited like any audience's (`PATCH /orgs/audiences/{id}` `nlPrompt` carries `target_text`).
+- Tests: `tests/integration/offer-audiences.test.ts`.
 
 ### Audience x source — a SOURCE is not an AUDIENCE (`src/services/audience-sources.ts`, AUDIENCE-SOURCES-1016)
 

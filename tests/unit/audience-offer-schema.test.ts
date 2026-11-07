@@ -115,6 +115,7 @@ describe("AudienceSchema — offerId is always present on a read", () => {
     status: "active" as const,
     source: null,
     profileAudienceId: null,
+    role: null,
     canonicalAudienceId: null,
     filters: null,
     avatarUrl: null,
