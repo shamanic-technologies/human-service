@@ -1187,6 +1187,10 @@ export const AudienceSchema = z
       description:
         "The client PROFILE (WHO, a cold audience the client keeps or pauses on the Targeting page) this source list was built for: a buying-signal list (hiring now, new in role, recently funded) or a competitor-post engagement list finds THAT profile's people, screened against the profile's text. Pausing or archiving the profile pauses its lists; resuming it resumes them (unless the source itself is off). null on a profile itself, on a whole-ICP list built before profiles had their own (retired once they do), and on every other audience. Show profiles = rows with null here and channels[0].list = apollo_search; sources = channels[0].list.",
     }),
+    role: z.enum(["target", "search"]).nullable().openapi({
+      description:
+        "AUDIENCE-PER-OFFER-1107. 'target' = THE audience of its offer: its text is who the offer targets, it has no list of its own and finds people through the brand's lists, each person judged against its text. 'search' = a list of the brand (Apollo search, signals, engagement) walked by every offer audience of it; hidden from GET /orgs/audiences unless role=search. null = an audience as before.",
+    }),
     canonicalAudienceId: z.string().uuid().nullable().openapi({
       description:
         "When this audience is a deprecated provider-variant (e.g. retired '<base> [Apify]' from the apify->apollo migration), the id of its active canonical replacement. Membership/stats reads resolve a deprecated match to this audience. null for non-deprecated / unlinked rows.",
@@ -1347,6 +1351,9 @@ export const ListAudiencesQuerySchema = z.object({
   // profileAudienceId). Omitted = no narrowing.
   profileAudienceId: z.string().uuid().optional(),
   status: AudienceStatusSchema.optional(),
+  // AUDIENCE-PER-OFFER-1107: the brand's lists (role 'search') are hidden by
+  // default; `role=search` lists only them, `role=target` only offer audiences.
+  role: z.enum(["target", "search"]).optional(),
 });
 
 export const AudienceMembersQuerySchema = z.object({
@@ -5339,6 +5346,90 @@ registry.registerPath({
   security: [{ apiKey: [] }],
   responses: {
     200: { description: "Screen decisions", content: { "application/json": { schema: TeaserScreeningResearchResponseSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+// ─── AUDIENCE-PER-OFFER-1107: one audience per offer ─────────────────────────
+
+export const RealignOfferAudiencesRequestSchema = z
+  .object({
+    reason: z.string().min(1).max(120),
+    orgId: z.string().regex(LAX_UUID_REGEX, "orgId must be a valid UUID"),
+    brandId: z.string().regex(LAX_UUID_REGEX, "brandId must be a valid UUID"),
+    offers: z
+      .array(
+        z.object({
+          offerId: z.string().regex(LAX_UUID_REGEX, "offerId must be a valid UUID"),
+          name: z.string().min(1).max(200),
+          text: z.string().min(1),
+        })
+      )
+      .max(20),
+    searchAudienceIds: z.array(z.string().regex(LAX_UUID_REGEX)).max(500),
+  })
+  .openapi("RealignOfferAudiencesRequest");
+
+export const RevertOfferAudiencesRequestSchema = z
+  .object({ reason: z.string().min(1).max(120) })
+  .openapi("RevertOfferAudiencesRequest");
+
+const RealignOfferAudiencesResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    targets: z.array(
+      z.object({
+        offerId: z.string().uuid(),
+        audienceId: z.string().uuid().nullable(),
+        outcome: z.enum(["created", "would_create", "exists"]),
+      })
+    ),
+    searches: z.array(
+      z.object({
+        audienceId: z.string().uuid(),
+        outcome: z.enum(["made_search", "would_make_search", "already_search"]),
+      })
+    ),
+  })
+  .openapi("RealignOfferAudiencesResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/offer-audiences/realign",
+  summary:
+    "AUDIENCE-PER-OFFER-1107: give each listed offer its ONE audience (role 'target', its text = the offer's text, no list of its own) and turn the listed audience rows into lists of the brand (role 'search'), walked by every offer audience of the brand, each person judged against the offer's text. One transaction, recorded under `reason`; idempotent (an offer that has its audience keeps it); `?dryRun=true` writes nothing; reversible via /realign/revert.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: z.object({ dryRun: z.enum(["true", "false"]).optional() }),
+    body: { content: { "application/json": { schema: RealignOfferAudiencesRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Realignment", content: { "application/json": { schema: RealignOfferAudiencesResponseSchema } } },
+    400: { description: "Invalid body, or a deprecated / offer audience listed as a search", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    404: { description: "An audience not in this org and brand", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/offer-audiences/realign/revert",
+  summary:
+    "Undo one realignment (by `reason`): each list gets its previous role back, each offer audience it created is deprecated. Nothing deleted.",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: RevertOfferAudiencesRequestSchema } } } },
+  responses: {
+    200: {
+      description: "Revert result",
+      content: {
+        "application/json": {
+          schema: z
+            .object({ restoredSearches: z.number().int(), deprecatedTargets: z.number().int() })
+            .openapi("RevertOfferAudiencesResponse"),
+        },
+      },
+    },
+    400: { description: "Invalid body", content: { "application/json": { schema: ErrorSchema } } },
     401: { description: "Unauthorized" },
   },
 });

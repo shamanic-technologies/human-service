@@ -588,6 +588,10 @@ export const audiences = pgTable(
     // that list is OFF while the audience keeps running through its other sources
     // (audience_sources). 'active' otherwise.
     ownSourceStatus: text("own_source_status").notNull().default("active"),
+    // AUDIENCE-PER-OFFER-1107 (migration 0054, src/services/offer-audiences.ts):
+    // 'target' = THE audience of its offer (text only); 'search' = a list of the
+    // brand walked by every target of it; NULL = an audience as before.
+    role: text("role").$type<AudienceRole>(),
     // Neutral PeopleSearchFilters shape (maps to both providers).
     filters: jsonb("filters").$type<Record<string, unknown>>(),
     // Hosted avatar URL.
@@ -1076,6 +1080,10 @@ export const audienceCandidates = pgTable(
     // A CRM-served candidate (0048): the crm-service contact as handed out, so the
     // reveal (and a re-offer after a crash) needs no second crm call. NULL = apollo.
     crmContact: jsonb("crm_contact").$type<CrmContact>(),
+    // A target's candidate (0054): the brand list that found it (a search row, and
+    // the source of it when a signal / engagement list found it). NULL otherwise.
+    searchAudienceId: uuid("search_audience_id"),
+    searchSourceId: uuid("search_source_id"),
     offeredAt: timestamp("offered_at", { withTimezone: true }).notNull().defaultNow(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1088,6 +1096,25 @@ export const audienceCandidates = pgTable(
 );
 
 export type AudienceCandidate = typeof audienceCandidates.$inferSelect;
+
+export type AudienceRole = "target" | "search";
+
+// Reversible ledger of the offer-audience realignment (0054,
+// src/services/offer-audiences.ts): `action` = 'target_created' | 'made_search'.
+export const offerAudienceRealignments = pgTable(
+  "offer_audience_realignments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    reason: text("reason").notNull(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    audienceId: uuid("audience_id").notNull(),
+    action: text("action").notNull(),
+    previousRole: text("previous_role"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("idx_offer_audience_realignments_unique").on(table.reason, table.audienceId, table.action)]
+);
 
 // Re-reach ledger of catch-all people already paid for (migration 0045,
 // src/services/catch-all-rereach.ts). A serve asking `valid_and_catch_all`

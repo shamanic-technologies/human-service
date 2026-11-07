@@ -5,7 +5,7 @@ import { personStatus } from "../services/audience-status-origin.js";
 import { ensureAvatar, ensureProfileAvatar } from "../services/audience-avatar.js";
 import { emailsOfPersons } from "../services/person-emails.js";
 import { EmailVerificationError } from "../lib/email-verification.js";
-import { and, asc, count, desc, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import {
   audienceTargetFields,
   ensureTargetText,
@@ -857,6 +857,9 @@ router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) 
   // active or serve-next 422s "no committed provider". Enforce serveability on
   // the active read.
   if (statusFilter === "active") conditions.push(isNotNull(audiences.provider));
+  // AUDIENCE-PER-OFFER-1107: a brand list is not an audience, hidden unless asked.
+  if (parsedQuery.data.role) conditions.push(eq(audiences.role, parsedQuery.data.role));
+  else conditions.push(or(isNull(audiences.role), ne(audiences.role, "search"))!);
   const whereClause = and(...conditions);
 
   const [rows, totalRows] = await Promise.all([
@@ -2024,6 +2027,7 @@ function serializeAudience(
     status: row.status,
     source: row.source,
     profileAudienceId: row.profileAudienceId,
+    role: row.role ?? null,
     canonicalAudienceId: row.canonicalAudienceId,
     filters: row.filters,
     avatarUrl: row.avatarUrl,
