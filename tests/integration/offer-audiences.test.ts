@@ -291,3 +291,88 @@ describe("offer audiences — the shared walk", () => {
     expect(row.searchAudienceId).toBeNull();
   });
 });
+
+describe("offer audiences — CRM lists through hand-outs", () => {
+  async function crmSearch() {
+    const [row] = await db
+      .insert(audiences)
+      .values({ orgId: ORG, brandId: BRAND, offerId: OFFER_A, name: "CRM contacts", provider: "crm", status: "active" })
+      .returning();
+    return row.id;
+  }
+
+  // crm-service hand-outs: one contact X; each asker gets X once; served = burned for every asker.
+  function mockCrm() {
+    const handed = new Map<string, string>(); // handOutId -> asker
+    const declined: string[] = [];
+    const served: string[] = [];
+    let burned = false;
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string }) => {
+      const u = String(url);
+      const body = JSON.parse(init.body ?? "{}") as Record<string, unknown>;
+      if (u.endsWith("/orgs/contacts/hand-outs")) {
+        const asker = body.asker as string;
+        const already = [...handed.values()].includes(asker);
+        if (burned || already) return ok({ asker, contacts: [], handedOut: 0, exhausted: true });
+        const handOutId = `00000000-0000-4000-8000-00000000${String(handed.size + 1).padStart(4, "0")}`;
+        handed.set(handOutId, asker);
+        return ok({
+          asker,
+          contacts: [{ id: "c-x", handOutId, primaryEmail: "x@clinic.com", phoneE164: null, fullName: "X Doe", firstName: "X", lastName: "Doe", jobTitle: "Associate Chiropractor", companyName: "Clinic" }],
+          handedOut: 1,
+          exhausted: false,
+        });
+      }
+      const m = u.match(/hand-outs\/([^/]+)\/(serve|decline)$/);
+      if (m) {
+        if (m[2] === "decline") {
+          declined.push(handed.get(m[1])!);
+          return ok({ handOutId: m[1], status: "declined", duplicate: false, emails: [] });
+        }
+        if (burned) return { ok: false, status: 409, json: async () => ({ type: "already_served" }), text: async () => "" };
+        burned = true;
+        served.push(handed.get(m[1])!);
+        return ok({ handOutId: m[1], status: "served", duplicate: false, emails: ["x@clinic.com"] });
+      }
+      throw new Error("unexpected url " + u);
+    });
+    return { declined, served };
+  }
+
+  beforeEach(() => {
+    process.env.CRM_SERVICE_URL = "http://crm:8080";
+    process.env.CRM_SERVICE_API_KEY = "crm-key";
+  });
+
+  it("a CRM contact one offer declines goes to the other offer, burned only when that one serves it", async () => {
+    const crm = await crmSearch();
+    await realign([crm]);
+    const { a, b } = await targets();
+    const fleet = mockCrm();
+    const forA = await next(a);
+    expect(forA.body.status).toBe("candidate");
+    expect(forA.body.candidate.providerPersonId).toBe("c-x");
+    expect((await decline(a, forA.body.candidate.candidateId)).status).toBe(200);
+    expect(fleet.declined).toEqual([`audience:${a}`]);
+    expect((await next(a)).body.status).toBe("exhausted");
+
+    const forB = await next(b);
+    expect(forB.body.candidate.providerPersonId).toBe("c-x");
+    const r = await reveal(b, forB.body.candidate.candidateId);
+    expect(r.body).toMatchObject({ status: "served" });
+    expect(r.body.person.email).toBe("x@clinic.com");
+    expect(fleet.served).toEqual([`audience:${b}`]);
+  });
+
+  it("a hand-out another offer served first is never written to", async () => {
+    const crm = await crmSearch();
+    await realign([crm]);
+    const { a, b } = await targets();
+    mockCrm();
+    const forA = (await next(a)).body.candidate.candidateId as string;
+    const forB = (await next(b)).body.candidate.candidateId as string;
+    expect((await reveal(a, forA)).body.status).toBe("served");
+    const second = await reveal(b, forB);
+    expect(second.body).toMatchObject({ status: "not_served", reason: "already_served" });
+  });
+});

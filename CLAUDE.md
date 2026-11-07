@@ -2233,8 +2233,12 @@ to an offer. `audiences.role` (migration `0054`):
   a refill advances the search's cursor for every target. Candidate / decision / yield on the TARGET; the
   candidate records `search_audience_id` / `search_source_id`, its reveal runs as that list. A person offer A
   declines is offered to offer B from the same page; one A revealed is `taken` for B.
-- **CRM files are NOT walked yet**: crm-service burns a contact brand-wide at hand-out, so a person one offer
-  declines would be lost for the others. They stay searches, unwalked, until crm-service hands out without burning.
+- **CRM lists** (file / people pool search rows) are walked through crm-service's HAND-OUTS (v0.121.0,
+  `crmHandOut`, asker `audience:<targetId>`): nothing is burned at hand-out; the candidate's `crmContact.handOutId`
+  is SERVED at reveal (409 `already_served` ⟹ `not_served` reason `already_served`, never written to) and DECLINED
+  at decline (before our write), so the brand's other offers still get the person. A CRM-sourced feature slug or a
+  `stepFilter` walks the CRM lists only; a phone reach skips the Apollo lists. Email-unknown contacts keep the
+  email-lookup path.
 - **Realign** `POST /internal/offer-audiences/realign?dryRun` `{reason, orgId, brandId, offers[{offerId, name,
   text}], searchAudienceIds[]}`: creates each offer's target (an existing one is kept), turns the rows into
   searches; one transaction, ledger `offer_audience_realignments` (in the brand transfer); `/realign/revert

@@ -22,9 +22,9 @@
 // cursor advances for every target alike. Candidates, decisions and yield are on
 // the TARGET; the candidate records which list found it.
 //
-// CRM files are NOT walked yet: crm-service burns a contact for the whole brand the
-// moment it hands it out, so a person one offer declines would be lost for the
-// others. They stay searches, unwalked, until crm-service hands out without burning.
+// CRM lists (files, people pool) are walked through crm-service's HAND-OUTS (v0.121.0):
+// a contact handed to one offer audience is burned for the brand only when that
+// offer serves it; a decline leaves it to the brand's other offers.
 //
 // REALIGNMENT (`POST /internal/offer-audiences/realign`): creates each offer's
 // target from its text and turns the given audience rows into searches, in one
@@ -32,6 +32,7 @@
 // `/revert` undoes exactly that. Nothing archived or deleted.
 
 import { and, eq, inArray, ne } from "drizzle-orm";
+import { providerCanReach, type Reach } from "../lib/reach.js";
 import { db, sql as pg } from "../db/index.js";
 import { audiences, offerAudienceRealignments, type AudienceSource } from "../db/schema.js";
 import type { PoppedTeaserRow } from "./teaser-buffer.js";
@@ -65,6 +66,7 @@ const WALKABLE_LISTS: ReadonlySet<AudienceListKind> = new Set([
   "apollo_search",
   "apollo_buying_signal",
   "linkedin_engagement",
+  "crm_contacts",
 ]);
 
 function hasOwnList(row: AudienceRow): boolean {
@@ -83,6 +85,7 @@ function hasOwnList(row: AudienceRow): boolean {
 export async function brandListsOf(
   target: AudienceRow,
   featureSlug: string | undefined,
+  reach: readonly Reach[] = [],
   random: () => number = Math.random
 ): Promise<BrandList[]> {
   const searches = await db
@@ -94,13 +97,18 @@ export async function brandListsOf(
         eq(audiences.brandId, target.brandId),
         eq(audiences.role, "search"),
         eq(audiences.status, "active"),
-        eq(audiences.provider, "apollo")
+        inArray(audiences.provider, ["apollo", "crm"])
       )
     );
   const sources = await sourcesOf(searches.map((s) => s.id));
   const all: BrandList[] = [];
   for (const search of searches) {
     const own = audienceListKind(search);
+    if (search.provider === "crm") {
+      if (ownListOn(search) && providerCanReach("crm", reach)) all.push({ search, source: null, view: search, list: "crm_contacts" });
+      continue;
+    }
+    if (!providerCanReach("apollo", reach)) continue;
     if (own && WALKABLE_LISTS.has(own) && ownListOn(search) && hasOwnList(search)) {
       all.push({ search, source: null, view: search, list: own });
     }
@@ -122,7 +130,8 @@ export async function brandListsOf(
 }
 
 async function wantedLists(target: AudienceRow, featureSlug: string | undefined): Promise<Set<AudienceListKind> | null> {
-  if (!featureSlug || isCrmSourcedFeature(featureSlug)) return null;
+  if (!featureSlug) return null;
+  if (isCrmSourcedFeature(featureSlug)) return new Set<AudienceListKind>(["crm_contacts"]);
   if (featureSlug === LEAD_SOURCING_SLUG) {
     if (!target.offerId) return null;
     const choice = await readLeadSourcingChoice({ orgId: target.orgId, brandId: target.brandId, offerId: target.offerId });
