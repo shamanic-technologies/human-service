@@ -4581,6 +4581,98 @@ registry.registerPath({
   },
 });
 
+// Same membership read keyed by PHONE / PERSON id / HUMAN id (AUDIENCE-PER-OFFER-1107):
+// crm-service places a phone-only fill or an id-only person on the offer that
+// already reached them, on the same rows and order as by-email.
+const PersonMembershipSchema = BrandMembershipSchema.extend({
+  personId: z.string().uuid().openapi({ description: "The person of the org this membership belongs to." }),
+});
+
+const KeyedMembershipsSchema = z
+  .object({
+    humanId: z.string().uuid().nullable().openapi({ description: "Canonical fleet human id (as the org sees it); null when no human holds the key yet." }),
+    personIds: z.array(z.string().uuid()).openapi({ description: "Every person of the org behind this key (one human can be several persons, one per mailbox)." }),
+    memberships: z.array(PersonMembershipSchema).openapi({
+      description: "Every audience of the brand that found any of these persons, raw, oldest first (same rows as by-email). [] = persons of the org no audience of this brand found.",
+    }),
+  })
+  .nullable()
+  .openapi({ description: "null = the org holds no person for this key." });
+
+export const BrandMembershipsByPhoneRequestSchema = z
+  .object({
+    orgId: z.string().regex(LAX_UUID_REGEX).openapi({ description: "Internal org UUID that holds the people." }),
+    phones: z.array(z.string().min(1)).min(1).max(1000).openapi({
+      description: "Phone numbers, E.164 (spaces, dashes, dots, parentheses and a 00 prefix are accepted). Each comes back as a key, raw as sent; a value that is not E.164 comes back null.",
+    }),
+  })
+  .openapi("BrandMembershipsByPhoneRequest");
+
+export const BrandMembershipsByPhoneResponseSchema = z
+  .object({ brandId: z.string().uuid(), byPhone: z.record(z.string(), KeyedMembershipsSchema) })
+  .openapi("BrandMembershipsByPhoneResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/brands/{brandId}/memberships/by-phone",
+  summary: "Per PHONE: every audience of the brand (list, offer, provenance served|found_taken) that found the person(s) at that number. Same rows as by-email, no spend.",
+  description:
+    "Service auth. A phone names a person through the fleet human holding the phone key (all the org's persons of that human) and through the business a Google Maps audience of the org served at that number.",
+  security: [{ apiKey: [] }],
+  request: {
+    params: BrandSnapshotParamsSchema,
+    body: { content: { "application/json": { schema: BrandMembershipsByPhoneRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Memberships per phone", content: { "application/json": { schema: BrandMembershipsByPhoneResponseSchema } } },
+    ...snapshotErrors,
+  },
+});
+
+export const BrandMembershipsByPersonRequestSchema = z
+  .object({
+    orgId: z.string().regex(LAX_UUID_REGEX).openapi({ description: "Internal org UUID that holds the people." }),
+    personIds: z.array(z.string().uuid()).max(1000).default([]).openapi({ description: "Person ids (the `personId` serve-next and by-email return)." }),
+    humanIds: z.array(z.string().uuid()).max(1000).default([]).openapi({ description: "Fleet human ids (the id /humans/resolve returns, canonical or atomic)." }),
+  })
+  .refine((b) => b.personIds.length + b.humanIds.length > 0, { message: "personIds or humanIds is required" })
+  .openapi("BrandMembershipsByPersonRequest");
+
+export const BrandMembershipsByPersonResponseSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    byPersonId: z.record(
+      z.string(),
+      z
+        .object({
+          personId: z.string().uuid(),
+          humanId: z.string().uuid().nullable(),
+          emails: PersonEmailsField,
+          memberships: z.array(BrandMembershipSchema).openapi({ description: "Same as by-email: every audience of the brand that found this person, raw, oldest first." }),
+        })
+        .nullable()
+        .openapi({ description: "null = not a person of this org." })
+    ),
+    byHumanId: z.record(z.string(), KeyedMembershipsSchema),
+  })
+  .openapi("BrandMembershipsByPersonResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/brands/{brandId}/memberships/by-person",
+  summary: "Per PERSON id or HUMAN id: every audience of the brand (list, offer, provenance served|found_taken) that found them. Same rows as by-email, no spend.",
+  description: "Service auth. A human id answers for every person of the org that human is (merges and splits the org sees).",
+  security: [{ apiKey: [] }],
+  request: {
+    params: BrandSnapshotParamsSchema,
+    body: { content: { "application/json": { schema: BrandMembershipsByPersonRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Memberships per person / human id", content: { "application/json": { schema: BrandMembershipsByPersonResponseSchema } } },
+    ...snapshotErrors,
+  },
+});
+
 export const BrandAudienceOverlapResponseSchema = z
   .object({
     brandId: z.string().uuid(),

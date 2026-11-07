@@ -11,12 +11,13 @@
 // provenance ('served' | 'found_taken') is explained in audience-provenance.ts.
 //
 // Pure DB read: no provider call, no spend.
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { audienceMembers, audiences } from "../db/schema.js";
+import { audienceMembers, audiences, googleMapsBrandClaims, humanIdentities, humanIdentityKeys, people } from "../db/schema.js";
 import { audienceListKind } from "./audience-snapshot.js";
 import { normalizeEmail } from "./suppression.js";
 import { emailsOfPersons, personIdsByEmail, type PersonEmailView } from "./person-emails.js";
+import { canonicalOf, InvalidIdentityKeyError, normalizePhone } from "./human-identity.js";
 
 export interface MembershipScope {
   brandId: string;
@@ -289,4 +290,203 @@ export async function brandMembershipsByEmail(
       : null;
   }
   return { brandId: scope.brandId, byEmail };
+}
+
+// --- Same read, keyed by PHONE or by PERSON / HUMAN id (AUDIENCE-PER-OFFER-1107) ---
+//
+// crm-service places a form fill / WhatsApp message on the offer that already
+// reached the person ("a person is contacted for one offer of a brand only"). By
+// email it asks brandMembershipsByEmail above; a fill with only a phone, or a
+// person known only by its id, is answered here on the SAME membership rows (same
+// provenance, same oldest-first order), so the caller's "reached" rule
+// (provenance served, earliest wins) reads identically whatever key it holds.
+//
+// A phone or a human can stand for SEVERAL persons of the org (one human, two
+// mailboxes = two `people` rows): the entry merges their memberships, each row
+// naming its personId, oldest first.
+
+type Membership = {
+  audienceId: string;
+  offerId: string | null;
+  list: ReturnType<typeof audienceListKind>;
+  status: string;
+  provenance: string;
+  joinedAt: string;
+};
+type PersonMembership = Membership & { personId: string };
+
+const PERSON_CHUNK = 10_000;
+
+// Every membership of the given persons in the brand's audiences, oldest first.
+async function membershipsOfPersons(
+  scope: { brandId: string; orgId: string },
+  personIds: string[]
+): Promise<PersonMembership[]> {
+  const ids = [...new Set(personIds)];
+  if (ids.length === 0) return [];
+  const auds = await loadBrandAudiences(scope);
+  const out: PersonMembership[] = [];
+  for (let i = 0; i < ids.length; i += PERSON_CHUNK) {
+    const found = await db
+      .select({
+        personId: audienceMembers.personId,
+        audienceId: audienceMembers.audienceId,
+        provenance: audienceMembers.provenance,
+        joinedAt: audienceMembers.joinedAt,
+      })
+      .from(audienceMembers)
+      .innerJoin(audiences, eq(audiences.id, audienceMembers.audienceId))
+      .where(
+        and(
+          eq(audiences.brandId, scope.brandId),
+          eq(audiences.orgId, scope.orgId),
+          inArray(audienceMembers.personId, ids.slice(i, i + PERSON_CHUNK))
+        )
+      );
+    for (const r of found) {
+      const a = auds.get(r.audienceId);
+      if (!a) throw new Error(`audience ${r.audienceId} missing from brand scope`);
+      out.push({
+        personId: r.personId,
+        audienceId: a.id,
+        offerId: a.offerId,
+        list: audienceListKind(a),
+        status: a.status,
+        provenance: r.provenance,
+        joinedAt: r.joinedAt.toISOString(),
+      });
+    }
+  }
+  return out.sort(
+    (x, y) => x.joinedAt.localeCompare(y.joinedAt) || x.audienceId.localeCompare(y.audienceId)
+  );
+}
+
+// The org's persons of one human: every `people` row whose atomic human is in the
+// component the org sees (merges and splits it can see), plus the canonical id.
+async function personsOfHuman(orgId: string, humanId: string) {
+  const { humanId: canonical, memberHumanIds } = await canonicalOf(db, humanId, orgId);
+  const rows = await db
+    .select({ id: people.id })
+    .from(people)
+    .where(and(eq(people.orgId, orgId), inArray(people.humanId, memberHumanIds)));
+  return { humanId: canonical, personIds: rows.map((r) => r.id) };
+}
+
+export interface KeyedMemberships {
+  humanId: string | null;
+  personIds: string[];
+  memberships: PersonMembership[];
+}
+
+// Per PHONE (E.164, any common spelling): the org's persons at that number, from
+// the two places a phone names a person: the fleet human holding the phone key
+// (WhatsApp contacts, CRM records, signups resolved here), and the business a
+// Google Maps audience of the org served at that number. null = no person of the
+// org at that number (or the value is not an E.164 phone).
+export async function brandMembershipsByPhone(
+  scope: { brandId: string; orgId: string },
+  phones: string[]
+) {
+  const byPhone: Record<string, KeyedMemberships | null> = {};
+  for (const raw of phones) {
+    if (raw in byPhone) continue;
+    let norm: string;
+    try {
+      norm = normalizePhone(raw);
+    } catch (err) {
+      if (err instanceof InvalidIdentityKeyError) {
+        byPhone[raw] = null;
+        continue;
+      }
+      throw err;
+    }
+    const personIds = new Set<string>();
+    let humanId: string | null = null;
+    const [key] = await db
+      .select({ humanId: humanIdentityKeys.humanId })
+      .from(humanIdentityKeys)
+      .where(and(eq(humanIdentityKeys.kind, "phone"), eq(humanIdentityKeys.valueNorm, norm)))
+      .limit(1);
+    if (key) {
+      const h = await personsOfHuman(scope.orgId, key.humanId);
+      humanId = h.humanId;
+      for (const id of h.personIds) personIds.add(id);
+    }
+    const claims = await db
+      .select({ personId: googleMapsBrandClaims.personId })
+      .from(googleMapsBrandClaims)
+      .where(
+        and(
+          eq(googleMapsBrandClaims.orgId, scope.orgId),
+          eq(googleMapsBrandClaims.phoneE164, norm),
+          isNotNull(googleMapsBrandClaims.personId)
+        )
+      );
+    for (const c of claims) if (c.personId) personIds.add(c.personId);
+    byPhone[raw] =
+      personIds.size === 0
+        ? null
+        : {
+            humanId,
+            personIds: [...personIds].sort(),
+            memberships: await membershipsOfPersons(scope, [...personIds]),
+          };
+  }
+  return { brandId: scope.brandId, byPhone };
+}
+
+// Per PERSON id (the `people` id serve-next / by-email return) and per HUMAN id
+// (the fleet id /humans/resolve returns). A person id outside the org, or a human
+// with no person in the org, is null; an unknown human id is null too.
+export async function brandMembershipsByPerson(
+  scope: { brandId: string; orgId: string },
+  ids: { personIds: string[]; humanIds: string[] }
+) {
+  const personIds = [...new Set(ids.personIds)];
+  const known = personIds.length
+    ? await db
+        .select({ id: people.id, humanId: people.humanId })
+        .from(people)
+        .where(and(eq(people.orgId, scope.orgId), inArray(people.id, personIds)))
+    : [];
+  const knownIds = known.map((p) => p.id);
+  const [emails, memberships] = await Promise.all([
+    emailsOfPersons(db, knownIds),
+    membershipsOfPersons(scope, knownIds),
+  ]);
+  const byPersonId: Record<
+    string,
+    { personId: string; humanId: string | null; emails: PersonEmailView[]; memberships: Membership[] } | null
+  > = {};
+  for (const id of personIds) byPersonId[id] = null;
+  for (const p of known) {
+    byPersonId[p.id] = {
+      personId: p.id,
+      humanId: p.humanId ? (await canonicalOf(db, p.humanId, scope.orgId)).humanId : null,
+      emails: emails.get(p.id) ?? [],
+      memberships: memberships
+        .filter((m) => m.personId === p.id)
+        .map(({ personId: _p, ...m }) => m),
+    };
+  }
+
+  const byHumanId: Record<string, KeyedMemberships | null> = {};
+  for (const hid of new Set(ids.humanIds)) {
+    const [exists] = await db
+      .select({ id: humanIdentities.id })
+      .from(humanIdentities)
+      .where(eq(humanIdentities.id, hid))
+      .limit(1);
+    if (!exists) {
+      byHumanId[hid] = null;
+      continue;
+    }
+    const h = await personsOfHuman(scope.orgId, hid);
+    byHumanId[hid] =
+      h.personIds.length === 0
+        ? null
+        : { humanId: h.humanId, personIds: h.personIds.sort(), memberships: await membershipsOfPersons(scope, h.personIds) };
+  }
+  return { brandId: scope.brandId, byPersonId, byHumanId };
 }
