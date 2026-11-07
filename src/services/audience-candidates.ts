@@ -86,7 +86,8 @@ import {
 import { isLinkedinEngagementFilters } from "../lib/apollo-audiences.js";
 import { ensureTargetText, screenTarget } from "./audience-target-text.js";
 import { isCrmSourcedFeature } from "./sourcing-origin.js";
-import { nextCrmCandidate, revealCrmCandidate, type CrmRevealReason } from "./crm-candidates.js";
+import { nextCrmCandidate, nextCrmHandOutCandidate, revealCrmCandidate, type CrmRevealReason } from "./crm-candidates.js";
+import { crmDeclineHandOut } from "../lib/crm-contacts.js";
 import {
   markSourceServed,
   persistSourceExhaustion,
@@ -382,6 +383,9 @@ export async function nextCandidate(
   reach: readonly Reach[] = []
 ): Promise<NextCandidateResult> {
   const deadline = Date.now() + budgetMs;
+  // ONE AUDIENCE PER OFFER (offer-audiences.ts): a target has no list of its own,
+  // it walks the brand's lists (CRM ones through hand-outs).
+  if (isOfferTarget(audienceIn)) return nextCandidateForTarget(audienceIn, identityIn, deadline, budgetMs, reach);
   if (isCrmCandidateServe(audienceIn, identityIn)) {
     const next = await nextCrmCandidate(audienceIn, identityIn, { reach }, () =>
       retakeLapsedOffer(identityIn.orgId, audienceIn.id, null)
@@ -390,9 +394,6 @@ export async function nextCandidate(
       ? { status: "candidate", candidate: toView(next.row), target: next.target }
       : { status: "exhausted", candidate: null, reason: "pool_exhausted", target: next.target };
   }
-  // ONE AUDIENCE PER OFFER (offer-audiences.ts): a target has no list of its own,
-  // it walks the brand's lists.
-  if (isOfferTarget(audienceIn)) return nextCandidateForTarget(audienceIn, identityIn, deadline, budgetMs, reach);
   // SOURCES (audience-sources.ts): the slug names WHERE to look; an audience with
   // no source offers from its own list, exactly as before.
   const pick = await pickServeSource(audienceIn, identityIn.workflowTracking?.featureSlug);
@@ -551,16 +552,7 @@ async function nextCandidateForTarget(
   budgetMs: number,
   reach: readonly Reach[]
 ): Promise<NextCandidateResult> {
-  if (identity.stepFilter) {
-    throw new AudienceNotServableError("A stepFilter needs a CRM-sourced serve; an offer audience walks Apollo lists.");
-  }
   const text = screenTarget(target);
-  if (!providerCanReach("apollo", reach)) {
-    console.log(
-      `[human-service] reach.provider_cannot_reach org=${identity.orgId} audience=${target.id} provider=apollo reach=${reach.join(",")} path=candidates`
-    );
-    return { status: "exhausted", candidate: null, reason: "unreachable_by_provider", target: null };
-  }
   const yieldNow = await readCandidateYield(target.id, null);
   if (yieldNow?.spent) {
     console.log(
@@ -579,9 +571,20 @@ async function nextCandidateForTarget(
   }
   if (Date.now() >= deadline) return { status: "pending", candidate: null, target: text };
 
-  const lists = await brandListsOf(target, identity.workflowTracking?.featureSlug);
+  // A stepFilter only a CRM list can honour; a reach only some lists carry (brandListsOf filters by reach).
+  const lists = (await brandListsOf(target, identity.workflowTracking?.featureSlug, reach)).filter(
+    (l) => !identity.stepFilter || l.list === "crm_contacts"
+  );
+  if (lists.length === 0 && !providerCanReach("apollo", reach) && !providerCanReach("crm", reach)) {
+    return { status: "exhausted", candidate: null, reason: "unreachable_by_provider", target: null };
+  }
   let pending: NextCandidateResult | null = null;
   for (const list of lists) {
+    if (list.list === "crm_contacts") {
+      const crm = await nextCrmHandOutCandidate(target, list.search, identity, { reach });
+      if (crm.status === "candidate") return { status: "candidate", candidate: toView(crm.row), target: text };
+      continue;
+    }
     let view = list.view;
     if (!list.source && needsApolloPointerBuild(view)) view = await ensureApolloPointer(view, identity);
     const filters = (view.filters ?? null) as Record<string, unknown> | null;
@@ -1402,6 +1405,20 @@ export async function declineCandidate(
   reason: string,
   basis: string | null
 ): Promise<{ declined: true; replayed: boolean }> {
+  // A CRM hand-out (an offer audience's candidate, offer-audiences.ts): crm-service records the decline first, so this
+  // offer is never handed the contact again while the brand's other offers still are. Before our write: a failure
+  // writes nothing and the decline can be retried (idempotent there).
+  const [pre] = await db
+    .select()
+    .from(audienceCandidates)
+    .where(and(eq(audienceCandidates.id, candidateId), eq(audienceCandidates.audienceId, audience.id), eq(audienceCandidates.orgId, orgId)));
+  const handOutId = pre?.status === "offered" ? pre.crmContact?.handOutId : undefined;
+  if (handOutId) {
+    await crmDeclineHandOut(handOutId, audience.brandId, reason, {
+      orgId,
+      workflowTracking: { audienceId: audience.id },
+    } as Identity);
+  }
   return db.transaction(async (tx) => {
     const [row] = await tx
       .select()
