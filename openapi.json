@@ -7072,6 +7072,351 @@
           "emails"
         ]
       },
+      "BrandMembershipsByPhoneResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "byPhone": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "nullable": true,
+              "properties": {
+                "humanId": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "uuid",
+                  "description": "Canonical fleet human id (as the org sees it); null when no human holds the key yet."
+                },
+                "personIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "description": "Every person of the org behind this key (one human can be several persons, one per mailbox)."
+                },
+                "memberships": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "audienceId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "offerId": {
+                        "type": "string",
+                        "nullable": true,
+                        "format": "uuid"
+                      },
+                      "list": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "apollo_search",
+                          "apollo_buying_signal",
+                          "linkedin_engagement",
+                          "crm_contacts",
+                          "apify_search",
+                          "google_maps_search",
+                          null
+                        ]
+                      },
+                      "status": {
+                        "$ref": "#/components/schemas/AudienceStatus"
+                      },
+                      "provenance": {
+                        "type": "string",
+                        "enum": [
+                          "served",
+                          "found_taken"
+                        ],
+                        "description": "'served' = a serve made under this audience handed the person out. 'found_taken' = this audience's FREE search found the person while they were already taken (served) for the brand; they were not served again and nothing was paid to record it."
+                      },
+                      "joinedAt": {
+                        "type": "string"
+                      },
+                      "personId": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "The person of the org this membership belongs to."
+                      }
+                    },
+                    "required": [
+                      "audienceId",
+                      "offerId",
+                      "list",
+                      "status",
+                      "provenance",
+                      "joinedAt",
+                      "personId"
+                    ]
+                  },
+                  "description": "Every audience of the brand that found any of these persons, raw, oldest first (same rows as by-email). [] = persons of the org no audience of this brand found."
+                }
+              },
+              "required": [
+                "humanId",
+                "personIds",
+                "memberships"
+              ],
+              "description": "null = the org holds no person for this key."
+            }
+          }
+        },
+        "required": [
+          "brandId",
+          "byPhone"
+        ]
+      },
+      "BrandMembershipsByPhoneRequest": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "description": "Internal org UUID that holds the people."
+          },
+          "phones": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "maxItems": 1000,
+            "description": "Phone numbers, E.164 (spaces, dashes, dots, parentheses and a 00 prefix are accepted). Each comes back as a key, raw as sent; a value that is not E.164 comes back null."
+          }
+        },
+        "required": [
+          "orgId",
+          "phones"
+        ]
+      },
+      "BrandMembershipsByPersonResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "byPersonId": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "nullable": true,
+              "properties": {
+                "personId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "humanId": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "uuid"
+                },
+                "emails": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PersonEmail"
+                  },
+                  "description": "Every email address of the person, primary first. A lookup by ANY of them returns this person."
+                },
+                "memberships": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "audienceId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "offerId": {
+                        "type": "string",
+                        "nullable": true,
+                        "format": "uuid"
+                      },
+                      "list": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "apollo_search",
+                          "apollo_buying_signal",
+                          "linkedin_engagement",
+                          "crm_contacts",
+                          "apify_search",
+                          "google_maps_search",
+                          null
+                        ]
+                      },
+                      "status": {
+                        "$ref": "#/components/schemas/AudienceStatus"
+                      },
+                      "provenance": {
+                        "type": "string",
+                        "enum": [
+                          "served",
+                          "found_taken"
+                        ],
+                        "description": "'served' = a serve made under this audience handed the person out. 'found_taken' = this audience's FREE search found the person while they were already taken (served) for the brand; they were not served again and nothing was paid to record it."
+                      },
+                      "joinedAt": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "audienceId",
+                      "offerId",
+                      "list",
+                      "status",
+                      "provenance",
+                      "joinedAt"
+                    ]
+                  },
+                  "description": "Same as by-email: every audience of the brand that found this person, raw, oldest first."
+                }
+              },
+              "required": [
+                "personId",
+                "humanId",
+                "emails",
+                "memberships"
+              ],
+              "description": "null = not a person of this org."
+            }
+          },
+          "byHumanId": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "nullable": true,
+              "properties": {
+                "humanId": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "uuid",
+                  "description": "Canonical fleet human id (as the org sees it); null when no human holds the key yet."
+                },
+                "personIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "description": "Every person of the org behind this key (one human can be several persons, one per mailbox)."
+                },
+                "memberships": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "audienceId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "offerId": {
+                        "type": "string",
+                        "nullable": true,
+                        "format": "uuid"
+                      },
+                      "list": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                          "apollo_search",
+                          "apollo_buying_signal",
+                          "linkedin_engagement",
+                          "crm_contacts",
+                          "apify_search",
+                          "google_maps_search",
+                          null
+                        ]
+                      },
+                      "status": {
+                        "$ref": "#/components/schemas/AudienceStatus"
+                      },
+                      "provenance": {
+                        "type": "string",
+                        "enum": [
+                          "served",
+                          "found_taken"
+                        ],
+                        "description": "'served' = a serve made under this audience handed the person out. 'found_taken' = this audience's FREE search found the person while they were already taken (served) for the brand; they were not served again and nothing was paid to record it."
+                      },
+                      "joinedAt": {
+                        "type": "string"
+                      },
+                      "personId": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "The person of the org this membership belongs to."
+                      }
+                    },
+                    "required": [
+                      "audienceId",
+                      "offerId",
+                      "list",
+                      "status",
+                      "provenance",
+                      "joinedAt",
+                      "personId"
+                    ]
+                  },
+                  "description": "Every audience of the brand that found any of these persons, raw, oldest first (same rows as by-email). [] = persons of the org no audience of this brand found."
+                }
+              },
+              "required": [
+                "humanId",
+                "personIds",
+                "memberships"
+              ],
+              "description": "null = the org holds no person for this key."
+            }
+          }
+        },
+        "required": [
+          "brandId",
+          "byPersonId",
+          "byHumanId"
+        ]
+      },
+      "BrandMembershipsByPersonRequest": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "description": "Internal org UUID that holds the people."
+          },
+          "personIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "maxItems": 1000,
+            "default": [],
+            "description": "Person ids (the `personId` serve-next and by-email return)."
+          },
+          "humanIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "maxItems": 1000,
+            "default": [],
+            "description": "Fleet human ids (the id /humans/resolve returns, canonical or atomic)."
+          }
+        },
+        "required": [
+          "orgId"
+        ]
+      },
       "BrandMembershipsResponse": {
         "type": "object",
         "properties": {
@@ -15824,6 +16169,118 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/BrandMembershipsByEmailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/memberships/by-phone": {
+      "post": {
+        "summary": "Per PHONE: every audience of the brand (list, offer, provenance served|found_taken) that found the person(s) at that number. Same rows as by-email, no spend.",
+        "description": "Service auth. A phone names a person through the fleet human holding the phone key (all the org's persons of that human) and through the business a Google Maps audience of the org served at that number.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrandMembershipsByPhoneRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Memberships per phone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandMembershipsByPhoneResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/memberships/by-person": {
+      "post": {
+        "summary": "Per PERSON id or HUMAN id: every audience of the brand (list, offer, provenance served|found_taken) that found them. Same rows as by-email, no spend.",
+        "description": "Service auth. A human id answers for every person of the org that human is (merges and splits the org sees).",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrandMembershipsByPersonRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Memberships per person / human id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandMembershipsByPersonResponse"
                 }
               }
             }

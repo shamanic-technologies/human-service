@@ -14,11 +14,17 @@ import { requireApiKey } from "../middleware/auth.js";
 import {
   AudienceStillFitsRequestSchema,
   BrandMembershipsByEmailRequestSchema,
+  BrandMembershipsByPersonRequestSchema,
+  BrandMembershipsByPhoneRequestSchema,
   BrandSnapshotParamsSchema,
   ResolveAudiencesRequestSchema,
 } from "../schemas.js";
 import { resolveAudiencesForBrand } from "../services/audiences.js";
-import { brandMembershipsByEmail } from "../services/audience-memberships.js";
+import {
+  brandMembershipsByEmail,
+  brandMembershipsByPerson,
+  brandMembershipsByPhone,
+} from "../services/audience-memberships.js";
 import {
   audienceStillFits,
   CannotJudgeError,
@@ -78,6 +84,45 @@ router.post(
       await brandMembershipsByEmail(
         { brandId: params.data.brandId, orgId: body.data.orgId },
         body.data.emails
+      )
+    );
+  }
+);
+
+// Same read keyed by PHONE, and by PERSON / HUMAN id (AUDIENCE-PER-OFFER-1107):
+// crm-service places a phone-only form fill / WhatsApp message, or an id-only
+// person, on the offer that already reached them.
+function invalid(res: express.Response, ...issues: Array<{ success: boolean; error?: { issues: Array<{ message: string }> } }>) {
+  const msg = issues.find((p) => !p.success)?.error?.issues[0]?.message ?? "Invalid request";
+  res.status(400).json({ error: msg });
+}
+
+router.post(
+  "/internal/brands/:brandId/memberships/by-phone",
+  express.json({ limit: RESOLVE_BODY_LIMIT }),
+  requireApiKey,
+  async (req, res) => {
+    const params = BrandSnapshotParamsSchema.safeParse(req.params);
+    const body = BrandMembershipsByPhoneRequestSchema.safeParse(req.body);
+    if (!params.success || !body.success) return invalid(res, params, body);
+    res.json(
+      await brandMembershipsByPhone({ brandId: params.data.brandId, orgId: body.data.orgId }, body.data.phones)
+    );
+  }
+);
+
+router.post(
+  "/internal/brands/:brandId/memberships/by-person",
+  express.json({ limit: RESOLVE_BODY_LIMIT }),
+  requireApiKey,
+  async (req, res) => {
+    const params = BrandSnapshotParamsSchema.safeParse(req.params);
+    const body = BrandMembershipsByPersonRequestSchema.safeParse(req.body);
+    if (!params.success || !body.success) return invalid(res, params, body);
+    res.json(
+      await brandMembershipsByPerson(
+        { brandId: params.data.brandId, orgId: body.data.orgId },
+        { personIds: body.data.personIds, humanIds: body.data.humanIds }
       )
     );
   }
