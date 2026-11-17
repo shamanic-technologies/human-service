@@ -1572,8 +1572,13 @@ export const googleMapsPlaces = pgTable(
     rank: integer("rank").notNull().default(0),
     place: jsonb("place").$type<Record<string, unknown>>().notNull(),
     phoneE164: text("phone_e164"),
-    // waiting | checking | served | taken | no_phone | not_on_whatsapp | stated_not_to_brand | own_company
+    // waiting | checking | served | taken | not_on_whatsapp | stated_not_to_brand | own_company | opted_out | won
+    // (no_phone: legacy, migrated back to waiting by 0055; a channel the business lacks is filtered, never decided)
     status: text("status").notNull().default("waiting"),
+    // Email channel (GMAPS-EMAIL-1117): null = site not read yet | found | no_website | no_email | not_deliverable
+    emailStatus: text("email_status"),
+    email: text("email"),
+    emailVerdict: text("email_verdict"),
     foundRunId: text("found_run_id"),
     servedRunId: text("served_run_id"),
     personId: uuid("person_id"),
@@ -1584,6 +1589,29 @@ export const googleMapsPlaces = pgTable(
     uniqueIndex("idx_google_maps_places_unique").on(table.audienceId, table.placeId),
     index("idx_google_maps_places_drain").on(table.audienceId, table.status, table.foundAt, table.rank),
   ]
+);
+
+// What a business's own website published (GMAPS-EMAIL-1117, bronze): read
+// once per Google place id, fleet-wide, never re-read.
+export const googleMapsSiteReads = pgTable(
+  "google_maps_site_reads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    placeId: text("place_id").notNull(),
+    website: text("website"),
+    orgId: uuid("org_id").notNull(),
+    runId: text("run_id"),
+    // found | no_website | no_email
+    outcome: text("outcome").notNull(),
+    pages: jsonb("pages").$type<Array<Record<string, unknown>>>().notNull().default([]),
+    emails: text("emails").array().notNull().default([]),
+    email: text("email"),
+    contactName: text("contact_name"),
+    contactRole: text("contact_role"),
+    chargedMicro: integer("charged_micro").notNull().default(0),
+    readAt: timestamp("read_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("idx_google_maps_site_reads_place").on(table.placeId)]
 );
 
 // One business (its place id, and its phone) is served at most once per brand.

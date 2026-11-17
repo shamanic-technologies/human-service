@@ -267,11 +267,14 @@ describe("Google Maps source — serve-next", () => {
     expect(calls.filter((c) => c.url.startsWith("https://treg.to"))).toHaveLength(2);
   });
 
-  it("an email pipe gets nobody and nothing is searched", async () => {
+  it("an email pipe gets no business without a website (GMAPS-EMAIL-1117: email reach reads the site)", async () => {
+    placesByQuery["restaurants in Astana"] = [place("ChIJ-a", "Line Brew", "+7 701 155 1322")];
     const audience = await createAudience();
     const res = await serve(audience.id, { reachableBy: "email" });
     expect(res.body.status).toBe("exhausted");
-    expect(calls.some((c) => c.url.startsWith("https://treg.to"))).toBe(false);
+    expect(calls.some((c) => c.url === "https://treg.to/call/treg.web.extract")).toBe(false);
+    // The business stays for a phone pipe.
+    expect((await serve(audience.id)).body.person.providerPersonId).toBe("ChIJ-a");
   });
 
   it("refuses a paid search without x-run-id (400)", async () => {

@@ -30,6 +30,7 @@ import {
   humanFacts,
   humanIdentityEvents,
   googleMapsQueries,
+  googleMapsSiteReads,
   googleMapsPlaces,
   googleMapsBrandClaims,
   offerAudienceRealignments,
@@ -41,6 +42,7 @@ export async function cleanTestData() {
   await db.delete(googleMapsBrandClaims);
   await db.delete(googleMapsPlaces);
   await db.delete(googleMapsQueries);
+  await db.delete(googleMapsSiteReads);
   await db.delete(humanMethodologies);
   await db.delete(humans);
   await db.delete(listMembers);
