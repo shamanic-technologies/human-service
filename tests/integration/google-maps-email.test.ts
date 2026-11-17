@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
-import { audienceCandidates, audiences, brandSuppressions, googleMapsBrandClaims, googleMapsPlaces, googleMapsSiteReads, leadServes } from "../../src/db/schema.js";
+import { audienceCandidates, audiences, brandSuppressions, googleMapsBrandClaims, googleMapsPlaces, googleMapsQueries, googleMapsSiteReads, leadServes } from "../../src/db/schema.js";
 import { contactPageLinks, homepageOf, publishedEmails } from "../../src/services/google-maps-site-contact.js";
 
 // GMAPS-EMAIL-1117: a Google Maps audience asked for EMAIL reach reads each
@@ -56,6 +56,8 @@ interface Call {
 }
 let calls: Call[] = [];
 let placesByQuery: Record<string, unknown[]> = {};
+// litescrape rows per query (absent = a free miss: treg's route answers)
+let cheapestByQuery: Record<string, unknown[]> = {};
 // page text + links per url (absent = treg answers 404 after its waterfall)
 let site: Record<string, { text: string; links?: string[] }> = {};
 let verdicts: Record<string, string> = {};
@@ -80,6 +82,11 @@ async function route(input: string | URL, init?: RequestInit): Promise<Response>
   if (/^http:\/\/runs\/v1\/runs\/[^/]+\/costs\/[^/]+$/.test(url)) return json(200, {});
   if (/^http:\/\/runs\/v1\/runs\/[^/]+$/.test(url) && method === "PATCH") return json(200, {});
   if (url === "http://billing/v1/customer_balance/authorize") return json(200, { sufficient: true });
+  if (url.startsWith("https://treg.to/call/litescrape.google.serp.maps?")) {
+    const rows = cheapestByQuery[String(new URL(url).searchParams.get("q"))];
+    if (!rows) return json(404, { error: "no result" });
+    return json(200, { local_results: rows }, { "x-treg-cost-micro": "150", "x-treg-served-by": "litescrape.google.serp.maps" });
+  }
   if (url === "https://treg.to/call/treg.google.serp.maps") {
     const places = placesByQuery[String(body?.q)] ?? [];
     return json(200, { output: { places } }, { "x-treg-cost-micro": "150", "x-treg-served-by": "crawl4ai.google.serp.maps" });
@@ -113,6 +120,7 @@ beforeEach(async () => {
   await cleanTestData();
   calls = [];
   placesByQuery = {};
+  cheapestByQuery = {};
   site = {};
   verdicts = {};
   optedOut.clear();
@@ -236,7 +244,9 @@ describe("Google Maps source — email reach", () => {
     expect(calls.some((c) => c.url === "https://treg.to/call/treg.web.extract")).toBe(false);
 
     // WhatsApp / phone behaviour unchanged: the phone pipe still gets it.
-    const phone = await serve(audience.id, {});
+    // No reach stated = email (GMAPS-LIVE-1117): still nobody.
+    expect((await serve(audience.id, {})).body.status).toBe("exhausted");
+    const phone = await serve(audience.id, { reachableBy: "phone" });
     expect(phone.body.status).toBe("served");
     expect(phone.body.person.email).toBeNull();
     expect(phone.body.person.phone).toBe("+41445556677");
@@ -411,6 +421,90 @@ describe("Google Maps list walked by an offer audience", () => {
     expect(r.body.person.email).toBeNull();
     const [row] = await db.select().from(audienceCandidates);
     expect(row.serveReach).toEqual({ reachableBy: ["phone"], reachableOn: [] });
+  });
+
+  // GMAPS-LIVE-1117: the first live run offered Living Vital blank shops (dataforseo rows read as no name, no site)
+  // to a cold-email campaign whose walk stated no reach, so no site was read and the judge rejected them blind.
+  it("a walk stating no reach goes by email: the site is read first, and the candidate carries every fact of a dataforseo row", async () => {
+    placesByQuery["Drogerie in Zürich"] = [
+      {
+        type: "maps_search",
+        title: "Silent Shop",
+        place_id: "ChIJ-n",
+        phone: "+41445556677",
+        url: "https://silent.ch/",
+        domain: "silent.ch",
+        category: "Drogerie",
+        address: "Langstrasse 1, 8004 Zürich",
+        address_info: { address: "Langstrasse 1", city: "Zürich", zip: "8004", country_code: "CH" },
+      },
+      {
+        type: "maps_search",
+        title: "Drogerie Schwamedingerhuus",
+        place_id: "ChIJ-s",
+        phone: "+41443224446",
+        url: "https://drogerieschwamendingen.com/kontakt",
+        domain: "drogerieschwamendingen.com",
+        category: "Drogerie",
+        additional_categories: ["Naturheilkundler"],
+        address: "Saatlenstrasse 12, 8051 Zürich",
+        address_info: { address: "Saatlenstrasse 12", city: "Zürich", zip: "8051", country_code: "CH" },
+        rating: { value: 4.4, votes_count: 44 },
+      },
+    ];
+    site["https://silent.ch/"] = { text: "Nur Telefon." };
+    schwamendingen();
+    pick = () => ({ email: "info@drogerieschwamendingen.com", name: "Marc Pfister", role: "Geschäftsinhaber" });
+    await brandList();
+    const { a } = await offerTargets();
+
+    const n = await next(a, {});
+    expect(n.body.status).toBe("candidate");
+    // The site of each shop was read before any offer; the shop publishing no email never reached the judge.
+    expect(calls.filter((c) => c.url === "https://treg.to/call/treg.web.extract").map((c) => c.body?.url)).toContain("https://silent.ch/");
+    expect(n.body.candidate.providerPersonId).toBe("ChIJ-s");
+    expect(n.body.candidate.person).toMatchObject({ name: "Marc Pfister", title: "Geschäftsinhaber", city: "Zürich", country: "Switzerland" });
+    expect(n.body.candidate.company).toEqual({
+      name: "Drogerie Schwamedingerhuus",
+      domain: "drogerieschwamendingen.com",
+      industry: "Drogerie",
+      employees: null,
+      city: "Zürich",
+      state: null,
+      country: "Switzerland",
+      keywords: ["Drogerie", "Naturheilkundler"],
+      address: "Saatlenstrasse 12, 8051 Zürich",
+    });
+    const [row] = await db.select().from(audienceCandidates);
+    expect(row.serveReach).toEqual({ reachableBy: [], reachableOn: [] });
+    // Its reveal serves the published address, never a phone-only lead.
+    const r = await reveal(a, n.body.candidate.candidateId);
+    expect(r.body.status).toBe("served");
+    expect(r.body.person.email).toBe("info@drogerieschwamendingen.com");
+    expect(r.body.person.organization).toMatchObject({ name: "Drogerie Schwamedingerhuus", websiteUrl: "https://drogerieschwamendingen.com/kontakt", city: "Zürich" });
+  });
+
+  it("the cheapest Maps provider answers first and treg's route is never asked; its rows read with their facts", async () => {
+    cheapestByQuery["Drogerie in Zürich"] = [
+      {
+        title: "Drogerie Schwamedingerhuus",
+        place_id: "ChIJ-s",
+        type: "Drug store",
+        types: ["Drug store", "Health food store"],
+        address: "Saatlenstrasse 12, 8051 Zürich, Switzerland",
+        phone: "+41 44 322 44 46",
+        website: "https://drogerieschwamendingen.com/",
+      },
+    ];
+    schwamendingen();
+    pick = () => ({ email: "info@drogerieschwamendingen.com", name: null, role: null });
+    await brandList();
+    const { a } = await offerTargets();
+    const n = await next(a, { reachableBy: "email" });
+    expect(n.body.candidate.company).toMatchObject({ name: "Drogerie Schwamedingerhuus", domain: "drogerieschwamendingen.com", industry: "Drug store", city: "Zürich", keywords: ["Drug store", "Health food store"] });
+    expect(calls.some((c) => c.url === "https://treg.to/call/treg.google.serp.maps")).toBe(false);
+    const [q] = await db.select().from(googleMapsQueries);
+    expect(q).toMatchObject({ servedBy: "litescrape.google.serp.maps", chargedMicro: 150, placesCount: 1 });
   });
 
   it("refuses a brand list scoped to an offer", async () => {

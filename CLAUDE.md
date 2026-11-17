@@ -2332,6 +2332,15 @@ writes them from the offer's validated target).
 - **still-fits**: `email: null` + `phone` (E.164) answers from the brand's claim of that phone under the audience.
 - Brand transfer moves the three tables. Size/Remaining unknown until exhausted (like linkedin_engagement).
   Tests: `tests/integration/google-maps-source.test.ts`.
+- **Live fixes** (GMAPS-LIVE-1117, first live run on a client 2026-11-17): (1) every stored row is the provider's own
+  (bronze) and is READ through `readPlace` (crawl4ai `name/website/categories`, dataforseo `title/url/address_info/
+  additional_categories`, litescrape `title/website/type/types`): a dataforseo row used to read as a shop with no name
+  and no site, so 683 shops were judged blind. (2) A serve stating NO reach walks by EMAIL (phone only for
+  `reachableBy: phone` or a messaging network): `served` carries a usable email unless the pipe says otherwise; 265
+  phone-only shops had been served to a cold-email campaign. (3) Search: litescrape first (`$0.00015`, not in treg's
+  route, a miss is free), then treg's route with `{q}` ONLY (a `country`/`language` filter made treg skip crawl4ai and
+  pay dataforseo $0.002). Candidates carry `company.address`. Migration 0057 re-opened the blind declines, released the
+  phone-only claims (ledger `google_maps_live_repairs`) and resumed the list paused during the incident.
 - **Email reach** (GMAPS-EMAIL-1117, `src/services/google-maps-site-contact.ts`): `reachableBy` email reads the
   business's OWN site through treg `treg.web.extract` (routed, free public route first, ceiling $0.001/page, metered on a
   `google-maps-site-read` child run): homepage + up to 3 same-site pages it links to whose path names a contact / legal

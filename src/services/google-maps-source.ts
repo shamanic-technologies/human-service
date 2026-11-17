@@ -85,10 +85,17 @@ import { isEmailBounced } from "./bounces.js";
 import { siteContactOf, type SiteContact } from "./google-maps-site-contact.js";
 
 export const GOOGLE_MAPS_PROVIDER = "google_maps";
-/** treg's routed Google Maps search (cheapest provider first, a miss tries the next). */
+/**
+ * treg's routed Google Maps search (cheapest provider first, a miss tries the next). Sent the search text ONLY:
+ * a `country` / `language` filter makes treg skip every provider that ignores filters (crawl4ai), so the whole
+ * Living Vital run went to dataforseo at $0.002 a search (GMAPS-LIVE-1117). The place is in the search text.
+ */
 export const GOOGLE_MAPS_ENDPOINT = "treg.google.serp.maps";
-/** The most one search may cost: $0.005, so only the cheap Maps providers answer (crawl4ai $0.00015 first). */
+/** The most one routed search may cost: $0.005, so only the cheap Maps providers answer (crawl4ai $0.00023 first). */
 export const GOOGLE_MAPS_MAX_MICRO = 5_000;
+/** The cheapest Maps search treg sells ($0.00015 a hit, failures free) but does not route to: asked first. */
+export const GOOGLE_MAPS_CHEAPEST_ENDPOINT = "litescrape.google.serp.maps";
+export const GOOGLE_MAPS_CHEAPEST_MAX_MICRO = 1_000;
 /** At most this many searches per audience (each answers up to ~20 businesses). */
 export const GOOGLE_MAPS_MAX_QUERIES = 40;
 /** A business taken for a decision and never decided (a dead serve) is retaken after this. */
@@ -174,12 +181,15 @@ export async function draftGoogleMapsFilters(target: string, identity: Identity)
 
 // ─── The place → the neutral Person ────────────────────────────────────────────
 
+/** A business as we read it, whatever provider found it (`readPlace`). */
 export interface GoogleMapsPlace {
   place_id?: string;
   name?: string;
   phone?: string;
   website?: string;
   address?: string;
+  /** The city the provider states (dataforseo's address_info); else read from the address. */
+  city?: string;
   category?: string;
   categories?: string[];
   latitude?: number;
@@ -187,6 +197,50 @@ export interface GoogleMapsPlace {
   rating?: number;
   review_count?: number;
   url?: string;
+}
+
+const str = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+const strs = (v: unknown): string[] => (Array.isArray(v) ? v.map(str).filter((x): x is string => !!x) : []);
+const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+
+/**
+ * One business row as stored (bronze: the provider's own row, verbatim) read into our shape. The Maps providers
+ * name the same facts differently: crawl4ai `name` / `website` / `categories`; dataforseo `title` / `url` (the
+ * site) / `category` + `additional_categories` / `address_info`; litescrape `title` / `website` / `type` + `types`.
+ * Before this, a dataforseo row read as a business with no name and no website (GMAPS-LIVE-1117).
+ */
+export function readPlace(raw: unknown): GoogleMapsPlace {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const info = (r.address_info && typeof r.address_info === "object" ? r.address_info : null) as Record<string, unknown> | null;
+  // dataforseo's `type` is the row kind ("maps_search"), litescrape's the business category.
+  const dataforseo = r.type === "maps_search" || info !== null;
+  const domain = str(r.domain);
+  const website = str(r.website) ?? (dataforseo ? str(r.url) : undefined) ?? (domain ? `https://${domain}` : undefined);
+  const category = str(r.category) ?? (dataforseo ? undefined : str(r.type));
+  const categories = [...new Set([...(category ? [category] : []), ...strs(r.categories), ...strs(r.types), ...strs(r.additional_categories)])];
+  let address = str(r.address);
+  const city = info ? str(info.city) : undefined;
+  if (info) {
+    const street = str(info.address) ?? address;
+    const place = [str(info.zip), city].filter(Boolean).join(" ");
+    address = [street, place].filter(Boolean).join(", ") || address;
+  }
+  const rating = r.rating && typeof r.rating === "object" ? (r.rating as Record<string, unknown>) : null;
+  return {
+    place_id: str(r.place_id),
+    name: str(r.name) ?? str(r.title),
+    phone: str(r.phone),
+    website,
+    address,
+    city,
+    category,
+    categories: categories.length > 0 ? categories : undefined,
+    latitude: num(r.latitude) ?? num((r.gps_coordinates as Record<string, unknown> | undefined)?.latitude),
+    longitude: num(r.longitude) ?? num((r.gps_coordinates as Record<string, unknown> | undefined)?.longitude),
+    rating: num(r.rating) ?? (rating ? num(rating.value) : undefined),
+    review_count: num(r.review_count) ?? num(r.reviews) ?? (rating ? num(rating.votes_count) : undefined),
+    url: dataforseo ? undefined : str(r.url),
+  };
 }
 
 /** The phone in E.164, read in the audience's country; null when it is not a valid number. */
@@ -239,7 +293,7 @@ export interface PlaceEmail {
 
 export function placeToPerson(place: GoogleMapsPlace, phoneE164: string | null, filters: GoogleMapsFilters, contact: PlaceEmail | null = null): Person {
   const country = countryName(filters.country);
-  const city = cityOfAddress(place.address, country);
+  const city = place.city ?? cityOfAddress(place.address, country);
   const geo = { city, state: null, country };
   const named = splitContactName(contact?.contactName ?? null);
   return {
@@ -353,23 +407,34 @@ async function runNextQuery(audience: AudienceRow, filters: GoogleMapsFilters, m
     .limit(1);
   if (!query) return false;
 
-  const answer = await meter.call(GOOGLE_MAPS_ENDPOINT, {
-    method: "POST",
-    body: { q: query.query, country: filters.country, language: filters.language },
-    maxMicro: GOOGLE_MAPS_MAX_MICRO,
+  // The cheapest provider first (failures are free); its miss, or an answer without places, goes to treg's route.
+  const cheap = await meter.call(`${GOOGLE_MAPS_CHEAPEST_ENDPOINT}?${new URLSearchParams({ q: query.query, type: "search" })}`, {
+    method: "GET",
+    maxMicro: GOOGLE_MAPS_CHEAPEST_MAX_MICRO,
   });
+  const cheapPlaces = cheap.status >= 200 && cheap.status < 300 && Array.isArray(cheap.body?.local_results) ? (cheap.body!.local_results as unknown[]) : null;
+  if (!cheapPlaces || cheapPlaces.length === 0) {
+    console.log(
+      `[human-service] google_maps.cheapest_missed audience=${audience.id} query=${JSON.stringify(query.query)} status=${cheap.status} places=${cheapPlaces?.length ?? "-"}`
+    );
+  }
+  const answer =
+    cheapPlaces && cheapPlaces.length > 0
+      ? { ...cheap, servedBy: cheap.servedBy ?? GOOGLE_MAPS_CHEAPEST_ENDPOINT, body: { output: { places: cheapPlaces } } as Record<string, unknown> }
+      : await meter.call(GOOGLE_MAPS_ENDPOINT, { method: "POST", body: { q: query.query }, maxMicro: GOOGLE_MAPS_MAX_MICRO });
+  const charged = (cheapPlaces && cheapPlaces.length > 0 ? 0 : cheap.chargedMicro) + answer.chargedMicro;
   const runId = await meter.openedRunId();
   if (answer.status < 200 || answer.status >= 300) {
     // A routed miss (no provider found anything / all failed): recorded with its
     // charge, NOT marked ran, so a later serve asks again. Loud, never a silent empty.
-    await db.update(googleMapsQueries).set({ runId, chargedMicro: answer.chargedMicro, error: `${answer.status}: ${JSON.stringify(answer.body).slice(0, 500)}` }).where(eq(googleMapsQueries.id, query.id));
+    await db.update(googleMapsQueries).set({ runId, chargedMicro: charged, error: `${answer.status}: ${JSON.stringify(answer.body).slice(0, 500)}` }).where(eq(googleMapsQueries.id, query.id));
     throw new GoogleMapsSourceError(`treg ${GOOGLE_MAPS_ENDPOINT} answered ${answer.status} for "${query.query}": ${JSON.stringify(answer.body).slice(0, 300)}`);
   }
   const output = (answer.body?.output ?? null) as { places?: unknown } | null;
   if (!output || !Array.isArray(output.places)) {
     throw new GoogleMapsSourceError(`treg ${GOOGLE_MAPS_ENDPOINT} answered no output.places for "${query.query}"`);
   }
-  const places = (output.places as GoogleMapsPlace[]).filter((p) => typeof p?.place_id === "string" && p.place_id);
+  const places = (output.places as unknown[]).filter((p) => !!readPlace(p).place_id);
   let inserted = 0;
   if (places.length > 0) {
     const rows = await db
@@ -378,11 +443,11 @@ async function runNextQuery(audience: AudienceRow, filters: GoogleMapsFilters, m
         places.map((p, rank) => ({
           orgId: audience.orgId,
           audienceId: audience.id,
-          placeId: p.place_id!,
+          placeId: readPlace(p).place_id!,
           queryId: query.id,
           rank,
           place: p as Record<string, unknown>,
-          phoneE164: toE164(p.phone, filters.country),
+          phoneE164: toE164(readPlace(p).phone, filters.country),
           foundRunId: runId,
         }))
       )
@@ -392,10 +457,10 @@ async function runNextQuery(audience: AudienceRow, filters: GoogleMapsFilters, m
   }
   await db
     .update(googleMapsQueries)
-    .set({ ranAt: new Date(), runId, servedBy: answer.servedBy, chargedMicro: answer.chargedMicro, placesCount: places.length, newPlacesCount: inserted, error: null })
+    .set({ ranAt: new Date(), runId, servedBy: answer.servedBy, chargedMicro: charged, placesCount: places.length, newPlacesCount: inserted, error: null })
     .where(eq(googleMapsQueries.id, query.id));
   console.log(
-    `[human-service] google_maps.search org=${audience.orgId} audience=${audience.id} query=${JSON.stringify(query.query)} places=${places.length} new=${inserted} charged_micro=${answer.chargedMicro} served_by=${answer.servedBy ?? "-"} run=${runId ?? "-"}`
+    `[human-service] google_maps.search org=${audience.orgId} audience=${audience.id} query=${JSON.stringify(query.query)} places=${places.length} new=${inserted} charged_micro=${charged} served_by=${answer.servedBy ?? "-"} run=${runId ?? "-"}`
   );
   return true;
 }
@@ -531,9 +596,11 @@ interface ServeChannels {
 function serveChannels(reach: readonly Reach[], reachableOn: readonly MessagingNetwork[], acceptedEmails: AcceptedEmails | undefined): ServeChannels | null {
   if (reachableOn.some((n) => n !== "whatsapp")) return null;
   const onWhatsapp = reachableOn.includes("whatsapp");
-  // An email pipe needs the published address; every other serve (phone, WhatsApp, none stated) the phone, as before.
-  const needEmail = reach.includes("email");
-  const needPhone = reach.includes("phone") || onWhatsapp || !needEmail;
+  // A phone / WhatsApp pipe needs the phone; an email pipe, and a serve stating NO reach, the published address:
+  // `served` carries a usable email unless the pipe says otherwise (the serve-next contract every provider keeps).
+  // Before GMAPS-LIVE-1117 no reach meant phone: a cold-email campaign got 265 shops without an address.
+  const needPhone = reach.includes("phone") || onWhatsapp;
+  const needEmail = reach.includes("email") || !needPhone;
   const accepted = googleMapsAcceptedVerdicts(acceptedEmails);
   const fits = and(
     needPhone ? sql`phone_e164 is not null` : sql`true`,
@@ -596,7 +663,7 @@ type PlaceRow = typeof googleMapsPlaces.$inferSelect;
 // Read the business's own site once (stored per place): the published email and the person it names, onto the row.
 // Returns the read, or the channel reason the business cannot be written to by email.
 async function readSiteOf(row: PlaceRow, identity: Identity, meters: GoogleMapsMeters): Promise<SiteContact | GoogleMapsSkipReason> {
-  const place = row.place as GoogleMapsPlace;
+  const place = readPlace(row.place);
   const site = await siteContactOf({
     placeId: row.placeId,
     businessName: place.name ?? null,
@@ -630,7 +697,7 @@ async function servePlace(
   ch: ServeChannels,
   meters: GoogleMapsMeters
 ): Promise<PlaceOutcome> {
-  const place = row.place as GoogleMapsPlace;
+  const place = readPlace(row.place);
   if (isOwnCompany(own, { name: place.name ?? null, website: place.website ?? null })) {
     await decide(row.id, "own_company");
     return { kind: "skipped", reason: "own_company" };
@@ -774,7 +841,7 @@ export async function serveNextGoogleMaps(
 /** The snapshot the caller judges a business on: the business, and the person its site names when read. */
 export function placeTeaser(place: GoogleMapsPlace, filters: GoogleMapsFilters, site: { contactName: string | null; contactRole: string | null } | null): TeaserSnapshot {
   const country = countryName(filters.country);
-  const city = cityOfAddress(place.address, country);
+  const city = place.city ?? cityOfAddress(place.address, country);
   return {
     name: site?.contactName ?? null,
     title: site?.contactRole ?? null,
@@ -790,6 +857,7 @@ export function placeTeaser(place: GoogleMapsPlace, filters: GoogleMapsFilters, 
     organizationState: null,
     organizationCountry: country,
     organizationKeywords: place.categories && place.categories.length > 0 ? place.categories : null,
+    organizationAddress: place.address ?? null,
   };
 }
 
@@ -840,7 +908,7 @@ export async function nextGoogleMapsCandidate(
         console.log(`[human-service] offer_audience.google_maps_walked org=${identity.orgId} audience=${target.id} list=${search.id}`);
         return { status: "exhausted" };
       }
-      const place = row.place as GoogleMapsPlace;
+      const place = readPlace(row.place);
       if (isOwnCompany(own, { name: place.name ?? null, website: place.website ?? null })) {
         await decide(row.id, "own_company");
         continue;

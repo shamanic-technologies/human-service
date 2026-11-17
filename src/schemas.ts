@@ -1707,6 +1707,9 @@ export const AudienceCandidateViewSchema = z
       state: z.string().nullable(),
       country: z.string().nullable(),
       keywords: z.array(z.string()).nullable(),
+      address: z.string().nullable().openapi({
+        description: "The business's street address as its listing prints it (a Google Maps business). null when the source serves none.",
+      }),
     }),
   })
   .openapi("AudienceCandidateView");
