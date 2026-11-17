@@ -927,6 +927,8 @@ export interface TeaserSnapshot {
   organizationState: string | null;
   organizationCountry: string | null;
   organizationKeywords: string[] | null;
+  /** The business's street address as its listing prints it (Google Maps lists only; absent elsewhere). */
+  organizationAddress?: string | null;
 }
 
 // 🥉 BRONZE — append-only, EVERY verdict including the passes, each with the

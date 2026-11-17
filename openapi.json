@@ -3483,6 +3483,11 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "address": {
+                "type": "string",
+                "nullable": true,
+                "description": "The business's street address as its listing prints it (a Google Maps business). null when the source serves none."
               }
             },
             "required": [
@@ -3493,7 +3498,8 @@
               "city",
               "state",
               "country",
-              "keywords"
+              "keywords",
+              "address"
             ]
           }
         },

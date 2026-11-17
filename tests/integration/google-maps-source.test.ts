@@ -30,6 +30,8 @@ interface Call {
 let calls: Call[] = [];
 // place results per search query; WhatsApp verdict per phone.
 let placesByQuery: Record<string, unknown[]> = {};
+// litescrape rows per query (absent = a free miss: treg's route answers)
+let cheapestByQuery: Record<string, unknown[]> = {};
 let whatsapp: Record<string, { reachable: true } | { reachable: false; code: string; error: string }> = {};
 let costId = 0;
 
@@ -50,6 +52,11 @@ async function route(input: string | URL, init?: RequestInit): Promise<Response>
   if (/^http:\/\/runs\/v1\/runs\/[^/]+\/costs\/[^/]+$/.test(url)) return json(200, {});
   if (/^http:\/\/runs\/v1\/runs\/[^/]+$/.test(url) && method === "PATCH") return json(200, {});
   if (url === "http://billing/v1/customer_balance/authorize") return json(200, { sufficient: true });
+  if (url.startsWith("https://treg.to/call/litescrape.google.serp.maps?")) {
+    const rows = cheapestByQuery[String(new URL(url).searchParams.get("q"))];
+    if (!rows) return json(404, { error: "no result" });
+    return json(200, { local_results: rows }, { "x-treg-cost-micro": "150", "x-treg-served-by": "litescrape.google.serp.maps" });
+  }
   if (url === "https://treg.to/call/treg.google.serp.maps") {
     const q = String(body?.q);
     const places = placesByQuery[q] ?? [];
@@ -79,6 +86,7 @@ beforeEach(async () => {
   await cleanTestData();
   calls = [];
   placesByQuery = {};
+  cheapestByQuery = {};
   whatsapp = {};
   costId = 0;
   Object.assign(process.env, {
@@ -116,7 +124,8 @@ async function createAudience(brandId = BRAND, name = "Restaurants in Astana") {
   return res.body.audience as { id: string; channels: Array<{ list: string }> };
 }
 
-async function serve(audienceId: string, body: Record<string, unknown> = {}, extra: Record<string, string> = {}) {
+// A phone pipe by default (no reach stated = email since GMAPS-LIVE-1117).
+async function serve(audienceId: string, body: Record<string, unknown> = { reachableBy: "phone" }, extra: Record<string, string> = {}) {
   return request(app).post(`/orgs/audiences/${audienceId}/serve-next`).set(headers(extra)).send(body);
 }
 
@@ -152,14 +161,19 @@ describe("Google Maps source — serve-next", () => {
     expect(runOpen?.body).toMatchObject({ serviceName: "human-service", taskName: "google-maps-search" });
     const costs = calls.filter((c) => c.url === "http://runs/v1/runs/child-run-1/costs").map((c) => (c.body!.items as Array<Record<string, unknown>>)[0]);
     expect(costs).toEqual([
+      expect.objectContaining({ costName: "treg-micro-usd", costSource: "platform", quantity: 1000, status: "provisioned" }),
       expect.objectContaining({ costName: "treg-micro-usd", costSource: "platform", quantity: 5000, status: "provisioned" }),
       expect.objectContaining({ costName: "treg-micro-usd", costSource: "platform", quantity: 150 }),
     ]);
-    expect(costs[1]).not.toHaveProperty("status");
-    expect(calls.some((c) => c.url === "http://runs/v1/runs/child-run-1/costs/cost-1" && c.body?.status === "cancelled")).toBe(true);
-    const treg = calls.find((c) => c.url.startsWith("https://treg.to"));
+    expect(costs[2]).not.toHaveProperty("status");
+    expect(calls.some((c) => c.url === "http://runs/v1/runs/child-run-1/costs/cost-2" && c.body?.status === "cancelled")).toBe(true);
+    // The cheapest provider first (a free miss here), then treg's route with the search text only.
+    const cheap = calls.find((c) => c.url.startsWith("https://treg.to/call/litescrape.google.serp.maps?"));
+    expect(cheap?.method).toBe("GET");
+    expect(new URL(cheap!.url).searchParams.get("q")).toBe("restaurants in Astana");
+    const treg = calls.find((c) => c.url === "https://treg.to/call/treg.google.serp.maps");
     expect(treg?.headers["x-treg-route-max-cost"]).toBe("0.005000");
-    expect(treg?.body).toEqual({ q: "restaurants in Astana", country: "kz", language: "en" });
+    expect(treg?.body).toEqual({ q: "restaurants in Astana" });
     const [q] = await db.select().from(googleMapsQueries).where(eq(googleMapsQueries.query, "restaurants in Astana"));
     expect(q.runId).toBe("child-run-1");
     expect(q.chargedMicro).toBe(150);
@@ -259,12 +273,12 @@ describe("Google Maps source — serve-next", () => {
     expect(end.body).toEqual({ status: "exhausted", person: null });
     const queries = await db.select().from(googleMapsQueries).where(eq(googleMapsQueries.audienceId, audience.id));
     expect(queries.every((q) => q.ranAt !== null)).toBe(true);
-    expect(calls.filter((c) => c.url.startsWith("https://treg.to"))).toHaveLength(2);
+    expect(calls.filter((c) => c.url === "https://treg.to/call/treg.google.serp.maps")).toHaveLength(2);
     const [row] = await db.select().from(audiences).where(eq(audiences.id, audience.id));
     expect(row.reachableCount).toBe(1);
     // A later serve runs no search again.
     await serve(audience.id);
-    expect(calls.filter((c) => c.url.startsWith("https://treg.to"))).toHaveLength(2);
+    expect(calls.filter((c) => c.url === "https://treg.to/call/treg.google.serp.maps")).toHaveLength(2);
   });
 
   it("an email pipe gets no business without a website (GMAPS-EMAIL-1117: email reach reads the site)", async () => {

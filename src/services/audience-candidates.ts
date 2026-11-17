@@ -160,6 +160,8 @@ export interface CandidateView {
     state: string | null;
     country: string | null;
     keywords: string[] | null;
+    /** Street address when the source serves one (a Google Maps business); null otherwise. */
+    address: string | null;
   };
 }
 
@@ -215,6 +217,7 @@ function toView(row: AudienceCandidate): CandidateView {
       state: t.organizationState ?? null,
       country: t.organizationCountry ?? null,
       keywords: t.organizationKeywords ?? null,
+      address: t.organizationAddress ?? null,
     },
   };
 }
