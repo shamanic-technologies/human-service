@@ -2221,9 +2221,10 @@ screen) judges each person against each offer's text. No variants, no audience p
 to an offer. `audiences.role` (migration `0054`):
 - **`target`** = THE audience of its offer (one live per (org, brand, offer), partial unique index): `nl_prompt` =
   `target_text` = the offer's text, `provider='apollo'`, no filters / pointer of its own. Served by
-  `candidates/next` only (serve-next 422). Size / Remaining UNKNOWN (omitted). Never a profile (no source build,
+  `candidates/next` only (serve-next 422). Size / Remaining UNKNOWN (omitted, never counted: no Apollo dry-run). Never a profile (no source build,
   no avatar sweep), never a pointer build. A brand with one makes the refill skip it (`offer_audience`).
-- **`search`** = a list of the brand (a former audience row: filters / pointer, cursor, buffer, sources intact).
+- **`search`** = a list of the brand (a former audience row: filters / pointer, cursor, buffer, sources intact; or born
+  one: `POST /orgs/audiences {role: "search"}`, no offerId). Apollo, CRM and Google Maps lists are walked.
   Hidden from `GET /orgs/audiences` unless `?role=search`. Its own walk (if any caller still serves it) unchanged.
 - **NULL** = an audience as before, byte-identical.
 - **The shared walk** (`nextCandidateForTarget`, `audience-candidates.ts`): the target's lapsed offers, then each
@@ -2345,6 +2346,18 @@ writes them from the offer's validated target).
   A business lacking the channel a serve needs stays `waiting` (`email_status` no_website / no_email / not_deliverable,
   or no phone), filtered out of that channel's walk only, so the other pipe still gets it (0055 moved `no_phone` rows
   back to waiting). still-fits answers an email find too. Tests: `tests/integration/google-maps-email.test.ts`.
+- **Walked by offer audiences** (GMAPS-TARGET-WALK-1117): a brand Google Maps list (`POST /orgs/audiences {provider:
+  "google_maps", role: "search", nlPrompt | filters}`, no offerId; or an existing one turned into a search by
+  `/internal/offer-audiences/realign`) is in `brandListsOf` (list `google_maps_search`) for every target of the brand.
+  `candidates/next` on a target offers ONE business as a candidate (`nextGoogleMapsCandidate`: read, not consumed;
+  skips businesses this target decided, claimed for the brand, own company, or lacking the walk's channel; an email
+  walk reads the site BEFORE the offer, so the judge never sees a shop with no published email and the teaser carries
+  the named person). The walk's `reachableBy` / `reachableOn` are stored on the candidate (`serve_reach`, migration
+  0056) and its reveal runs the same per-business rules as serve-next (`servePlace`: gates, verification, WhatsApp
+  check, the brand claim under the LIST). Reasons in the reveal's enum, the precise one in `detail` (`taken` ⟹
+  `already_served`, `no_website` ⟹ `no_email`, `not_on_whatsapp` ⟹ `no_person`; the brand unable to send on WhatsApp
+  ⟹ `provider_skipped` / `whatsapp_unavailable`, candidate handed back). One offer declining leaves the business to
+  the others. Tests: the "offer audience" block of `google-maps-email.test.ts`.
 
 ### Hiring titles — a hiring source says WHICH roles are posted (`src/services/signal-source-titles.ts`, HIRING-TITLES-1102)
 

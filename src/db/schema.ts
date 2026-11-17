@@ -1084,6 +1084,8 @@ export const audienceCandidates = pgTable(
     // the source of it when a signal / engagement list found it). NULL otherwise.
     searchAudienceId: uuid("search_audience_id"),
     searchSourceId: uuid("search_source_id"),
+    // A Google Maps candidate (0056): the channels the walk that offered it asked for, read back at its reveal.
+    serveReach: jsonb("serve_reach").$type<{ reachableBy: string[]; reachableOn: string[] }>(),
     offeredAt: timestamp("offered_at", { withTimezone: true }).notNull().defaultNow(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
