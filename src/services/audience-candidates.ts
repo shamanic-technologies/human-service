@@ -96,7 +96,9 @@ import {
   sourceView,
   type AudienceSource,
 } from "./audience-sources.js";
-import { providerCanReach, type Reach } from "../lib/reach.js";
+import { normalizeReach, providerCanReach, type Reach } from "../lib/reach.js";
+import type { MessagingNetwork } from "../lib/messaging-networks.js";
+import { nextGoogleMapsCandidate, revealGoogleMapsCandidate, type GoogleMapsSkipReason } from "./google-maps-source.js";
 import { brandListsOf, dropBufferedTeaser, isOfferTarget, peekTeaserForTarget, type BrandList } from "./offer-audiences.js";
 import { widenedVerdicts, type EmailVerdict } from "../lib/email-verification.js";
 import {
@@ -575,11 +577,20 @@ async function nextCandidateForTarget(
   const lists = (await brandListsOf(target, identity.workflowTracking?.featureSlug, reach)).filter(
     (l) => !identity.stepFilter || l.list === "crm_contacts"
   );
-  if (lists.length === 0 && !providerCanReach("apollo", reach) && !providerCanReach("crm", reach)) {
+  if (lists.length === 0 && !providerCanReach("apollo", reach) && !providerCanReach("crm", reach) && !providerCanReach("google_maps", reach)) {
     return { status: "exhausted", candidate: null, reason: "unreachable_by_provider", target: null };
   }
   let pending: NextCandidateResult | null = null;
   for (const list of lists) {
+    if (list.list === "google_maps_search") {
+      const gm = await nextGoogleMapsCandidate(target, list.search, identity, reach, identity.reachableOn ?? [], deadline);
+      if (gm.status === "candidate") return { status: "candidate", candidate: toView(gm.row), target: text };
+      if (gm.status === "pending") {
+        pending = { status: "pending", candidate: null, target: text };
+        if (Date.now() >= deadline) return pending;
+      }
+      continue;
+    }
     if (list.list === "crm_contacts") {
       const crm = await nextCrmHandOutCandidate(target, list.search, identity, { reach });
       if (crm.status === "candidate") return { status: "candidate", candidate: toView(crm.row), target: text };
@@ -1136,6 +1147,7 @@ export async function revealCandidate(
 ): Promise<RevealCandidateResult> {
   const existing = await loadCandidate(identityIn.orgId, audienceIn.id, candidateId);
   if (existing.crmContact) return revealCrmCandidateRow(audienceIn, identityIn, existing, basis);
+  if (existing.serveReach && existing.searchAudienceId) return revealGoogleMapsCandidateRow(audienceIn, identityIn, existing, basis);
   // A candidate a source offered is revealed and recorded as that source's.
   const source = existing.sourceId
     ? ((await sourcesOf([audienceIn.id])).get(audienceIn.id) ?? []).find((s) => s.id === existing.sourceId) ?? null
@@ -1263,6 +1275,92 @@ async function revealCrmCandidateRow(
     `[human-service] audience.candidate_revealed org=${identity.orgId} audience=${audience.id} candidate=${existing.id} status=${result.status}${result.reason ? ` reason=${result.reason}` : ""} path=crm`
   );
   return { ...result, replayed: false };
+}
+
+// An offer audience's Google Maps candidate (GMAPS-TARGET-WALK-1117): the same claim / store / replay, the business
+// decided and served by google-maps-source.ts on the channels its walk asked for. The brand unable to send on WhatsApp
+// hands the candidate back (nobody consumed). Reasons stay in the reveal's vocabulary, the precise one in `detail`.
+async function revealGoogleMapsCandidateRow(
+  target: AudienceRow,
+  identity: Identity,
+  existing: AudienceCandidate,
+  basis: string | null
+): Promise<RevealCandidateResult> {
+  if (existing.status === "revealed") return { ...storedReveal(existing.revealResult), replayed: true };
+  if (existing.status === "declined") throw new CandidateStateError("Candidate was declined", existing.status);
+  const [search] = await db.select().from(audiences).where(eq(audiences.id, existing.searchAudienceId!));
+  if (!search) throw new CandidateStateError("The list that found this candidate is gone", existing.status);
+  const claimCutoff = new Date(Date.now() - CANDIDATE_REVEAL_CLAIM_TTL_MS);
+  const [claimed] = await db
+    .update(audienceCandidates)
+    .set({ status: "revealing", decidedAt: new Date(), basis })
+    .where(
+      and(
+        eq(audienceCandidates.id, existing.id),
+        or(
+          eq(audienceCandidates.status, "offered"),
+          and(eq(audienceCandidates.status, "revealing"), lt(audienceCandidates.decidedAt, claimCutoff))
+        )
+      )
+    )
+    .returning();
+  if (!claimed) {
+    const now = await loadCandidate(identity.orgId, target.id, existing.id);
+    if (now.status === "revealed") return { ...storedReveal(now.revealResult), replayed: true };
+    throw new CandidateStateError(`Candidate is ${now.status}`, now.status);
+  }
+  const reach = existing.serveReach!;
+  let gm: Awaited<ReturnType<typeof revealGoogleMapsCandidate>>;
+  try {
+    gm = await revealGoogleMapsCandidate(
+      search,
+      { ...identity, brandIds: [search.brandId] },
+      existing.providerPersonId,
+      normalizeReach(reach.reachableBy as Reach[]),
+      reach.reachableOn as MessagingNetwork[]
+    );
+  } catch (err) {
+    await releaseFailedReveal(identity.orgId, target.id, claimed, err);
+    throw err;
+  }
+  const result: Omit<RevealCandidateResult, "replayed"> =
+    gm.status === "served"
+      ? { status: "served", person: gm.person, personId: gm.personId, emailVerdict: gm.emailVerdict }
+      : { status: "not_served", person: null, ...googleMapsRevealReason(gm.reason), ...(gm.verdict ? { verdict: gm.verdict } : {}) };
+  if (gm.handBack) {
+    await db
+      .update(audienceCandidates)
+      .set({ status: "offered", decidedAt: null, basis: null })
+      .where(and(eq(audienceCandidates.id, existing.id), eq(audienceCandidates.status, "revealing")));
+    return { ...result, replayed: false };
+  }
+  await db.update(audienceCandidates).set({ status: "revealed", revealResult: result }).where(eq(audienceCandidates.id, existing.id));
+  console.log(
+    `[human-service] audience.candidate_revealed org=${identity.orgId} audience=${target.id} candidate=${existing.id} status=${result.status}${result.detail ? ` reason=${result.detail}` : result.reason ? ` reason=${result.reason}` : ""} path=google_maps`
+  );
+  return { ...result, replayed: false };
+}
+
+function googleMapsRevealReason(reason: GoogleMapsSkipReason | "brand_cannot_send"): Pick<RevealCandidateResult, "reason" | "detail"> {
+  switch (reason) {
+    case "taken":
+      return { reason: "already_served", detail: reason };
+    case "no_email":
+    case "no_website":
+      return { reason: "no_email", detail: reason };
+    case "not_deliverable":
+    case "opted_out":
+    case "won":
+    case "bounced":
+    case "own_company":
+      return { reason, detail: reason };
+    case "brand_cannot_send":
+      // Nothing was bought: the brand cannot send on WhatsApp now, the candidate is offered again.
+      return { reason: "provider_skipped", detail: "whatsapp_unavailable" };
+    default:
+      // no_phone / not_on_whatsapp / stated_not_to_brand: the business cannot be reached on the walk's channel.
+      return { reason: "no_person", detail: reason };
+  }
 }
 
 // A reveal that threw. An outage (a provider, a gate's source) hands the

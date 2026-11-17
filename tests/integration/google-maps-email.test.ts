@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
-import { brandSuppressions, googleMapsBrandClaims, googleMapsPlaces, googleMapsSiteReads, leadServes } from "../../src/db/schema.js";
+import { audienceCandidates, audiences, brandSuppressions, googleMapsBrandClaims, googleMapsPlaces, googleMapsSiteReads, leadServes } from "../../src/db/schema.js";
 import { contactPageLinks, homepageOf, publishedEmails } from "../../src/services/google-maps-site-contact.js";
 
 // GMAPS-EMAIL-1117: a Google Maps audience asked for EMAIL reach reads each
@@ -18,6 +18,7 @@ const bounced = new Set<string>();
 vi.mock("../../src/services/opt-outs.js", async (orig) => ({
   ...(await orig<typeof import("../../src/services/opt-outs.js")>()),
   isPersonOptedOut: async (_i: unknown, e: string) => optedOut.has(e),
+  loadServeExclusions: async () => ({ emails: new Set(), linkedinUrls: new Set(), personIds: new Set() }),
   isEmailWonForRequest: async (_i: unknown, e: string) => won.has(e),
 }));
 vi.mock("../../src/services/bounces.js", async (orig) => ({
@@ -295,6 +296,129 @@ describe("Google Maps source — email reach", () => {
     expect(rows).toEqual({ "ChIJ-s": "taken", "ChIJ-h": "taken", "ChIJ-o": "opted_out" });
     // The claimed business was never read.
     expect(calls.some((c) => String(c.body?.url ?? "").includes("drogerieschwamendingen"))).toBe(false);
+  });
+});
+
+// GMAPS-TARGET-WALK-1117: a brand's Google Maps list (role 'search') is walked by every offer audience of the brand.
+describe("Google Maps list walked by an offer audience", () => {
+  const OFFER_A = "00000000-0000-4000-8000-0000000000d1";
+  const OFFER_B = "00000000-0000-4000-8000-0000000000d2";
+
+  async function brandList() {
+    const res = await request(app)
+      .post("/orgs/audiences")
+      .set(headers())
+      .send({ name: "Zürich drugstores (Maps)", brandId: BRAND, provider: "google_maps", role: "search", filters: FILTERS });
+    expect(res.status).toBe(201);
+    expect(res.body.audience.role).toBe("search");
+    return res.body.audience.id as string;
+  }
+
+  async function offerTargets() {
+    const res = await request(app)
+      .post("/internal/offer-audiences/realign")
+      .set(getAuthHeaders())
+      .send({
+        reason: "gmaps-walk-test",
+        orgId: ORG,
+        brandId: BRAND,
+        offers: [
+          { offerId: OFFER_A, name: "Drugstores", text: "Independent drugstores in Zürich and their owners" },
+          { offerId: OFFER_B, name: "Organic shops", text: "Organic food shops in Zürich" },
+        ],
+        searchAudienceIds: [],
+      });
+    expect(res.status).toBe(200);
+    const rows = await db.select().from(audiences);
+    return { a: rows.find((r) => r.offerId === OFFER_A)!.id, b: rows.find((r) => r.offerId === OFFER_B)!.id };
+  }
+
+  const next = (id: string, body: Record<string, unknown>) => request(app).post(`/orgs/audiences/${id}/candidates/next`).set(headers()).send(body);
+  const reveal = (id: string, c: string) =>
+    request(app).post(`/orgs/audiences/${id}/candidates/${c}/reveal`).set(headers()).send({ acceptedEmails: "valid_and_catch_all" });
+
+  it("an offer audience serves an email lead from the brand's Google Maps list, judged on the business and the person its site names", async () => {
+    placesByQuery["Drogerie in Zürich"] = [
+      place("ChIJ-n", "Silent Shop", "044 555 66 77", "https://silent.ch"),
+      place("ChIJ-s", "Drogerie Schwamedingerhuus", "044 322 44 46", "https://drogerieschwamendingen.com/kontakt"),
+    ];
+    site["https://silent.ch/"] = { text: "Nur Telefon." };
+    schwamendingen();
+    pick = () => ({ email: "info@drogerieschwamendingen.com", name: "Marc Pfister", role: "Geschäftsinhaber" });
+    const list = await brandList();
+    // A brand list is hidden from the brand's audiences.
+    const listed = await request(app).get(`/orgs/audiences?brandId=${BRAND}`).set(headers());
+    expect(listed.body.audiences.map((a: { id: string }) => a.id)).not.toContain(list);
+    const { a } = await offerTargets();
+
+    const n = await next(a, { reachableBy: "email" });
+    expect(n.status).toBe(200);
+    expect(n.body.status).toBe("candidate");
+    // The shop with no published email was never offered.
+    expect(n.body.candidate.providerPersonId).toBe("ChIJ-s");
+    expect(n.body.candidate.person).toMatchObject({ name: "Marc Pfister", title: "Geschäftsinhaber", country: "Switzerland" });
+    expect(n.body.candidate.company).toMatchObject({ name: "Drogerie Schwamedingerhuus", domain: "drogerieschwamendingen.com", industry: "Drugstore" });
+    expect(n.body.target.text).toBe("Independent drugstores in Zürich and their owners");
+    // Nothing verified or claimed before the reveal.
+    expect(calls.some((c) => c.url === "http://apollo/email-verifications")).toBe(false);
+    expect(await db.select().from(googleMapsBrandClaims)).toHaveLength(0);
+
+    const r = await reveal(a, n.body.candidate.candidateId);
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ status: "served", emailVerdict: "valid", replayed: false });
+    expect(r.body.person).toMatchObject({ email: "info@drogerieschwamendingen.com", firstName: "Marc", lastName: "Pfister", phone: "+41443224446" });
+    const [claim] = await db.select().from(googleMapsBrandClaims);
+    expect(claim).toMatchObject({ brandId: BRAND, placeId: "ChIJ-s", audienceId: list });
+    const [serveRow] = await db.select().from(leadServes);
+    expect(serveRow).toMatchObject({ provider: "google_maps", email: "info@drogerieschwamendingen.com", audienceId: list });
+    // A replay bills nothing.
+    calls = [];
+    const again = await reveal(a, n.body.candidate.candidateId);
+    expect(again.body.replayed).toBe(true);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("one offer declining a business leaves it to the brand's other offer; once served it is taken for all", async () => {
+    placesByQuery["Drogerie in Zürich"] = [place("ChIJ-s", "Drogerie Schwamedingerhuus", "044 322 44 46", "https://drogerieschwamendingen.com")];
+    schwamendingen();
+    pick = () => ({ email: "info@drogerieschwamendingen.com", name: null, role: null });
+    await brandList();
+    const { a, b } = await offerTargets();
+    const na = await next(a, { reachableBy: "email" });
+    await request(app).post(`/orgs/audiences/${a}/candidates/${na.body.candidate.candidateId}/decline`).set(headers()).send({ reason: "not organic" });
+    const nb = await next(b, { reachableBy: "email" });
+    expect(nb.body.candidate.providerPersonId).toBe("ChIJ-s");
+    // The site was read once, for both offers.
+    expect(calls.filter((c) => c.url === "https://treg.to/call/treg.web.extract" && c.body?.url === "https://drogerieschwamendingen.com/")).toHaveLength(1);
+    expect((await reveal(b, nb.body.candidate.candidateId)).body.status).toBe("served");
+    expect((await next(a, { reachableBy: "email" })).body.status).toBe("exhausted");
+  });
+
+  it("a business already claimed for the brand is never offered; a phone walk gets the phone lead as before", async () => {
+    placesByQuery["Drogerie in Zürich"] = [
+      place("ChIJ-s", "Drogerie Schwamedingerhuus", "044 322 44 46", "https://drogerieschwamendingen.com"),
+      place("ChIJ-p", "Phone Shop", "044 555 66 79", undefined),
+    ];
+    await db.insert(googleMapsBrandClaims).values({ orgId: ORG, brandId: BRAND, placeId: "ChIJ-s", phoneE164: "+41443224446" });
+    await brandList();
+    const { a } = await offerTargets();
+    const n = await next(a, { reachableBy: "phone" });
+    expect(n.body.candidate.providerPersonId).toBe("ChIJ-p");
+    expect(calls.some((c) => c.url === "https://treg.to/call/treg.web.extract")).toBe(false);
+    const r = await reveal(a, n.body.candidate.candidateId);
+    expect(r.body.status).toBe("served");
+    expect(r.body.person.phone).toBe("+41445556679");
+    expect(r.body.person.email).toBeNull();
+    const [row] = await db.select().from(audienceCandidates);
+    expect(row.serveReach).toEqual({ reachableBy: ["phone"], reachableOn: [] });
+  });
+
+  it("refuses a brand list scoped to an offer", async () => {
+    const res = await request(app)
+      .post("/orgs/audiences")
+      .set(headers())
+      .send({ name: "x", brandId: BRAND, provider: "google_maps", role: "search", offerId: OFFER_A, filters: FILTERS });
+    expect(res.status).toBe(400);
   });
 });
 

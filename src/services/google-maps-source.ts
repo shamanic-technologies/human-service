@@ -53,8 +53,11 @@ import { and, asc, eq, isNull, or, sql, type SQL } from "drizzle-orm";
 import { parsePhoneNumberFromString, type CountryCode } from "libphonenumber-js";
 import { db } from "../db/index.js";
 import {
+  audienceCandidates,
   audienceMembers,
   audiences,
+  type AudienceCandidate,
+  type TeaserSnapshot,
   brandSuppressions,
   googleMapsBrandClaims,
   googleMapsPlaces,
@@ -515,6 +518,209 @@ async function setEmailState(rowId: string, state: { emailStatus: string; email?
     .where(eq(googleMapsPlaces.id, rowId));
 }
 
+// The channels one serve needs, and the SQL that keeps a business that cannot carry them out of its walk.
+interface ServeChannels {
+  needEmail: boolean;
+  needPhone: boolean;
+  onWhatsapp: boolean;
+  accepted: EmailVerdict[];
+  fits: SQL;
+}
+
+/** null = the serve writes on a network nobody can check a number for: never served on a guess. */
+function serveChannels(reach: readonly Reach[], reachableOn: readonly MessagingNetwork[], acceptedEmails: AcceptedEmails | undefined): ServeChannels | null {
+  if (reachableOn.some((n) => n !== "whatsapp")) return null;
+  const onWhatsapp = reachableOn.includes("whatsapp");
+  // An email pipe needs the published address; every other serve (phone, WhatsApp, none stated) the phone, as before.
+  const needEmail = reach.includes("email");
+  const needPhone = reach.includes("phone") || onWhatsapp || !needEmail;
+  const accepted = googleMapsAcceptedVerdicts(acceptedEmails);
+  const fits = and(
+    needPhone ? sql`phone_e164 is not null` : sql`true`,
+    needEmail
+      ? sql`(email_status is null or (email_status = 'found' and (email_verdict is null or email_verdict in (${sql.join(accepted.map((v) => sql`${v}`), sql`, `)}))))`
+      : sql`true`
+  )!;
+  return { needEmail, needPhone, onWhatsapp, accepted, fits };
+}
+
+// The metered treg clients of one call (each opens its child run on first use), closed together.
+class GoogleMapsMeters {
+  private maps: TregMeter | null = null;
+  private site: TregMeter | null = null;
+  constructor(
+    private readonly identity: Identity,
+    private readonly brandId: string,
+    private readonly callerPath: string
+  ) {}
+  private meterIdentity() {
+    const { identity } = this;
+    if (!identity.runId || !identity.userId) {
+      throw new GoogleMapsSourceError("a Google Maps search or site read is paid: the serve needs x-run-id and x-user-id", 400);
+    }
+    return { orgId: identity.orgId, userId: identity.userId, runId: identity.runId, brandIds: [this.brandId], campaignId: identity.campaignId, workflowTracking: identity.workflowTracking };
+  }
+  search(): TregMeter {
+    return (this.maps ??= new TregMeter(this.meterIdentity(), "google-maps-search", this.callerPath));
+  }
+  siteRead(): TregMeter {
+    return (this.site ??= new TregMeter(this.meterIdentity(), "google-maps-site-read", this.callerPath));
+  }
+  async close(failed: boolean): Promise<void> {
+    if (this.maps) await this.maps.close(failed ? "failed" : "completed");
+    if (this.site) await this.site.close(failed ? "failed" : "completed");
+  }
+}
+
+/** Why a business was not served (it stays for another channel when the reason is about this channel only). */
+export type GoogleMapsSkipReason =
+  | "own_company"
+  | "taken"
+  | "no_phone"
+  | "no_website"
+  | "no_email"
+  | "not_deliverable"
+  | "opted_out"
+  | "won"
+  | "bounced"
+  | "not_on_whatsapp"
+  | "stated_not_to_brand";
+
+type PlaceOutcome =
+  | { kind: "served"; person: Person; personId: string; verdict: EmailVerdict | null }
+  | { kind: "skipped"; reason: GoogleMapsSkipReason; verdict?: EmailVerdict }
+  | { kind: "brand_cannot_send"; code: string };
+
+type PlaceRow = typeof googleMapsPlaces.$inferSelect;
+
+// Read the business's own site once (stored per place): the published email and the person it names, onto the row.
+// Returns the read, or the channel reason the business cannot be written to by email.
+async function readSiteOf(row: PlaceRow, identity: Identity, meters: GoogleMapsMeters): Promise<SiteContact | GoogleMapsSkipReason> {
+  const place = row.place as GoogleMapsPlace;
+  const site = await siteContactOf({
+    placeId: row.placeId,
+    businessName: place.name ?? null,
+    website: place.website ?? null,
+    identity,
+    meter: () => meters.siteRead(),
+  }).catch(async (err) => {
+    await decide(row.id, "waiting");
+    throw err;
+  });
+  if (site.outcome !== "found" || !site.email) {
+    await setEmailState(row.id, { emailStatus: site.outcome, email: null });
+    return site.outcome === "no_website" ? "no_website" : "no_email";
+  }
+  await db.update(googleMapsPlaces).set({ emailStatus: "found", email: site.email }).where(eq(googleMapsPlaces.id, row.id));
+  row.emailStatus = "found";
+  row.email = site.email;
+  return site;
+}
+
+/**
+ * Decide ONE business of a Google Maps list for a serve, and serve it when it passes: the same rules for serve-next and
+ * for an offer audience's reveal. `search` is the Google Maps list (the claim, the serve and the membership are its).
+ */
+async function servePlace(
+  search: AudienceRow,
+  row: PlaceRow,
+  identity: Identity,
+  filters: GoogleMapsFilters,
+  own: Awaited<ReturnType<typeof loadOwnCompany>>,
+  ch: ServeChannels,
+  meters: GoogleMapsMeters
+): Promise<PlaceOutcome> {
+  const place = row.place as GoogleMapsPlace;
+  if (isOwnCompany(own, { name: place.name ?? null, website: place.website ?? null })) {
+    await decide(row.id, "own_company");
+    return { kind: "skipped", reason: "own_company" };
+  }
+  if (await brandAlreadyHas(search.orgId, search.brandId, row.placeId, row.phoneE164)) {
+    await decide(row.id, "taken");
+    return { kind: "skipped", reason: "taken" };
+  }
+  if (ch.needPhone && !row.phoneE164) {
+    await decide(row.id, "waiting");
+    return { kind: "skipped", reason: "no_phone" };
+  }
+
+  let contact: PlaceEmail | null = null;
+  if (ch.needEmail) {
+    let site: SiteContact | null = null;
+    if (row.emailStatus === null) {
+      const read = await readSiteOf(row, identity, meters);
+      if (typeof read === "string") return { kind: "skipped", reason: read };
+      site = read;
+    }
+    const email = row.emailStatus === "found" ? row.email : null;
+    if (!email) {
+      await decide(row.id, "waiting");
+      return { kind: "skipped", reason: row.emailStatus === "no_website" ? "no_website" : row.emailStatus === "not_deliverable" ? "not_deliverable" : "no_email" };
+    }
+    // The fleet's email facts about this address, before paying to verify it.
+    const brandIdentity = { ...identity, brandIds: [search.brandId] };
+    if (await isEmailSuppressed(search.orgId, [search.brandId], email, identity.excludeEmailedWithin)) {
+      await decide(row.id, "taken");
+      return { kind: "skipped", reason: "taken" };
+    }
+    if (await isPersonOptedOut(brandIdentity, email)) {
+      await decide(row.id, "opted_out");
+      return { kind: "skipped", reason: "opted_out" };
+    }
+    if (await isEmailWonForRequest(brandIdentity, email)) {
+      await decide(row.id, "won");
+      return { kind: "skipped", reason: "won" };
+    }
+    if (await isEmailBounced(brandIdentity, email)) {
+      await setEmailState(row.id, { emailStatus: "not_deliverable", email, emailVerdict: "invalid" });
+      return { kind: "skipped", reason: "bounced" };
+    }
+    const verdict =
+      (row.emailVerdict as EmailVerdict | null) ??
+      (await verifyEmail(email, identity).catch(async (err) => {
+        await decide(row.id, "waiting");
+        throw err;
+      }));
+    if (!ch.accepted.includes(verdict)) {
+      await setEmailState(row.id, { emailStatus: verdict === "invalid" || verdict === "risky" ? "not_deliverable" : "found", email, emailVerdict: verdict });
+      return { kind: "skipped", reason: "not_deliverable", verdict };
+    }
+    await db.update(googleMapsPlaces).set({ emailStatus: "found", email, emailVerdict: verdict }).where(eq(googleMapsPlaces.id, row.id));
+    // Same read as the stored row when the site was read on an earlier call.
+    const named =
+      site ??
+      (await siteContactOf({ placeId: row.placeId, businessName: null, website: null, identity, meter: () => { throw new GoogleMapsSourceError(`site of ${row.placeId} not stored`); } }));
+    contact = { email, verdict, contactName: named.contactName, contactRole: named.contactRole };
+  }
+
+  if (ch.onWhatsapp && row.phoneE164) {
+    const wa = await crmWhatsappReach(search.brandId, row.phoneE164, identity).catch(async (err) => {
+      await decide(row.id, "waiting");
+      throw err;
+    });
+    if (!wa.reachable) {
+      if (wa.code === "not_on_whatsapp" || wa.code === "stated_not_to_brand") {
+        await decide(row.id, wa.code);
+        return { kind: "skipped", reason: wa.code };
+      }
+      // The BRAND cannot send on WhatsApp now: nobody is consumed.
+      await decide(row.id, "waiting");
+      console.warn(`[human-service] google_maps.whatsapp_unavailable org=${identity.orgId} audience=${search.id} brand=${search.brandId} code=${wa.code}: ${wa.error}`);
+      return { kind: "brand_cannot_send", code: wa.code };
+    }
+  }
+  const person = placeToPerson(place, row.phoneE164, filters, contact);
+  const personId = await claimAndServe(search, identity, row, person, contact?.verdict ?? null);
+  if (!personId) {
+    await decide(row.id, "taken");
+    return { kind: "skipped", reason: "taken" };
+  }
+  console.log(
+    `[human-service] google_maps.served org=${identity.orgId} audience=${search.id} place=${row.placeId} email=${contact ? contact.verdict : "-"} named=${contact?.contactName ? "yes" : "no"} run=${identity.runId ?? "-"}`
+  );
+  return { kind: "served", person, personId, verdict: contact?.verdict ?? null };
+}
+
 export async function serveNextGoogleMaps(
   audience: AudienceRow,
   identity: Identity,
@@ -524,146 +730,195 @@ export async function serveNextGoogleMaps(
 ): Promise<GoogleMapsServeResult> {
   const filters = readGoogleMapsFilters(audience.filters);
   if (!filters) throw new GoogleMapsSourceError(`audience ${audience.id} holds no Google Maps searches`);
-  const onWhatsapp = reachableOn.includes("whatsapp");
-  const unsupported = reachableOn.filter((n) => n !== "whatsapp");
-  if (unsupported.length > 0) {
-    // No owner answers "is this number on <network>" for these yet: never served on a guess.
-    console.log(`[human-service] google_maps.network_not_checkable org=${identity.orgId} audience=${audience.id} reachableOn=${unsupported.join(",")}`);
+  const ch = serveChannels(reach, reachableOn, identity.acceptedEmails);
+  if (!ch) {
+    console.log(`[human-service] google_maps.network_not_checkable org=${identity.orgId} audience=${audience.id} reachableOn=${reachableOn.join(",")}`);
     return { status: "exhausted", person: null };
   }
-  // The channels this serve needs: an email pipe needs the published address; every
-  // other serve (phone, WhatsApp, none stated) needs the phone, as before.
-  const needEmail = reach.includes("email");
-  const needPhone = reach.includes("phone") || onWhatsapp || !needEmail;
-  const accepted = googleMapsAcceptedVerdicts(identity.acceptedEmails);
-  const fits = and(
-    needPhone ? sql`phone_e164 is not null` : sql`true`,
-    needEmail
-      ? sql`(email_status is null or (email_status = 'found' and (email_verdict is null or email_verdict in (${sql.join(accepted.map((v) => sql`${v}`), sql`, `)}))))`
-      : sql`true`
-  )!;
 
   await seedGoogleMapsQueries(audience, filters);
   const own = await loadOwnCompany(identity.orgId, [audience.brandId]);
-  const meterIdentity = () => {
-    if (!identity.runId || !identity.userId) {
-      throw new GoogleMapsSourceError("a Google Maps search or site read is paid: serve-next needs x-run-id and x-user-id", 400);
-    }
-    return { orgId: identity.orgId, userId: identity.userId, runId: identity.runId, brandIds: [audience.brandId], campaignId: identity.campaignId, workflowTracking: identity.workflowTracking };
-  };
-  let meter: TregMeter | null = null;
-  let siteMeter: TregMeter | null = null;
+  const meters = new GoogleMapsMeters(identity, audience.brandId, `/orgs/audiences/${audience.id}/serve-next`);
   let failed = false;
   try {
     while (Date.now() < deadline) {
-      const row = await takePlace(audience.id, fits);
+      const row = await takePlace(audience.id, ch.fits);
       if (!row) {
-        meter ??= new TregMeter(meterIdentity(), "google-maps-search", `/orgs/audiences/${audience.id}/serve-next`);
-        if (await runNextQuery(audience, filters, meter)) continue;
+        if (await runNextQuery(audience, filters, meters.search())) continue;
         await persistGoogleMapsReachable(audience);
         console.log(`[human-service] google_maps.exhausted org=${identity.orgId} audience=${audience.id} queries=${filters.queries.length} reach=${reach.join(",") || "-"}`);
         return { status: "exhausted", person: null };
       }
-
-      const place = row.place as GoogleMapsPlace;
-      if (isOwnCompany(own, { name: place.name ?? null, website: place.website ?? null })) {
-        await decide(row.id, "own_company");
-        continue;
-      }
-      if (await brandAlreadyHas(audience.orgId, audience.brandId, row.placeId, row.phoneE164)) {
-        await decide(row.id, "taken");
-        continue;
-      }
-
-      let contact: PlaceEmail | null = null;
-      if (needEmail) {
-        let email = row.email;
-        let site: SiteContact | null = null;
-        if (row.emailStatus === null) {
-          site = await siteContactOf({
-            placeId: row.placeId,
-            businessName: place.name ?? null,
-            website: place.website ?? null,
-            identity,
-            meter: () => (siteMeter ??= new TregMeter(meterIdentity(), "google-maps-site-read", `/orgs/audiences/${audience.id}/serve-next`)),
-          }).catch(async (err) => {
-            await decide(row.id, "waiting");
-            throw err;
-          });
-          if (site.outcome !== "found" || !site.email) {
-            await setEmailState(row.id, { emailStatus: site.outcome, email: null });
-            continue;
-          }
-          email = site.email;
-        }
-        if (!email) {
-          await setEmailState(row.id, { emailStatus: "no_email", email: null });
-          continue;
-        }
-        // The fleet's email facts about this address, before paying to verify it.
-        const brandIdentity = { ...identity, brandIds: [audience.brandId] };
-        if (await isEmailSuppressed(audience.orgId, [audience.brandId], email, identity.excludeEmailedWithin)) {
-          await decide(row.id, "taken");
-          continue;
-        }
-        if (await isPersonOptedOut(brandIdentity, email)) {
-          await decide(row.id, "opted_out");
-          continue;
-        }
-        if (await isEmailWonForRequest(brandIdentity, email)) {
-          await decide(row.id, "won");
-          continue;
-        }
-        if (await isEmailBounced(brandIdentity, email)) {
-          await setEmailState(row.id, { emailStatus: "not_deliverable", email, emailVerdict: "invalid" });
-          continue;
-        }
-        const verdict = (row.emailVerdict as EmailVerdict | null) ?? (await verifyEmail(email, identity).catch(async (err) => {
-          await decide(row.id, "waiting");
-          throw err;
-        }));
-        if (!accepted.includes(verdict)) {
-          await setEmailState(row.id, { emailStatus: verdict === "invalid" || verdict === "risky" ? "not_deliverable" : "found", email, emailVerdict: verdict });
-          continue;
-        }
-        await db.update(googleMapsPlaces).set({ emailStatus: "found", email, emailVerdict: verdict }).where(eq(googleMapsPlaces.id, row.id));
-        // Same read as the stored row when the site was read on an earlier serve.
-        const named = site ?? (await siteContactOf({ placeId: row.placeId, businessName: null, website: null, identity, meter: () => { throw new GoogleMapsSourceError(`site of ${row.placeId} not stored`); } }));
-        contact = { email, verdict, contactName: named.contactName, contactRole: named.contactRole };
-      }
-
-      if (onWhatsapp && row.phoneE164) {
-        const wa = await crmWhatsappReach(audience.brandId, row.phoneE164, identity).catch(async (err) => {
-          await decide(row.id, "waiting");
-          throw err;
-        });
-        if (!wa.reachable) {
-          if (wa.code === "not_on_whatsapp" || wa.code === "stated_not_to_brand") {
-            await decide(row.id, wa.code);
-            continue;
-          }
-          // The BRAND cannot send on WhatsApp now: nobody is consumed.
-          await decide(row.id, "waiting");
-          console.warn(`[human-service] google_maps.whatsapp_unavailable org=${identity.orgId} audience=${audience.id} brand=${audience.brandId} code=${wa.code}: ${wa.error}`);
-          return { status: "exhausted", person: null };
-        }
-      }
-      const person = placeToPerson(place, row.phoneE164, filters, contact);
-      const personId = await claimAndServe(audience, identity, row, person, contact?.verdict ?? null);
-      if (!personId) {
-        await decide(row.id, "taken");
-        continue;
-      }
-      console.log(`[human-service] google_maps.served org=${identity.orgId} audience=${audience.id} place=${row.placeId} email=${contact ? contact.verdict : "-"} named=${contact?.contactName ? "yes" : "no"} run=${identity.runId ?? "-"}`);
-      return { status: "served", person, personId };
+      const out = await servePlace(audience, row, identity, filters, own, ch, meters);
+      if (out.kind === "served") return { status: "served", person: out.person, personId: out.personId };
+      if (out.kind === "brand_cannot_send") return { status: "exhausted", person: null };
     }
     return { status: "pending", person: null };
   } catch (err) {
     failed = true;
     throw err;
   } finally {
-    if (meter) await meter.close(failed ? "failed" : "completed");
-    if (siteMeter) await (siteMeter as TregMeter).close(failed ? "failed" : "completed");
+    await meters.close(failed);
+  }
+}
+
+// ─── An offer audience walks the brand's Google Maps list (GMAPS-TARGET-WALK-1117) ─────────────────────────────────
+//
+// ONE AUDIENCE PER OFFER (offer-audiences.ts): a brand's Google Maps list (role 'search') is walked by every offer
+// audience (role 'target') of the brand. Each business is offered as a CANDIDATE of the target (free), judged by the
+// caller against the target's text, then revealed: the same rules as serve-next (servePlace), under the list's claim.
+// A business is READ, not consumed: one offer declining it leaves it to the brand's others; once served for the brand
+// (any offer, any audience) it is taken for all. For an email reach the site is read BEFORE the offer, so a business
+// that publishes no email is never handed to the judge, and the candidate carries the person the site names.
+
+/** The snapshot the caller judges a business on: the business, and the person its site names when read. */
+export function placeTeaser(place: GoogleMapsPlace, filters: GoogleMapsFilters, site: { contactName: string | null; contactRole: string | null } | null): TeaserSnapshot {
+  const country = countryName(filters.country);
+  const city = cityOfAddress(place.address, country);
+  return {
+    name: site?.contactName ?? null,
+    title: site?.contactRole ?? null,
+    headline: null,
+    seniority: null,
+    city,
+    state: null,
+    country,
+    organizationName: place.name ?? null,
+    organizationIndustry: place.category ?? null,
+    organizationEmployees: null,
+    organizationCity: city,
+    organizationState: null,
+    organizationCountry: country,
+    organizationKeywords: place.categories && place.categories.length > 0 ? place.categories : null,
+  };
+}
+
+// The oldest business of the list this target has not decided yet, fit for the serve's channels, not taken for the
+// brand. Not leased: the candidate row (unique per target and place) is the claim.
+async function nextPlaceForTarget(target: AudienceRow, search: AudienceRow, fits: SQL): Promise<PlaceRow | null> {
+  const [row] = await db
+    .select()
+    .from(googleMapsPlaces)
+    .where(
+      and(
+        eq(googleMapsPlaces.audienceId, search.id),
+        eq(googleMapsPlaces.status, "waiting"),
+        fits,
+        sql`not exists (select 1 from audience_candidates c where c.audience_id = ${target.id} and c.provider_person_id = ${googleMapsPlaces.placeId})`,
+        sql`not exists (select 1 from audience_screened_out s where s.audience_id = ${target.id} and s.provider_person_id = ${googleMapsPlaces.placeId})`,
+        sql`not exists (select 1 from google_maps_brand_claims k where k.org_id = ${search.orgId} and k.brand_id = ${search.brandId} and (k.place_id = ${googleMapsPlaces.placeId} or k.phone_e164 = ${googleMapsPlaces.phoneE164}))`
+      )
+    )
+    .orderBy(asc(googleMapsPlaces.foundAt), asc(googleMapsPlaces.rank), asc(googleMapsPlaces.id))
+    .limit(1);
+  return row ?? null;
+}
+
+export type GoogleMapsCandidateResult = { status: "candidate"; row: AudienceCandidate } | { status: "exhausted" } | { status: "pending" };
+
+/** The next business of a brand Google Maps list, offered to an offer audience (free, no verification, no claim). */
+export async function nextGoogleMapsCandidate(
+  target: AudienceRow,
+  search: AudienceRow,
+  identity: Identity,
+  reach: readonly Reach[],
+  reachableOn: readonly MessagingNetwork[],
+  deadline: number
+): Promise<GoogleMapsCandidateResult> {
+  const filters = readGoogleMapsFilters(search.filters);
+  const ch = serveChannels(reach, reachableOn, identity.acceptedEmails);
+  if (!filters || !ch) return { status: "exhausted" };
+  await seedGoogleMapsQueries(search, filters);
+  const own = await loadOwnCompany(identity.orgId, [search.brandId]);
+  const meters = new GoogleMapsMeters(identity, search.brandId, `/orgs/audiences/${target.id}/candidates/next`);
+  let failed = false;
+  try {
+    while (Date.now() < deadline) {
+      const row = await nextPlaceForTarget(target, search, ch.fits);
+      if (!row) {
+        if (await runNextQuery(search, filters, meters.search())) continue;
+        console.log(`[human-service] offer_audience.google_maps_walked org=${identity.orgId} audience=${target.id} list=${search.id}`);
+        return { status: "exhausted" };
+      }
+      const place = row.place as GoogleMapsPlace;
+      if (isOwnCompany(own, { name: place.name ?? null, website: place.website ?? null })) {
+        await decide(row.id, "own_company");
+        continue;
+      }
+      let site: { contactName: string | null; contactRole: string | null } | null = null;
+      if (ch.needEmail) {
+        const read = row.emailStatus === null ? await readSiteOf(row, identity, meters) : null;
+        if (typeof read === "string") continue;
+        site = read ?? (await siteContactOf({ placeId: row.placeId, businessName: null, website: null, identity, meter: () => { throw new GoogleMapsSourceError(`site of ${row.placeId} not stored`); } }));
+      }
+      const [candidate] = await db
+        .insert(audienceCandidates)
+        .values({
+          orgId: identity.orgId,
+          audienceId: target.id,
+          providerPersonId: row.placeId,
+          linkedinUrl: null,
+          teaser: placeTeaser(place, filters, site),
+          organizationDomain: businessDomain(place.website),
+          searchAudienceId: search.id,
+          serveReach: { reachableBy: [...reach], reachableOn: [...reachableOn] },
+        })
+        .onConflictDoNothing({ target: [audienceCandidates.audienceId, audienceCandidates.providerPersonId] })
+        .returning();
+      if (!candidate) continue;
+      console.log(
+        `[human-service] offer_audience.google_maps_candidate_offered org=${identity.orgId} audience=${target.id} list=${search.id} candidate=${candidate.id} place=${row.placeId} email=${ch.needEmail ? "published" : "-"}`
+      );
+      return { status: "candidate", row: candidate };
+    }
+    return { status: "pending" };
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    await meters.close(failed);
+  }
+}
+
+export type GoogleMapsRevealResult =
+  | { status: "served"; person: Person; personId: string; emailVerdict: EmailVerdict | null; handBack: false }
+  | { status: "not_served"; person: null; reason: GoogleMapsSkipReason | "brand_cannot_send"; verdict?: EmailVerdict; handBack: boolean };
+
+/**
+ * Reveal an offer audience's Google Maps candidate: the business decided and served exactly as serve-next would
+ * (verification, WhatsApp check, the brand claim). The brand unable to send on WhatsApp hands it back.
+ */
+export async function revealGoogleMapsCandidate(
+  search: AudienceRow,
+  identity: Identity,
+  placeId: string,
+  reach: readonly Reach[],
+  reachableOn: readonly MessagingNetwork[]
+): Promise<GoogleMapsRevealResult> {
+  const filters = readGoogleMapsFilters(search.filters);
+  if (!filters) throw new GoogleMapsSourceError(`list ${search.id} holds no Google Maps searches`);
+  const ch = serveChannels(reach, reachableOn, identity.acceptedEmails);
+  if (!ch) return { status: "not_served", person: null, reason: "brand_cannot_send", handBack: true };
+  const [row] = await db
+    .select()
+    .from(googleMapsPlaces)
+    .where(and(eq(googleMapsPlaces.audienceId, search.id), eq(googleMapsPlaces.placeId, placeId)))
+    .limit(1);
+  if (!row) throw new GoogleMapsSourceError(`business ${placeId} is not in list ${search.id}`);
+  if (row.status === "served") return { status: "not_served", person: null, reason: "taken", handBack: false };
+  const own = await loadOwnCompany(identity.orgId, [search.brandId]);
+  const meters = new GoogleMapsMeters(identity, search.brandId, `/orgs/audiences/${search.id}/candidates/reveal`);
+  let failed = false;
+  try {
+    const out = await servePlace(search, row, identity, filters, own, ch, meters);
+    if (out.kind === "served") return { status: "served", person: out.person, personId: out.personId, emailVerdict: out.verdict, handBack: false };
+    if (out.kind === "brand_cannot_send") return { status: "not_served", person: null, reason: "brand_cannot_send", handBack: true };
+    return { status: "not_served", person: null, reason: out.reason, ...(out.verdict ? { verdict: out.verdict } : {}), handBack: false };
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    await meters.close(failed);
   }
 }
 

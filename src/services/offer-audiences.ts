@@ -22,6 +22,9 @@
 // cursor advances for every target alike. Candidates, decisions and yield are on
 // the TARGET; the candidate records which list found it.
 //
+// Google Maps lists (GMAPS-TARGET-WALK-1117) are walked through google-maps-source.ts: each business offered as a
+// candidate (read, not consumed), revealed by the same rules as its serve-next, claimed once for the brand.
+//
 // CRM lists (files, people pool) are walked through crm-service's HAND-OUTS (v0.121.0):
 // a contact handed to one offer audience is burned for the brand only when that
 // offer serves it; a decline leaves it to the brand's other offers.
@@ -41,6 +44,7 @@ import { isSourceOn, ownListOn, sourcesOf, sourceView, SOURCE_EXHAUSTED_RETRY_MS
 import { isCrmSourcedFeature, listKindOfOriginSlug, type AudienceListKind } from "./sourcing-origin.js";
 import { LEAD_SOURCING_SLUG, readLeadSourcingChoice } from "./lead-sourcing.js";
 import { systemStatus } from "./audience-status-origin.js";
+import { readGoogleMapsFilters } from "./google-maps-source.js";
 
 type AudienceRow = typeof audiences.$inferSelect;
 
@@ -97,13 +101,20 @@ export async function brandListsOf(
         eq(audiences.brandId, target.brandId),
         eq(audiences.role, "search"),
         eq(audiences.status, "active"),
-        inArray(audiences.provider, ["apollo", "crm"])
+        inArray(audiences.provider, ["apollo", "crm", "google_maps"])
       )
     );
   const sources = await sourcesOf(searches.map((s) => s.id));
   const all: BrandList[] = [];
   for (const search of searches) {
     const own = audienceListKind(search);
+    if (search.provider === "google_maps") {
+      // GMAPS-TARGET-WALK-1117: its businesses carry a phone and the email their site publishes.
+      if (ownListOn(search) && readGoogleMapsFilters(search.filters) && providerCanReach("google_maps", reach)) {
+        all.push({ search, source: null, view: search, list: "google_maps_search" });
+      }
+      continue;
+    }
     if (search.provider === "crm") {
       if (ownListOn(search) && providerCanReach("crm", reach)) all.push({ search, source: null, view: search, list: "crm_contacts" });
       continue;

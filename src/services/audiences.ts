@@ -244,6 +244,8 @@ export async function refreshAudienceCountIfStale(
     return;
   }
   if (audience.provider !== "apollo" && audience.provider !== "apify") return;
+  // An offer audience (role target) holds a text, no list: its Size is unknown by design, never a count of no filter.
+  if (audience.role === "target") return;
   // No Apollo count exists for a linkedin_engagement audience.
   if (isLinkedinEngagementFilters(audience.filters)) return;
   if (

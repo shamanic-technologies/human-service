@@ -1239,7 +1239,7 @@ export const CreateAudienceRequestSchema = z
     brandId: z.string().uuid(),
     provider: z.enum(["apollo", "apify", "crm", "google_maps"]).optional().openapi({
       description:
-        "The provider this audience commits to. apollo/apify when persisting a candidate from /suggest; crm for a brand whose audience is its uploaded contact list (served by crm-service — no filters/apolloAudienceId, brand-scoped); google_maps for local businesses found on Google Maps (GMAPS-SOURCE-1103): state `nlPrompt` in plain words (\"restaurants and cafes in Astana\") and the Google Maps searches are written for you (needs x-user-id), or pass `filters: {google_maps: {queries, country, language}}` yourself. Each serve hands out one business: phone (E.164), website, address, no email, no person name. Omit for a neutral audience.",
+        "The provider this audience commits to. apollo/apify when persisting a candidate from /suggest; crm for a brand whose audience is its uploaded contact list (served by crm-service — no filters/apolloAudienceId, brand-scoped); google_maps for local businesses found on Google Maps (GMAPS-SOURCE-1103): state `nlPrompt` in plain words (\"restaurants and cafes in Astana\") and the Google Maps searches are written for you (needs x-user-id), or pass `filters: {google_maps: {queries, country, language}}` yourself. Each serve hands out one business: phone (E.164), website, address; for an email reach, the email its own site publishes and the person it names (GMAPS-EMAIL-1117). With role 'search' every offer audience of the brand walks it. Omit for a neutral audience.",
     }),
     nlPrompt: z.string().min(1).optional(),
     // Opaque, provider-native filter object stored as-is. For apollo audiences
@@ -1269,6 +1269,10 @@ export const CreateAudienceRequestSchema = z
     apifyCount: z.number().int().min(0).nullish().openapi({
       description:
         "Optional apify count snapshot (see apolloCount). Accepts null (e.g. an apollo-source candidate carries apifyCount: null).",
+    }),
+    role: z.enum(["search"]).optional().openapi({
+      description:
+        "'search' = a LIST of the brand (AUDIENCE-PER-OFFER-1107): no offer of its own, walked by every offer audience (role 'target') of the brand, each person judged against that offer's text. Hidden from GET /orgs/audiences unless role=search. Not with offerId. Omit for an audience as before.",
     }),
   })
   .openapi("CreateAudienceRequest");
