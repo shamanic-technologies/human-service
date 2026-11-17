@@ -2307,7 +2307,7 @@ catalogue) holds `filters.google_maps = {queries[], country (ISO2), language}`: 
 plain-words target expands to (`POST /orgs/audiences {provider:"google_maps", nlPrompt}` writes them, one
 chat-service call on a `google-maps-list-build` run declaring the list; or pass the filters; a source campaign ON
 writes them from the offer's validated target).
-- **Serve (serve-next only; candidates/next 422)**: one business per call: `email`/names null, `phone` E.164
+- **Serve (serve-next only; candidates/next 422)**: one business per call: `email`/names null (email reach below), `phone` E.164
   (`libphonenumber-js`, read in the audience's country), `providerPersonId` = Google place id, `organization`
   {name, domain (none for a facebook/instagram page), websiteUrl, streetAddress, city (from Google's address),
   country, primaryPhone, industry}. Walk: oldest undecided business of the audience (`google_maps_places`,
@@ -2321,7 +2321,7 @@ writes them from the offer's validated target).
   `not_on_whatsapp` ⟹ kept aside (`not_on_whatsapp`), never claimed; `stated_not_to_brand` (the brand's user
   tagged the person not someone of the brand, crm-service v0.112.0) ⟹ same, row `stated_not_to_brand`, sourcing goes on; the BRAND cannot send (not linked /
   connected / automation refused) ⟹ business back to waiting, `exhausted`, nobody consumed. Never guessed from the
-  number. Another network ⟹ exhausted (no owner checks it). `reachableBy` email ⟹ exhausted, nothing searched.
+  number. Another network ⟹ exhausted (no owner checks it).
 - **Cost**: treg `treg.google.serp.maps` (routed, cheapest first, ~$0.00015 a search of ~20 places), metered by
   `src/lib/treg-meter.ts` (apollo-service's linkedin-engagement pattern): a `google-maps-search` child run of the
   serve's run, `treg-micro-usd` ceiling 5,000 provisioned + authorized (platform key) + sent as
@@ -2331,6 +2331,20 @@ writes them from the offer's validated target).
 - **still-fits**: `email: null` + `phone` (E.164) answers from the brand's claim of that phone under the audience.
 - Brand transfer moves the three tables. Size/Remaining unknown until exhausted (like linkedin_engagement).
   Tests: `tests/integration/google-maps-source.test.ts`.
+- **Email reach** (GMAPS-EMAIL-1117, `src/services/google-maps-site-contact.ts`): `reachableBy` email reads the
+  business's OWN site through treg `treg.web.extract` (routed, free public route first, ceiling $0.001/page, metered on a
+  `google-maps-site-read` child run): homepage + up to 3 same-site pages it links to whose path names a contact / legal
+  page (impressum, kontakt, contact, imprint, legal, about...; legal first). Every address the pages PUBLISH (text,
+  `x(at)y`, mailto) is collected; one chat-service call (google flash-pro, org-billed on the site-read run) picks the
+  business's own address and the person the site names; the email must be one of the published addresses, the
+  name / role must appear verbatim in the pages, else dropped (never guessed, never invented). Stored once per place,
+  fleet-wide (bronze `google_maps_site_reads`, migration 0055): never read twice. Then gates: brand suppression (window),
+  opt-out, won, bounce, then apollo-service `POST /email-verifications` (source `google-maps`, on the serve's run): served
+  when `valid` / `catch_all` (+ `unknown` under `valid_catch_all_and_unknown`). Served = the person carries `email`,
+  `emailStatus` = verdict, name / title when named; claim as before + a `brand_suppressions` row + `lead_serves.email`.
+  A business lacking the channel a serve needs stays `waiting` (`email_status` no_website / no_email / not_deliverable,
+  or no phone), filtered out of that channel's walk only, so the other pipe still gets it (0055 moved `no_phone` rows
+  back to waiting). still-fits answers an email find too. Tests: `tests/integration/google-maps-email.test.ts`.
 
 ### Hiring titles — a hiring source says WHICH roles are posted (`src/services/signal-source-titles.ts`, HIRING-TITLES-1102)
 

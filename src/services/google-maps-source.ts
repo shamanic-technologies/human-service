@@ -8,10 +8,24 @@
 //
 //   filters = { google_maps: { queries: ["restaurants in Astana", ...], country: "kz", language: "en" } }
 //
-// Each serve-next hands out ONE business as a lead: no person name (never
-// invented), no email, its phone in E.164, its website / domain and address on
-// `organization`, `providerPersonId` = the Google place id (stable: the same
-// business is the same lead).
+// Each serve-next hands out ONE business as a lead: its phone in E.164, its
+// website / domain and address on `organization`, `providerPersonId` = the
+// Google place id (stable: the same business is the same lead). A phone serve
+// carries no email and no person name (never invented).
+//
+// EMAIL REACH (GMAPS-EMAIL-1117): a serve asking `reachableBy: email` reads the
+// business's own website (google-maps-site-contact.ts: homepage + the contact /
+// legal pages it links to, through treg, metered, stored once per place) and
+// serves the address the site PUBLISHES, with the person the site names when it
+// names one; the address is verified by apollo-service (POST /email-verifications,
+// the fleet's verifier) and served only when valid or catch-all (plus unknown when
+// the caller states `valid_catch_all_and_unknown`). Never a guessed address. The
+// email also passes the fleet's email gates (brand suppression, opt-out, won,
+// bounce) and is claimed in brand_suppressions beside the business claim.
+// A business lacking the channel a serve needs (no phone for a phone serve, no
+// published / deliverable email for an email serve) is NOT decided for good: it
+// stays waiting, filtered out of that channel's walk, so the other channel's
+// pipe still gets it.
 //
 // THE WALK (serve-next only; candidates/next answers 422 for this provider):
 //   1. take the oldest business the audience found and has not decided yet;
@@ -35,12 +49,13 @@
 // cannot send on WhatsApp (no linked / connected account), nobody is consumed:
 // the business goes back to waiting and the serve answers exhausted, logged.
 
-import { and, asc, eq, isNull, or, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, or, sql, type SQL } from "drizzle-orm";
 import { parsePhoneNumberFromString, type CountryCode } from "libphonenumber-js";
 import { db } from "../db/index.js";
 import {
   audienceMembers,
   audiences,
+  brandSuppressions,
   googleMapsBrandClaims,
   googleMapsPlaces,
   googleMapsQueries,
@@ -59,6 +74,12 @@ import { HOSTING_PLATFORMS, isOwnCompany, loadOwnCompany, registrableDomain } fr
 import { deriveBusinessLanguages } from "./business-languages.js";
 import type { Reach } from "../lib/reach.js";
 import type { MessagingNetwork } from "../lib/messaging-networks.js";
+import { apolloPost } from "./people-providers.js";
+import { isVerdictAccepted, type AcceptedEmails, type EmailVerdict } from "../lib/email-verification.js";
+import { isEmailSuppressed, normalizeEmail } from "./suppression.js";
+import { isEmailWonForRequest, isPersonOptedOut } from "./opt-outs.js";
+import { isEmailBounced } from "./bounces.js";
+import { siteContactOf, type SiteContact } from "./google-maps-site-contact.js";
 
 export const GOOGLE_MAPS_PROVIDER = "google_maps";
 /** treg's routed Google Maps search (cheapest provider first, a miss tries the next). */
@@ -199,20 +220,35 @@ export function businessDomain(website: string | null | undefined): string | nul
   return d && !HOSTING_PLATFORMS.has(d) ? d : null;
 }
 
-export function placeToPerson(place: GoogleMapsPlace, phoneE164: string, filters: GoogleMapsFilters): Person {
+/** The person the site names, split as written ("Marc Pfister" ⟹ Marc / Pfister). */
+export function splitContactName(name: string | null): { firstName: string | null; lastName: string | null } {
+  if (!name) return { firstName: null, lastName: null };
+  const parts = name.trim().split(/\s+/);
+  return { firstName: parts[0] ?? null, lastName: parts.length > 1 ? parts.slice(1).join(" ") : null };
+}
+
+export interface PlaceEmail {
+  email: string;
+  verdict: EmailVerdict;
+  contactName: string | null;
+  contactRole: string | null;
+}
+
+export function placeToPerson(place: GoogleMapsPlace, phoneE164: string | null, filters: GoogleMapsFilters, contact: PlaceEmail | null = null): Person {
   const country = countryName(filters.country);
   const city = cityOfAddress(place.address, country);
   const geo = { city, state: null, country };
+  const named = splitContactName(contact?.contactName ?? null);
   return {
-    firstName: null,
-    lastName: null,
-    name: null,
-    title: null,
+    firstName: named.firstName,
+    lastName: named.lastName,
+    name: contact?.contactName ?? null,
+    title: contact?.contactRole ?? null,
     headline: null,
     seniority: null,
-    email: null,
-    emailStatus: null,
-    catchAll: null,
+    email: contact?.email ?? null,
+    emailStatus: contact?.verdict ?? null,
+    catchAll: contact ? contact.verdict === "catch_all" : null,
     inferred: null,
     linkedinUrl: null,
     photoUrl: null,
@@ -244,7 +280,7 @@ export function placeToPerson(place: GoogleMapsPlace, phoneE164: string, filters
     },
     employmentHistory: null,
     buyingSignal: null,
-    phone: phoneE164,
+    ...(phoneE164 ? { phone: phoneE164 } : {}),
   };
 }
 
@@ -266,13 +302,14 @@ export async function seedGoogleMapsQueries(audience: AudienceRow, filters: Goog
 
 // Take the oldest undecided business of the audience for a decision (a lease:
 // a dead serve's business is retaken after CHECKING_LEASE_MS).
-async function takePlace(audienceId: string): Promise<typeof googleMapsPlaces.$inferSelect | null> {
+async function takePlace(audienceId: string, fits: SQL): Promise<typeof googleMapsPlaces.$inferSelect | null> {
   const rows = await db.execute<{ id: string }>(sql`
     update google_maps_places set status = 'checking', decided_at = now()
     where id = (
       select id from google_maps_places
       where audience_id = ${audienceId}
         and (status = 'waiting' or (status = 'checking' and decided_at < now() - (${CHECKING_LEASE_MS} || ' milliseconds')::interval))
+        and ${fits}
       order by found_at asc, rank asc, id asc
       limit 1
       for update skip locked
@@ -288,7 +325,7 @@ async function decide(placeRowId: string, status: string): Promise<void> {
   await db.update(googleMapsPlaces).set({ status, decidedAt: new Date() }).where(eq(googleMapsPlaces.id, placeRowId));
 }
 
-async function brandAlreadyHas(orgId: string, brandId: string, placeId: string, phone: string): Promise<boolean> {
+async function brandAlreadyHas(orgId: string, brandId: string, placeId: string, phone: string | null): Promise<boolean> {
   const [row] = await db
     .select({ id: googleMapsBrandClaims.id })
     .from(googleMapsBrandClaims)
@@ -296,7 +333,7 @@ async function brandAlreadyHas(orgId: string, brandId: string, placeId: string, 
       and(
         eq(googleMapsBrandClaims.orgId, orgId),
         eq(googleMapsBrandClaims.brandId, brandId),
-        or(eq(googleMapsBrandClaims.placeId, placeId), eq(googleMapsBrandClaims.phoneE164, phone))
+        phone ? or(eq(googleMapsBrandClaims.placeId, placeId), eq(googleMapsBrandClaims.phoneE164, phone)) : eq(googleMapsBrandClaims.placeId, placeId)
       )
     )
     .limit(1);
@@ -365,10 +402,12 @@ async function claimAndServe(
   audience: AudienceRow,
   identity: Identity,
   row: typeof googleMapsPlaces.$inferSelect,
-  person: Person
+  person: Person,
+  emailVerdict: EmailVerdict | null = null
 ): Promise<string | null> {
   return db.transaction(async (tx) => {
-    const phone = row.phoneE164!;
+    const phone = row.phoneE164;
+    const emailNorm = normalizeEmail(person.email);
     const claimed = await tx
       .insert(googleMapsBrandClaims)
       .values({ orgId: audience.orgId, brandId: audience.brandId, placeId: row.placeId, phoneE164: phone, audienceId: audience.id, runId: identity.runId ?? null })
@@ -383,16 +422,44 @@ async function claimAndServe(
       .where(and(eq(googleMapsBrandClaims.orgId, audience.orgId), eq(googleMapsBrandClaims.placeId, row.placeId), sql`${googleMapsBrandClaims.personId} is not null`))
       .limit(1);
     let personId = known?.personId ?? null;
+    if (!personId && emailNorm) {
+      // The org may already hold this address (another source found it): one person.
+      const [holder] = await tx.select({ id: people.id }).from(people).where(and(eq(people.orgId, audience.orgId), eq(people.emailNorm, emailNorm))).limit(1);
+      personId = holder?.id ?? null;
+    }
     if (!personId) {
       const [created] = await tx
         .insert(people)
         .values({
           orgId: audience.orgId,
+          emailNorm,
+          firstName: person.firstName,
+          lastName: person.lastName,
+          fullName: person.name,
+          title: person.title,
           companyName: person.organization?.name ?? null,
           companyDomain: person.organization?.domain ?? null,
         })
         .returning({ id: people.id });
       personId = created.id;
+    } else if (emailNorm) {
+      // The business's person learns its published address (when nobody else in the org holds it).
+      await tx.execute(sql`
+        update people set email_norm = ${emailNorm},
+          first_name = coalesce(first_name, ${person.firstName}), last_name = coalesce(last_name, ${person.lastName}),
+          full_name = coalesce(full_name, ${person.name}), title = coalesce(title, ${person.title})
+        where id = ${personId} and email_norm is null
+          and not exists (select 1 from people p2 where p2.org_id = ${audience.orgId} and p2.email_norm = ${emailNorm})`);
+    }
+    if (emailNorm) {
+      // The brand now holds this address: no other source re-serves it inside the window.
+      await tx
+        .insert(brandSuppressions)
+        .values({ orgId: audience.orgId, brandId: audience.brandId, emailNorm, providerPersonId: row.placeId, lastProvider: GOOGLE_MAPS_PROVIDER })
+        .onConflictDoUpdate({
+          target: [brandSuppressions.orgId, brandSuppressions.brandId, brandSuppressions.emailNorm],
+          set: { lastServedAt: sql`now()`, lastProvider: GOOGLE_MAPS_PROVIDER },
+        });
     }
     await tx.update(googleMapsBrandClaims).set({ personId }).where(eq(googleMapsBrandClaims.id, claimed[0].id));
     await tx
@@ -407,6 +474,10 @@ async function claimAndServe(
       brandId: audience.brandId,
       provider: GOOGLE_MAPS_PROVIDER,
       providerPersonId: row.placeId,
+      firstName: person.firstName,
+      lastName: person.lastName,
+      email: person.email,
+      emailVerdict,
       companyDomain: person.organization?.domain ?? null,
       campaignId: identity.campaignId ?? null,
       runId: identity.runId ?? null,
@@ -420,6 +491,30 @@ async function claimAndServe(
   });
 }
 
+/** The verdicts an email serve hands out: valid + catch-all always, unknown when the caller asks for it. */
+export function googleMapsAcceptedVerdicts(accepted: AcceptedEmails | undefined): EmailVerdict[] {
+  return accepted === "valid_catch_all_and_unknown" ? ["valid", "catch_all", "unknown"] : ["valid", "catch_all"];
+}
+
+/** apollo-service's verdict on an address we hold (its verifier, its cost, on the serve's run). */
+async function verifyEmail(email: string, identity: Identity): Promise<EmailVerdict> {
+  const body = (await apolloPost("/email-verifications", { emails: [email], source: "google-maps" }, identity)) as {
+    results?: Array<{ email?: unknown; verdict?: unknown; deliverable?: unknown }>;
+  };
+  const r = body.results?.[0];
+  if (!r || typeof r.verdict !== "string" || typeof r.deliverable !== "boolean" || !["valid", "invalid", "catch_all", "risky", "unknown"].includes(r.verdict)) {
+    throw new GoogleMapsSourceError(`apollo-service verified ${email} without a usable verdict: ${JSON.stringify(body).slice(0, 300)}`);
+  }
+  return r.verdict as EmailVerdict;
+}
+
+async function setEmailState(rowId: string, state: { emailStatus: string; email?: string | null; emailVerdict?: string | null }): Promise<void> {
+  await db
+    .update(googleMapsPlaces)
+    .set({ status: "waiting", decidedAt: new Date(), emailStatus: state.emailStatus, ...(state.email !== undefined ? { email: state.email } : {}), ...(state.emailVerdict !== undefined ? { emailVerdict: state.emailVerdict } : {}) })
+    .where(eq(googleMapsPlaces.id, rowId));
+}
+
 export async function serveNextGoogleMaps(
   audience: AudienceRow,
   identity: Identity,
@@ -429,11 +524,6 @@ export async function serveNextGoogleMaps(
 ): Promise<GoogleMapsServeResult> {
   const filters = readGoogleMapsFilters(audience.filters);
   if (!filters) throw new GoogleMapsSourceError(`audience ${audience.id} holds no Google Maps searches`);
-  // A business carries a phone, never an email.
-  if (reach.includes("email")) {
-    console.log(`[human-service] reach.provider_cannot_reach org=${identity.orgId} audience=${audience.id} provider=google_maps reach=${reach.join(",")}`);
-    return { status: "exhausted", person: null };
-  }
   const onWhatsapp = reachableOn.includes("whatsapp");
   const unsupported = reachableOn.filter((n) => n !== "whatsapp");
   if (unsupported.length > 0) {
@@ -441,34 +531,41 @@ export async function serveNextGoogleMaps(
     console.log(`[human-service] google_maps.network_not_checkable org=${identity.orgId} audience=${audience.id} reachableOn=${unsupported.join(",")}`);
     return { status: "exhausted", person: null };
   }
+  // The channels this serve needs: an email pipe needs the published address; every
+  // other serve (phone, WhatsApp, none stated) needs the phone, as before.
+  const needEmail = reach.includes("email");
+  const needPhone = reach.includes("phone") || onWhatsapp || !needEmail;
+  const accepted = googleMapsAcceptedVerdicts(identity.acceptedEmails);
+  const fits = and(
+    needPhone ? sql`phone_e164 is not null` : sql`true`,
+    needEmail
+      ? sql`(email_status is null or (email_status = 'found' and (email_verdict is null or email_verdict in (${sql.join(accepted.map((v) => sql`${v}`), sql`, `)}))))`
+      : sql`true`
+  )!;
 
   await seedGoogleMapsQueries(audience, filters);
   const own = await loadOwnCompany(identity.orgId, [audience.brandId]);
+  const meterIdentity = () => {
+    if (!identity.runId || !identity.userId) {
+      throw new GoogleMapsSourceError("a Google Maps search or site read is paid: serve-next needs x-run-id and x-user-id", 400);
+    }
+    return { orgId: identity.orgId, userId: identity.userId, runId: identity.runId, brandIds: [audience.brandId], campaignId: identity.campaignId, workflowTracking: identity.workflowTracking };
+  };
   let meter: TregMeter | null = null;
+  let siteMeter: TregMeter | null = null;
   let failed = false;
   try {
     while (Date.now() < deadline) {
-      const row = await takePlace(audience.id);
+      const row = await takePlace(audience.id, fits);
       if (!row) {
-        if (!identity.runId || !identity.userId) {
-          throw new GoogleMapsSourceError("a Google Maps search is paid: serve-next needs x-run-id and x-user-id", 400);
-        }
-        meter ??= new TregMeter(
-          { orgId: identity.orgId, userId: identity.userId, runId: identity.runId, brandIds: [audience.brandId], campaignId: identity.campaignId, workflowTracking: identity.workflowTracking },
-          "google-maps-search",
-          `/orgs/audiences/${audience.id}/serve-next`
-        );
+        meter ??= new TregMeter(meterIdentity(), "google-maps-search", `/orgs/audiences/${audience.id}/serve-next`);
         if (await runNextQuery(audience, filters, meter)) continue;
         await persistGoogleMapsReachable(audience);
-        console.log(`[human-service] google_maps.exhausted org=${identity.orgId} audience=${audience.id} queries=${filters.queries.length}`);
+        console.log(`[human-service] google_maps.exhausted org=${identity.orgId} audience=${audience.id} queries=${filters.queries.length} reach=${reach.join(",") || "-"}`);
         return { status: "exhausted", person: null };
       }
 
       const place = row.place as GoogleMapsPlace;
-      if (!row.phoneE164) {
-        await decide(row.id, "no_phone");
-        continue;
-      }
       if (isOwnCompany(own, { name: place.name ?? null, website: place.website ?? null })) {
         await decide(row.id, "own_company");
         continue;
@@ -477,7 +574,65 @@ export async function serveNextGoogleMaps(
         await decide(row.id, "taken");
         continue;
       }
-      if (onWhatsapp) {
+
+      let contact: PlaceEmail | null = null;
+      if (needEmail) {
+        let email = row.email;
+        let site: SiteContact | null = null;
+        if (row.emailStatus === null) {
+          site = await siteContactOf({
+            placeId: row.placeId,
+            businessName: place.name ?? null,
+            website: place.website ?? null,
+            identity,
+            meter: () => (siteMeter ??= new TregMeter(meterIdentity(), "google-maps-site-read", `/orgs/audiences/${audience.id}/serve-next`)),
+          }).catch(async (err) => {
+            await decide(row.id, "waiting");
+            throw err;
+          });
+          if (site.outcome !== "found" || !site.email) {
+            await setEmailState(row.id, { emailStatus: site.outcome, email: null });
+            continue;
+          }
+          email = site.email;
+        }
+        if (!email) {
+          await setEmailState(row.id, { emailStatus: "no_email", email: null });
+          continue;
+        }
+        // The fleet's email facts about this address, before paying to verify it.
+        const brandIdentity = { ...identity, brandIds: [audience.brandId] };
+        if (await isEmailSuppressed(audience.orgId, [audience.brandId], email, identity.excludeEmailedWithin)) {
+          await decide(row.id, "taken");
+          continue;
+        }
+        if (await isPersonOptedOut(brandIdentity, email)) {
+          await decide(row.id, "opted_out");
+          continue;
+        }
+        if (await isEmailWonForRequest(brandIdentity, email)) {
+          await decide(row.id, "won");
+          continue;
+        }
+        if (await isEmailBounced(brandIdentity, email)) {
+          await setEmailState(row.id, { emailStatus: "not_deliverable", email, emailVerdict: "invalid" });
+          continue;
+        }
+        const verdict = (row.emailVerdict as EmailVerdict | null) ?? (await verifyEmail(email, identity).catch(async (err) => {
+          await decide(row.id, "waiting");
+          throw err;
+        }));
+        if (!accepted.includes(verdict)) {
+          await setEmailState(row.id, { emailStatus: verdict === "invalid" || verdict === "risky" ? "not_deliverable" : "found", email, emailVerdict: verdict });
+          continue;
+        }
+        await db.update(googleMapsPlaces).set({ emailStatus: "found", email, emailVerdict: verdict }).where(eq(googleMapsPlaces.id, row.id));
+        // Same read as the stored row when the site was read on an earlier serve.
+        const named = site ?? (await siteContactOf({ placeId: row.placeId, businessName: null, website: null, identity, meter: () => { throw new GoogleMapsSourceError(`site of ${row.placeId} not stored`); } }));
+        contact = { email, verdict, contactName: named.contactName, contactRole: named.contactRole };
+      }
+
+      if (onWhatsapp && row.phoneE164) {
         const wa = await crmWhatsappReach(audience.brandId, row.phoneE164, identity).catch(async (err) => {
           await decide(row.id, "waiting");
           throw err;
@@ -493,13 +648,13 @@ export async function serveNextGoogleMaps(
           return { status: "exhausted", person: null };
         }
       }
-      const person = placeToPerson(place, row.phoneE164, filters);
-      const personId = await claimAndServe(audience, identity, row, person);
+      const person = placeToPerson(place, row.phoneE164, filters, contact);
+      const personId = await claimAndServe(audience, identity, row, person, contact?.verdict ?? null);
       if (!personId) {
         await decide(row.id, "taken");
         continue;
       }
-      console.log(`[human-service] google_maps.served org=${identity.orgId} audience=${audience.id} place=${row.placeId} run=${identity.runId ?? "-"}`);
+      console.log(`[human-service] google_maps.served org=${identity.orgId} audience=${audience.id} place=${row.placeId} email=${contact ? contact.verdict : "-"} named=${contact?.contactName ? "yes" : "no"} run=${identity.runId ?? "-"}`);
       return { status: "served", person, personId };
     }
     return { status: "pending", person: null };
@@ -508,6 +663,7 @@ export async function serveNextGoogleMaps(
     throw err;
   } finally {
     if (meter) await meter.close(failed ? "failed" : "completed");
+    if (siteMeter) await (siteMeter as TregMeter).close(failed ? "failed" : "completed");
   }
 }
 
@@ -533,6 +689,18 @@ export async function googleMapsStillFits(audienceId: string, orgId: string, bra
         eq(googleMapsBrandClaims.phoneE164, phone)
       )
     )
+    .limit(1);
+  return !!row;
+}
+
+/** still-fits for an email find: the business this audience served at that published address. */
+export async function googleMapsStillFitsEmail(audienceId: string, email: string): Promise<boolean> {
+  const norm = normalizeEmail(email);
+  if (!norm) return false;
+  const [row] = await db
+    .select({ id: googleMapsPlaces.id })
+    .from(googleMapsPlaces)
+    .where(and(eq(googleMapsPlaces.audienceId, audienceId), eq(googleMapsPlaces.status, "served"), eq(googleMapsPlaces.email, norm)))
     .limit(1);
   return !!row;
 }
