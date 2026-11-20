@@ -386,6 +386,34 @@
       "when": 1771933782399,
       "tag": "0054_offer_audiences",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1771933783399,
+      "tag": "0055_google_maps_email",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1771933784399,
+      "tag": "0056_candidate_serve_reach",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1771933884399,
+      "tag": "0057_google_maps_live_repair",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1771933885399,
+      "tag": "0058_audience_snapshot_cache",
+      "breakpoints": true
     }
   ]
 }

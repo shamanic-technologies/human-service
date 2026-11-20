@@ -1113,9 +1113,19 @@ Optional `?orgId=` narrows; omitted = every org holding the brand.
   `company_name` NULL), teasers the name but no domain; a screened-then-revealed
   person bridges name -> domain for the brand, so `domain:<d>` when known, else
   `name:<lower name>`, else no company.
-- Measured 2026-10-05: ~1.1-1.4s on the two biggest brands (42.7k screenings /
-  17.9k members). No provider call, no spend, no state. Tests:
-  `tests/integration/audience-snapshot.test.ts`.
+- **Speed** (MON-PAGE-SPEED-FLOOR-1120, owner: every dashboard page under 1 s):
+  each table filters on `audience_id = any(array(<brand's audiences>))`, never a
+  join to a CTE (no stats: seq scans of the whole fleet); the domain -> name and
+  company -> sources maps are built once, never a correlated per-row scan (was
+  quadratic: 28 s people page, 30 s companies page). And the three dashboard reads
+  (totals, people page, companies page; NOT `/person-companies`) answer from
+  their last stored body (`audience_snapshot_cache`, key = brand + `orgId` scope +
+  read + page args, `src/services/audience-snapshot-cache.ts`): a stored answer
+  older than 60 s is served and recomputed behind it; never computed = inline.
+  Byte-identical to the computation, at most one refresh old. A copy of a read,
+  never a source (transfer-brand drops both brands' rows). `AUDIENCE_SNAPSHOT_CACHE=off`
+  = inline (tests default). Tests: `tests/integration/audience-snapshot.test.ts`,
+  `audience-snapshot-cache.test.ts`.
 - **`/person-companies`** = provider person id -> company for EVERY held person
   in one statement (same relation + per-person max as `/people`, no sort, no
   page). features-service's sourcing figures read it; never walk `/people` in
@@ -2221,9 +2231,10 @@ screen) judges each person against each offer's text. No variants, no audience p
 to an offer. `audiences.role` (migration `0054`):
 - **`target`** = THE audience of its offer (one live per (org, brand, offer), partial unique index): `nl_prompt` =
   `target_text` = the offer's text, `provider='apollo'`, no filters / pointer of its own. Served by
-  `candidates/next` only (serve-next 422). Size / Remaining UNKNOWN (omitted). Never a profile (no source build,
+  `candidates/next` only (serve-next 422). Size / Remaining UNKNOWN (omitted, never counted: no Apollo dry-run). Never a profile (no source build,
   no avatar sweep), never a pointer build. A brand with one makes the refill skip it (`offer_audience`).
-- **`search`** = a list of the brand (a former audience row: filters / pointer, cursor, buffer, sources intact).
+- **`search`** = a list of the brand (a former audience row: filters / pointer, cursor, buffer, sources intact; or born
+  one: `POST /orgs/audiences {role: "search"}`, no offerId). Apollo, CRM and Google Maps lists are walked.
   Hidden from `GET /orgs/audiences` unless `?role=search`. Its own walk (if any caller still serves it) unchanged.
 - **NULL** = an audience as before, byte-identical.
 - **The shared walk** (`nextCandidateForTarget`, `audience-candidates.ts`): the target's lapsed offers, then each
@@ -2307,7 +2318,7 @@ catalogue) holds `filters.google_maps = {queries[], country (ISO2), language}`: 
 plain-words target expands to (`POST /orgs/audiences {provider:"google_maps", nlPrompt}` writes them, one
 chat-service call on a `google-maps-list-build` run declaring the list; or pass the filters; a source campaign ON
 writes them from the offer's validated target).
-- **Serve (serve-next only; candidates/next 422)**: one business per call: `email`/names null, `phone` E.164
+- **Serve (serve-next only; candidates/next 422)**: one business per call: `email`/names null (email reach below), `phone` E.164
   (`libphonenumber-js`, read in the audience's country), `providerPersonId` = Google place id, `organization`
   {name, domain (none for a facebook/instagram page), websiteUrl, streetAddress, city (from Google's address),
   country, primaryPhone, industry}. Walk: oldest undecided business of the audience (`google_maps_places`,
@@ -2321,7 +2332,7 @@ writes them from the offer's validated target).
   `not_on_whatsapp` ⟹ kept aside (`not_on_whatsapp`), never claimed; `stated_not_to_brand` (the brand's user
   tagged the person not someone of the brand, crm-service v0.112.0) ⟹ same, row `stated_not_to_brand`, sourcing goes on; the BRAND cannot send (not linked /
   connected / automation refused) ⟹ business back to waiting, `exhausted`, nobody consumed. Never guessed from the
-  number. Another network ⟹ exhausted (no owner checks it). `reachableBy` email ⟹ exhausted, nothing searched.
+  number. Another network ⟹ exhausted (no owner checks it).
 - **Cost**: treg `treg.google.serp.maps` (routed, cheapest first, ~$0.00015 a search of ~20 places), metered by
   `src/lib/treg-meter.ts` (apollo-service's linkedin-engagement pattern): a `google-maps-search` child run of the
   serve's run, `treg-micro-usd` ceiling 5,000 provisioned + authorized (platform key) + sent as
@@ -2331,6 +2342,41 @@ writes them from the offer's validated target).
 - **still-fits**: `email: null` + `phone` (E.164) answers from the brand's claim of that phone under the audience.
 - Brand transfer moves the three tables. Size/Remaining unknown until exhausted (like linkedin_engagement).
   Tests: `tests/integration/google-maps-source.test.ts`.
+- **Live fixes** (GMAPS-LIVE-1117, first live run on a client 2026-11-17): (1) every stored row is the provider's own
+  (bronze) and is READ through `readPlace` (crawl4ai `name/website/categories`, dataforseo `title/url/address_info/
+  additional_categories`, litescrape `title/website/type/types`): a dataforseo row used to read as a shop with no name
+  and no site, so 683 shops were judged blind. (2) A serve stating NO reach walks by EMAIL (phone only for
+  `reachableBy: phone` or a messaging network): `served` carries a usable email unless the pipe says otherwise; 265
+  phone-only shops had been served to a cold-email campaign. (3) Search: litescrape first (`$0.00015`, not in treg's
+  route, a miss is free), then treg's route with `{q}` ONLY (a `country`/`language` filter made treg skip crawl4ai and
+  pay dataforseo $0.002). Candidates carry `company.address`. Migration 0057 re-opened the blind declines, released the
+  phone-only claims (ledger `google_maps_live_repairs`) and resumed the list paused during the incident.
+- **Email reach** (GMAPS-EMAIL-1117, `src/services/google-maps-site-contact.ts`): `reachableBy` email reads the
+  business's OWN site through treg `treg.web.extract` (routed, free public route first, ceiling $0.001/page, metered on a
+  `google-maps-site-read` child run): homepage + up to 3 same-site pages it links to whose path names a contact / legal
+  page (impressum, kontakt, contact, imprint, legal, about...; legal first). Every address the pages PUBLISH (text,
+  `x(at)y`, mailto) is collected; one chat-service call (google flash-pro, org-billed on the site-read run) picks the
+  business's own address and the person the site names; the email must be one of the published addresses, the
+  name / role must appear verbatim in the pages, else dropped (never guessed, never invented). Stored once per place,
+  fleet-wide (bronze `google_maps_site_reads`, migration 0055): never read twice. Then gates: brand suppression (window),
+  opt-out, won, bounce, then apollo-service `POST /email-verifications` (source `google-maps`, on the serve's run): served
+  when `valid` / `catch_all` (+ `unknown` under `valid_catch_all_and_unknown`). Served = the person carries `email`,
+  `emailStatus` = verdict, name / title when named; claim as before + a `brand_suppressions` row + `lead_serves.email`.
+  A business lacking the channel a serve needs stays `waiting` (`email_status` no_website / no_email / not_deliverable,
+  or no phone), filtered out of that channel's walk only, so the other pipe still gets it (0055 moved `no_phone` rows
+  back to waiting). still-fits answers an email find too. Tests: `tests/integration/google-maps-email.test.ts`.
+- **Walked by offer audiences** (GMAPS-TARGET-WALK-1117): a brand Google Maps list (`POST /orgs/audiences {provider:
+  "google_maps", role: "search", nlPrompt | filters}`, no offerId; or an existing one turned into a search by
+  `/internal/offer-audiences/realign`) is in `brandListsOf` (list `google_maps_search`) for every target of the brand.
+  `candidates/next` on a target offers ONE business as a candidate (`nextGoogleMapsCandidate`: read, not consumed;
+  skips businesses this target decided, claimed for the brand, own company, or lacking the walk's channel; an email
+  walk reads the site BEFORE the offer, so the judge never sees a shop with no published email and the teaser carries
+  the named person). The walk's `reachableBy` / `reachableOn` are stored on the candidate (`serve_reach`, migration
+  0056) and its reveal runs the same per-business rules as serve-next (`servePlace`: gates, verification, WhatsApp
+  check, the brand claim under the LIST). Reasons in the reveal's enum, the precise one in `detail` (`taken` ⟹
+  `already_served`, `no_website` ⟹ `no_email`, `not_on_whatsapp` ⟹ `no_person`; the brand unable to send on WhatsApp
+  ⟹ `provider_skipped` / `whatsapp_unavailable`, candidate handed back). One offer declining leaves the business to
+  the others. Tests: the "offer audience" block of `google-maps-email.test.ts`.
 
 ### Hiring titles — a hiring source says WHICH roles are posted (`src/services/signal-source-titles.ts`, HIRING-TITLES-1102)
 

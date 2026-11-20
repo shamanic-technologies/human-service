@@ -30,7 +30,7 @@ import { crmStillFits } from "../lib/crm-contacts.js";
 import type { StepFilter } from "../lib/step-filter.js";
 import { normalizeEmail } from "./suppression.js";
 import { emailsOfPersons, personIdsByEmail } from "./person-emails.js";
-import { googleMapsStillFits, isGoogleMapsAudience } from "./google-maps-source.js";
+import { googleMapsStillFits, googleMapsStillFitsEmail, isGoogleMapsAudience } from "./google-maps-source.js";
 
 export type StillFitsBasis = "crm_people_pool" | "crm_list" | "found_by_search";
 
@@ -102,6 +102,9 @@ async function googleMapsFit(q: StillFitsQuestion, audience: typeof audiences.$i
     if (member) return { fits: true, basis: "found_by_search" };
   }
   if (q.phone && (await googleMapsStillFits(audience.id, q.orgId, audience.brandId, q.phone))) {
+    return { fits: true, basis: "found_by_search" };
+  }
+  if (q.email && (await googleMapsStillFitsEmail(audience.id, q.email))) {
     return { fits: true, basis: "found_by_search" };
   }
   throw new CannotJudgeError("not_found_by_audience", "This audience never found this business, so it cannot say whether it still fits");

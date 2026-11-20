@@ -279,6 +279,12 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
   const orgId = res.locals.orgId as string;
   const userId = (res.locals.userId as string | undefined) ?? null;
 
+  // A brand list (role search) belongs to no offer: every offer audience of the brand walks it.
+  if (parsed.data.role === "search" && parsed.data.offerId) {
+    res.status(400).json({ error: "A brand list (role 'search') belongs to no offer: omit offerId." });
+    return;
+  }
+
   // A people binding is a crm audience's, and never beside a file binding
   // (crm-service refuses both at once). Checked before any downstream call.
   if (parsed.data.crmPeople) {
@@ -437,6 +443,7 @@ router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res)
         // not resolve the id (same treatment as brandId; crmUploadId is
         // validated above only because it decides who a serve may reach).
         offerId: parsed.data.offerId ?? null,
+        role: parsed.data.role ?? null,
         nlPrompt: parsed.data.nlPrompt ?? null,
         ...audienceTargetFields(parsed.data.nlPrompt),
         filters: storedFilters,
