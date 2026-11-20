@@ -1637,3 +1637,19 @@ export const googleMapsBrandClaims = pgTable(
     index("idx_google_maps_brand_claims_org_place").on(table.orgId, table.placeId),
   ]
 );
+
+// MON-PAGE-SPEED-FLOOR-1120: last computed answer of each brand audience snapshot
+// read (src/services/audience-snapshot-cache.ts). A copy of a read, keyed on the
+// brand + org scope + read + page args: never a source of truth. Carries the
+// brand ⟹ transfer-brand drops the brand's rows (they recompute on next read).
+export const audienceSnapshotCache = pgTable(
+  "audience_snapshot_cache",
+  {
+    cacheKey: text("cache_key").primaryKey(),
+    brandId: uuid("brand_id").notNull(),
+    orgId: uuid("org_id"),
+    body: text("body").notNull(),
+    computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_audience_snapshot_cache_brand").on(table.brandId)]
+);

@@ -144,6 +144,10 @@ export async function transferBrand(
                   WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING child_audience_id`).length
       );
       add("lead_sourcing_choices", await moveLeadSourcingChoices(tx, fromOrg, fromBrand, targetOrgId, targetBrandId));
+      // Stored snapshot answers (a copy of a read, MON-PAGE-SPEED-FLOOR-1120): both
+      // brands' answers change, so they are dropped and recomputed on next read.
+      // Not reported as moved rows: nothing of the brand's data lives there.
+      await tx`DELETE FROM audience_snapshot_cache WHERE brand_id IN (${fromBrand}, ${targetBrandId})`;
       add(
         "lead_sourcing_choice_changes",
         (await tx`UPDATE lead_sourcing_choice_changes SET org_id = ${targetOrgId}, brand_id = ${targetBrandId}
