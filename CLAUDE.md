@@ -1084,7 +1084,11 @@ CRUD responses stay the plain `AudienceSchema`.
   dashboard brand page AND by features-service on every lead pick, so it stacked
   up behind itself. The EXISTS form is linear (227 ms on that brand, identical
   counts). Measured 2026-09-24; guarded by the linkedin-only and other-brand
-  cases in `tests/integration/audiences.test.ts`.
+  cases in `tests/integration/audiences.test.ts`. Each EXISTS also carries
+  `offset 0`: without it Postgres turns the OR-ed EXISTS into HASHED subplans
+  over the whole fleet's in-window suppressions + person addresses (~400 ms per
+  list page); with it, one index probe per member (~100-200 ms, same counts,
+  MON-PAGE-SPEED-FLOOR-1120, `tests/integration/audience-contactability-plan.test.ts`).
 
 ### Staff audience snapshot — `GET /internal/brands/{brandId}/audience-snapshot`
 
