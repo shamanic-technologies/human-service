@@ -535,6 +535,12 @@ export async function computeAudienceContactability(
   // suppressions — on a list the dashboard loads on every brand page and
   // features-service reads on every lead pick. The EXISTS form is linear in
   // members + suppressions (227 ms on the same brand, identical counts).
+  //
+  // ⚠️ Each EXISTS carries `offset 0` (MON-PAGE-SPEED-FLOOR-1120): without it
+  // Postgres turns the OR-ed EXISTS into HASHED subplans that read every
+  // in-window suppression and person address of the FLEET (49k + 58k rows) to
+  // judge one page's 2.4k members (~400 ms). An OFFSET keeps each EXISTS a
+  // correlated index probe per member (~100 ms, identical counts, 2026-11-20).
   const inWindowSuppressionFor = (
     key: typeof brandSuppressions.emailNorm | typeof brandSuppressions.linkedinUrlNorm,
     value: typeof people.emailNorm | typeof people.linkedinUrlNorm
@@ -544,6 +550,7 @@ export async function computeAudienceContactability(
       and ${brandSuppressions.brandId} = ${audiences.brandId}
       and ${key} = ${value}
       and ${brandSuppressions.lastServedAt} > ${windowCutoff()}
+    offset 0
   )`;
 
   const suppressedRows = await db
@@ -569,6 +576,7 @@ export async function computeAudienceContactability(
             where ${personEmails.personId} = ${people.id}
               and ${brandSuppressions.brandId} = ${audiences.brandId}
               and ${brandSuppressions.lastServedAt} > ${windowCutoff()}
+            offset 0
           )`,
           and(
             isNotNull(people.linkedinUrlNorm),
