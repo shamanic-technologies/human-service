@@ -1113,9 +1113,19 @@ Optional `?orgId=` narrows; omitted = every org holding the brand.
   `company_name` NULL), teasers the name but no domain; a screened-then-revealed
   person bridges name -> domain for the brand, so `domain:<d>` when known, else
   `name:<lower name>`, else no company.
-- Measured 2026-10-05: ~1.1-1.4s on the two biggest brands (42.7k screenings /
-  17.9k members). No provider call, no spend, no state. Tests:
-  `tests/integration/audience-snapshot.test.ts`.
+- **Speed** (MON-PAGE-SPEED-FLOOR-1120, owner: every dashboard page under 1 s):
+  each table filters on `audience_id = any(array(<brand's audiences>))`, never a
+  join to a CTE (no stats: seq scans of the whole fleet); the domain -> name and
+  company -> sources maps are built once, never a correlated per-row scan (was
+  quadratic: 28 s people page, 30 s companies page). And the three dashboard reads
+  (totals, people page, companies page; NOT `/person-companies`) answer from
+  their last stored body (`audience_snapshot_cache`, key = brand + `orgId` scope +
+  read + page args, `src/services/audience-snapshot-cache.ts`): a stored answer
+  older than 60 s is served and recomputed behind it; never computed = inline.
+  Byte-identical to the computation, at most one refresh old. A copy of a read,
+  never a source (transfer-brand drops both brands' rows). `AUDIENCE_SNAPSHOT_CACHE=off`
+  = inline (tests default). Tests: `tests/integration/audience-snapshot.test.ts`,
+  `audience-snapshot-cache.test.ts`.
 - **`/person-companies`** = provider person id -> company for EVERY held person
   in one statement (same relation + per-person max as `/people`, no sort, no
   page). features-service's sourcing figures read it; never walk `/people` in

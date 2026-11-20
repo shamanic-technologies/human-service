@@ -15,6 +15,7 @@ import {
   brandHeldPeople,
   brandHeldPersonCompanies,
 } from "../services/audience-snapshot.js";
+import { cachedSnapshotRead } from "../services/audience-snapshot-cache.js";
 import { brandAudienceOverlap, brandMemberships } from "../services/audience-memberships.js";
 
 const router = Router();
@@ -30,7 +31,8 @@ router.get("/internal/brands/:brandId/audience-snapshot", requireApiKey, async (
   const query = BrandSnapshotQuerySchema.safeParse(req.query);
   if (!params.success) return badRequest(res, params.error.issues[0]?.message);
   if (!query.success) return badRequest(res, query.error.issues[0]?.message);
-  res.json(await brandAudienceSnapshot({ brandId: params.data.brandId, orgId: query.data.orgId }));
+  const scope = { brandId: params.data.brandId, orgId: query.data.orgId };
+  res.json(await cachedSnapshotRead({ ...scope, read: "totals" }, () => brandAudienceSnapshot(scope)));
 });
 
 function pageArgs(req: Request, res: Response) {
@@ -51,7 +53,11 @@ function pageArgs(req: Request, res: Response) {
 router.get("/internal/brands/:brandId/audience-snapshot/people", requireApiKey, async (req, res) => {
   const args = pageArgs(req, res);
   if (!args) return;
-  res.json(await brandHeldPeople(args.scope, args.page));
+  res.json(
+    await cachedSnapshotRead({ ...args.scope, read: "people", args: { ...args.page } }, () =>
+      brandHeldPeople(args.scope, args.page)
+    )
+  );
 });
 
 // One read of every held person's company (features-service sourcing figures).
@@ -66,7 +72,11 @@ router.get("/internal/brands/:brandId/audience-snapshot/person-companies", requi
 router.get("/internal/brands/:brandId/audience-snapshot/companies", requireApiKey, async (req, res) => {
   const args = pageArgs(req, res);
   if (!args) return;
-  res.json(await brandHeldCompanies(args.scope, args.page));
+  res.json(
+    await cachedSnapshotRead({ ...args.scope, read: "companies", args: { ...args.page } }, () =>
+      brandHeldCompanies(args.scope, args.page)
+    )
+  );
 });
 
 // Multi-source provenance reads (src/services/audience-memberships.ts): RAW

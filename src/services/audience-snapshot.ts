@@ -64,31 +64,38 @@ export interface SnapshotScope {
   orgId?: string;
 }
 
-type AudienceRow = typeof audiences.$inferSelect;
+type AudienceRow = Pick<
+  typeof audiences.$inferSelect,
+  "id" | "orgId" | "offerId" | "name" | "status" | "provider" | "filters" | "targetText"
+>;
 
 // One row per (audience, person) the brand holds, with its company key. Every
 // read below aggregates this one relation, so the three surfaces cannot disagree.
 function heldSql(scope: SnapshotScope) {
   const orgFilter = scope.orgId ? sql`and a.org_id = ${scope.orgId}` : sql``;
+  // The brand's audiences as an ARRAY each table filters on (`audience_id =
+  // any(...)`), never a join to a CTE: Postgres has no statistics on a CTE, so
+  // the join form estimated "every row matches" and seq-scanned the whole
+  // screenings / candidates / members / buffer tables of the fleet (3.6 s for a
+  // 205-audience brand, 2026-11-20); the array form walks each table's
+  // audience_id index.
+  const ids = sql`array(select a.id from audiences a where a.brand_id = ${scope.brandId} ${orgFilter})`;
   return sql`
-    aud as (
-      select a.id, a.org_id from audiences a
-      where a.brand_id = ${scope.brandId} ${orgFilter}
-    ),
     verdicts as (
       select s.audience_id, s.provider_person_id, s.teaser, s.yes_probability,
         case when s.yes_probability is not null
           then s.yes_probability > ${SCREEN_MIN_YES_PROBABILITY}
           else s.verdict end as accepted,
         null::text as org_domain, s.created_at as judged_at
-      from audience_teaser_screenings s join aud on aud.id = s.audience_id
+      from audience_teaser_screenings s where s.audience_id = any(${ids})
       union all
       -- lead-service's decision on the candidate path (since 2026-10-07): paying
       -- the reveal = its target accepted the person, declining = it did not.
       select c.audience_id, c.provider_person_id, c.teaser, null::double precision,
         c.status in ('revealing', 'revealed'), lower(c.organization_domain), c.decided_at
-      from audience_candidates c join aud on aud.id = c.audience_id
-      where c.status in ('revealing', 'revealed', 'declined') and c.decided_at is not null
+      from audience_candidates c
+      where c.audience_id = any(${ids})
+        and c.status in ('revealing', 'revealed', 'declined') and c.decided_at is not null
     ),
     scr as (
       select distinct on (v.audience_id, v.provider_person_id)
@@ -104,11 +111,10 @@ function heldSql(scope: SnapshotScope) {
         p.title, p.company_name as org_name, lower(p.company_domain) as org_domain,
         null::boolean as accepted, null::double precision as yes_probability
       from audience_members m
-      join aud on aud.id = m.audience_id
       join people p on p.id = m.person_id
       -- what THIS list revealed; a person it only found while taken
       -- (multi-source, audience-memberships.ts) was bought by another list
-      where m.provenance = 'served'
+      where m.audience_id = any(${ids}) and m.provenance = 'served'
       union all
       select scr.audience_id, scr.provider_person_id, null, 'screened',
         scr.teaser->>'name', scr.teaser->>'title', scr.teaser->>'organizationName', scr.org_domain,
@@ -118,14 +124,14 @@ function heldSql(scope: SnapshotScope) {
       select b.audience_id, b.provider_person_id, null, 'buffered',
         b.teaser->>'name', b.teaser->>'title', b.teaser->>'organizationName', null,
         null, null
-      from audience_teaser_buffer b join aud on aud.id = b.audience_id
+      from audience_teaser_buffer b where b.audience_id = any(${ids})
       union all
       -- a candidate handed to lead-service and not decided yet: held, waiting
       select c.audience_id, c.provider_person_id, null, 'buffered',
         c.teaser->>'name', c.teaser->>'title', c.teaser->>'organizationName', lower(c.organization_domain),
         null, null
-      from audience_candidates c join aud on aud.id = c.audience_id
-      where c.status = 'offered'
+      from audience_candidates c
+      where c.audience_id = any(${ids}) and c.status = 'offered'
     ),
     held as (
       select audience_id, person_key,
@@ -148,6 +154,14 @@ function heldSql(scope: SnapshotScope) {
       from person_org where org_name is not null and org_domain is not null
       group by lower(org_name)
     ),
+    -- a domain's name, for a person who carries only the domain (one row per
+    -- domain; was a per-person lateral scan of person_org, quadratic: 28 s for
+    -- one people page of a 12k-person brand, 2026-11-20)
+    domain_name as (
+      select org_domain, max(org_name) as org_name
+      from person_org where org_name is not null and org_domain is not null
+      group by org_domain
+    ),
     keyed as (
       select h.*,
         coalesce(po.org_domain, nd.domain) as company_domain,
@@ -159,10 +173,7 @@ function heldSql(scope: SnapshotScope) {
       from held h
       join person_org po on po.person_key = h.person_key
       left join name_domain nd on nd.lname = lower(po.org_name)
-      left join lateral (
-        select max(p2.org_name) as org_name from person_org p2
-        where po.org_name is null and p2.org_domain = po.org_domain and p2.org_name is not null
-      ) nd2 on true
+      left join domain_name nd2 on po.org_name is null and nd2.org_domain = po.org_domain
     )`;
 }
 
@@ -174,7 +185,21 @@ async function loadAudiences(scope: SnapshotScope): Promise<Map<string, Audience
   const where = scope.orgId
     ? and(eq(audiences.brandId, scope.brandId), eq(audiences.orgId, scope.orgId))
     : eq(audiences.brandId, scope.brandId);
-  const list = await db.select().from(audiences).where(where);
+  // Only the columns the snapshot shows: an audience row also carries its avatar
+  // (a data: URI) and its preview, which this read never returns.
+  const list = await db
+    .select({
+      id: audiences.id,
+      orgId: audiences.orgId,
+      offerId: audiences.offerId,
+      name: audiences.name,
+      status: audiences.status,
+      provider: audiences.provider,
+      filters: audiences.filters,
+      targetText: audiences.targetText,
+    })
+    .from(audiences)
+    .where(where);
   return new Map(list.map((a) => [a.id, a]));
 }
 
@@ -355,18 +380,24 @@ export async function brandHeldCompanies(scope: SnapshotScope, page: PageArgs) {
         count(distinct person_key) filter (where accepted) as accepted
       from keyed where company_key is not null group by company_key, audience_id
     ),
+    -- one sources list per company, built once (was a correlated scan of per_aud
+    -- per company, quadratic: 30 s for one companies page, 2026-11-20)
+    company_sources as (
+      select company_key,
+        jsonb_agg(jsonb_build_object('audienceId', audience_id, 'people', people, 'accepted', accepted)
+          order by audience_id) as sources
+      from per_aud group by company_key
+    ),
     grouped as (
       select k.company_key, max(k.company_name) as company_name, max(k.company_domain) as company_domain,
         count(distinct k.person_key) as people,
         count(distinct k.person_key) filter (where k.revealed) as revealed,
-        count(distinct k.person_key) filter (where k.accepted) as accepted,
-        (select jsonb_agg(jsonb_build_object('audienceId', pa.audience_id, 'people', pa.people, 'accepted', pa.accepted)
-                order by pa.audience_id)
-         from per_aud pa where pa.company_key = k.company_key) as sources
+        count(distinct k.person_key) filter (where k.accepted) as accepted
       from keyed k where k.company_key is not null
       group by k.company_key ${having}
     )
-    select *, count(*) over () as total from grouped
+    select g.*, cs.sources, count(*) over () as total
+    from grouped g join company_sources cs on cs.company_key = g.company_key
     order by accepted desc, people desc, company_name nulls last, company_key
     limit ${page.limit} offset ${page.offset}`);
   const total = list.length ? n(list[0].total) : await countCompanies(scope, page.acceptedOnly);
