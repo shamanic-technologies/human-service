@@ -422,12 +422,21 @@ describe("brand relations — only people in the relation are offered (judged on
     expect(jev.calls).toHaveLength(2);
     expect(apollo.searches()).toBe(3);
 
+    // An adopted target with no creator: the screen bills its list's creator.
+    await db.update(audiences).set({ createdByUserId: null }).where(eq(audiences.id, target));
+    const again = await request(app)
+      .post("/internal/brand-relations/screen")
+      .set(getAuthHeaders())
+      .send({ orgId: ORG, brandId: BRAND, relation: "industry_peers" });
+    expect(again.status).toBe(200);
+    expect(jev.calls).toHaveLength(2);
+
     const dry = await request(app)
       .post("/internal/brand-relations/screen?dryRun=true")
       .set(getAuthHeaders())
       .send({ orgId: ORG, brandId: BRAND, relation: "industry_peers" });
     expect(dry.body).toMatchObject({ dryRun: true, people: 3, passed: 1, failed: 2, unjudged: 0 });
-    expect(apollo.searches()).toBe(3);
+    expect(apollo.searches()).toBe(4); // the dry run searched nothing (the second screen's one empty page)
 
     const res = await request(app).post(`/orgs/audiences/${target}/candidates/next`).set(getAuthHeaders());
     expect(res.body.candidate).toMatchObject({ providerPersonId: "s1" });

@@ -537,7 +537,8 @@ export async function screenRelationLists(input: {
     passedSample: [],
     failedSample: [],
   };
-  const userId = target.createdByUserId;
+  // Billed to whoever created the relation audience, else one of its lists (an adopted target may carry no creator).
+  const userId = target.createdByUserId ?? lists.find((l) => l.createdByUserId)?.createdByUserId ?? null;
   if (!dryRun && !userId) throw new BrandRelationError("the relation audience has no creator to bill the screen to", 400);
 
   const run = async (identity: Identity | null) => {
