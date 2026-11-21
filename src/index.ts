@@ -29,6 +29,7 @@ import suppressionRecoveryRoutes from "./routes/suppression-recovery.js";
 import blankCandidateRoutes from "./routes/blank-candidates.js";
 import sourceAudienceMergeRoutes from "./routes/source-audience-merge.js";
 import offerAudienceRoutes from "./routes/offer-audiences.js";
+import brandRelationRoutes from "./routes/brand-relations.js";
 import suppressionBackfillRoutes from "./routes/suppression-backfill.js";
 import { register as runInstrumentation } from "./instrumentation.js";
 import { startOfferAttributionSweep } from "./services/offer-attribution-sweep.js";
@@ -83,6 +84,7 @@ app.use(suppressionRecoveryRoutes);
 app.use(blankCandidateRoutes);
 app.use(sourceAudienceMergeRoutes);
 app.use(offerAudienceRoutes);
+app.use(brandRelationRoutes);
 app.use(sendSuppressionSyncRoutes);
 app.use(candidateWalkRoutes);
 app.use(audienceSplitRoutes); // FACTORY-P3 next outcomes: the stored split script's doors + recorded proposals // FACTORY-P3 next outcomes: the stored walk script's doors + recorded walks

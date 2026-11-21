@@ -89,6 +89,7 @@ const TABLES = [
   "lead_sourcing_choices",
   "lead_sourcing_choice_changes",
   "offer_audience_realignments",
+  "brand_relation_assignments",
   "google_maps_queries",
   "google_maps_places",
   "google_maps_brand_claims",
@@ -157,6 +158,12 @@ export async function transferBrand(
       add(
         "offer_audience_realignments",
         (await tx`UPDATE offer_audience_realignments SET org_id = ${targetOrgId}, brand_id = ${targetBrandId}
+                  WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`).length
+      );
+      // The brand-relation ledger follows its audiences (OUTREACH-3WAYS-1121).
+      add(
+        "brand_relation_assignments",
+        (await tx`UPDATE brand_relation_assignments SET org_id = ${targetOrgId}, brand_id = ${targetBrandId}
                   WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`).length
       );
       if (await tableExists(tx, "lists")) {

@@ -25,6 +25,7 @@ import suppressionRecoveryRoutes from "../../src/routes/suppression-recovery.js"
 import blankCandidateRoutes from "../../src/routes/blank-candidates.js";
 import sourceAudienceMergeRoutes from "../../src/routes/source-audience-merge.js";
 import offerAudienceRoutes from "../../src/routes/offer-audiences.js";
+import brandRelationRoutes from "../../src/routes/brand-relations.js";
 import suppressionBackfillRoutes from "../../src/routes/suppression-backfill.js";
 import sendSuppressionSyncRoutes from "../../src/routes/send-suppression-sync.js";
 
@@ -55,6 +56,7 @@ export function createTestApp() {
   app.use(blankCandidateRoutes);
   app.use(sourceAudienceMergeRoutes);
   app.use(offerAudienceRoutes);
+  app.use(brandRelationRoutes);
   app.use(sendSuppressionSyncRoutes);
   app.use(listsRoutes);
   app.use(personEmailRoutes);

@@ -867,6 +867,7 @@ router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) 
   // AUDIENCE-PER-OFFER-1107: a brand list is not an audience, hidden unless asked.
   if (parsedQuery.data.role) conditions.push(eq(audiences.role, parsedQuery.data.role));
   else conditions.push(or(isNull(audiences.role), ne(audiences.role, "search"))!);
+  if (parsedQuery.data.relation) conditions.push(eq(audiences.relation, parsedQuery.data.relation));
   const whereClause = and(...conditions);
 
   const [rows, totalRows] = await Promise.all([
@@ -2035,6 +2036,7 @@ function serializeAudience(
     source: row.source,
     profileAudienceId: row.profileAudienceId,
     role: row.role ?? null,
+    relation: row.relation ?? null,
     canonicalAudienceId: row.canonicalAudienceId,
     filters: row.filters,
     avatarUrl: row.avatarUrl,

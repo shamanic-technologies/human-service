@@ -11,6 +11,7 @@ import { RELATIONSHIP_POLICIES } from "./lib/relationship-policy.js";
 import { EXCLUDE_EMAILED_WITHIN } from "./lib/recontact-window.js";
 import { MESSAGING_NETWORKS } from "./lib/messaging-networks.js";
 import { CRM_RECORD_PROVIDERS } from "./lib/crm-record-providers.js";
+import { BRAND_RELATIONS } from "./lib/brand-relations.js";
 
 extendZodWithOpenApi(z);
 export const registry = new OpenAPIRegistry();
@@ -1191,6 +1192,10 @@ export const AudienceSchema = z
       description:
         "AUDIENCE-PER-OFFER-1107. 'target' = THE audience of its offer: its text is who the offer targets, it has no list of its own and finds people through the brand's lists, each person judged against its text. 'search' = a list of the brand (Apollo search, signals, engagement) walked by every offer audience of it; hidden from GET /orgs/audiences unless role=search. null = an audience as before.",
     }),
+    relation: z.enum(BRAND_RELATIONS).nullable().openapi({
+      description:
+        "OUTREACH-3WAYS-1121. Who the audience is to the brand beyond buyers of an offer: 'investors' (its equity investors) or 'industry_peers' (founders and leaders of companies in its industry, competitors included). Such an audience has no offer; its lists carry the same relation and only it walks them. null = buyers of its offer. See GET /orgs/audiences/relations.",
+    }),
     canonicalAudienceId: z.string().uuid().nullable().openapi({
       description:
         "When this audience is a deprecated provider-variant (e.g. retired '<base> [Apify]' from the apify->apollo migration), the id of its active canonical replacement. Membership/stats reads resolve a deprecated match to this audience. null for non-deprecated / unlinked rows.",
@@ -1358,6 +1363,8 @@ export const ListAudiencesQuerySchema = z.object({
   // AUDIENCE-PER-OFFER-1107: the brand's lists (role 'search') are hidden by
   // default; `role=search` lists only them, `role=target` only offer audiences.
   role: z.enum(["target", "search"]).optional(),
+  // OUTREACH-3WAYS-1121: only the audiences of one brand relation.
+  relation: z.enum(BRAND_RELATIONS).optional(),
 });
 
 export const AudienceMembersQuerySchema = z.object({
@@ -5525,6 +5532,165 @@ registry.registerPath({
           schema: z
             .object({ restoredSearches: z.number().int(), deprecatedTargets: z.number().int() })
             .openapi("RevertOfferAudiencesResponse"),
+        },
+      },
+    },
+    400: { description: "Invalid body", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+// ─── Brand relations (OUTREACH-3WAYS-1121, src/services/brand-relations.ts) ───
+
+export const BrandRelationSchema = z.enum(BRAND_RELATIONS).openapi("BrandRelation");
+
+export const BrandRelationsQuerySchema = z.object({
+  brandId: z.string().regex(LAX_UUID_REGEX, "brandId must be a valid UUID"),
+});
+
+export const BrandRelationsResponseSchema = z
+  .object({
+    brandId: z.string(),
+    relations: z.array(
+      z.object({
+        relation: BrandRelationSchema,
+        audienceId: z.string().uuid().nullable().openapi({
+          description:
+            "THE audience of this relation for the brand: serve it like any audience (POST /orgs/audiences/{audienceId}/candidates/next, then reveal / decline), each person judged against targetText. null = not built yet (POST /orgs/audiences/relations/ensure).",
+        }),
+        name: z.string().nullable(),
+        status: z.string().nullable(),
+        targetText: z.string().nullable(),
+        reachableCount: z.number().int().nullable().openapi({
+          description:
+            "People the relation's ACTIVE lists can still reach: the sum of each list's Remaining (free provider count minus people the brand contacted inside the re-contact window). null = no list measured yet (its Apollo filters are still being built).",
+        }),
+        lists: z.array(
+          z.object({
+            audienceId: z.string().uuid(),
+            name: z.string(),
+            status: z.string(),
+            provider: z.string().nullable(),
+            sizeCount: z.number().int().nullable(),
+            availableToContactCount: z.number().int().nullable(),
+          })
+        ),
+      })
+    ),
+  })
+  .openapi("BrandRelationsResponse");
+
+export const EnsureBrandRelationsRequestSchema = z
+  .object({
+    brandId: z.string().regex(LAX_UUID_REGEX, "brandId must be a valid UUID"),
+    relations: z.array(BrandRelationSchema).min(1).optional(),
+  })
+  .strict()
+  .openapi("EnsureBrandRelationsRequest");
+
+export const EnsureBrandRelationsResponseSchema = z
+  .object({
+    results: z.array(
+      z.object({
+        relation: BrandRelationSchema,
+        target: z.enum(["exists", "created", "skipped"]),
+        list: z.enum(["exists", "created", "skipped"]),
+        reason: z.enum(["competitors_not_computed", "no_competitors"]).optional(),
+        audienceId: z.string().uuid().nullable(),
+        listAudienceId: z.string().uuid().nullable(),
+      })
+    ),
+  })
+  .openapi("EnsureBrandRelationsResponse");
+
+export const AssignBrandRelationRequestSchema = z
+  .object({
+    reason: z.string().min(1).max(120),
+    orgId: z.string().regex(LAX_UUID_REGEX, "orgId must be a valid UUID"),
+    brandId: z.string().regex(LAX_UUID_REGEX, "brandId must be a valid UUID"),
+    relation: BrandRelationSchema,
+    targetAudienceId: z.string().regex(LAX_UUID_REGEX).optional(),
+    searchAudienceIds: z.array(z.string().regex(LAX_UUID_REGEX)).max(500),
+  })
+  .openapi("AssignBrandRelationRequest");
+
+export const AssignBrandRelationResponseSchema = z
+  .object({
+    dryRun: z.boolean(),
+    assigned: z.array(
+      z.object({
+        audienceId: z.string().uuid(),
+        role: z.enum(["target", "search"]),
+        outcome: z.enum(["assigned", "would_assign", "already"]),
+      })
+    ),
+  })
+  .openapi("AssignBrandRelationResponse");
+
+export const RevertBrandRelationRequestSchema = z
+  .object({ reason: z.string().min(1).max(120) })
+  .openapi("RevertBrandRelationRequest");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/audiences/relations",
+  summary:
+    "OUTREACH-3WAYS-1121: the brand's populations that are not buyers of an offer: its investors and its industry peers. Each relation: THE audience to serve (candidates/next on audienceId), its text, its lists and how many people they can still reach. Both relations are always listed; audienceId null = not built yet. Pure DB read, no cost.",
+  security: [{ apiKey: [] }],
+  request: { query: BrandRelationsQuerySchema },
+  responses: {
+    200: { description: "The brand's relations", content: { "application/json": { schema: BrandRelationsResponseSchema } } },
+    400: { description: "Missing or invalid brandId", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/audiences/relations/ensure",
+  summary:
+    "OUTREACH-3WAYS-1121: build the relation audiences the brand lacks, done for you from what we know about it (name, domain, competitors from brand-service). Investors: one list of business angels and early-stage VCs. Industry peers: one list of leaders at companies selling what the brand's competitors sell (skipped with a reason while the competitors are not known). The lists' Apollo filters build in the background (~2-3 min, org-billed by apollo-service / chat-service); GET /orgs/audiences/relations shows them once counted. Idempotent. Needs x-user-id.",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: EnsureBrandRelationsRequestSchema } } } },
+  responses: {
+    200: { description: "What exists / was created per relation", content: { "application/json": { schema: EnsureBrandRelationsResponseSchema } } },
+    400: { description: "Invalid body", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    502: { description: "brand-service or runs-service unavailable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/brand-relations/assign",
+  summary:
+    "OUTREACH-3WAYS-1121: make existing audiences a brand relation (a target and/or brand lists): relation set, offer cleared, recorded under `reason` (`?dryRun=true` writes nothing; reversible via /revert). 409 when the brand already has another target for that relation.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: z.object({ dryRun: z.enum(["true", "false"]).optional() }),
+    body: { content: { "application/json": { schema: AssignBrandRelationRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Assignment", content: { "application/json": { schema: AssignBrandRelationResponseSchema } } },
+    400: { description: "Invalid body, a deprecated row, a non-target as target or a non-list as list", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    404: { description: "An audience not in this org and brand", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "The brand already has its audience for that relation", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/brand-relations/revert",
+  summary: "Undo one assignment by `reason`: relation, role and offer restored verbatim; rows `ensure` created (reason 'ensure') are deprecated. Nothing deleted.",
+  security: [{ apiKey: [] }],
+  request: { body: { content: { "application/json": { schema: RevertBrandRelationRequestSchema } } } },
+  responses: {
+    200: {
+      description: "Revert result",
+      content: {
+        "application/json": {
+          schema: z.object({ restored: z.number().int(), deprecated: z.number().int() }).openapi("RevertBrandRelationResponse"),
         },
       },
     },
