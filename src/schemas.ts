@@ -5706,6 +5706,8 @@ export const ScreenBrandRelationRequestSchema = z
     brandId: z.string().regex(LAX_UUID_REGEX, "brandId must be a valid UUID"),
     relation: BrandRelationSchema,
     maxPages: z.number().int().min(1).max(200).optional(),
+    // Required unless dryRun: the campaign that walks the list (Apollo keys its search cursor on it).
+    campaignId: z.string().regex(LAX_UUID_REGEX, "campaignId must be a valid UUID").optional(),
   })
   .strict()
   .openapi("ScreenBrandRelationRequest");
