@@ -489,6 +489,8 @@ export async function screenRelationLists(input: {
   relation: BrandRelation;
   dryRun: boolean;
   maxPages?: number;
+  /** The campaign that walks the list: Apollo keys its search cursor on it, so the screen pages the walk's own cursor. */
+  campaignId?: string;
 }): Promise<RelationScreenReport> {
   const { orgId, brandId, relation, dryRun } = input;
   const [target] = await db
@@ -540,6 +542,7 @@ export async function screenRelationLists(input: {
   // Billed to whoever created the relation audience, else one of its lists (an adopted target may carry no creator).
   const userId = target.createdByUserId ?? lists.find((l) => l.createdByUserId)?.createdByUserId ?? null;
   if (!dryRun && !userId) throw new BrandRelationError("the relation audience has no creator to bill the screen to", 400);
+  if (!dryRun && !input.campaignId) throw new BrandRelationError("campaignId is required to search (Apollo keys its cursor on the campaign)", 400);
 
   const run = async (identity: Identity | null) => {
     for (const list of lists) {
@@ -554,7 +557,8 @@ export async function screenRelationLists(input: {
             filters: native ? {} : (filters as PeopleSearchFilters),
             apolloSearchParams: native ? filters : undefined,
             audienceId: list.id,
-            identity: { ...identity, brandIds: [brandId] },
+            // The campaign rides the search only (its cursor), never the screen's own run.
+            identity: { ...identity, brandIds: [brandId], workflowTracking: { ...(identity.workflowTracking ?? {}), campaignId: input.campaignId } },
           });
           pages += 1;
           if (search.people.length === 0) break;

@@ -92,6 +92,7 @@ const BRAND = "00000000-0000-4000-8000-0000000000c2";
 const ORG = getAuthHeaders()["x-org-id"];
 const ANGEL_OFFER = "00000000-0000-4000-8000-0000000000a2";
 const PRODUCT_OFFER = "00000000-0000-4000-8000-0000000000b2";
+const CAMPAIGN = "00000000-0000-4000-8000-0000000000f2";
 
 const fetchSpy = vi.fn();
 const fetchBeforeThisSuite = globalThis.fetch;
@@ -346,16 +347,18 @@ describe("brand relations — only people in the relation are offered (judged on
 
   function mockPages(pages: Array<Array<ReturnType<typeof teaser>>>) {
     let searches = 0;
-    fetchSpy.mockImplementation(async (url: string) => {
+    const campaigns: Array<string | null> = [];
+    fetchSpy.mockImplementation(async (url: string, init?: { headers?: Record<string, string> }) => {
       const u = String(url);
       if (u.endsWith("/search/next")) {
+        campaigns.push(init?.headers?.["x-campaign-id"] ?? null);
         const people = pages[searches] ?? [];
         searches += 1;
         return ok({ people, done: people.length === 0, totalEntries: people.length });
       }
       throw new Error("unexpected url " + u);
     });
-    return { searches: () => searches };
+    return { searches: () => searches, campaigns };
   }
 
   const nextgen = (id: string) =>
@@ -409,11 +412,16 @@ describe("brand relations — only people in the relation are offered (judged on
     const { target } = await ensureWithList("industry_peers");
     jev.p["nextgen.com"] = 0.1;
     const apollo = mockPages([[nextgen("n1"), salesloft("s1")], [nextgen("n2")]]);
+    const noCampaign = await request(app)
+      .post("/internal/brand-relations/screen")
+      .set(getAuthHeaders())
+      .send({ orgId: ORG, brandId: BRAND, relation: "industry_peers" });
+    expect(noCampaign.status).toBe(400);
 
     const screen = await request(app)
       .post("/internal/brand-relations/screen")
       .set(getAuthHeaders())
-      .send({ orgId: ORG, brandId: BRAND, relation: "industry_peers" });
+      .send({ orgId: ORG, brandId: BRAND, relation: "industry_peers", campaignId: CAMPAIGN });
     expect(screen.body.error ?? null).toBeNull();
     expect(screen.status).toBe(200);
     expect(screen.body).toMatchObject({ audienceId: target, people: 3, judged: 3, passed: 1, failed: 2, noFacts: 0, unjudged: 0, subjects: 2, passedSubjects: 1 });
@@ -421,13 +429,14 @@ describe("brand relations — only people in the relation are offered (judged on
     expect(screen.body.passedSample.map((p: { company: string }) => p.company)).toEqual(["Salesloft"]);
     expect(jev.calls).toHaveLength(2);
     expect(apollo.searches()).toBe(3);
+    expect(apollo.campaigns).toEqual([CAMPAIGN, CAMPAIGN, CAMPAIGN]);
 
     // An adopted target with no creator: the screen bills its list's creator.
     await db.update(audiences).set({ createdByUserId: null }).where(eq(audiences.id, target));
     const again = await request(app)
       .post("/internal/brand-relations/screen")
       .set(getAuthHeaders())
-      .send({ orgId: ORG, brandId: BRAND, relation: "industry_peers" });
+      .send({ orgId: ORG, brandId: BRAND, relation: "industry_peers", campaignId: CAMPAIGN });
     expect(again.status).toBe(200);
     expect(jev.calls).toHaveLength(2);
 
