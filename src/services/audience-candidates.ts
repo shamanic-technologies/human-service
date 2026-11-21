@@ -52,7 +52,7 @@ import { completeRun, createRun } from "./runs.js";
 import { passLapsedFreeGates, selectLapsed, type LapsedCursor, type LapsedServe } from "./recontact-rereach.js";
 import { holdsEverEmailed, isShortenedWindow } from "../lib/recontact-window.js";
 import { isJudgeableTeaser, withPersonTeasers } from "./person-teaser.js";
-import { judgeRelationFit } from "./relation-fit.js";
+import { judgeRelationFit, searchTagsOf } from "./relation-fit.js";
 import { tagFoundAlreadyTaken } from "./audience-provenance.js";
 import { bufferTeasers, popTeaserRow, restoreTeasers, type BufferedTeaser, type PoppedTeaserRow } from "./teaser-buffer.js";
 import {
@@ -572,7 +572,7 @@ async function nextCandidateForTarget(
     const lapsed = await retakeLapsedOffer(identity.orgId, target.id, null);
     if (!lapsed) break;
     const failed = await firstFailedFreeCheck(target, identity, lapsed, exclusions, ownCompany);
-    if (!failed && (await fitsRelation(target, identity, lapsed))) return { status: "candidate", candidate: toView(lapsed), target: text };
+    if (!failed && (await fitsRelation(target, identity, lapsed, await searchTagsOfList(lapsed.searchAudienceId)))) return { status: "candidate", candidate: toView(lapsed), target: text };
     await db.delete(audienceCandidates).where(and(eq(audienceCandidates.id, lapsed.id), eq(audienceCandidates.status, "offered")));
   }
   if (Date.now() >= deadline) return { status: "pending", candidate: null, target: text };
@@ -714,6 +714,13 @@ async function nextTeaser(w: Walk): Promise<{ teaser: PoppedTeaserRow } | { end:
   }
 }
 
+/** The search tags of the brand list a candidate was found by (null = none / unknown). */
+async function searchTagsOfList(searchAudienceId: string | null): Promise<string[] | null> {
+  if (!searchAudienceId) return null;
+  const [row] = await db.select({ filters: audiences.filters }).from(audiences).where(eq(audiences.id, searchAudienceId)).limit(1);
+  return searchTagsOf(row?.filters);
+}
+
 /**
  * OUTREACH-3WAYS-1121: true unless `audience` is a brand-relation audience and Jev judged this person outside it
  * (industry peers: their company; investors: the person). Judged once per subject, persisted (relation-fit.ts).
@@ -721,14 +728,15 @@ async function nextTeaser(w: Walk): Promise<{ teaser: PoppedTeaserRow } | { end:
 async function fitsRelation(
   audience: AudienceRow,
   identity: Identity,
-  person: { providerPersonId: string; teaser: BufferedTeaser["teaser"]; organizationDomain: string | null; linkedinUrl: string | null }
+  person: { providerPersonId: string; teaser: BufferedTeaser["teaser"]; organizationDomain: string | null; linkedinUrl: string | null },
+  searchTags: string[] | null
 ): Promise<boolean> {
   if (!audience.relation) return true;
   const subject = isJudgeableTeaser(person.teaser) ? person : ((await withPersonTeasers([person])).judgeable[0] ?? person);
-  const fit = await judgeRelationFit(audience, subject, identity);
+  const fit = await judgeRelationFit(audience, { ...subject, searchTags }, identity);
   if (!fit.fits) {
     console.log(
-      `[human-service] relation_fit.passed_over org=${identity.orgId} audience=${audience.id} relation=${audience.relation} person=${person.providerPersonId} ${"reason" in fit ? `reason=${fit.reason}` : `p=${fit.yesProbability.toFixed(2)}`}`
+      `[human-service] relation_fit.passed_over org=${identity.orgId} audience=${audience.id} relation=${audience.relation} person=${person.providerPersonId} ${"reason" in fit ? `reason=${fit.reason}` : `choice=${fit.choice}`}`
     );
   }
   return fit.fits;
@@ -826,7 +834,7 @@ async function walkHere(w: Walk): Promise<NextCandidateResult> {
       }
       // OUTREACH-3WAYS-1121: a relation's list only feeds people Jev puts in the relation (relation-fit.ts). The list
       // is walked by that relation's audience alone, so a person outside it leaves the list.
-      if (w.pool && audience.relation && !(await fitsRelation(audience, identity, teaser))) {
+      if (w.pool && audience.relation && !(await fitsRelation(audience, identity, teaser, searchTagsOf(w.pool.list.view.filters)))) {
         await dropBufferedTeaser(teaser.id);
         continue;
       }

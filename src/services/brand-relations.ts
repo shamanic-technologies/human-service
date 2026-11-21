@@ -43,7 +43,7 @@ import { discoverBrandCompetitors, type BrandCompetitor } from "../lib/brand-com
 import { peopleSearch, type Identity, type PeopleSearchFilters } from "./people-providers.js";
 import { computeAudienceContactability, ensureApolloPointer, hasApolloNativeFilters } from "./audiences.js";
 import { bufferTeasers } from "./teaser-buffer.js";
-import { judgeRelationFit, readRelationFit, relationFitSubject } from "./relation-fit.js";
+import { judgeRelationFit, readRelationFit, relationFitSubject, searchTagsOf } from "./relation-fit.js";
 import { systemStatus } from "./audience-status-origin.js";
 import { completeRun, createRun } from "./runs.js";
 
@@ -460,7 +460,8 @@ export interface RelationScreenSample {
   company: string | null;
   domain: string | null;
   industry: string | null;
-  yesProbability: number | null;
+  /** The judge's confidence in its answer. */
+  confidence: number | null;
 }
 
 export interface RelationScreenReport {
@@ -577,7 +578,12 @@ export async function screenRelationLists(input: {
           const b = queue.shift();
           if (!b) return;
           report.people += 1;
-          const subjectIn = { providerPersonId: b.providerPersonId, teaser: b.teaser ?? null, organizationDomain: b.organizationDomain ?? null };
+          const subjectIn = {
+            providerPersonId: b.providerPersonId,
+            teaser: b.teaser ?? null,
+            organizationDomain: b.organizationDomain ?? null,
+            searchTags: searchTagsOf(list.filters),
+          };
           const subject = relationFitSubject(relation, subjectIn);
           if (!subject) {
             report.noFacts += 1;
@@ -588,7 +594,7 @@ export async function screenRelationLists(input: {
           if (identity) {
             const fit = await judgeRelationFit(target, subjectIn, identity);
             fits = fit.fits;
-            p = "yesProbability" in fit ? fit.yesProbability : null;
+            p = "confidence" in fit ? fit.confidence : null;
           } else {
             const stored = await readRelationFit(orgId, brandId, relation, subject.key);
             fits = stored ? stored.verdict : null;
@@ -606,7 +612,7 @@ export async function screenRelationLists(input: {
             company: b.teaser?.organizationName ?? null,
             domain: b.organizationDomain ?? null,
             industry: b.teaser?.organizationIndustry ?? null,
-            yesProbability: p,
+            confidence: p,
           };
           if (fits) {
             report.passed += 1;
