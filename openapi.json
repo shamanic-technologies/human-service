@@ -9625,6 +9625,195 @@
         "required": [
           "reason"
         ]
+      },
+      "ScreenBrandRelationResponse": {
+        "type": "object",
+        "properties": {
+          "relation": {
+            "type": "string",
+            "enum": [
+              "investors",
+              "industry_peers"
+            ]
+          },
+          "audienceId": {
+            "type": "string"
+          },
+          "dryRun": {
+            "type": "boolean"
+          },
+          "lists": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "pagesSearched": {
+                  "type": "integer"
+                },
+                "buffered": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "audienceId",
+                "name",
+                "pagesSearched",
+                "buffered"
+              ]
+            }
+          },
+          "people": {
+            "type": "integer"
+          },
+          "judged": {
+            "type": "integer"
+          },
+          "passed": {
+            "type": "integer"
+          },
+          "failed": {
+            "type": "integer"
+          },
+          "noFacts": {
+            "type": "integer"
+          },
+          "unjudged": {
+            "type": "integer"
+          },
+          "subjects": {
+            "type": "integer"
+          },
+          "passedSubjects": {
+            "type": "integer"
+          },
+          "passedSample": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "providerPersonId": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "company": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "domain": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "industry": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "yesProbability": {
+                  "type": "number",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "providerPersonId",
+                "title",
+                "company",
+                "domain",
+                "industry",
+                "yesProbability"
+              ]
+            }
+          },
+          "failedSample": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "providerPersonId": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "company": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "domain": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "industry": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "yesProbability": {
+                  "type": "number",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "providerPersonId",
+                "title",
+                "company",
+                "domain",
+                "industry",
+                "yesProbability"
+              ]
+            }
+          }
+        },
+        "required": [
+          "relation",
+          "audienceId",
+          "dryRun",
+          "lists",
+          "people",
+          "judged",
+          "passed",
+          "failed",
+          "noFacts",
+          "unjudged",
+          "subjects",
+          "passedSubjects",
+          "passedSample",
+          "failedSample"
+        ]
+      },
+      "ScreenBrandRelationRequest": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "brandId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "relation": {
+            "$ref": "#/components/schemas/BrandRelation"
+          },
+          "maxPages": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "required": [
+          "orgId",
+          "brandId",
+          "relation"
+        ],
+        "additionalProperties": false
       }
     },
     "parameters": {}
@@ -18276,6 +18465,99 @@
           },
           "401": {
             "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/brand-relations/screen": {
+      "post": {
+        "summary": "OUTREACH-3WAYS-1121: page a brand relation's ACTIVE Apollo lists through the free teaser search into their buffer, then judge every buffered person with Jev (industry peers: is their COMPANY in the brand's industry, one question per company; investors: does the PERSON invest in companies), persisted once per subject. The walk of the relation's audience reads those verdicts and never offers a person judged outside. `?dryRun=true` searches and judges nothing (report from what is stored); `?async=true` answers 202 and runs in the background. Org-billed (Jev) on its own run.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "dryRun",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "async",
+            "in": "query"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScreenBrandRelationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Screen report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScreenBrandRelationResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Started in the background"
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "The brand has no audience for that relation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "brand-service / chat-service / apollo-service failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }

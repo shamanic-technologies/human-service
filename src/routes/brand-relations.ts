@@ -8,6 +8,7 @@ import {
   BrandRelationsQuerySchema,
   EnsureBrandRelationsRequestSchema,
   RevertBrandRelationRequestSchema,
+  ScreenBrandRelationRequestSchema,
 } from "../schemas.js";
 import {
   assignBrandRelation,
@@ -15,7 +16,10 @@ import {
   ensureBrandRelations,
   listBrandRelations,
   revertBrandRelation,
+  screenRelationLists,
 } from "../services/brand-relations.js";
+import { ChatConfigError, ChatServiceError } from "../lib/chat-client.js";
+import { ProviderConfigError, ProviderError } from "../services/people-providers.js";
 import { BRAND_RELATIONS } from "../lib/brand-relations.js";
 import { BrandConfigError, BrandServiceError } from "../lib/brand-offers.js";
 
@@ -85,6 +89,41 @@ router.post("/internal/brand-relations/revert", requireApiKey, async (req, res) 
     return;
   }
   res.json(await revertBrandRelation(parsed.data.reason));
+});
+
+router.post("/internal/brand-relations/screen", requireApiKey, async (req, res) => {
+  const parsed = ScreenBrandRelationRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+  const input = { ...parsed.data, dryRun: req.query.dryRun === "true" };
+  if (req.query.async === "true" && !input.dryRun) {
+    void screenRelationLists(input).catch((err) => console.error(`[human-service] brand_relation.screen_failed brand=${input.brandId} relation=${input.relation}:`, err));
+    res.status(202).json({ started: true });
+    return;
+  }
+  try {
+    res.json(await screenRelationLists(input));
+  } catch (err) {
+    if (err instanceof BrandRelationError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    if (err instanceof BrandServiceError || err instanceof BrandConfigError) {
+      res.status(502).json({ error: err.message, source: "brand-service" });
+      return;
+    }
+    if (err instanceof ChatServiceError || err instanceof ChatConfigError) {
+      res.status(502).json({ error: err.message, source: "chat-service" });
+      return;
+    }
+    if (err instanceof ProviderError || err instanceof ProviderConfigError) {
+      res.status(502).json({ error: err.message, source: "apollo-service" });
+      return;
+    }
+    throw err;
+  }
 });
 
 export default router;

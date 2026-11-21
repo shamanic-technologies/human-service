@@ -35,6 +35,7 @@ import {
   googleMapsBrandClaims,
   offerAudienceRealignments,
   brandRelationAssignments,
+  relationFitJudgments,
   audienceSnapshotCache,
 } from "../../src/db/schema.js";
 import { sql } from "../../src/db/index.js";
@@ -43,6 +44,7 @@ export async function cleanTestData() {
   await db.delete(audienceSnapshotCache);
   await db.delete(offerAudienceRealignments);
   await db.delete(brandRelationAssignments);
+  await db.delete(relationFitJudgments);
   await db.delete(googleMapsBrandClaims);
   await db.delete(googleMapsPlaces);
   await db.delete(googleMapsQueries);

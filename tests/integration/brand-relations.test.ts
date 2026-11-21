@@ -38,6 +38,33 @@ const competitors = vi.hoisted(() => ({
 vi.mock("../../src/lib/brand-competitors.js", () => ({
   discoverBrandCompetitors: vi.fn(async () => competitors.answer),
 }));
+vi.mock("../../src/services/runs.js", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual, createRun: vi.fn(async () => "00000000-0000-4000-8000-0000000000e2"), completeRun: vi.fn(async () => undefined) };
+});
+vi.mock("../../src/lib/brand-offers.js", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    listBrandOffers: vi.fn(async (brandId: string) => [
+      { offerId: "00000000-0000-4000-8000-0000000000d2", brandId, name: "Outbound", description: "Done-for-you B2B sales outreach that books sales meetings" },
+    ]),
+  };
+});
+// Jev (chat-service): every judgment recorded; the answer read from the per-test table, by company or person.
+const jev = vi.hoisted(() => ({ calls: [] as Array<{ state: Record<string, unknown>; instructions: string }>, p: {} as Record<string, number> }));
+vi.mock("../../src/lib/chat-client.js", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    judgeYesNo: vi.fn(async (args: { state: Record<string, unknown>; instructions: string }) => {
+      jev.calls.push(args);
+      const subject = (args.state.company ?? args.state.person) as Record<string, unknown>;
+      const key = String((subject.domain ?? subject.title ?? "") as string);
+      return { yesProbability: jev.p[key] ?? 0.9, model: "typesafe/test" };
+    }),
+  };
+});
 // The list's Apollo filters are the shared pointer build (its own suites): recorded, not run.
 const builds = vi.hoisted(() => ({ ids: [] as string[] }));
 vi.mock("../../src/services/audiences.js", async (importOriginal) => {
@@ -58,7 +85,7 @@ import { eq } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
-import { audienceCandidates, audiences } from "../../src/db/schema.js";
+import { audienceCandidates, audiences, audienceTeaserBuffer, relationFitJudgments } from "../../src/db/schema.js";
 
 const app = createTestApp();
 const BRAND = "00000000-0000-4000-8000-0000000000c2";
@@ -73,6 +100,9 @@ beforeEach(async () => {
   vi.stubGlobal("fetch", fetchSpy);
   fetchSpy.mockReset();
   builds.ids = [];
+  jev.calls = [];
+  jev.p = {};
+  (await import("../../src/services/relation-fit.js")).clearRelationFitCaches();
   competitors.answer = { status: "computed", competitors: [{ name: "Rival", domain: "rival.test", linkedinUrl: null }] };
   process.env.APOLLO_SERVICE_URL = "http://apollo:8080";
   process.env.APOLLO_SERVICE_API_KEY = "apollo-key";
@@ -88,7 +118,7 @@ function ok(json: unknown) {
   return { ok: true, status: 200, json: async () => json, text: async () => "" };
 }
 
-function teaser(id: string) {
+function teaser(id: string, over: Record<string, unknown> = {}) {
   return {
     id,
     firstName: "C",
@@ -114,6 +144,7 @@ function teaser(id: string) {
     organizationCity: null,
     organizationState: null,
     organizationCountry: null,
+    ...over,
   };
 }
 
@@ -300,5 +331,106 @@ describe("brand relations — built for the brand", () => {
     const { loadOfferlessPairs } = await import("../../src/services/audience-offer-backfill.js");
     const pairs = await loadOfferlessPairs();
     expect(pairs.pairs).toEqual([]);
+  });
+});
+
+describe("brand relations — only people in the relation are offered (judged once, persisted)", () => {
+  async function ensureWithList(relation: "industry_peers" | "investors") {
+    const res = await request(app).post("/orgs/audiences/relations/ensure").set(getAuthHeaders()).send({ brandId: BRAND, relations: [relation] });
+    expect(res.status).toBe(200);
+    const { audienceId, listAudienceId } = res.body.results[0];
+    // The pointer build is mocked: give the list its Apollo filters as the build would.
+    await db.update(audiences).set({ filters: { person_titles: ["Founder"] }, apolloAudienceId: `apollo-${relation}` }).where(eq(audiences.id, listAudienceId));
+    return { target: audienceId as string, list: listAudienceId as string };
+  }
+
+  function mockPages(pages: Array<Array<ReturnType<typeof teaser>>>) {
+    let searches = 0;
+    fetchSpy.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.endsWith("/search/next")) {
+        const people = pages[searches] ?? [];
+        searches += 1;
+        return ok({ people, done: people.length === 0, totalEntries: people.length });
+      }
+      throw new Error("unexpected url " + u);
+    });
+    return { searches: () => searches };
+  }
+
+  const nextgen = (id: string) =>
+    teaser(id, { title: "Director of Product, Patient Experience Platform", organizationName: "NextGen Healthcare", organizationDomain: "nextgen.com", organizationIndustry: "hospital & health care" });
+  const salesloft = (id: string) =>
+    teaser(id, { title: "VP Sales", organizationName: "Salesloft", organizationDomain: "salesloft.com", organizationIndustry: "computer software" });
+
+  it("industry peers: a company outside the brand's industry is never offered; each company is judged once", async () => {
+    const { target, list } = await ensureWithList("industry_peers");
+    jev.p["nextgen.com"] = 0.1;
+    mockPages([[nextgen("n1"), nextgen("n2")], [salesloft("s1")]]);
+
+    const res = await request(app).post(`/orgs/audiences/${target}/candidates/next`).set(getAuthHeaders());
+    expect(res.status).toBe(200);
+    expect(res.body.candidate).toMatchObject({ audienceId: target, providerPersonId: "s1" });
+
+    // One question per COMPANY: NextGen once for its two people, Salesloft once.
+    expect(jev.calls).toHaveLength(2);
+    const asked = jev.calls[0]!;
+    expect(asked.state.company).toMatchObject({ name: "NextGen Healthcare", domain: "nextgen.com", industry: "hospital & health care" });
+    expect(asked.state.company).not.toHaveProperty("title");
+    expect(JSON.stringify(asked.state.brand)).toContain("Done-for-you B2B sales outreach");
+    expect(asked.instructions).toContain("You judge ONE company");
+
+    const judgments = await db.select().from(relationFitJudgments);
+    expect(judgments.map((j) => [j.subjectKey, j.verdict]).sort()).toEqual([
+      ["company:domain:nextgen.com", false],
+      ["company:domain:salesloft.com", true],
+    ]);
+    // The NextGen people left the list's buffer; nobody of theirs can be offered.
+    const buffered = await db.select().from(audienceTeaserBuffer).where(eq(audienceTeaserBuffer.audienceId, list));
+    expect(buffered.map((b) => b.providerPersonId)).toEqual(["s1"]);
+    const offered = await db.select().from(audienceCandidates).where(eq(audienceCandidates.audienceId, target));
+    expect(offered.map((c) => c.providerPersonId)).toEqual(["s1"]);
+  });
+
+  it("investors: judged per PERSON, someone who only works at a fund-shaped name is never offered", async () => {
+    const { target } = await ensureWithList("investors");
+    jev.p["Fund Accountant"] = 0.2;
+    mockPages([[teaser("f1", { title: "Fund Accountant", organizationName: "Seed Capital Partners" })], [teaser("a1")]]);
+
+    const res = await request(app).post(`/orgs/audiences/${target}/candidates/next`).set(getAuthHeaders());
+    expect(res.body.candidate).toMatchObject({ providerPersonId: "a1" });
+    expect(jev.calls.map((c) => (c.state.person as { title: string }).title)).toEqual(["Fund Accountant", "Angel Investor"]);
+    expect(jev.calls[0]!.instructions).toContain("invests equity in companies themselves");
+    const keys = (await db.select().from(relationFitJudgments)).map((j) => j.subjectKey).sort();
+    expect(keys).toEqual(["person:a1", "person:f1"]);
+  });
+
+  it("the relation screen judges the whole list ahead of the walk and reports how many pass; the walk reuses its verdicts", async () => {
+    const { target } = await ensureWithList("industry_peers");
+    jev.p["nextgen.com"] = 0.1;
+    const apollo = mockPages([[nextgen("n1"), salesloft("s1")], [nextgen("n2")]]);
+
+    const screen = await request(app)
+      .post("/internal/brand-relations/screen")
+      .set(getAuthHeaders())
+      .send({ orgId: ORG, brandId: BRAND, relation: "industry_peers" });
+    expect(screen.body.error ?? null).toBeNull();
+    expect(screen.status).toBe(200);
+    expect(screen.body).toMatchObject({ audienceId: target, people: 3, judged: 3, passed: 1, failed: 2, noFacts: 0, unjudged: 0, subjects: 2, passedSubjects: 1 });
+    expect(screen.body.lists[0]).toMatchObject({ pagesSearched: 3, buffered: 3 });
+    expect(screen.body.passedSample.map((p: { company: string }) => p.company)).toEqual(["Salesloft"]);
+    expect(jev.calls).toHaveLength(2);
+    expect(apollo.searches()).toBe(3);
+
+    const dry = await request(app)
+      .post("/internal/brand-relations/screen?dryRun=true")
+      .set(getAuthHeaders())
+      .send({ orgId: ORG, brandId: BRAND, relation: "industry_peers" });
+    expect(dry.body).toMatchObject({ dryRun: true, people: 3, passed: 1, failed: 2, unjudged: 0 });
+    expect(apollo.searches()).toBe(3);
+
+    const res = await request(app).post(`/orgs/audiences/${target}/candidates/next`).set(getAuthHeaders());
+    expect(res.body.candidate).toMatchObject({ providerPersonId: "s1" });
+    expect(jev.calls).toHaveLength(2);
   });
 });
