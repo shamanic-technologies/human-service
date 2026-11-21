@@ -28,7 +28,8 @@ export type SystemStatusReason =
   | "portfolio_adopted" // a launch adopted a confirmed split
   | "merged_into_audience" // a per-source list became a source of its profile (AUDIENCE-SOURCES-1016)
   | "offer_audience" // created as THE audience of its offer (AUDIENCE-PER-OFFER-1107)
-  | "offer_audience_reverted"; // that creation undone
+  | "offer_audience_reverted" // that creation undone
+  | "brand_relation"; // created / assigned as a brand relation audience (OUTREACH-3WAYS-1121)
 
 export function personStatus(userId: string | null | undefined) {
   return {

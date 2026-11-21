@@ -414,6 +414,13 @@
       "when": 1771933885399,
       "tag": "0058_audience_snapshot_cache",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1771933985399,
+      "tag": "0059_brand_relations",
+      "breakpoints": true
     }
   ]
 }

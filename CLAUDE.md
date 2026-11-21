@@ -66,6 +66,9 @@ section — the port binds first).
 | Internal | `POST /internal/backfill-audience-offers` | apiKey | One-time data fix: attribute every pre-existing offer-less audience to the offer its `(org, brand)` holds, read from brand-service. A pair with no offer — or with several — stays NULL and is reported, never guessed (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/recover-suppressions` | apiKey | One-time data repair: for a caller-supplied set of `{orgId, brandId, email}`, archive the `brand_suppressions` row into the reversible `suppression_recoveries` ledger (tagged with a `reason`) and DELETE it, so people who were served but never actually contacted become emittable again for their brand. Idempotent (unique `(reason, org, brand, email_norm)`), `?dryRun=true`, reversible. NOT a sweep — the set is supplied, never inferred |
 | Internal | `POST /internal/offer-audiences/realign` (+ `/revert`) | apiKey | AUDIENCE-PER-OFFER-1107: one audience per offer (`role='target'`, the offer's text), the given rows become lists of the brand (`role='search'`) walked by every offer audience (`?dryRun`, reversible). See "ONE audience per offer" |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences/relations` | apiKey + `x-org-id` | The brand's investors / industry peers: THE audience to serve each, its text, lists, reachable count. See "Brand relations" |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/relations/ensure` | apiKey + `x-org-id` + `x-user-id` | Build the relation audiences the brand lacks, from brand-service facts (done for you) |
+| Internal | `POST /internal/brand-relations/assign` (+ `/revert`) | apiKey | Make existing audiences a brand relation (offer cleared), reversible by reason |
 | Internal | `POST /internal/merge-source-audiences` (+ `/revert`) | apiKey | One-time data fix (AUDIENCE-SOURCES-1016): each per-source audience row becomes a SOURCE of its profile, the row deprecated -> canonical = profile. `?dryRun&orgId&brandId`, reversible, nothing archived. See "Audience x source" |
 | Internal | `POST /internal/rejudge-blank-candidates` (+ `/revert`) | apiKey | One-time repair (BLANK-CANDIDATES-1101): re-offer candidates declined with no facts about the person, with the person's stored teaser (`?dryRun`, reversible). See "Never a blank candidate" |
 | Internal | `POST /internal/recover-suppressions/revert` | apiKey | Undo a recovery: restore every archived suppression row carrying `reason` verbatim + drop the ledger rows. A person re-suppressed by a fresh serve keeps the newer row |
@@ -2261,6 +2264,30 @@ to an offer. `audiences.role` (migration `0054`):
   {reason}` gives each row its previous role back and deprecates the targets it created. Nothing deleted.
 - The text is edited like any audience's (`PATCH /orgs/audiences/{id}` `nlPrompt` carries `target_text`).
 - Tests: `tests/integration/offer-audiences.test.ts`.
+
+### Brand relations — investors and industry peers (`src/services/brand-relations.ts`, OUTREACH-3WAYS-1121)
+
+Owner 2026-11-21: a brand reaches people who are NOT buyers of one of its offers: its equity INVESTORS and its
+INDUSTRY PEERS (founders / leaders of companies in its industry, competitors included). `audiences.relation`
+(migration `0059`) = `investors` | `industry_peers` (`src/lib/brand-relations.ts`), NULL = buyers of the offer.
+- **Shape = an offer audience without an offer**: ONE `role='target'` per (org, brand, relation) (partial unique
+  index), `offer_id` NULL, text = who the population is; served by the shared candidate path
+  (`candidates/next`, reveal, decline). Its lists = `role='search'` rows with the same relation. `brandListsOf`
+  keys on it: a relation target walks ONLY its relation's lists, an offer target ONLY `relation IS NULL` lists.
+- **Read** `GET /orgs/audiences/relations?brandId=` (x-org-id): both relations always listed, `{relation,
+  audienceId (null = not built), name, status, targetText, reachableCount (sum of the ACTIVE lists' Remaining,
+  null = none measured yet), lists[{audienceId, name, status, provider, sizeCount, availableToContactCount}]}`.
+  Pure DB read. `GET /orgs/audiences?relation=` narrows; every audience read carries `relation`.
+- **Done for you** `POST /orgs/audiences/relations/ensure {brandId, relations?}` (x-user-id): builds what is
+  missing from brand-service facts only (name, domain, discovered competitors), never a client form. Target text
+  + one Apollo list per relation (investors: angels / early-stage VCs; peers: leaders at companies selling what
+  the competitors sell); the list's filters = the shared pointer build in the background (own run, org-billed).
+  Peers with competitors not computed / none ⟹ `skipped` + reason, nothing invented. Idempotent; ledger reason
+  `ensure`.
+- **Adoption** `POST /internal/brand-relations/assign?dryRun {reason, orgId, brandId, relation, targetAudienceId?,
+  searchAudienceIds}` (+ `/revert {reason}`): sets relation, clears the offer; ledger `brand_relation_assignments`
+  (in the brand transfer) keeps previous relation / role / offer. 409 if the brand has another target for it.
+- The offer-attribution sweep never gives an offer to a relation row. Tests: `tests/integration/brand-relations.test.ts`.
 
 ### Audience x source — a SOURCE is not an AUDIENCE (`src/services/audience-sources.ts`, AUDIENCE-SOURCES-1016)
 

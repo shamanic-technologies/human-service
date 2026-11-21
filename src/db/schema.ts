@@ -592,6 +592,9 @@ export const audiences = pgTable(
     // 'target' = THE audience of its offer (text only); 'search' = a list of the
     // brand walked by every target of it; NULL = an audience as before.
     role: text("role").$type<AudienceRole>(),
+    // OUTREACH-3WAYS-1121 (migration 0059, src/services/brand-relations.ts): who
+    // the audience is to the brand beyond "buyers of its offer". NULL = buyers.
+    relation: text("relation").$type<BrandRelation>(),
     // Neutral PeopleSearchFilters shape (maps to both providers).
     filters: jsonb("filters").$type<Record<string, unknown>>(),
     // Hosted avatar URL.
@@ -1102,6 +1105,28 @@ export const audienceCandidates = pgTable(
 export type AudienceCandidate = typeof audienceCandidates.$inferSelect;
 
 export type AudienceRole = "target" | "search";
+
+export type BrandRelation = "investors" | "industry_peers";
+
+// Reversible ledger of brand relations (0059, src/services/brand-relations.ts):
+// `action` = 'target_assigned' | 'search_assigned' | 'target_created' | 'search_created'.
+export const brandRelationAssignments = pgTable(
+  "brand_relation_assignments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    reason: text("reason").notNull(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    audienceId: uuid("audience_id").notNull(),
+    relation: text("relation").notNull(),
+    action: text("action").notNull(),
+    previousRelation: text("previous_relation"),
+    previousRole: text("previous_role"),
+    previousOfferId: uuid("previous_offer_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("idx_brand_relation_assignments_unique").on(table.reason, table.audienceId)]
+);
 
 // Reversible ledger of the offer-audience realignment (0054,
 // src/services/offer-audiences.ts): `action` = 'target_created' | 'made_search'.
