@@ -2290,14 +2290,16 @@ INDUSTRY PEERS (founders / leaders of companies in its industry, competitors inc
   (in the brand transfer) keeps previous relation / role / offer. 409 if the brand has another target for it.
 - The offer-attribution sweep never gives an offer to a relation row. Tests: `tests/integration/brand-relations.test.ts`.
 - **Only people IN the relation are offered** (`src/services/relation-fit.ts`, owner 2026-11-21: distribute.you's peer list
-  matched "engagement" and held NextGen Healthcare staff). The target's walk asks Jev (`noul`, P(yes) > 0.5) after the free
-  gates, before the offer: industry peers = ONE question per COMPANY (domain, else name; company facts only + the brand's
-  name / domain / offer descriptions + the target text), investors = ONE per PERSON (title, headline, employer: an angel's
-  employer is often their own startup). Persisted once in `relation_fit_judgments` (unique org x brand x relation x subject
-  x prompt version, migration `0060`, in the brand transfer); a person judged out leaves the list's buffer. Jev billed to
-  the serve's org; failure = loud. `POST /internal/brand-relations/screen?dryRun&async {orgId, brandId, relation}` pages the
-  relation's active Apollo lists into their buffer and judges everyone ahead of the walk (own `brand-relation-screen` run),
-  reporting people / passed / failed / companies.
+  matched the Apollo tag "sales engagement" and held NextGen Healthcare staff). The target's walk asks ONE Jev `choice`
+  after the free gates, before the offer: industry peers = per COMPANY (domain, else name) `brand_industry | other_market
+  | unknown`, seeing the company facts, the list's search tags (`foundBySearchFor`, a hint), what the brand sells
+  (brand-service `whatTheySell`, else its described offers) and the target text; investors = per PERSON `investor |
+  not_investor | unknown`. Only `brand_industry` / `investor` pass. v1 (yes/no, P > 0.5) squashed to 0.3-0.6 on
+  name-only teasers (Apollo.io, ZoomInfo out): never a yes/no on thin facts. Persisted once in `relation_fit_judgments`
+  (unique org x brand x relation x subject x prompt version, migrations `0060`/`0061`, in the brand transfer); a person
+  judged out leaves the list's buffer. `POST /internal/brand-relations/screen?dryRun&async {orgId, brandId, relation,
+  campaignId}` pages the relation's Apollo lists into their buffer under the walking campaign (Apollo's cursor key) and
+  judges everyone ahead of the walk, reporting people / passed / failed / companies.
 - **A campaign serves a relation only when its serve STATES the population** (lead-service `population`): a serve without
   it walks the buyers (the brand's due follow-ups first). distribute.you's first peer email (2026-11-21, NextGen) came that way.
 

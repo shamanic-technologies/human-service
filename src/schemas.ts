@@ -5718,7 +5718,7 @@ const RelationScreenSampleSchema = z.object({
   company: z.string().nullable(),
   domain: z.string().nullable(),
   industry: z.string().nullable(),
-  yesProbability: z.number().nullable(),
+  confidence: z.number().nullable(),
 });
 
 export const ScreenBrandRelationResponseSchema = z
@@ -5744,7 +5744,7 @@ registry.registerPath({
   method: "post",
   path: "/internal/brand-relations/screen",
   summary:
-    "OUTREACH-3WAYS-1121: page a brand relation's ACTIVE Apollo lists through the free teaser search into their buffer, then judge every buffered person with Jev (industry peers: is their COMPANY in the brand's industry, one question per company; investors: does the PERSON invest in companies), persisted once per subject. The walk of the relation's audience reads those verdicts and never offers a person judged outside. `?dryRun=true` searches and judges nothing (report from what is stored); `?async=true` answers 202 and runs in the background. Org-billed (Jev) on its own run.",
+    "OUTREACH-3WAYS-1121: page a brand relation's ACTIVE Apollo lists through the free teaser search into their buffer, then judge every buffered person with a Jev choice (industry peers: is their COMPANY's main business in the brand's industry, one question per company; investors: does the PERSON invest in companies), persisted once per subject. The walk of the relation's audience reads those verdicts and never offers a person judged outside. `?dryRun=true` searches and judges nothing (report from what is stored); `?async=true` answers 202 and runs in the background. Org-billed (Jev) on its own run.",
   security: [{ apiKey: [] }],
   request: {
     query: z.object({ dryRun: z.enum(["true", "false"]).optional(), async: z.enum(["true", "false"]).optional() }),

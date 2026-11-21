@@ -1691,6 +1691,9 @@ export const relationFitJudgments = pgTable(
     subjectKey: text("subject_key").notNull(),
     promptVersion: text("prompt_version").notNull(),
     verdict: boolean("verdict").notNull(),
+    // The Jev choice (0061; NULL on v1 yes/no rows).
+    choice: text("choice"),
+    // v2: the choice's confidence; v1: P(yes).
     yesProbability: doublePrecision("yes_probability").notNull(),
     model: text("model").notNull(),
     facts: jsonb("facts").$type<Record<string, unknown>>().notNull(),
