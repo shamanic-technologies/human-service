@@ -82,7 +82,7 @@ import { isVerdictAccepted, type AcceptedEmails, type EmailVerdict } from "../li
 import { isEmailSuppressed, normalizeEmail } from "./suppression.js";
 import { isEmailWonForRequest, isPersonOptedOut } from "./opt-outs.js";
 import { isEmailBounced } from "./bounces.js";
-import { siteContactOf, type SiteContact } from "./google-maps-site-contact.js";
+import { SiteUnreadableError, siteContactOf, type SiteContact } from "./google-maps-site-contact.js";
 
 export const GOOGLE_MAPS_PROVIDER = "google_maps";
 /**
@@ -583,6 +583,14 @@ async function setEmailState(rowId: string, state: { emailStatus: string; email?
     .where(eq(googleMapsPlaces.id, rowId));
 }
 
+/** A business whose site got no answer is read again after this long (its row says `site_unreadable` meanwhile). */
+export const SITE_UNREADABLE_RETRY = "3 days";
+
+/** The site of this business is still to read: never read, or unreadable long enough ago to try again. */
+function siteToRead(row: PlaceRow): boolean {
+  return row.emailStatus === null || row.emailStatus === "site_unreadable";
+}
+
 // The channels one serve needs, and the SQL that keeps a business that cannot carry them out of its walk.
 interface ServeChannels {
   needEmail: boolean;
@@ -605,7 +613,7 @@ function serveChannels(reach: readonly Reach[], reachableOn: readonly MessagingN
   const fits = and(
     needPhone ? sql`phone_e164 is not null` : sql`true`,
     needEmail
-      ? sql`(email_status is null or (email_status = 'found' and (email_verdict is null or email_verdict in (${sql.join(accepted.map((v) => sql`${v}`), sql`, `)}))))`
+      ? sql`(email_status is null or (email_status = 'site_unreadable' and decided_at < now() - ${SITE_UNREADABLE_RETRY}::interval) or (email_status = 'found' and (email_verdict is null or email_verdict in (${sql.join(accepted.map((v) => sql`${v}`), sql`, `)}))))`
       : sql`true`
   )!;
   return { needEmail, needPhone, onWhatsapp, accepted, fits };
@@ -646,6 +654,7 @@ export type GoogleMapsSkipReason =
   | "no_phone"
   | "no_website"
   | "no_email"
+  | "site_unreadable"
   | "not_deliverable"
   | "opted_out"
   | "won"
@@ -671,9 +680,16 @@ async function readSiteOf(row: PlaceRow, identity: Identity, meters: GoogleMapsM
     identity,
     meter: () => meters.siteRead(),
   }).catch(async (err) => {
+    // One business's site that does not answer never stops the walk: skipped, read again later.
+    if (err instanceof SiteUnreadableError) {
+      await setEmailState(row.id, { emailStatus: "site_unreadable", email: null });
+      console.warn(`[human-service] google_maps.site_unreadable org=${identity.orgId} audience=${row.audienceId} place=${row.placeId}: ${err.message}`);
+      return null;
+    }
     await decide(row.id, "waiting");
     throw err;
   });
+  if (!site) return "site_unreadable";
   if (site.outcome !== "found" || !site.email) {
     await setEmailState(row.id, { emailStatus: site.outcome, email: null });
     return site.outcome === "no_website" ? "no_website" : "no_email";
@@ -714,7 +730,7 @@ async function servePlace(
   let contact: PlaceEmail | null = null;
   if (ch.needEmail) {
     let site: SiteContact | null = null;
-    if (row.emailStatus === null) {
+    if (siteToRead(row)) {
       const read = await readSiteOf(row, identity, meters);
       if (typeof read === "string") return { kind: "skipped", reason: read };
       site = read;
@@ -915,7 +931,7 @@ export async function nextGoogleMapsCandidate(
       }
       let site: { contactName: string | null; contactRole: string | null } | null = null;
       if (ch.needEmail) {
-        const read = row.emailStatus === null ? await readSiteOf(row, identity, meters) : null;
+        const read = siteToRead(row) ? await readSiteOf(row, identity, meters) : null;
         if (typeof read === "string") continue;
         site = read ?? (await siteContactOf({ placeId: row.placeId, businessName: null, website: null, identity, meter: () => { throw new GoogleMapsSourceError(`site of ${row.placeId} not stored`); } }));
       }

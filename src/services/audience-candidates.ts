@@ -1350,6 +1350,7 @@ function googleMapsRevealReason(reason: GoogleMapsSkipReason | "brand_cannot_sen
       return { reason: "already_served", detail: reason };
     case "no_email":
     case "no_website":
+    case "site_unreadable":
       return { reason: "no_email", detail: reason };
     case "not_deliverable":
     case "opted_out":

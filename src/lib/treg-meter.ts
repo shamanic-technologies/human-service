@@ -31,6 +31,18 @@ export class TregMeterError extends Error {
   }
 }
 
+/**
+ * The call never got an answer from treg (timeout, network): a fact about THIS
+ * call (often one slow website behind treg's extract), never about the caller.
+ * Callers that walk many items skip the item (LIVINGVITAL-SOURCING-1121).
+ */
+export class TregUnreachableError extends TregMeterError {
+  constructor(message: string) {
+    super(message);
+    this.name = "TregUnreachableError";
+  }
+}
+
 /** billing-service refused the spend (balance, or a sales funnel max budget). */
 export class TregInsufficientCreditError extends Error {
   constructor(readonly answer: Record<string, unknown>) {
@@ -221,7 +233,7 @@ export class TregMeter {
    * One metered treg call. `maxMicro` is the most it may cost: provisioned,
    * authorized, and sent as the route ceiling, so treg never charges above it.
    */
-  async call(endpoint: string, req: { method: "GET" | "POST"; body?: Record<string, unknown>; maxMicro: number }): Promise<TregAnswer> {
+  async call(endpoint: string, req: { method: "GET" | "POST"; body?: Record<string, unknown>; maxMicro: number; timeoutMs?: number }): Promise<TregAnswer> {
     const keys = await this.resolveKeys();
     const runId = await this.ensureRun();
     const holdId = await this.addCost(runId, { quantity: req.maxMicro, status: "provisioned", keySource: keys.keySource });
@@ -241,13 +253,13 @@ export class TregMeter {
             ...(req.body ? { "Content-Type": "application/json" } : {}),
           },
           body: req.body ? JSON.stringify(req.body) : undefined,
-          signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+          signal: AbortSignal.timeout(req.timeoutMs ?? CALL_TIMEOUT_MS),
         });
       } catch (err) {
         // The call may have reached treg and been billed: keep the hold (never a
         // cost we pretend did not happen); the run reads it as provisioned.
         settled = true;
-        throw new TregMeterError(`treg ${endpoint} unreachable: ${errorMessage(err)}`);
+        throw new TregUnreachableError(`treg ${endpoint} unreachable: ${errorMessage(err)}`);
       }
       const text = await res.text();
       let body: Record<string, unknown> | null = null;
