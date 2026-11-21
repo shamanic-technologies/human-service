@@ -2369,6 +2369,11 @@ writes them from the offer's validated target).
   A business lacking the channel a serve needs stays `waiting` (`email_status` no_website / no_email / not_deliverable,
   or no phone), filtered out of that channel's walk only, so the other pipe still gets it (0055 moved `no_phone` rows
   back to waiting). still-fits answers an email find too. Tests: `tests/integration/google-maps-email.test.ts`.
+  **A site that does not answer never blocks the walk** (LIVINGVITAL-SOURCING-1121): each page read is bounded at
+  20 s (`SITE_PAGE_TIMEOUT_MS`); a page treg never answers (`TregUnreachableError`) makes THAT business
+  `email_status = site_unreadable` (nothing stored in bronze), the walk goes on to the next one, and the business is
+  read again 3 days later (`SITE_UNREADABLE_RETRY`). Before: the throw failed the whole serve / candidates/next and the
+  next call took the same oldest business again: Living Vital served ~0 for 2 days on one site that always timed out.
 - **Walked by offer audiences** (GMAPS-TARGET-WALK-1117): a brand Google Maps list (`POST /orgs/audiences {provider:
   "google_maps", role: "search", nlPrompt | filters}`, no offerId; or an existing one turned into a search by
   `/internal/offer-audiences/realign`) is in `brandListsOf` (list `google_maps_search`) for every target of the brand.

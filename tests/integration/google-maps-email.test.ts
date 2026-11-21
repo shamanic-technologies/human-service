@@ -60,6 +60,8 @@ let placesByQuery: Record<string, unknown[]> = {};
 let cheapestByQuery: Record<string, unknown[]> = {};
 // page text + links per url (absent = treg answers 404 after its waterfall)
 let site: Record<string, { text: string; links?: string[] }> = {};
+// pages whose read gets no answer (treg's extract times out on them)
+let timeoutUrls = new Set<string>();
 let verdicts: Record<string, string> = {};
 let pick: (message: string) => Record<string, unknown> = () => ({ email: null, name: null, role: null });
 let costId = 0;
@@ -92,6 +94,7 @@ async function route(input: string | URL, init?: RequestInit): Promise<Response>
     return json(200, { output: { places } }, { "x-treg-cost-micro": "150", "x-treg-served-by": "crawl4ai.google.serp.maps" });
   }
   if (url === "https://treg.to/call/treg.web.extract") {
+    if (timeoutUrls.has(String(body?.url))) throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
     const page = site[String(body?.url)];
     if (!page) return json(404, { error: "no provider found the page" });
     return json(
@@ -122,6 +125,7 @@ beforeEach(async () => {
   placesByQuery = {};
   cheapestByQuery = {};
   site = {};
+  timeoutUrls = new Set();
   verdicts = {};
   optedOut.clear();
   won.clear();
@@ -250,6 +254,48 @@ describe("Google Maps source — email reach", () => {
     expect(phone.body.status).toBe("served");
     expect(phone.body.person.email).toBeNull();
     expect(phone.body.person.phone).toBe("+41445556677");
+  });
+
+  it("a site that never answers skips that business only: the next one is served, the slow one is read again 3 days later (LIVINGVITAL-SOURCING-1121)", async () => {
+    placesByQuery["Drogerie in Zürich"] = [
+      place("ChIJ-slow", "Slow Apotheke", "044 999 00 00", "https://slow-apotheke.ch/"),
+      place("ChIJ-a", "Bio Laden", "044 111 22 33", "https://bioladen.ch"),
+    ];
+    timeoutUrls.add("https://slow-apotheke.ch/");
+    site["https://bioladen.ch/"] = { text: "Schreiben Sie uns: hallo@bioladen.ch" };
+    pick = (message) => (message.includes("hallo@bioladen.ch") ? { email: "hallo@bioladen.ch", name: null, role: null } : { email: null, name: null, role: null });
+    const audience = await createAudience();
+    const res = await serve(audience.id);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.email).toBe("hallo@bioladen.ch");
+    // Each page read is bounded at 20 s (a homepage + 3 pages stay under lead-service's 90 s).
+    const slow = (await db.select().from(googleMapsPlaces).where(eq(googleMapsPlaces.placeId, "ChIJ-slow")))[0];
+    expect(slow).toMatchObject({ status: "waiting", emailStatus: "site_unreadable" });
+    // Nothing stored for the slow site: a later read may succeed.
+    const stored = await db.select().from(googleMapsSiteReads);
+    expect(stored.map((r) => r.placeId)).toEqual(["ChIJ-a"]);
+
+    // Within 3 days the slow business is not tried again: no read, nothing left by email.
+    calls = [];
+    expect((await serve(audience.id)).body.status).toBe("exhausted");
+    expect(calls.some((c) => c.url === "https://treg.to/call/treg.web.extract")).toBe(false);
+    // The phone pipe still gets it.
+    expect((await serve(audience.id, { reachableBy: "phone" })).body.status).toBe("served");
+  });
+
+  it("a slow site read again after 3 days is served once it answers", async () => {
+    placesByQuery["Drogerie in Zürich"] = [place("ChIJ-slow", "Slow Apotheke", "044 999 00 00", "https://slow-apotheke.ch/")];
+    timeoutUrls.add("https://slow-apotheke.ch/");
+    const audience = await createAudience();
+    expect((await serve(audience.id)).body.status).toBe("exhausted");
+    await db.update(googleMapsPlaces).set({ decidedAt: new Date(Date.now() - 4 * 24 * 3600 * 1000) }).where(eq(googleMapsPlaces.placeId, "ChIJ-slow"));
+    timeoutUrls.clear();
+    site["https://slow-apotheke.ch/"] = { text: "Kontakt: info@slow-apotheke.ch" };
+    pick = () => ({ email: "info@slow-apotheke.ch", name: null, role: null });
+    const res = await serve(audience.id);
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.email).toBe("info@slow-apotheke.ch");
   });
 
   it("a business with no website is not served by email, and never read", async () => {
@@ -505,6 +551,24 @@ describe("Google Maps list walked by an offer audience", () => {
     expect(calls.some((c) => c.url === "https://treg.to/call/treg.google.serp.maps")).toBe(false);
     const [q] = await db.select().from(googleMapsQueries);
     expect(q).toMatchObject({ servedBy: "litescrape.google.serp.maps", chargedMicro: 150, placesCount: 1 });
+  });
+
+  it("a site that times out never fails the offer walk: the next business is offered (LIVINGVITAL-SOURCING-1121)", async () => {
+    placesByQuery["Drogerie in Zürich"] = [
+      place("ChIJ-slow", "Slow Apotheke", "044 999 00 00", "https://slow-apotheke.ch/"),
+      place("ChIJ-s", "Drogerie Schwamedingerhuus", "044 322 44 46", "https://drogerieschwamendingen.com/kontakt"),
+    ];
+    timeoutUrls.add("https://slow-apotheke.ch/");
+    schwamendingen();
+    pick = () => ({ email: "info@drogerieschwamendingen.com", name: "Marc Pfister", role: "Geschäftsinhaber" });
+    await brandList();
+    const { a } = await offerTargets();
+    const n = await next(a, { reachableBy: "email" });
+    expect(n.status).toBe(200);
+    expect(n.body.status).toBe("candidate");
+    expect(n.body.candidate.company.name).toBe("Drogerie Schwamedingerhuus");
+    const [slow] = await db.select().from(googleMapsPlaces).where(eq(googleMapsPlaces.placeId, "ChIJ-slow"));
+    expect(slow.emailStatus).toBe("site_unreadable");
   });
 
   it("refuses a brand list scoped to an offer", async () => {
