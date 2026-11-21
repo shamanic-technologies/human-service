@@ -69,6 +69,7 @@ section — the port binds first).
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/relations` | apiKey + `x-org-id` | The brand's investors / industry peers: THE audience to serve each, its text, lists, reachable count. See "Brand relations" |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/relations/ensure` | apiKey + `x-org-id` + `x-user-id` | Build the relation audiences the brand lacks, from brand-service facts (done for you) |
 | Internal | `POST /internal/brand-relations/assign` (+ `/revert`) | apiKey | Make existing audiences a brand relation (offer cleared), reversible by reason |
+| Internal | `POST /internal/brand-relations/screen` (`?dryRun&async`) | apiKey | Judge a relation's lists ahead of the walk (Jev per company / per investor), report how many pass. See "Brand relations" |
 | Internal | `POST /internal/merge-source-audiences` (+ `/revert`) | apiKey | One-time data fix (AUDIENCE-SOURCES-1016): each per-source audience row becomes a SOURCE of its profile, the row deprecated -> canonical = profile. `?dryRun&orgId&brandId`, reversible, nothing archived. See "Audience x source" |
 | Internal | `POST /internal/rejudge-blank-candidates` (+ `/revert`) | apiKey | One-time repair (BLANK-CANDIDATES-1101): re-offer candidates declined with no facts about the person, with the person's stored teaser (`?dryRun`, reversible). See "Never a blank candidate" |
 | Internal | `POST /internal/recover-suppressions/revert` | apiKey | Undo a recovery: restore every archived suppression row carrying `reason` verbatim + drop the ledger rows. A person re-suppressed by a fresh serve keeps the newer row |
@@ -2288,6 +2289,17 @@ INDUSTRY PEERS (founders / leaders of companies in its industry, competitors inc
   searchAudienceIds}` (+ `/revert {reason}`): sets relation, clears the offer; ledger `brand_relation_assignments`
   (in the brand transfer) keeps previous relation / role / offer. 409 if the brand has another target for it.
 - The offer-attribution sweep never gives an offer to a relation row. Tests: `tests/integration/brand-relations.test.ts`.
+- **Only people IN the relation are offered** (`src/services/relation-fit.ts`, owner 2026-11-21: distribute.you's peer list
+  matched "engagement" and held NextGen Healthcare staff). The target's walk asks Jev (`noul`, P(yes) > 0.5) after the free
+  gates, before the offer: industry peers = ONE question per COMPANY (domain, else name; company facts only + the brand's
+  name / domain / offer descriptions + the target text), investors = ONE per PERSON (title, headline, employer: an angel's
+  employer is often their own startup). Persisted once in `relation_fit_judgments` (unique org x brand x relation x subject
+  x prompt version, migration `0060`, in the brand transfer); a person judged out leaves the list's buffer. Jev billed to
+  the serve's org; failure = loud. `POST /internal/brand-relations/screen?dryRun&async {orgId, brandId, relation}` pages the
+  relation's active Apollo lists into their buffer and judges everyone ahead of the walk (own `brand-relation-screen` run),
+  reporting people / passed / failed / companies.
+- **A campaign serves a relation only when its serve STATES the population** (lead-service `population`): a serve without
+  it walks the buyers (the brand's due follow-ups first). distribute.you's first peer email (2026-11-21, NextGen) came that way.
 
 ### Audience x source — a SOURCE is not an AUDIENCE (`src/services/audience-sources.ts`, AUDIENCE-SOURCES-1016)
 

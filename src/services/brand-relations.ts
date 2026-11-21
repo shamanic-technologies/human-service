@@ -36,12 +36,14 @@
 
 import { and, eq, inArray, isNull, ne } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { audiences, brandRelationAssignments, type BrandRelation } from "../db/schema.js";
+import { audiences, audienceTeaserBuffer, brandRelationAssignments, type BrandRelation } from "../db/schema.js";
 import { BRAND_RELATIONS } from "../lib/brand-relations.js";
 import { getBrandIdentity } from "../lib/brand-identity.js";
 import { discoverBrandCompetitors, type BrandCompetitor } from "../lib/brand-competitors.js";
-import type { Identity } from "./people-providers.js";
-import { computeAudienceContactability, ensureApolloPointer } from "./audiences.js";
+import { peopleSearch, type Identity, type PeopleSearchFilters } from "./people-providers.js";
+import { computeAudienceContactability, ensureApolloPointer, hasApolloNativeFilters } from "./audiences.js";
+import { bufferTeasers } from "./teaser-buffer.js";
+import { judgeRelationFit, readRelationFit, relationFitSubject } from "./relation-fit.js";
 import { systemStatus } from "./audience-status-origin.js";
 import { completeRun, createRun } from "./runs.js";
 
@@ -442,4 +444,197 @@ export async function revertBrandRelation(reason: string): Promise<{ restored: n
     console.log(`[human-service] brand_relation.revert reason=${reason} restored=${restored} deprecated=${deprecated}`);
     return { restored, deprecated };
   });
+}
+
+// ─── The relation screen of a list already built (OUTREACH-3WAYS-1121) ──────────────────────────────────────
+//
+// The walk judges each person as it reaches them (relation-fit.ts). This screens a relation's lists ahead of the
+// walk and says how many pass: it pages each ACTIVE Apollo list of the relation through the free teaser search
+// into the list's buffer (the walk reads that same buffer), then judges every buffered person (peers: per company,
+// so a company is one question for all its people). `dryRun` searches and judges nothing: it reports from what is
+// already buffered and judged. Org-billed (Jev) on its own run.
+
+export interface RelationScreenSample {
+  providerPersonId: string;
+  title: string | null;
+  company: string | null;
+  domain: string | null;
+  industry: string | null;
+  yesProbability: number | null;
+}
+
+export interface RelationScreenReport {
+  relation: BrandRelation;
+  audienceId: string;
+  dryRun: boolean;
+  lists: Array<{ audienceId: string; name: string; pagesSearched: number; buffered: number }>;
+  people: number;
+  judged: number;
+  passed: number;
+  failed: number;
+  noFacts: number;
+  unjudged: number;
+  subjects: number;
+  passedSubjects: number;
+  passedSample: RelationScreenSample[];
+  failedSample: RelationScreenSample[];
+}
+
+const SCREEN_MAX_PAGES = 50;
+const SCREEN_CONCURRENCY = 8;
+
+export async function screenRelationLists(input: {
+  orgId: string;
+  brandId: string;
+  relation: BrandRelation;
+  dryRun: boolean;
+  maxPages?: number;
+}): Promise<RelationScreenReport> {
+  const { orgId, brandId, relation, dryRun } = input;
+  const [target] = await db
+    .select()
+    .from(audiences)
+    .where(
+      and(
+        eq(audiences.orgId, orgId),
+        eq(audiences.brandId, brandId),
+        eq(audiences.relation, relation),
+        eq(audiences.role, "target"),
+        ne(audiences.status, "deprecated")
+      )
+    )
+    .limit(1);
+  if (!target) throw new BrandRelationError(`the brand has no ${relation} audience`, 404);
+  const lists = (
+    await db
+      .select()
+      .from(audiences)
+      .where(
+        and(
+          eq(audiences.orgId, orgId),
+          eq(audiences.brandId, brandId),
+          eq(audiences.relation, relation),
+          eq(audiences.role, "search"),
+          eq(audiences.status, "active"),
+          eq(audiences.provider, "apollo")
+        )
+      )
+  ).filter((l) => !!l.filters && Object.keys(l.filters as Record<string, unknown>).length > 0);
+
+  const report: RelationScreenReport = {
+    relation,
+    audienceId: target.id,
+    dryRun,
+    lists: [],
+    people: 0,
+    judged: 0,
+    passed: 0,
+    failed: 0,
+    noFacts: 0,
+    unjudged: 0,
+    subjects: 0,
+    passedSubjects: 0,
+    passedSample: [],
+    failedSample: [],
+  };
+  const userId = target.createdByUserId;
+  if (!dryRun && !userId) throw new BrandRelationError("the relation audience has no creator to bill the screen to", 400);
+
+  const run = async (identity: Identity | null) => {
+    for (const list of lists) {
+      let pages = 0;
+      if (identity) {
+        const filters = list.filters as Record<string, unknown>;
+        const native = hasApolloNativeFilters(list);
+        const maxPages = input.maxPages ?? SCREEN_MAX_PAGES;
+        while (pages < maxPages) {
+          const search = await peopleSearch({
+            provider: "apollo",
+            filters: native ? {} : (filters as PeopleSearchFilters),
+            apolloSearchParams: native ? filters : undefined,
+            audienceId: list.id,
+            identity: { ...identity, brandIds: [brandId] },
+          });
+          pages += 1;
+          if (search.people.length === 0) break;
+          await bufferTeasers(orgId, list.id, search.people, null);
+        }
+      }
+      const buffered = await db
+        .select()
+        .from(audienceTeaserBuffer)
+        .where(and(eq(audienceTeaserBuffer.audienceId, list.id), isNull(audienceTeaserBuffer.sourceId)));
+      report.lists.push({ audienceId: list.id, name: list.name, pagesSearched: pages, buffered: buffered.length });
+      const subjects = new Map<string, boolean | null>();
+      const queue = [...buffered];
+      const worker = async () => {
+        for (;;) {
+          const b = queue.shift();
+          if (!b) return;
+          report.people += 1;
+          const subjectIn = { providerPersonId: b.providerPersonId, teaser: b.teaser ?? null, organizationDomain: b.organizationDomain ?? null };
+          const subject = relationFitSubject(relation, subjectIn);
+          if (!subject) {
+            report.noFacts += 1;
+            continue;
+          }
+          let fits: boolean | null;
+          let p: number | null = null;
+          if (identity) {
+            const fit = await judgeRelationFit(target, subjectIn, identity);
+            fits = fit.fits;
+            p = "yesProbability" in fit ? fit.yesProbability : null;
+          } else {
+            const stored = await readRelationFit(orgId, brandId, relation, subject.key);
+            fits = stored ? stored.verdict : null;
+            p = stored?.yesProbability ?? null;
+          }
+          subjects.set(subject.key, fits);
+          if (fits === null) {
+            report.unjudged += 1;
+            continue;
+          }
+          report.judged += 1;
+          const sample: RelationScreenSample = {
+            providerPersonId: b.providerPersonId,
+            title: b.teaser?.title ?? null,
+            company: b.teaser?.organizationName ?? null,
+            domain: b.organizationDomain ?? null,
+            industry: b.teaser?.organizationIndustry ?? null,
+            yesProbability: p,
+          };
+          if (fits) {
+            report.passed += 1;
+            if (report.passedSample.length < 20) report.passedSample.push(sample);
+          } else {
+            report.failed += 1;
+            if (report.failedSample.length < 20) report.failedSample.push(sample);
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: SCREEN_CONCURRENCY }, worker));
+      report.subjects += subjects.size;
+      report.passedSubjects += [...subjects.values()].filter((v) => v === true).length;
+    }
+  };
+
+  if (dryRun) {
+    await run(null);
+  } else {
+    const tracking = { brandIds: [brandId] };
+    const runId = await createRun({ orgId, userId: userId!, taskName: "brand-relation-screen", workflowTracking: tracking });
+    if (!runId) throw new BrandRelationError("runs-service did not open a run for the relation screen", 502);
+    const runIdentity = { orgId, userId: userId!, workflowTracking: tracking };
+    try {
+      await run({ orgId, userId: userId!, runId, workflowTracking: tracking });
+      await completeRun(runId, "completed", runIdentity);
+    } catch (err) {
+      await completeRun(runId, "failed", runIdentity);
+      throw err;
+    }
+  }
+  console.log(
+    `[human-service] brand_relation.screened org=${orgId} brand=${brandId} relation=${relation} dryRun=${dryRun} people=${report.people} passed=${report.passed} failed=${report.failed} noFacts=${report.noFacts} unjudged=${report.unjudged} subjects=${report.subjects} passedSubjects=${report.passedSubjects}`
+  );
+  return report;
 }

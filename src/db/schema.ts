@@ -1678,3 +1678,26 @@ export const audienceSnapshotCache = pgTable(
   },
   (table) => [index("idx_audience_snapshot_cache_brand").on(table.brandId)]
 );
+
+// OUTREACH-3WAYS-1121 (0060, src/services/relation-fit.ts): one Jev verdict per brand x relation x subject
+// (industry peers: the company; investors: the person), judged once, read before anyone is offered.
+export const relationFitJudgments = pgTable(
+  "relation_fit_judgments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    relation: text("relation").notNull(),
+    subjectKey: text("subject_key").notNull(),
+    promptVersion: text("prompt_version").notNull(),
+    verdict: boolean("verdict").notNull(),
+    yesProbability: doublePrecision("yes_probability").notNull(),
+    model: text("model").notNull(),
+    facts: jsonb("facts").$type<Record<string, unknown>>().notNull(),
+    population: text("population").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_relation_fit_judgments_subject").on(table.orgId, table.brandId, table.relation, table.subjectKey, table.promptVersion),
+  ]
+);

@@ -5698,3 +5698,62 @@ registry.registerPath({
     401: { description: "Unauthorized" },
   },
 });
+
+// OUTREACH-3WAYS-1121: screen a brand relation's lists (src/services/brand-relations.ts screenRelationLists).
+export const ScreenBrandRelationRequestSchema = z
+  .object({
+    orgId: z.string().regex(LAX_UUID_REGEX, "orgId must be a valid UUID"),
+    brandId: z.string().regex(LAX_UUID_REGEX, "brandId must be a valid UUID"),
+    relation: BrandRelationSchema,
+    maxPages: z.number().int().min(1).max(200).optional(),
+  })
+  .strict()
+  .openapi("ScreenBrandRelationRequest");
+
+const RelationScreenSampleSchema = z.object({
+  providerPersonId: z.string(),
+  title: z.string().nullable(),
+  company: z.string().nullable(),
+  domain: z.string().nullable(),
+  industry: z.string().nullable(),
+  yesProbability: z.number().nullable(),
+});
+
+export const ScreenBrandRelationResponseSchema = z
+  .object({
+    relation: z.enum(BRAND_RELATIONS),
+    audienceId: z.string(),
+    dryRun: z.boolean(),
+    lists: z.array(z.object({ audienceId: z.string(), name: z.string(), pagesSearched: z.number().int(), buffered: z.number().int() })),
+    people: z.number().int(),
+    judged: z.number().int(),
+    passed: z.number().int(),
+    failed: z.number().int(),
+    noFacts: z.number().int(),
+    unjudged: z.number().int(),
+    subjects: z.number().int(),
+    passedSubjects: z.number().int(),
+    passedSample: z.array(RelationScreenSampleSchema),
+    failedSample: z.array(RelationScreenSampleSchema),
+  })
+  .openapi("ScreenBrandRelationResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/brand-relations/screen",
+  summary:
+    "OUTREACH-3WAYS-1121: page a brand relation's ACTIVE Apollo lists through the free teaser search into their buffer, then judge every buffered person with Jev (industry peers: is their COMPANY in the brand's industry, one question per company; investors: does the PERSON invest in companies), persisted once per subject. The walk of the relation's audience reads those verdicts and never offers a person judged outside. `?dryRun=true` searches and judges nothing (report from what is stored); `?async=true` answers 202 and runs in the background. Org-billed (Jev) on its own run.",
+  security: [{ apiKey: [] }],
+  request: {
+    query: z.object({ dryRun: z.enum(["true", "false"]).optional(), async: z.enum(["true", "false"]).optional() }),
+    body: { content: { "application/json": { schema: ScreenBrandRelationRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Screen report", content: { "application/json": { schema: ScreenBrandRelationResponseSchema } } },
+    202: { description: "Started in the background" },
+    400: { description: "Invalid body", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+    404: { description: "The brand has no audience for that relation", content: { "application/json": { schema: ErrorSchema } } },
+    502: { description: "brand-service / chat-service / apollo-service failure", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
