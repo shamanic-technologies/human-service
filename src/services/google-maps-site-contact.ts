@@ -26,7 +26,7 @@ import { eq } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { googleMapsSiteReads } from "../db/schema.js";
 import { completeJson } from "../lib/chat-client.js";
-import { TregMeter } from "../lib/treg-meter.js";
+import { TregMeter, TregUnreachableError } from "../lib/treg-meter.js";
 import { registrableDomain } from "./own-company.js";
 import { businessDomain } from "./google-maps-source.js";
 import type { Identity } from "./people-providers.js";
@@ -37,6 +37,11 @@ export const SITE_EXTRACT_ENDPOINT = "treg.web.extract";
 export const SITE_PAGE_MAX_MICRO = 1_000;
 /** Pages linked from the homepage read at most, beside the homepage. */
 export const SITE_MAX_CONTACT_PAGES = 3;
+/**
+ * The most one page read may take. treg's free routes answer a reachable page in
+ * seconds; a homepage + 3 contact pages stays under lead-service's 90 s hang-up.
+ */
+export const SITE_PAGE_TIMEOUT_MS = 20_000;
 /** Page text kept in bronze, and shown to the picker, per page. */
 const PAGE_TEXT_KEPT = 20_000;
 const PAGE_TEXT_SHOWN = 6_000;
@@ -57,6 +62,23 @@ export interface SitePage {
   chargedMicro: number;
   text: string | null;
   links: string[];
+}
+
+/**
+ * A page of the site got no answer (timeout, network): THIS business cannot be
+ * read right now. Nothing is stored (a later read may succeed); the walk skips
+ * the business and serves the next one (LIVINGVITAL-SOURCING-1121: one site that
+ * always timed out failed every serve of the brand for 2 days).
+ */
+export class SiteUnreadableError extends Error {
+  constructor(
+    readonly placeId: string,
+    readonly url: string,
+    cause: string
+  ) {
+    super(`site of ${placeId} unreadable at ${url}: ${cause}`);
+    this.name = "SiteUnreadableError";
+  }
 }
 
 export type SiteOutcome = "found" | "no_website" | "no_email";
@@ -153,8 +175,14 @@ function collapse(s: string): string {
 
 // ─── Reading the site ──────────────────────────────────────────────────────────
 
-async function readPage(meter: TregMeter, url: string): Promise<SitePage> {
-  const answer = await meter.call(SITE_EXTRACT_ENDPOINT, { method: "POST", body: { url }, maxMicro: SITE_PAGE_MAX_MICRO });
+async function readPage(meter: TregMeter, url: string, placeId: string): Promise<SitePage> {
+  let answer: Awaited<ReturnType<TregMeter["call"]>>;
+  try {
+    answer = await meter.call(SITE_EXTRACT_ENDPOINT, { method: "POST", body: { url }, maxMicro: SITE_PAGE_MAX_MICRO, timeoutMs: SITE_PAGE_TIMEOUT_MS });
+  } catch (err) {
+    if (err instanceof TregUnreachableError) throw new SiteUnreadableError(placeId, url, err.message);
+    throw err;
+  }
   const page = (answer.body?.output as { pages?: Array<Record<string, unknown>> } | undefined)?.pages?.[0];
   const ok = answer.status >= 200 && answer.status < 300 && !!page;
   return {
@@ -242,9 +270,9 @@ export async function siteContactOf(ctx: SiteReadContext): Promise<SiteContact> 
     result = { outcome: "no_website", email: null, contactName: null, contactRole: null, emails: [] };
   } else {
     const meter = ctx.meter();
-    const home = await readPage(meter, homepage);
+    const home = await readPage(meter, homepage, ctx.placeId);
     pages = [home];
-    for (const url of contactPageLinks(home.finalUrl ?? homepage, home.links)) pages.push(await readPage(meter, url));
+    for (const url of contactPageLinks(home.finalUrl ?? homepage, home.links)) pages.push(await readPage(meter, url, ctx.placeId));
     runId = await meter.openedRunId();
     const emails = publishedEmails(pages);
     if (emails.length === 0) {
