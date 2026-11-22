@@ -60,7 +60,7 @@ import {
   readSignalJobTitles,
 } from "../lib/apollo-audiences.js";
 import { launchAudiencePortfolio } from "../services/audience-portfolio.js";
-import { estimateSplitSegments } from "../services/audience-split-estimate.js";
+import { estimateSplitSegments, splitEstimateFor } from "../services/audience-split-estimate.js";
 import { serveListKind, sourcingOriginSlug, SourcingOriginError } from "../services/sourcing-origin.js";
 import {
   addProfileSignalSource,
@@ -120,7 +120,7 @@ import {
 
 import { crmListUploads, crmPeopleServeStats, type CrmServeStats } from "../lib/crm-contacts.js";
 import { getAudiencePreview } from "../services/audience-preview.js";
-import { applyPersonStatusChange } from "../services/profile-sources.js";
+import { applyPersonStatusChange, recordNativeFilters } from "../services/profile-sources.js";
 import { describeSourceChannels, pickSourcingList, sourcesOf, type AudienceSource } from "../services/audience-sources.js";
 import {
   checkNextPreviewPerson,
@@ -602,11 +602,26 @@ router.post(
     }
     const orgId = res.locals.orgId as string;
     const userId = (res.locals.userId as string | undefined) ?? null;
+    // A segment whose card was counted (POST /split/estimate) is born on the
+    // filters that count was taken on: the card and the audience are one
+    // population (AUDIENCE-COUNT-MISMATCH-1122). Never estimated = the build below.
+    const segments = await Promise.all(
+      parsed.data.segments.map(async (s) => ({
+        name: s.name,
+        description: s.description,
+        counted: await splitEstimateFor({
+          orgId,
+          brandId: parsed.data.brandId,
+          name: s.name,
+          description: s.description,
+        }),
+      }))
+    );
     const scope = {
       orgId,
       brandId: parsed.data.brandId,
       offerId: parsed.data.offerId,
-      segments: parsed.data.segments,
+      segments,
     };
     // A taken name is a 409 before anything is spent (the transaction checks
     // again, which is what makes it binding).
@@ -694,6 +709,18 @@ router.post(
     // The Apollo builds already run (above). serve-next builds inline if one
     // has not landed yet, so a confirmed segment is never active AND unservable.
     for (const row of created) {
+      // A row born on its card's filters gets its apollo-service record from
+      // them, verbatim (the pointer the previews read); no other build runs.
+      if (!row.apolloAudienceId && row.filters) {
+        const recordUserId = buildIdentityForSplit.userId ?? row.createdByUserId ?? undefined;
+        if (recordUserId) {
+          void recordNativeFilters(row, { ...buildIdentityForSplit, userId: recordUserId }).catch((err) =>
+            console.error(`[human-service] audience.native_record_failed org=${orgId} audience=${row.id}`, err)
+          );
+        } else {
+          console.warn(`[human-service] audience.native_record_skipped org=${orgId} audience=${row.id}: no user`);
+        }
+      }
       // Each segment's own text (several segments share one nl_prompt), drafted
       // now in the background; serve-next drafts it inline if it has not landed.
       void ensureTargetText(row, buildIdentityForSplit).catch((err) =>

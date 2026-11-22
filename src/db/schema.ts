@@ -1704,3 +1704,24 @@ export const relationFitJudgments = pgTable(
     uniqueIndex("idx_relation_fit_judgments_subject").on(table.orgId, table.brandId, table.relation, table.subjectKey, table.promptVersion),
   ]
 );
+
+// AUDIENCE-COUNT-MISMATCH-1122 (0062): the filters a split card was counted on
+// (src/services/audience-split-estimate.ts). The confirm of that segment builds
+// its audience on exactly these filters, so the card and the audience are the
+// same population.
+export const audienceSplitEstimates = pgTable(
+  "audience_split_estimates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    nameNorm: text("name_norm").notNull(),
+    description: text("description").notNull(),
+    filters: jsonb("filters").$type<Record<string, unknown>>().notNull(),
+    people: integer("people").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_audience_split_estimates_segment").on(table.orgId, table.brandId, table.nameNorm, table.createdAt),
+  ]
+);

@@ -205,7 +205,7 @@ export async function retireWholeIcpLists(scope: OfferScope, key: SourceKey): Pr
  * sent verbatim (same as the serve-source switch): a source is built ON that record.
  * Anything else is returned unchanged.
  */
-async function recordNativeFilters(profile: AudienceRow, identity: Identity): Promise<AudienceRow> {
+export async function recordNativeFilters(profile: AudienceRow, identity: Identity): Promise<AudienceRow> {
   const filters = (profile.filters ?? null) as Record<string, unknown> | null;
   if (profile.apolloAudienceId || !filters || Object.keys(filters).length === 0 || !hasApolloNativeFilters(profile)) {
     return profile;

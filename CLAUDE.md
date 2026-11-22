@@ -2731,7 +2731,7 @@ them as OpenAPI enums).
   duplicate name, or an icon outside the vocabulary ⟹ 502. Dropping a segment
   would silently lose part of the partition.
 - **Confirm = one transaction**: rows at `status='active'`, `provider='apollo'`,
-  `apollo_audience_id` + `filters` NULL, `description` = the segment sentence,
+  `apollo_audience_id` + `filters` NULL (a segment whose card was counted: the card's filters, see "Split estimate"), `description` = the segment sentence,
   `nl_prompt` = the person-level target drafted from the customer's words (see
 "Audience target"), `source='split_proposal'`, `offer_id` required.
   The Apollo filters are built by the existing pointer build
@@ -2779,8 +2779,22 @@ whole list without creating anything. `src/services/audience-split-estimate.ts`.
 - `estimatedPeople: null` only with `unavailableReason`
   (`no_filters_drafted` / `filters_rejected`), never an invented number. A
   provider or chat failure is a 502.
+- **The card and the audience it creates are ONE population**
+  (AUDIENCE-COUNT-MISMATCH-1122): every counted draft is stored
+  (`audience_split_estimates`, migration `0062`: org, brand, lowered name,
+  description, sanitized filters, raw count; in the brand transfer). `split/confirm`
+  of a segment with the same org + brand + name + description estimated in the
+  last 24 h (`splitEstimateFor`) is born on THOSE filters + count (no pointer
+  build, no chooser); its apollo-service record is created from them verbatim
+  after commit (`recordNativeFilters`). Not estimated = the pointer build as
+  before. Why: saasdocs.online 2026-11-22, card 240 vs audience 2,922. Replayed:
+  the card's draft carried `revenue_range` (one-person firms + tools: 35,089
+  people, 118 with a revenue cap) and the build dropped it; similar titles were
+  only 1.25x (2,922 vs 2,335). So the draft prompt forbids revenue / funding
+  fields under 50 employees. Its `degraded` was the chooser saying revenue and
+  migration intent cannot be filtered (correct, information only).
 - Cost: chat-service bills the caller's org (opens an `audience-split-estimate`
-  run when no `x-run-id`). Persists nothing. Tests:
+  run when no `x-run-id`). Creates no audience. Tests:
   `tests/integration/audiences-split-estimate.test.ts`.
 
 ### Audience suggestion (onboarding) — `POST /orgs/audiences/suggest`

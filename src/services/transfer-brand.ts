@@ -91,6 +91,7 @@ const TABLES = [
   "offer_audience_realignments",
   "brand_relation_assignments",
   "relation_fit_judgments",
+  "audience_split_estimates",
   "google_maps_queries",
   "google_maps_places",
   "google_maps_brand_claims",
@@ -174,6 +175,12 @@ export async function transferBrand(
       add(
         "relation_fit_judgments",
         (await tx`UPDATE relation_fit_judgments SET org_id = ${targetOrgId}, brand_id = ${targetBrandId}
+                  WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`).length
+      );
+      // The counted card drafts follow the brand (AUDIENCE-COUNT-MISMATCH-1122).
+      add(
+        "audience_split_estimates",
+        (await tx`UPDATE audience_split_estimates SET org_id = ${targetOrgId}, brand_id = ${targetBrandId}
                   WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`).length
       );
       if (await tableExists(tx, "lists")) {
