@@ -4,6 +4,7 @@ import { db } from "../db/index.js";
 import { humans } from "../db/schema.js";
 import { requireApiKey, requireIdentity } from "../middleware/auth.js";
 import { UpsertHumanRequestSchema } from "../schemas.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 const router = Router();
 
@@ -11,7 +12,7 @@ const router = Router();
 router.post("/humans", requireApiKey, requireIdentity, async (req, res) => {
   const parsed = UpsertHumanRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
 

@@ -2793,6 +2793,11 @@ whole list without creating anything. `src/services/audience-split-estimate.ts`.
   only 1.25x (2,922 vs 2,335). So the draft prompt forbids revenue / funding
   fields under 50 employees. Its `degraded` was the chooser saying revenue and
   migration intent cannot be filtered (correct, information only).
+- **Speed** (measured in prod 2026-11-25, 6 segments, cold): 7.3-11.7 s total; the ONE filter draft
+  is 6-7.5 s (Gemini flash-pro, ~1,000-1,400 thinking tokens even at minimal), the parallel counts
+  ~1.2 s, a repair round adds a draft + count. One draft per segment in parallel was 4.2 s / 8.4 s
+  wall (max-of-6 tail) for 6x the input tokens: not shipped. Each call logs
+  `audience.split_estimate.phases` (draft / count / repair ms).
 - Cost: chat-service bills the caller's org (opens an `audience-split-estimate`
   run when no `x-run-id`). Creates no audience. Tests:
   `tests/integration/audiences-split-estimate.test.ts`.
@@ -3438,6 +3443,14 @@ key-service, `scraping.ts` → scraping-service, `chat-client.ts` → chat-servi
 - Note: `lead_serves.audience_id` (bronze, provenance) is the audience a serve
   was recorded UNDER (membership tagging) — distinct from the `x-audience-id`
   cost-attribution header, though in the serve-next campaign flow they coincide.
+
+## A validation 400 names the field (`src/lib/zod-error.ts`, AGENT-SIGNUP-UX-1125)
+
+Every Zod 400 of every route answers `zodErrorBody(parsed.error)`: `error` = one line naming each
+offending field + what was expected (`"brandId: Invalid UUID; segments.0.name: Too small: ..."`, empty
+path = `body`), never Zod's JSON dump; `issues[] {path, message, code}` beside it (additive). An outside
+AI agent reads the top line. A new route uses the helper, never `parsed.error.message`. Tests:
+`tests/integration/split-validation-errors.test.ts`.
 
 ## Async route errors always answer (`src/lib/async-route-errors.ts`)
 

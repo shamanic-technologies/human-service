@@ -21,13 +21,14 @@ import {
   recoverSuppressions,
   revertSuppressionRecovery,
 } from "../services/suppression-recovery.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 const router = Router();
 
 router.post("/internal/recover-suppressions", requireApiKey, async (req, res) => {
   const parsedQuery = RecoverSuppressionsQuerySchema.safeParse(req.query);
   if (!parsedQuery.success) {
-    res.status(400).json({ error: parsedQuery.error.message });
+    res.status(400).json(zodErrorBody(parsedQuery.error));
     return;
   }
   const parsed = RecoverSuppressionsRequestSchema.safeParse(req.body);
@@ -52,7 +53,7 @@ router.post(
   async (req, res) => {
     const parsedQuery = RecoverSuppressionsQuerySchema.safeParse(req.query);
     if (!parsedQuery.success) {
-      res.status(400).json({ error: parsedQuery.error.message });
+      res.status(400).json(zodErrorBody(parsedQuery.error));
       return;
     }
     const parsed = RevertSuppressionRecoveryRequestSchema.safeParse(req.body);

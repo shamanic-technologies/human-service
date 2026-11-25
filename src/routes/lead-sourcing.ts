@@ -10,6 +10,7 @@ import {
   refreshLeadSourcingChoice,
   type OriginDecision,
 } from "../services/lead-sourcing.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 const router = Router();
 
@@ -21,7 +22,7 @@ const router = Router();
 router.get("/orgs/lead-sourcing/sources", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsed = LeadSourcingSourcesQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   const scope = { orgId: res.locals.orgId as string, brandId: parsed.data.brandId, offerId: parsed.data.offerId };

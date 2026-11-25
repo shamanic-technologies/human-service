@@ -275,7 +275,9 @@ export async function estimateSplitSegments(
       );
 
     const all = segments.map((_, i) => i);
+    let phaseStart = Date.now();
     const filtersByIndex = await draft(segmentsMessage(segments, all));
+    const draftMs = Date.now() - phaseStart;
 
     const measure = async (indexes: number[]) =>
       Promise.all(
@@ -288,7 +290,10 @@ export async function estimateSplitSegments(
       );
 
     const results = new Map<number, Awaited<ReturnType<typeof measure>>[number]>();
+    phaseStart = Date.now();
     for (const r of await measure(all)) results.set(r.index, r);
+    const countMs = Date.now() - phaseStart;
+    let repairMs = 0;
 
     const failures = [...results.values()]
       .filter((r) => !r.outcome || r.outcome.kind === "rejected" || r.outcome.total === 0)
@@ -303,6 +308,7 @@ export async function estimateSplitSegments(
       }));
 
     if (failures.length > 0) {
+      phaseStart = Date.now();
       const repaired = await draft(repairMessage(segments, failures));
       for (const f of failures) {
         const raw = repaired.get(f.index);
@@ -313,7 +319,14 @@ export async function estimateSplitSegments(
         const before = results.get(r.index);
         if (r.outcome && (r.outcome.kind === "count" || !before?.outcome)) results.set(r.index, r);
       }
+      repairMs = Date.now() - phaseStart;
     }
+    // Where the time goes (AGENT-SIGNUP-UX-1125, measured 2026-11-25 on 6 segments:
+    // the one filter draft 6-7.5 s, the parallel counts ~1.2 s, a repair round
+    // adds one more draft + count for the failed segments only).
+    console.log(
+      `[human-service] audience.split_estimate.phases segments=${segments.length} draft_ms=${draftMs} count_ms=${countMs} repaired=${failures.length} repair_ms=${repairMs}`
+    );
 
     // The filters each card was counted on: the confirm of that segment builds
     // its audience on exactly these (see file header).

@@ -4,12 +4,13 @@ import { Router } from "express";
 import { requireApiKey } from "../middleware/auth.js";
 import { RejudgeBlankCandidatesQuerySchema, RejudgeBlankCandidatesRequestSchema } from "../schemas.js";
 import { rejudgeBlankCandidates, revertRejudge } from "../services/blank-candidate-rejudge.js";
+import { zodErrorMessage } from "../lib/zod-error.js";
 
 const router = Router();
 
 function parse(req: { query: unknown; body: unknown }) {
   const q = RejudgeBlankCandidatesQuerySchema.safeParse(req.query);
-  if (!q.success) return { error: q.error.message } as const;
+  if (!q.success) return { error: zodErrorMessage(q.error) } as const;
   const b = RejudgeBlankCandidatesRequestSchema.safeParse(req.body);
   if (!b.success) return { error: b.error.issues[0]?.message ?? "Invalid request" } as const;
   return {

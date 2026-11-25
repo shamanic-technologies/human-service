@@ -52,6 +52,7 @@ import {
   BounceConfigError,
   BounceSourceError,
 } from "../lib/instantly-bounces.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 // Map a thrown provider error to the right HTTP status. Fail loud — a provider
 // outage surfaces as 502, an unsupported capability as 501; never swallowed.
@@ -139,7 +140,7 @@ router.post(
   async (req, res) => {
     const parsed = PeopleSearchRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const orgId = res.locals.orgId as string;
@@ -189,7 +190,7 @@ router.post(
   async (req, res) => {
     const parsed = ResolveEmailRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const orgId = res.locals.orgId as string;
@@ -237,7 +238,7 @@ router.post(
   async (req, res) => {
     const parsed = DryRunRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     try {
@@ -261,7 +262,7 @@ router.get(
   async (req, res) => {
     const parsed = FiltersPromptQuerySchema.safeParse(req.query);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     try {
