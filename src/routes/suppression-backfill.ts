@@ -28,6 +28,7 @@ import {
   backfillSentSuppressions,
   revertSentSuppressionBackfill,
 } from "../services/suppression-backfill.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 const router = Router();
 
@@ -42,7 +43,7 @@ router.post(
   async (req, res) => {
     const parsedQuery = BackfillSentSuppressionsQuerySchema.safeParse(req.query);
     if (!parsedQuery.success) {
-      res.status(400).json({ error: parsedQuery.error.message });
+      res.status(400).json(zodErrorBody(parsedQuery.error));
       return;
     }
     const parsed = BackfillSentSuppressionsRequestSchema.safeParse(req.body);
@@ -69,7 +70,7 @@ router.post(
   async (req, res) => {
     const parsedQuery = BackfillSentSuppressionsQuerySchema.safeParse(req.query);
     if (!parsedQuery.success) {
-      res.status(400).json({ error: parsedQuery.error.message });
+      res.status(400).json(zodErrorBody(parsedQuery.error));
       return;
     }
     const parsed = RevertSentSuppressionBackfillRequestSchema.safeParse(req.body);

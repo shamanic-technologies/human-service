@@ -8,6 +8,7 @@ import {
   UnknownSourceOriginError,
 } from "../services/source-campaigns.js";
 import { SourcingOriginError } from "../services/sourcing-origin.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 const router = Router();
 
@@ -16,7 +17,7 @@ const router = Router();
 router.post("/orgs/source-campaigns/state", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsed = SourceCampaignStateRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   try {
@@ -46,7 +47,7 @@ router.post("/orgs/source-campaigns/state", requireApiKey, requireOrgIdOnly, asy
 router.post("/internal/source-campaigns/reconcile", requireApiKey, async (req, res) => {
   const parsed = SourceCampaignReconcileQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   try {

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { requireApiKey } from "../middleware/auth.js";
 import { CompetitorEngagementSweepQuerySchema } from "../schemas.js";
 import { runCompetitorEngagementSweep } from "../services/competitor-engagement-audience.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 const router = Router();
 
@@ -15,7 +16,7 @@ const router = Router();
 router.post("/internal/competitor-engagement-audiences", requireApiKey, async (req, res) => {
   const parsed = CompetitorEngagementSweepQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   const result = await runCompetitorEngagementSweep({

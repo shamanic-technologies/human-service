@@ -144,6 +144,7 @@ import { draftGoogleMapsFilters, readGoogleMapsFilters, GoogleMapsSourceError } 
 import { createRun, completeRun } from "../services/runs.js";
 import { TregInsufficientCreditError, TregMeterError } from "../lib/treg-meter.js";
 import { addRunOutputs } from "../services/run-outputs.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 const router = Router();
 
 const DEFAULT_LIMIT = 50;
@@ -272,7 +273,7 @@ function sendProviderError(
 router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsed = CreateAudienceRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
 
@@ -498,7 +499,7 @@ router.post(
   async (req, res) => {
     const parsed = SuggestAudiencesRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     try {
@@ -529,7 +530,7 @@ router.post(
   async (req, res) => {
     const parsed = SplitAudiencesRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const startedAt = Date.now();
@@ -560,7 +561,7 @@ router.post(
   async (req, res) => {
     const parsed = EstimateSplitSegmentsRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const startedAt = Date.now();
@@ -592,7 +593,7 @@ router.post(
   async (req, res) => {
     const parsed = ConfirmAudienceSplitRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const names = parsed.data.segments.map((s) => s.name.toLowerCase());
@@ -750,7 +751,7 @@ router.post(
   async (req, res) => {
     const parsed = LaunchAudiencePortfolioRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const orgId = res.locals.orgId as string;
@@ -807,7 +808,7 @@ router.post(
   async (req, res) => {
     const parsed = CreateLinkedinEngagementAudienceRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const orgId = res.locals.orgId as string;
@@ -859,7 +860,7 @@ router.post(
 router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsedQuery = ListAudiencesQuerySchema.safeParse(req.query);
   if (!parsedQuery.success) {
-    res.status(400).json({ error: parsedQuery.error.message });
+    res.status(400).json(zodErrorBody(parsedQuery.error));
     return;
   }
 
@@ -946,7 +947,7 @@ router.post(
   async (req, res) => {
     const parsed = AudienceStatsRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
 
@@ -974,7 +975,7 @@ router.get("/orgs/audiences/:id", requireApiKey, requireOrgIdOnly, async (req, r
 router.patch("/orgs/audiences/:id", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsed = UpdateAudienceRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
 
@@ -1030,7 +1031,7 @@ router.patch(
   async (req, res) => {
     const parsed = ChangeAudienceStatusRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
 
@@ -1105,7 +1106,7 @@ router.patch(
   async (req, res) => {
     const parsed = ChangeAudienceServeSourceRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const orgId = res.locals.orgId as string;
@@ -1222,7 +1223,7 @@ function sendSignalSourceError(res: import("express").Response, err: unknown): v
 router.post("/orgs/audiences/:id/sources", requireApiKey, requireOrgAndUser, async (req, res) => {
   const parsed = AddAudienceSignalSourceRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   const orgId = res.locals.orgId as string;
@@ -1245,7 +1246,7 @@ router.post("/orgs/audiences/:id/sources", requireApiKey, requireOrgAndUser, asy
 router.patch("/orgs/audiences/:id/sources/:sourceId", requireApiKey, requireOrgAndUser, async (req, res) => {
   const parsed = SetSourceJobTitlesRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   const orgId = res.locals.orgId as string;
@@ -1661,7 +1662,7 @@ router.post(
   async (req, res) => {
     const parsed = RevealCandidateRequestSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const orgId = res.locals.orgId as string;
@@ -1709,7 +1710,7 @@ router.post(
   async (req, res) => {
     const parsed = DeclineCandidateRequestSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const orgId = res.locals.orgId as string;
@@ -1752,7 +1753,7 @@ router.get(
   async (req, res) => {
     const parsed = ListScreeningsQuerySchema.safeParse(req.query);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const orgId = res.locals.orgId as string;
@@ -1829,7 +1830,7 @@ router.post(
   async (req, res) => {
     const parsed = GenerateAudienceAvatarRequestSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
 
@@ -1866,7 +1867,7 @@ router.get(
   async (req, res) => {
     const parsedQuery = AudienceMembersQuerySchema.safeParse(req.query);
     if (!parsedQuery.success) {
-      res.status(400).json({ error: parsedQuery.error.message });
+      res.status(400).json(zodErrorBody(parsedQuery.error));
       return;
     }
 

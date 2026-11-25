@@ -22,13 +22,14 @@ import { ChatConfigError, ChatServiceError } from "../lib/chat-client.js";
 import { ProviderConfigError, ProviderError } from "../services/people-providers.js";
 import { BRAND_RELATIONS } from "../lib/brand-relations.js";
 import { BrandConfigError, BrandServiceError } from "../lib/brand-offers.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 const router = Router();
 
 router.get("/orgs/audiences/relations", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsed = BrandRelationsQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   const orgId = res.locals.orgId as string;
@@ -38,7 +39,7 @@ router.get("/orgs/audiences/relations", requireApiKey, requireOrgIdOnly, async (
 router.post("/orgs/audiences/relations/ensure", requireApiKey, requireOrgAndUser, async (req, res) => {
   const parsed = EnsureBrandRelationsRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   try {
@@ -68,7 +69,7 @@ router.post("/orgs/audiences/relations/ensure", requireApiKey, requireOrgAndUser
 router.post("/internal/brand-relations/assign", requireApiKey, async (req, res) => {
   const parsed = AssignBrandRelationRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   try {
@@ -85,7 +86,7 @@ router.post("/internal/brand-relations/assign", requireApiKey, async (req, res) 
 router.post("/internal/brand-relations/revert", requireApiKey, async (req, res) => {
   const parsed = RevertBrandRelationRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   res.json(await revertBrandRelation(parsed.data.reason));
@@ -94,7 +95,7 @@ router.post("/internal/brand-relations/revert", requireApiKey, async (req, res) 
 router.post("/internal/brand-relations/screen", requireApiKey, async (req, res) => {
   const parsed = ScreenBrandRelationRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   const input = { ...parsed.data, dryRun: req.query.dryRun === "true" };

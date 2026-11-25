@@ -36,7 +36,14 @@ const identityHeaders = z.object({
 
 export const ErrorSchema = z
   .object({
-    error: z.string(),
+    error: z.string().openapi({
+      description:
+        "One line. On a validation 400 it names each offending field and what was expected, e.g. 'brandId: Invalid UUID; segments.0.name: Too small: expected string to have >=1 characters' (empty path = 'body').",
+    }),
+    issues: z
+      .array(z.object({ path: z.string(), message: z.string(), code: z.string() }))
+      .optional()
+      .openapi({ description: "Validation 400s only: the same facts as `error`, one entry per offending field." }),
   })
   .openapi("Error");
 

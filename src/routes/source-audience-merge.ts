@@ -6,13 +6,14 @@ import { Router } from "express";
 import { requireApiKey } from "../middleware/auth.js";
 import { MergeSourceAudiencesQuerySchema as QuerySchema } from "../schemas.js";
 import { mergeSourceAudiences, revertSourceAudienceMerge } from "../services/source-audience-merge.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 const router = Router();
 
 router.post("/internal/merge-source-audiences", requireApiKey, async (req, res) => {
   const q = QuerySchema.safeParse(req.query);
   if (!q.success) {
-    res.status(400).json({ error: q.error.message });
+    res.status(400).json(zodErrorBody(q.error));
     return;
   }
   res.json(await mergeSourceAudiences({ dryRun: q.data.dryRun === "true", orgId: q.data.orgId, brandId: q.data.brandId }));
@@ -21,7 +22,7 @@ router.post("/internal/merge-source-audiences", requireApiKey, async (req, res) 
 router.post("/internal/merge-source-audiences/revert", requireApiKey, async (req, res) => {
   const q = QuerySchema.safeParse(req.query);
   if (!q.success) {
-    res.status(400).json({ error: q.error.message });
+    res.status(400).json(zodErrorBody(q.error));
     return;
   }
   res.json(await revertSourceAudienceMerge({ dryRun: q.data.dryRun === "true", orgId: q.data.orgId, brandId: q.data.brandId }));

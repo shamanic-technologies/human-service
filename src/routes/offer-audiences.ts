@@ -4,13 +4,14 @@ import { Router } from "express";
 import { requireApiKey } from "../middleware/auth.js";
 import { RealignOfferAudiencesRequestSchema, RevertOfferAudiencesRequestSchema } from "../schemas.js";
 import { RealignError, realignOfferAudiences, revertOfferAudienceRealignment } from "../services/offer-audiences.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 const router = Router();
 
 router.post("/internal/offer-audiences/realign", requireApiKey, async (req, res) => {
   const parsed = RealignOfferAudiencesRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   try {
@@ -27,7 +28,7 @@ router.post("/internal/offer-audiences/realign", requireApiKey, async (req, res)
 router.post("/internal/offer-audiences/realign/revert", requireApiKey, async (req, res) => {
   const parsed = RevertOfferAudiencesRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   res.json(await revertOfferAudienceRealignment(parsed.data.reason));

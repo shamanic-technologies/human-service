@@ -90,7 +90,31 @@
         "type": "object",
         "properties": {
           "error": {
-            "type": "string"
+            "type": "string",
+            "description": "One line. On a validation 400 it names each offending field and what was expected, e.g. 'brandId: Invalid UUID; segments.0.name: Too small: expected string to have >=1 characters' (empty path = 'body')."
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "message",
+                "code"
+              ]
+            },
+            "description": "Validation 400s only: the same facts as `error`, one entry per offending field."
           }
         },
         "required": [

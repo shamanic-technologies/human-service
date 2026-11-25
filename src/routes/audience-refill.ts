@@ -16,6 +16,7 @@ import {
   WideningProposalNotFoundError,
 } from "../services/audience-widening.js";
 import { serializeAudiences } from "./audiences.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 const router = Router();
 
@@ -28,7 +29,7 @@ const router = Router();
 router.post("/internal/audience-refill", requireApiKey, async (req, res) => {
   const parsed = AudienceRefillQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   const result = await runAudienceRefillSweep({
@@ -61,7 +62,7 @@ function sendWideningError(res: import("express").Response, err: unknown): boole
 router.get("/orgs/audiences/widening-proposals", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsed = ListWideningProposalsQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   const proposals = await listWideningProposals({ orgId: res.locals.orgId as string, ...parsed.data });

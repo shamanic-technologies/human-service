@@ -41,6 +41,7 @@ import { ChatConfigError, ChatServiceError } from "../lib/chat-client.js";
 import { ProviderConfigError } from "../services/people-providers.js";
 import { BackfillUpstreamError, backfillRunOutcomes } from "../services/run-outcomes-backfill.js";
 import { backfillTargetTexts } from "../services/audience-target-text.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 const router = Router();
 
@@ -54,7 +55,7 @@ const router = Router();
 router.post("/internal/backfill-run-outcomes", requireApiKey, async (req, res) => {
   const parsed = BackfillRunOutcomesQuerySchema.safeParse(req.query);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   const opts = { dryRun: parsed.data.dryRun === "true" };
@@ -97,7 +98,7 @@ router.post(
   async (req, res) => {
     const parsed = BackfillAudienceTargetTextsQuerySchema.safeParse(req.query);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const opts = { dryRun: parsed.data.dryRun === "true", brandId: parsed.data.brandId };
@@ -142,7 +143,7 @@ router.post(
       req.query
     );
     if (!parsedQuery.success) {
-      res.status(400).json({ error: parsedQuery.error.message });
+      res.status(400).json(zodErrorBody(parsedQuery.error));
       return;
     }
     const dryRun = parsedQuery.data.dryRun === "true";
@@ -259,7 +260,7 @@ router.post(
   async (req, res) => {
     const parsedQuery = RemapAudienceFiltersQuerySchema.safeParse(req.query);
     if (!parsedQuery.success) {
-      res.status(400).json({ error: parsedQuery.error.message });
+      res.status(400).json(zodErrorBody(parsedQuery.error));
       return;
     }
     const dryRun = parsedQuery.data.dryRun === "true";
@@ -445,7 +446,7 @@ router.post(
   async (req, res) => {
     const parsedQuery = MigrateApifyAudiencesQuerySchema.safeParse(req.query);
     if (!parsedQuery.success) {
-      res.status(400).json({ error: parsedQuery.error.message });
+      res.status(400).json(zodErrorBody(parsedQuery.error));
       return;
     }
     const dryRun = parsedQuery.data.dryRun === "true";
@@ -598,7 +599,7 @@ router.post(
   async (req, res) => {
     const parsedQuery = BackfillAudienceAvatarsQuerySchema.safeParse(req.query);
     if (!parsedQuery.success) {
-      res.status(400).json({ error: parsedQuery.error.message });
+      res.status(400).json(zodErrorBody(parsedQuery.error));
       return;
     }
     const dryRun = parsedQuery.data.dryRun === "true";
@@ -715,7 +716,7 @@ router.post(
   async (req, res) => {
     const parsedQuery = BackfillCanonicalLinksQuerySchema.safeParse(req.query);
     if (!parsedQuery.success) {
-      res.status(400).json({ error: parsedQuery.error.message });
+      res.status(400).json(zodErrorBody(parsedQuery.error));
       return;
     }
     const dryRun = parsedQuery.data.dryRun === "true";
@@ -865,7 +866,7 @@ router.post(
   async (req, res) => {
     const parsedQuery = BackfillApolloPointersQuerySchema.safeParse(req.query);
     if (!parsedQuery.success) {
-      res.status(400).json({ error: parsedQuery.error.message });
+      res.status(400).json(zodErrorBody(parsedQuery.error));
       return;
     }
     const dryRun = parsedQuery.data.dryRun === "true";
@@ -980,7 +981,7 @@ router.post(
 router.post("/internal/backfill-audience-offers", requireApiKey, async (req, res) => {
   const parsedQuery = BackfillAudienceOffersQuerySchema.safeParse(req.query);
   if (!parsedQuery.success) {
-    res.status(400).json({ error: parsedQuery.error.message });
+    res.status(400).json(zodErrorBody(parsedQuery.error));
     return;
   }
   const dryRun = parsedQuery.data.dryRun === "true";

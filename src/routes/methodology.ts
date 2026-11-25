@@ -11,6 +11,7 @@ import { mapSiteUrls, scrapePage } from "../services/scraping.js";
 import { rankPages } from "../services/url-utils.js";
 import { extractMethodology } from "../services/extractor.js";
 import { traceEvent } from "../lib/trace-event.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 const router = Router();
 
@@ -69,7 +70,7 @@ router.post(
     const parsed = ExtractRequestSchema.safeParse(req.body);
 
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
 
