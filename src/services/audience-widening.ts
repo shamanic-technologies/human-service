@@ -23,7 +23,7 @@ import { ensureProfileAvatar } from "./audience-avatar.js";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audiences, audienceWideningProposals } from "../db/schema.js";
-import { insertSplitAudiences } from "./audience-split.js";
+import { insertSplitAudiences, offerNameForAlign } from "./audience-split.js";
 import {
   dedupeSegmentNames,
   toWideningProposalView,
@@ -87,6 +87,16 @@ export async function acceptWideningProposal(args: {
    * builds run under the user the refill ran under unless this is a UUID. */
   decidedByUserId: string | null;
 }): Promise<{ proposal: WideningProposalView; audiences: AudienceRow[] }> {
+  // The offer's name for its one audience (ONBOARDING-ONE-AUDIENCE-1126), read before any write.
+  const [pre] = await db
+    .select()
+    .from(audienceWideningProposals)
+    .where(and(eq(audienceWideningProposals.orgId, args.orgId), eq(audienceWideningProposals.id, args.id)))
+    .limit(1);
+  const offerName =
+    pre && pre.status === "pending"
+      ? await offerNameForAlign({ orgId: pre.orgId, brandId: pre.brandId, offerId: pre.offerId, targetAudience: pre.widenedTarget })
+      : null;
   const result = await db.transaction(async (tx) => {
     const [row] = await tx
       .select()
@@ -129,6 +139,7 @@ export async function acceptWideningProposal(args: {
       targetAudience: row.widenedTarget,
       segments: row.segments.map((s, i) => ({ name: names[i], description: s.description })),
       source: WIDENING_ACCEPTED_SOURCE,
+      offerName,
     });
     const [updated] = await tx
       .update(audienceWideningProposals)

@@ -407,8 +407,14 @@ describe("nobody left inside the target: a widening PROPOSAL, never active audie
     }
     expect(vi.mocked(ensureApolloPointer)).toHaveBeenCalledTimes(2);
     expect(vi.mocked(ensureTargetText)).toHaveBeenCalledTimes(2);
+    // ONE audience per offer (ONBOARDING-ONE-AUDIENCE-1126): the offer's target is created on the wider
+    // target, the original row and the new ones are lists of the brand.
     const [same] = await db.select().from(audiences).where(eq(audiences.id, original.id));
-    expect(same).toMatchObject({ nlPrompt: TARGET, status: "active" });
+    expect(same).toMatchObject({ nlPrompt: TARGET, status: "active", role: "search" });
+    for (const r of created) expect(r.role).toBe("search");
+    const offerTarget = (await db.select().from(audiences).where(eq(audiences.brandId, BRAND_PAYING))).filter((r) => r.role === "target");
+    expect(offerTarget).toHaveLength(1);
+    expect(offerTarget[0]).toMatchObject({ targetText: WIDENED, offerId: OFFER, status: "active" });
 
     // Repeat: same audiences, nothing new.
     const a2 = await request(app)
@@ -417,7 +423,7 @@ describe("nobody left inside the target: a widening PROPOSAL, never active audie
     expect(a2.status).toBe(200);
     expect(a2.body.audiences.map((a: { id: string }) => a.id)).toEqual(a1.body.audiences.map((a: { id: string }) => a.id));
     const all = await db.select().from(audiences).where(eq(audiences.brandId, BRAND_PAYING));
-    expect(all).toHaveLength(3);
+    expect(all).toHaveLength(4);
 
     // Declining an accepted proposal is a conflict.
     const d = await request(app)

@@ -5,6 +5,7 @@ import { requireApiKey } from "../middleware/auth.js";
 import { RealignOfferAudiencesRequestSchema, RevertOfferAudiencesRequestSchema } from "../schemas.js";
 import { RealignError, realignOfferAudiences, revertOfferAudienceRealignment } from "../services/offer-audiences.js";
 import { zodErrorBody } from "../lib/zod-error.js";
+import { alignOfferAudiences } from "../services/offer-audience-align-sweep.js";
 
 const router = Router();
 
@@ -23,6 +24,16 @@ router.post("/internal/offer-audiences/realign", requireApiKey, async (req, res)
     }
     throw err;
   }
+});
+
+// ONBOARDING-ONE-AUDIENCE-1126: align every offer still holding live role-NULL rows now (also every 5 min).
+router.post("/internal/offer-audiences/align", requireApiKey, async (req, res) => {
+  const brandId = typeof req.query.brandId === "string" ? req.query.brandId : undefined;
+  if (brandId && !/^[0-9a-f-]{36}$/i.test(brandId)) {
+    res.status(400).json({ error: "brandId: Invalid UUID" });
+    return;
+  }
+  res.json(await alignOfferAudiences({ dryRun: req.query.dryRun === "true", brandId }));
 });
 
 router.post("/internal/offer-audiences/realign/revert", requireApiKey, async (req, res) => {

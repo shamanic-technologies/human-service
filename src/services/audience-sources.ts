@@ -383,7 +383,7 @@ export async function sourceBornStatus(
           notInArray(audiences.status, ["deprecated", "archived"])
         )
       )
-  ).filter((r) => audienceListKind(r) === list);
+  ).filter((r) => r.role !== "target" && audienceListKind(r) === list);
   if (legacy.length > 0) return legacy.some((r) => r.status === "active") ? "active" : "paused";
   return fallback;
 }

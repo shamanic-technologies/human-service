@@ -5524,6 +5524,46 @@ registry.registerPath({
   },
 });
 
+const AlignScopeSchema = z.object({ orgId: z.string(), brandId: z.string(), offerId: z.string() });
+registry.registerPath({
+  method: "post",
+  path: "/internal/offer-audiences/align",
+  summary:
+    "ONBOARDING-ONE-AUDIENCE-1126: put every offer still holding live (active / paused) role-NULL buyer rows on ONE audience: its target created when missing (text = the offer's validated target, name = the offer's), those rows made brand lists. Also runs every 5 min. Reversible (`/realign/revert {reason: \"offer-audience-align-1126\"}`).",
+  security: [{ apiKey: [] }],
+  request: {
+    query: z.object({
+      dryRun: z.enum(["true", "false"]).optional(),
+      brandId: z.string().uuid().optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Alignment result",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              dryRun: z.boolean(),
+              offers: z.number().int(),
+              aligned: z.array(
+                AlignScopeSchema.extend({
+                  targetId: z.string().nullable(),
+                  target: z.enum(["created", "would_create", "exists"]),
+                  madeSearch: z.array(z.string()),
+                })
+              ),
+              skipped: z.array(AlignScopeSchema.extend({ reason: z.string() })),
+            })
+            .openapi("AlignOfferAudiencesResponse"),
+        },
+      },
+    },
+    400: { description: "Invalid brandId", content: { "application/json": { schema: ErrorSchema } } },
+    401: { description: "Unauthorized" },
+  },
+});
+
 registry.registerPath({
   method: "post",
   path: "/internal/offer-audiences/realign/revert",
