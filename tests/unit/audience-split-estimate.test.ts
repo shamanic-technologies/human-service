@@ -31,4 +31,20 @@ describe("split estimate helpers", () => {
     expect(p).toContain('{"segments":[{"index":');
     expect(p).toContain("Never use buying_signal.");
   });
+
+  it("keeps facts Apollo rarely holds out of the filters, generically (TINY-SPLIT-AUDIENCES-1126)", () => {
+    const p = buildEstimateSystemPrompt("REF");
+    expect(p).toContain("Filter ONLY on facts Apollo holds for nearly every person and company");
+    expect(p).toContain("tools or technologies a company");
+    expect(p).toContain("its revenue, its funding");
+    expect(p).toContain("it stays in the audience text");
+    // A principle, never a rule keyed on one tool or one client.
+    expect(p).not.toMatch(/zapier|n8n|writebros/i);
+  });
+
+  it("counts the role, not one exact title, at small companies", () => {
+    const p = buildEstimateSystemPrompt("REF");
+    expect(p).toContain("Count every person who holds the ROLE, whatever their exact title.");
+    expect(p).toContain("(person_functions)");
+  });
 });
