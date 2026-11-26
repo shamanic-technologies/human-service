@@ -2459,6 +2459,15 @@ writes them from the offer's validated target).
   `email_status = site_unreadable` (nothing stored in bronze), the walk goes on to the next one, and the business is
   read again 3 days later (`SITE_UNREADABLE_RETRY`). Before: the throw failed the whole serve / candidates/next and the
   next call took the same oldest business again: Living Vital served ~0 for 2 days on one site that always timed out.
+- **Every provider's page is read** (GMAPS-SITE-READ-EMPTY-1126): `treg.web.extract` returns each provider's OWN row,
+  so `readExtractRow` takes the words from `text` / `markdown` (crawl4ai) / `content` (search1api) / `full_content` /
+  `raw_content`... else `excerpts` (parallel), links from the row's list else from the words (markdown / href / bare
+  URLs). Reading `text` alone (tinyfish only) made every read empty once treg routed crawl4ai first (2026-11-24 on,
+  1,445 shops "no email" on 11-26, each charged). A homepage answered with NO words is a failed read
+  (`site_unreadable`, read again after 3 days), never stored as `no_email`. Migration `0065` archived (in
+  `google_maps_live_repairs`, reason `gmaps-site-read-empty-1126`) and deleted the 1,836 empty `no_email` reads and
+  put their waiting businesses back in the email walk. Tests: `tests/unit/site-extract-row.test.ts`, the "whoever
+  serves it" / "no words" cases of `google-maps-email.test.ts`.
 - **Walked by offer audiences** (GMAPS-TARGET-WALK-1117): a brand Google Maps list (`POST /orgs/audiences {provider:
   "google_maps", role: "search", nlPrompt | filters}`, no offerId; or an existing one turned into a search by
   `/internal/offer-audiences/realign`) is in `brandListsOf` (list `google_maps_search`) for every target of the brand.
