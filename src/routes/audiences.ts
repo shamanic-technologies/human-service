@@ -1,4 +1,5 @@
 import { messageOf } from "../lib/db-error.js";
+import { ensureNativeRecord, ensureProviderChoice, providerChoicePending } from "../services/audience-provider-choice.js";
 import { Router } from "express";
 import { randomUUID } from "node:crypto";
 import { personStatus } from "../services/audience-status-origin.js";
@@ -715,7 +716,7 @@ router.post(
       if (!row.apolloAudienceId && row.filters) {
         const recordUserId = buildIdentityForSplit.userId ?? row.createdByUserId ?? undefined;
         if (recordUserId) {
-          void recordNativeFilters(row, { ...buildIdentityForSplit, userId: recordUserId }).catch((err) =>
+          void ensureNativeRecord(row, { ...buildIdentityForSplit, userId: recordUserId }).catch((err) =>
             console.error(`[human-service] audience.native_record_failed org=${orgId} audience=${row.id}`, err)
           );
         } else {
@@ -732,6 +733,12 @@ router.post(
       );
       void ensureProfileAvatar(row, buildIdentityForSplit).catch((err) =>
         console.error(`[human-service] audience.avatar_failed org=${orgId} audience=${row.id}`, err)
+      );
+      // Its provider is measured now (each provider's sample judged against its
+      // target), so the visitor's first preview finds it decided; the preview and
+      // the first serve await the same in-flight measurement if it has not landed.
+      void ensureProviderChoice(row, buildIdentityForSplit).catch((err) =>
+        console.error(`[human-service] audience.provider_choice_failed org=${orgId} audience=${row.id}`, err)
       );
     }
     res.status(201).json({ audiences: await serializeAudiences(created) });
@@ -1412,10 +1419,19 @@ router.get(
       return;
     }
     const orgId = res.locals.orgId as string;
-    const audience = await getAudienceInOrg(orgId, req.params.id);
+    let audience = await getAudienceInOrg(orgId, req.params.id);
     if (!audience) {
       res.status(404).json({ error: "Audience not found" });
       return;
+    }
+    // A proposed audience's provider is measured before its first use (AUDIENCE-SOURCE-BY-FIT-1126).
+    if (providerChoicePending(audience)) {
+      try {
+        audience = await ensureProviderChoice(audience, buildIdentity(res));
+      } catch (err) {
+        sendProviderError(res, err);
+        return;
+      }
     }
     try {
       res.json(
@@ -1539,10 +1555,19 @@ router.post(
   requireOrgAndUser,
   async (req, res) => {
     const orgId = res.locals.orgId as string;
-    const audience = await getAudienceInOrg(orgId, req.params.id);
+    let audience = await getAudienceInOrg(orgId, req.params.id);
     if (!audience) {
       res.status(404).json({ error: "Audience not found" });
       return;
+    }
+    // A proposed audience's provider is measured before its first use (AUDIENCE-SOURCE-BY-FIT-1126).
+    if (providerChoicePending(audience)) {
+      try {
+        audience = await ensureProviderChoice(audience, buildIdentity(res));
+      } catch (err) {
+        sendProviderError(res, err);
+        return;
+      }
     }
 
     // Suppression is scoped to the audience's brand, taken from the stored row —
@@ -1612,10 +1637,19 @@ router.post(
   requireOrgAndUser,
   async (req, res) => {
     const orgId = res.locals.orgId as string;
-    const audience = await getAudienceInOrg(orgId, req.params.id);
+    let audience = await getAudienceInOrg(orgId, req.params.id);
     if (!audience) {
       res.status(404).json({ error: "Audience not found" });
       return;
+    }
+    // A proposed audience's provider is measured before its first use (AUDIENCE-SOURCE-BY-FIT-1126).
+    if (providerChoicePending(audience)) {
+      try {
+        audience = await ensureProviderChoice(audience, buildIdentity(res));
+      } catch (err) {
+        sendProviderError(res, err);
+        return;
+      }
     }
     const identity: Identity = { ...buildIdentity(res), brandIds: [audience.brandId] };
     if (!needsApolloPointerBuild(audience)) void refreshAudienceCountIfStale(audience, identity).catch((err) =>

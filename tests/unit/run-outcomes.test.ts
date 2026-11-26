@@ -153,7 +153,7 @@ describe("run outputs: what a run we opened built", () => {
         support: { kind: "product_feature", reason: TASK_SUPPORT["audience-split-estimate"].reason },
       });
       expect(calls[1].body).toEqual({ serviceName: "human-service", taskName: "audience-refill" });
-      expect(Object.keys(TASK_SUPPORT).sort()).toEqual(["audience-preview-companies", "audience-split-estimate", "audience-target-draft"]);
+      expect(Object.keys(TASK_SUPPORT).sort()).toEqual(["audience-preview-companies", "audience-provider-choice", "audience-split-estimate", "audience-target-draft"]);
     });
   });
 });

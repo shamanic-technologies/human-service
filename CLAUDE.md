@@ -1278,6 +1278,38 @@ audience reaches, with firmographics, and the ONE person to write to at each.
   (`preview` | `companies`, unique `(audience_id, sample, person_index)`).
 - Tests: `tests/integration/audiences-preview-companies.test.ts`.
 
+### Source by fit — the provider is MEASURED, every shown company + person is JUDGED (AUDIENCE-SOURCE-BY-FIT-1126)
+
+Prod 2026-11-25: "Brazilian restaurants" (born `apollo`, as every split audience was) previewed a caterer, an HR
+tech firm and a brewery, with "Human Resources Manager" as the person, while its text said HR is out. Owner
+2026-11-26: no special case (never "local business -> Google Maps"), measured beats default.
+- **One shared fit judgment** (`src/services/audience-fit.ts`): ONE Jev call per subject, two `choice` questions
+  on `{targetAudience: <the audience's text>, candidate: <teaser snapshot>}`: company `in_target | out_of_target |
+  unknown`, person `in_target | out_of_target | no_person`. Passes = company `in_target` AND person not
+  `out_of_target` (`no_person` = the business itself). Judged once per (audience, provider, subject, prompt
+  version), bronze `audience_fit_judgments` (migration `0063`, no org_id: cascades with the audience), fail loud.
+- **Preview companies** shows only rows that pass: Apollo chunks are judged before they are stored (rejected rows
+  are never stored, the cursor walks past them; a walk pauses after 10 chunks, the next page walks on); rows
+  stored before this are judged once on read and hidden if out. A Google Maps audience's preview = its own
+  businesses (`google_maps_places`, judged, person fields null), next search when they run out.
+- **Provider choice** (`src/services/audience-provider-choice.ts`): every split birth (`audience-split.ts`)
+  carries `chooser_trace.providerChoice.status = "pending"` (`src/lib/provider-choice-marker.ts`). Each provider
+  able to sample a target (`SAMPLERS`: apollo = the first 10 companies of its list; google_maps = the searches its
+  target expands to, first search(es) until 10 businesses) is sampled, every company judged. Cost per company =
+  costs-service price (`COSTS_SERVICE_URL`, public `/v1/platform-prices`): 1 `apollo-credit`; Google Maps = the
+  `treg-micro-usd` its searches charged / businesses found. Lowest cost per FITTING company wins; none fits = the
+  audience keeps its provider. Trace = per provider sampled / fits / fitRate / unitCostUsd / costPerFitUsd /
+  samples with verdicts + winner + reason. Google Maps wins ⟹ the row becomes `provider='google_maps'` with its
+  searches (Apollo pointer kept for audit, Apollo sample rows deleted); the sample's businesses and verdicts are
+  reused by preview and serve (never searched / judged twice). Apollo wins ⟹ its fitting sample rows are the
+  preview's first rows.
+- **When**: background right after split confirm (own `audience-provider-choice` run, support
+  `product_feature`, when the caller sent none); awaited by preview/companies, serve-next and candidates/next
+  while pending (deduped in flight). No provider sampled ⟹ 502, stays pending. Audiences born before never move.
+- **Serve**: Google Maps serve-next judges each business (company question) before serving; out ⟹ place status
+  `not_in_target`. Apollo serve-next keeps its teaser screen; candidates keep lead-service's screen.
+- Tests: `tests/integration/audience-source-by-fit.test.ts`.
+
 ### Serve-next (lead primitive) — `POST /orgs/audiences/{id}/serve-next`
 
 The per-iteration lead primitive the new runtime calls: lead-service asks

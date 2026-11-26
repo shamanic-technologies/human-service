@@ -24,6 +24,7 @@
 // industry, seniority/role), one axis or two crossed, never overlapping mixes,
 // so each segment maps to a filter set and an A/B result means something.
 
+import { pendingProviderChoice } from "../lib/provider-choice-marker.js";
 import type { CountedSplitSegment } from "./audience-split-estimate.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -501,6 +502,10 @@ function splitAudienceValues(args: SplitArgs) {
     status: "active",
     source: args.source ?? "split_proposal",
     createdByUserId: args.userId,
+    // Born unsourced: its provider is MEASURED (each provider's sample judged against
+    // the target, the most fitting companies per dollar wins) before its first
+    // preview / serve, never forced (AUDIENCE-SOURCE-BY-FIT-1126).
+    chooserTrace: pendingProviderChoice(),
   }));
 }
 

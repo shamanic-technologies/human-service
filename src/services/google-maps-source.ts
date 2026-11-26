@@ -49,6 +49,8 @@
 // cannot send on WhatsApp (no linked / connected account), nobody is consumed:
 // the business goes back to waiting and the serve answers exhausted, logged.
 
+import { judgeAudienceFit } from "./audience-fit.js";
+import { screenTarget } from "./audience-target-text.js";
 import { and, asc, eq, isNull, or, sql, type SQL } from "drizzle-orm";
 import { parsePhoneNumberFromString, type CountryCode } from "libphonenumber-js";
 import { db } from "../db/index.js";
@@ -250,7 +252,14 @@ export function toE164(raw: string | null | undefined, country: string): string 
   return parsed && parsed.isValid() ? parsed.format("E.164") : null;
 }
 
-function countryName(code: string): string | null {
+/** The fit judgment's key of a business: the same key the companies preview judges it under
+ * (company `gmaps:<place id>`, no person), so a business judged there is never judged again. */
+export function placeFitKey(raw: Record<string, unknown>): string {
+  const id = readPlace(raw).place_id;
+  return id ? `id:gmaps:${id}#-` : `name:${(readPlace(raw).name ?? "").trim().toLowerCase()}#-`;
+}
+
+export function countryName(code: string): string | null {
   try {
     return new Intl.DisplayNames(["en"], { type: "region" }).of(code.toUpperCase()) ?? null;
   } catch {
@@ -398,7 +407,7 @@ async function brandAlreadyHas(orgId: string, brandId: string, placeId: string, 
 }
 
 // Run the audience's next search, once. Returns false when every search already ran.
-async function runNextQuery(audience: AudienceRow, filters: GoogleMapsFilters, meter: TregMeter): Promise<boolean> {
+export async function runNextQuery(audience: AudienceRow, filters: GoogleMapsFilters, meter: TregMeter): Promise<boolean> {
   const [query] = await db
     .select()
     .from(googleMapsQueries)
@@ -620,7 +629,7 @@ function serveChannels(reach: readonly Reach[], reachableOn: readonly MessagingN
 }
 
 // The metered treg clients of one call (each opens its child run on first use), closed together.
-class GoogleMapsMeters {
+export class GoogleMapsMeters {
   private maps: TregMeter | null = null;
   private site: TregMeter | null = null;
   constructor(
@@ -821,6 +830,7 @@ export async function serveNextGoogleMaps(
 
   await seedGoogleMapsQueries(audience, filters);
   const own = await loadOwnCompany(identity.orgId, [audience.brandId]);
+  const fitTarget = screenTarget(audience)?.text ?? null;
   const meters = new GoogleMapsMeters(identity, audience.brandId, `/orgs/audiences/${audience.id}/serve-next`);
   let failed = false;
   try {
@@ -831,6 +841,21 @@ export async function serveNextGoogleMaps(
         await persistGoogleMapsReachable(audience);
         console.log(`[human-service] google_maps.exhausted org=${identity.orgId} audience=${audience.id} queries=${filters.queries.length} reach=${reach.join(",") || "-"}`);
         return { status: "exhausted", person: null };
+      }
+      // The shared fit judgment (audience-fit.ts): a business the audience's text does not
+      // describe is never served (judged once, stored; AUDIENCE-SOURCE-BY-FIT-1126).
+      if (fitTarget) {
+        const [verdict] = await judgeAudienceFit({
+          audienceId: audience.id,
+          provider: GOOGLE_MAPS_PROVIDER,
+          target: fitTarget,
+          subjects: [{ key: placeFitKey(row.place as Record<string, unknown>), snapshot: placeTeaser(readPlace(row.place), filters, null) }],
+          identity,
+        });
+        if (!verdict.companyPasses) {
+          await decide(row.id, "not_in_target");
+          continue;
+        }
       }
       const out = await servePlace(audience, row, identity, filters, own, ch, meters);
       if (out.kind === "served") return { status: "served", person: out.person, personId: out.personId };
