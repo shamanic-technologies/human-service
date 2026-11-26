@@ -85,6 +85,7 @@ import { isEmailSuppressed, normalizeEmail } from "./suppression.js";
 import { isEmailWonForRequest, isPersonOptedOut } from "./opt-outs.js";
 import { isEmailBounced } from "./bounces.js";
 import { SiteUnreadableError, siteContactOf, type SiteContact } from "./google-maps-site-contact.js";
+import { extendGoogleMapsCoverage } from "./google-maps-coverage.js";
 
 export const GOOGLE_MAPS_PROVIDER = "google_maps";
 /**
@@ -838,6 +839,10 @@ export async function serveNextGoogleMaps(
       const row = await takePlace(audience.id, ch.fits);
       if (!row) {
         if (await runNextQuery(audience, filters, meters.search())) continue;
+        // Every search ran: the next ones, until the target region is covered (GMAPS-COVERAGE-1126).
+        const coverage = await extendGoogleMapsCoverage(audience, filters, fitTarget, identity);
+        if (coverage === "extended") continue;
+        if (coverage === "pending") return { status: "pending", person: null };
         await persistGoogleMapsReachable(audience);
         console.log(`[human-service] google_maps.exhausted org=${identity.orgId} audience=${audience.id} queries=${filters.queries.length} reach=${reach.join(",") || "-"}`);
         return { status: "exhausted", person: null };
@@ -946,6 +951,11 @@ export async function nextGoogleMapsCandidate(
       const row = await nextPlaceForTarget(target, search, ch.fits);
       if (!row) {
         if (await runNextQuery(search, filters, meters.search())) continue;
+        // Every search ran: the next ones, until the target region is covered (GMAPS-COVERAGE-1126). The list's
+        // own text names the region, else the walking offer audience's.
+        const coverage = await extendGoogleMapsCoverage(search, filters, screenTarget(search)?.text ?? screenTarget(target)?.text ?? null, identity);
+        if (coverage === "extended") continue;
+        if (coverage === "pending") return { status: "pending" };
         console.log(`[human-service] offer_audience.google_maps_walked org=${identity.orgId} audience=${target.id} list=${search.id}`);
         return { status: "exhausted" };
       }
