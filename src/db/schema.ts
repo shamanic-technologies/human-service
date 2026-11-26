@@ -932,6 +932,8 @@ export interface TeaserSnapshot {
   organizationKeywords: string[] | null;
   /** The business's street address as its listing prints it (Google Maps lists only; absent elsewhere). */
   organizationAddress?: string | null;
+  /** The company's one-line description as its provider prints it (companies preview only; absent elsewhere). */
+  organizationDescription?: string | null;
 }
 
 // 🥉 BRONZE — append-only, EVERY verdict including the passes, each with the
@@ -1723,5 +1725,31 @@ export const audienceSplitEstimates = pgTable(
   },
   (table) => [
     index("idx_audience_split_estimates_segment").on(table.orgId, table.brandId, table.nameNorm, table.createdAt),
+  ]
+);
+
+// AUDIENCE-SOURCE-BY-FIT-1126 (src/services/audience-fit.ts): one Jev judgment per (audience, provider,
+// subject, prompt version): is the company one of the target's companies, is the person one to write to.
+// Bronze, judged once. No org_id: the audience's (cascades with it).
+export const audienceFitJudgments = pgTable(
+  "audience_fit_judgments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    subjectKey: text("subject_key").notNull(),
+    promptVersion: text("prompt_version").notNull(),
+    targetText: text("target_text").notNull(),
+    subject: jsonb("subject").$type<Record<string, unknown>>().notNull(),
+    companyFit: text("company_fit").notNull(),
+    companyConfidence: doublePrecision("company_confidence").notNull(),
+    personFit: text("person_fit").notNull(),
+    personConfidence: doublePrecision("person_confidence").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_audience_fit_judgments_subject").on(table.audienceId, table.provider, table.subjectKey, table.promptVersion),
   ]
 );
