@@ -65,3 +65,17 @@ vi.mock("../src/lib/features-sourcing.js", async (importOriginal) => {
     })),
   };
 });
+
+// GMAPS-COVERAGE-1126: once every search of a Google Maps list ran, the walk asks a model for the next searches.
+// Default answer: the region is covered (the list ends as before); a suite sets `gmapsCoverageDraft` to drive it
+// (tests/integration/google-maps-coverage.test.ts).
+vi.mock("../src/lib/google-maps-coverage-draft.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/google-maps-coverage-draft.js")>();
+  return {
+    ...actual,
+    draftCoverageSearches: vi.fn(async (input: unknown, identity: unknown) => {
+      const drive = (globalThis as { gmapsCoverageDraft?: (input: unknown, identity: unknown) => Promise<unknown> }).gmapsCoverageDraft;
+      return drive ? drive(input, identity) : { covered: true, reason: "test default: covered", queries: [] };
+    }),
+  };
+});

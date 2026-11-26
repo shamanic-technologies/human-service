@@ -2399,8 +2399,8 @@ writes them from the offer's validated target).
   (`libphonenumber-js`, read in the audience's country), `providerPersonId` = Google place id, `organization`
   {name, domain (none for a facebook/instagram page), websiteUrl, streetAddress, city (from Google's address),
   country, primaryPhone, industry}. Walk: oldest undecided business of the audience (`google_maps_places`,
-  lease 5 min) ⟹ none: the next search, ONCE each (`google_maps_queries`) ⟹ none left: `exhausted`,
-  `reachable_count` = businesses served. No phone / own company ⟹ never served; already served to the brand
+  lease 5 min) ⟹ none: the next search, ONCE each (`google_maps_queries`) ⟹ none left: the next searches
+  until the region is covered (below) ⟹ covered: `exhausted`, `reachable_count` = businesses served. No phone / own company ⟹ never served; already served to the brand
   (same place OR same phone, any audience) ⟹ `taken`; one atomic claim per (org, brand, place) and (org, brand,
   phone) in `google_maps_brand_claims`: forever, not the 3-month window. Bronze `lead_serves` row, `people` row
   (one per business per org), membership.
@@ -2459,6 +2459,18 @@ writes them from the offer's validated target).
   `already_served`, `no_website` ⟹ `no_email`, `not_on_whatsapp` ⟹ `no_person`; the brand unable to send on WhatsApp
   ⟹ `provider_skipped` / `whatsapp_unavailable`, candidate handed back). One offer declining leaves the business to
   the others. Tests: the "offer audience" block of `google-maps-email.test.ts`.
+
+- **Coverage: "exhausted" only once the region is covered** (GMAPS-COVERAGE-1126, `src/services/google-maps-coverage.ts`).
+  Living Vital 2026-11-24: 40 drafted searches (4 kinds x 10 cities) all ran, the walk said exhausted, while the canton of
+  St. Gallen alone held 51 drugstores never searched and "Drogerie in Zürich" stopped at the 100-result ceiling. Every
+  search ran (serve-next AND an offer audience's walk) ⟹ ONE model call (`src/lib/google-maps-coverage-draft.ts`, org-billed
+  on the serve's run) sees the region text (the list's own, else the walking offer audience's), every search with places /
+  new / at ceiling (ceiling = the most places that provider ever answered one search, fleet-wide, measured), the towns found
+  so far, and writes up to 40 next searches: finer areas for a search at the ceiling, towns of the region not searched yet.
+  No town list in code. Stored as `google_maps_queries.coverage_round` N; round rows `google_maps_coverage_rounds`
+  (migration `0064`, claim `drafting` 5 min, then `extended` / `covered` + reason; no org_id, cascades). Covered (final) =
+  the model says so, writes nothing new, a whole round found no new place (measured), or 1,500 searches (loud). A failed
+  draft = 502, claim dropped. tests/setup.ts answers "covered" by default. Tests: `tests/integration/google-maps-coverage.test.ts`.
 
 ### Hiring titles — a hiring source says WHICH roles are posted (`src/services/signal-source-titles.ts`, HIRING-TITLES-1102)
 
@@ -2822,9 +2834,15 @@ whole list without creating anything. `src/services/audience-split-estimate.ts`.
   before. Why: saasdocs.online 2026-11-22, card 240 vs audience 2,922. Replayed:
   the card's draft carried `revenue_range` (one-person firms + tools: 35,089
   people, 118 with a revenue cap) and the build dropped it; similar titles were
-  only 1.25x (2,922 vs 2,335). So the draft prompt forbids revenue / funding
-  fields under 50 employees. Its `degraded` was the chooser saying revenue and
+  only 1.25x (2,922 vs 2,335). Its `degraded` was the chooser saying revenue and
   migration intent cannot be filtered (correct, information only).
+- **Only facts Apollo holds for nearly everyone are filters** (TINY-SPLIT-AUDIENCES-1126): ONE
+  generic rule in the draft prompt, replacing the old revenue/funding rule: industry or keyword
+  tags, headcount, location, seniority, department, title. Any other detail (tools used, revenue,
+  funding, needs) stays in the audience TEXT, judged later per person. No real case quoted in the
+  prompt (the model copies examples); figures live in the code comment. writebros.ai 2026-11-26:
+  a technology filter [zapier, n8n] kept 340 agency founders, 36,599 without it. Pinned by
+  `tests/unit/audience-split-estimate.test.ts`.
 - **Speed** (measured in prod 2026-11-25, 6 segments, cold): 7.3-11.7 s total; the ONE filter draft
   is 6-7.5 s (Gemini flash-pro, ~1,000-1,400 thinking tokens even at minimal), the parallel counts
   ~1.2 s, a repair round adds a draft + count. One draft per segment in parallel was 4.2 s / 8.4 s

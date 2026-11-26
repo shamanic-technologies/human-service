@@ -1584,9 +1584,33 @@ export const googleMapsQueries = pgTable(
     placesCount: integer("places_count"),
     newPlacesCount: integer("new_places_count"),
     error: text("error"),
+    // 0 = drafted with the list; N = written by coverage round N (GMAPS-COVERAGE-1126)
+    coverageRound: integer("coverage_round").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [uniqueIndex("idx_google_maps_queries_unique").on(table.audienceId, table.query)]
+);
+
+// GMAPS-COVERAGE-1126: each round that extended a Google Maps list's searches once they all ran (finer areas where
+// a search hit the result ceiling, towns of the region not searched yet), or declared its region covered.
+export const googleMapsCoverageRounds = pgTable(
+  "google_maps_coverage_rounds",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    round: integer("round").notNull(),
+    // drafting | extended | covered
+    status: text("status").notNull(),
+    reason: text("reason"),
+    regionText: text("region_text"),
+    queries: jsonb("queries").$type<string[]>(),
+    runId: text("run_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (table) => [uniqueIndex("idx_google_maps_coverage_rounds_round").on(table.audienceId, table.round)]
 );
 
 // Every business a search returned for the audience, and what became of it.
