@@ -2824,14 +2824,13 @@ whole list without creating anything. `src/services/audience-split-estimate.ts`.
   people, 118 with a revenue cap) and the build dropped it; similar titles were
   only 1.25x (2,922 vs 2,335). Its `degraded` was the chooser saying revenue and
   migration intent cannot be filtered (correct, information only).
-- **Only facts Apollo holds for nearly everyone are filters** (TINY-SPLIT-AUDIENCES-1126, a
-  PRINCIPLE in the draft prompt, never a list of tools / clients): industry or keyword tags,
-  headcount, location, seniority, department, title. Technologies used, revenue, funding, how a
-  company works or what it needs stay in the audience TEXT (judged later per person). A role at
-  companies under 200 is counted by department + seniority levels, not exact titles. writebros.ai
-  2026-11-26: a `currently_using_any_of_technology_uids` [zapier, n8n] filter + exact "Content
-  Director" titles at 5-50-person agencies gave cards of 340 and 22; replayed 36,599 and 7,840.
-  Pinned by `tests/unit/audience-split-estimate.test.ts`.
+- **Only facts Apollo holds for nearly everyone are filters** (TINY-SPLIT-AUDIENCES-1126): ONE
+  generic rule in the draft prompt, replacing the old revenue/funding rule: industry or keyword
+  tags, headcount, location, seniority, department, title. Any other detail (tools used, revenue,
+  funding, needs) stays in the audience TEXT, judged later per person. No real case quoted in the
+  prompt (the model copies examples); figures live in the code comment. writebros.ai 2026-11-26:
+  a technology filter [zapier, n8n] kept 340 agency founders, 36,599 without it. Pinned by
+  `tests/unit/audience-split-estimate.test.ts`.
 - **Speed** (measured in prod 2026-11-25, 6 segments, cold): 7.3-11.7 s total; the ONE filter draft
   is 6-7.5 s (Gemini flash-pro, ~1,000-1,400 thinking tokens even at minimal), the parallel counts
   ~1.2 s, a repair round adds a draft + count. One draft per segment in parallel was 4.2 s / 8.4 s

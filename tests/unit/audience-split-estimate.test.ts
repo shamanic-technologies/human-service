@@ -39,12 +39,9 @@ describe("split estimate helpers", () => {
     expect(p).toContain("its revenue, its funding");
     expect(p).toContain("it stays in the audience text");
     // A principle, never a rule keyed on one tool or one client.
-    expect(p).not.toMatch(/zapier|n8n|writebros/i);
+    expect(p).not.toMatch(/zapier|n8n|writebros|agenc|content director|content marketing/i);
+    // It replaces the old revenue/funding rule, never sits beside it.
+    expect(p).not.toContain("Never use revenue_range or funding fields");
   });
 
-  it("counts the role, not one exact title, at small companies", () => {
-    const p = buildEstimateSystemPrompt("REF");
-    expect(p).toContain("Count every person who holds the ROLE, whatever their exact title.");
-    expect(p).toContain("(person_functions)");
-  });
 });
