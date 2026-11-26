@@ -207,7 +207,8 @@ async function listAudiences(a: { orgId: string; brandId: string; offerId: strin
       )
     )
     .orderBy(desc(audiences.updatedAt));
-  return rows.filter((r) => audienceListKind(r) === list);
+  // An offer's ONE audience (role target, offer-audiences.ts) holds a text, never a list: an OFF never pauses it.
+  return rows.filter((r) => r.role !== "target" && audienceListKind(r) === list);
 }
 
 /**

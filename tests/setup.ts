@@ -17,6 +17,15 @@ process.env.SCRAPING_SERVICE_API_KEY = "";
 // no domain and no usable name, so the gate is a no-op and every other suite
 // stays about what it is about. tests/**/own-company*.test.ts mock it themselves.
 import { vi } from "vitest";
+// The offer's name (src/lib/offer-name.ts, brand-service): an offer's ONE audience is named after it
+// (ONBOARDING-ONE-AUDIENCE-1126). Default "Test offer"; a suite sets `globalThis.__offerName` (null = unknown).
+vi.mock("../src/lib/offer-name.js", () => ({
+  readOfferName: async () => {
+    const g = globalThis as { __offerName?: string | null };
+    return g.__offerName === undefined ? "Test offer" : g.__offerName;
+  },
+}));
+
 vi.mock("../src/lib/brand-identity.js", () => ({
   getBrandIdentity: async (brandId: string) => ({
     id: brandId,

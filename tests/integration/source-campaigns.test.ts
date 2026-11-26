@@ -268,6 +268,14 @@ describe("push: POST /orgs/source-campaigns/state", () => {
     expect(vi.mocked(proposeAudienceSplit).mock.calls[0][0]).toBe(TARGET);
     const created = res.body.audiences as Array<{ name: string; status: string }>;
     expect(created).toEqual([expect.objectContaining({ name: "US clinic owners", status: "active" })]);
+    // The offer's ONE audience is born beside it (ONBOARDING-ONE-AUDIENCE-1126); an OFF never pauses it.
+    const [target] = (await db.select().from(audiences).where(eq(audiences.offerId, OFFER))).filter((r) => r.role === "target");
+    expect(target).toMatchObject({ status: "active", targetText: TARGET });
+    const off = await push({ originSlug: COLD, campaignId: COLD_CAMPAIGN, status: "off" });
+    expect(off.status).toBe(200);
+    const after = await db.select().from(audiences).where(eq(audiences.offerId, OFFER));
+    expect(after.find((r) => r.id === target.id)!.status).toBe("active");
+    expect(after.find((r) => r.name === "US clinic owners")!.status).toBe("paused");
   });
 
   it("an origin the catalogue does not name is a 400; an offer with no target says so", async () => {

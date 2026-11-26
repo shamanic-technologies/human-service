@@ -9331,6 +9331,92 @@
           "searchAudienceIds"
         ]
       },
+      "AlignOfferAudiencesResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "offers": {
+            "type": "integer"
+          },
+          "aligned": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "orgId": {
+                  "type": "string"
+                },
+                "brandId": {
+                  "type": "string"
+                },
+                "offerId": {
+                  "type": "string"
+                },
+                "targetId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "target": {
+                  "type": "string",
+                  "enum": [
+                    "created",
+                    "would_create",
+                    "exists"
+                  ]
+                },
+                "madeSearch": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "orgId",
+                "brandId",
+                "offerId",
+                "targetId",
+                "target",
+                "madeSearch"
+              ]
+            }
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "orgId": {
+                  "type": "string"
+                },
+                "brandId": {
+                  "type": "string"
+                },
+                "offerId": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "orgId",
+                "brandId",
+                "offerId",
+                "reason"
+              ]
+            }
+          }
+        },
+        "required": [
+          "dryRun",
+          "offers",
+          "aligned",
+          "skipped"
+        ]
+      },
       "RevertOfferAudiencesResponse": {
         "type": "object",
         "properties": {
@@ -18227,6 +18313,64 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/internal/offer-audiences/align": {
+      "post": {
+        "summary": "ONBOARDING-ONE-AUDIENCE-1126: put every offer still holding live (active / paused) role-NULL buyer rows on ONE audience: its target created when missing (text = the offer's validated target, name = the offer's), those rows made brand lists. Also runs every 5 min. Reversible (`/realign/revert {reason: \"offer-audience-align-1126\"}`).",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "dryRun",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Alignment result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlignOfferAudiencesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid brandId",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
           }
         }
       }

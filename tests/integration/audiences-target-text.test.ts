@@ -149,7 +149,7 @@ describe("split confirm writes the text", () => {
       expect(a).toMatchObject({ targetText: null, targetTextMissingReason: "not_written_yet" });
     }
     await vi.waitFor(async () => {
-      const rows = await db.select().from(audiences);
+      const rows = (await db.select().from(audiences)).filter((r) => r.role !== "target");
       expect(rows.map((r) => r.targetText).sort()).toEqual([
         "TEXT FOR Managing Partners",
         "TEXT FOR Solo Practitioners",

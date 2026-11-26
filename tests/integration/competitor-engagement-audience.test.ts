@@ -175,7 +175,8 @@ describe("competitor-engagement audience at portfolio launch", () => {
     expect(call.windowDays).toBe(30);
     expect(call.baseFilters).toEqual({});
 
-    const list = await request(app).get(`/orgs/audiences?brandId=${BRAND}`).set(getAuthHeaders());
+    // The profile is a list of the brand (role search) behind the offer's ONE audience.
+    const list = await request(app).get(`/orgs/audiences?brandId=${BRAND}&role=search`).set(getAuthHeaders());
     expect(list.status).toBe(200);
     const listed = (list.body.audiences as Array<{ id: string; channels: Array<{ list: string; sizeUnknownReason: string | null }> }>).find(
       (a) => a.id === profile.id
