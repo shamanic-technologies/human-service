@@ -69,6 +69,8 @@ let placesByQuery: Record<string, unknown[]> = {};
 let cheapestByQuery: Record<string, unknown[]> = {};
 // page text + links per url (absent = treg answers 404 after its waterfall)
 let site: Record<string, { text: string; links?: string[] }> = {};
+// a provider-native extract row per url (crawl4ai markdown, parallel excerpts...), served as is
+let rows: Record<string, { servedBy: string; row: Record<string, unknown> }> = {};
 // pages whose read gets no answer (treg's extract times out on them)
 let timeoutUrls = new Set<string>();
 let verdicts: Record<string, string> = {};
@@ -104,6 +106,8 @@ async function route(input: string | URL, init?: RequestInit): Promise<Response>
   }
   if (url === "https://treg.to/call/treg.web.extract") {
     if (timeoutUrls.has(String(body?.url))) throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    const native = rows[String(body?.url)];
+    if (native) return json(200, { output: { pages: [native.row] } }, { "x-treg-cost-micro": "250", "x-treg-served-by": native.servedBy });
     const page = site[String(body?.url)];
     if (!page) return json(404, { error: "no provider found the page" });
     return json(
@@ -134,6 +138,7 @@ beforeEach(async () => {
   placesByQuery = {};
   cheapestByQuery = {};
   site = {};
+  rows = {};
   timeoutUrls = new Set();
   verdicts = {};
   optedOut.clear();
@@ -305,6 +310,38 @@ describe("Google Maps source — email reach", () => {
     const res = await serve(audience.id);
     expect(res.body.status).toBe("served");
     expect(res.body.person.email).toBe("info@slow-apotheke.ch");
+  });
+
+  // GMAPS-SITE-READ-EMPTY-1126: treg hands back each provider's own row. crawl4ai
+  // writes the page as `markdown` (links inside it), parallel as `excerpts`; reading
+  // `text` alone made every such page empty, every shop "no email" since 2026-11-24.
+  it("reads the page whoever serves it: crawl4ai markdown, links written in it, parallel excerpts", async () => {
+    placesByQuery["Drogerie in Zürich"] = [place("ChIJ-c4", "Anklin Apotheke", "041 780 39 19", "http://www.anklinapotheke.ch/")];
+    rows["http://www.anklinapotheke.ch/"] = {
+      servedBy: "crawl4ai.web.scrape",
+      row: { final_url: "https://www.anklinapotheke.ch/", markdown: "Geöffnet [Telefon](tel:+41417803919)\n\n[Impressum](/impressum) [Notdienst](/notdienst)", ok: true, text_len: 70 },
+    };
+    rows["https://www.anklinapotheke.ch/impressum"] = {
+      servedBy: "parallel.web.extract",
+      row: { url: "https://www.anklinapotheke.ch/impressum", title: "Impressum", excerpts: ["Anklin Apotheke AG, Poststrasse 3, Cham", "E-Mail: info@anklinapotheke.ch"], full_content: null },
+    };
+    pick = (message) => (message.includes("info@anklinapotheke.ch") ? { email: "info@anklinapotheke.ch", name: null, role: null } : { email: null, name: null, role: null });
+    const audience = await createAudience();
+    const res = await serve(audience.id);
+    expect(res.body.status).toBe("served");
+    expect(res.body.person.email).toBe("info@anklinapotheke.ch");
+    const [stored] = await db.select().from(googleMapsSiteReads);
+    expect(stored.outcome).toBe("found");
+  });
+
+  it("a homepage answered with no words is a failed read: never stored as no email, read again later", async () => {
+    placesByQuery["Drogerie in Zürich"] = [place("ChIJ-e", "Empty answer", "044 999 00 01", "https://empty-answer.ch/")];
+    rows["https://empty-answer.ch/"] = { servedBy: "crawl4ai.web.scrape", row: { final_url: "https://empty-answer.ch/", ok: true, text_len: 0 } };
+    const audience = await createAudience();
+    expect((await serve(audience.id)).body.status).toBe("exhausted");
+    const [row] = await db.select().from(googleMapsPlaces).where(eq(googleMapsPlaces.placeId, "ChIJ-e"));
+    expect(row).toMatchObject({ status: "waiting", emailStatus: "site_unreadable" });
+    expect(await db.select().from(googleMapsSiteReads)).toEqual([]);
   });
 
   it("a business with no website is not served by email, and never read", async () => {
