@@ -31,6 +31,15 @@
 // confirm ran apollo-service's own build: saasdocs.online 2026-11-22, card 240
 // (a revenue_range filter) vs audience 2,922 (no revenue, similar titles on).
 //
+// Sparse facts stay out of the filters (TINY-SPLIT-AUDIENCES-1126): ONE generic
+// rule in the prompt, filter only on facts Apollo holds for nearly everyone; any
+// other detail (tools used, revenue, funding, needs) stays in the audience text
+// and is judged later per person. Measured: one-person companies using named
+// tools 35,089 people, 118 with a revenue cap (2026-11-22); writebros.ai
+// 2026-11-26, a technology filter [zapier, n8n] kept 340 agency founders,
+// 36,599 once dropped. Examples of a real case never go in the prompt (the
+// model copies them).
+//
 // Cost: chat-service owns the LLM cost and bills the caller's org (identity
 // headers forwarded; an `audience-split-estimate` run is opened when the caller
 // sent no x-run-id). Dry-runs are free. human-service declares none.
@@ -123,11 +132,16 @@ export function buildEstimateSystemPrompt(filtersPrompt: string): string {
     "  - When you use person_titles, list the common exact titles for the role",
     "    (several spellings). Similar-title matching is switched off.",
     "  - Never put a product or what the seller sells into the filters.",
-    "  - Never use revenue_range or funding fields for companies under 50 employees.",
-    "    Apollo holds those figures for very few small companies, so the field keeps",
-    "    only the few it knows and drops every other one (one-person companies using",
-    "    named tools: 35,089 people, 118 with a revenue cap). A small business's",
-    "    revenue band is judged later, person by person, from the audience text.",
+    "  - Filter ONLY on facts Apollo holds for nearly every person and company: the",
+    "    company's industry or keyword tags, its headcount, its location, the",
+    "    person's seniority, department and title. A field Apollo fills for only some",
+    "    companies keeps the few it knows and silently drops everyone else, so the",
+    "    count collapses to the share of the market Apollo happens to have data on,",
+    "    not the market itself. That is true of the tools or technologies a company",
+    "    uses, its revenue, its funding, and any detail of how it works or what it",
+    "    needs. Leave every such detail OUT of the filters, even when the sentence",
+    "    states it: it stays in the audience text, and each person is judged against",
+    "    that text later.",
     "  - Never use buying_signal.",
     "",
     "Answer JSON only, shaped exactly:",
