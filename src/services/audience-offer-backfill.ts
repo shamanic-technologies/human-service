@@ -86,7 +86,7 @@ export async function loadOfferlessPairs(): Promise<{
       brandId: audiences.brandId,
     })
     .from(audiences)
-    .where(isNull(audiences.offerId));
+    .where(and(isNull(audiences.offerId), isNull(audiences.relation)));
 
   const byPair = new Map<string, OfferBackfillPair>();
   for (const row of rows) {
@@ -179,7 +179,9 @@ export async function backfillAudienceOffers(
           and(
             eq(audiences.orgId, pair.orgId),
             eq(audiences.brandId, pair.brandId),
-            isNull(audiences.offerId)
+            isNull(audiences.offerId),
+            // A brand-relation audience (investors, peers) belongs to no offer by design.
+            isNull(audiences.relation)
           )
         );
       for (const row of rows) {
@@ -202,7 +204,9 @@ export async function backfillAudienceOffers(
           and(
             eq(audiences.orgId, pair.orgId),
             eq(audiences.brandId, pair.brandId),
-            isNull(audiences.offerId)
+            isNull(audiences.offerId),
+            // A brand-relation audience (investors, peers) belongs to no offer by design.
+            isNull(audiences.relation)
           )
         )
         .returning({ id: audiences.id, name: audiences.name });

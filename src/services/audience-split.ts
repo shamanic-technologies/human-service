@@ -24,6 +24,8 @@
 // industry, seniority/role), one axis or two crossed, never overlapping mixes,
 // so each segment maps to a filter set and an A/B result means something.
 
+import { pendingProviderChoice } from "../lib/provider-choice-marker.js";
+import type { CountedSplitSegment } from "./audience-split-estimate.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { audiences, audienceSplitProposals } from "../db/schema.js";
@@ -430,7 +432,10 @@ export async function confirmAudienceSplit(args: {
   brandId: string;
   offerId: string;
   targetAudience: string | null;
-  segments: Array<{ name: string; description: string }>;
+  /** `counted` = the filters + raw count the segment's card was counted on
+   * (audience-split-estimate.ts): the row is born on exactly those filters, so
+   * the card and the audience are one population, and no other build runs. */
+  segments: Array<{ name: string; description: string; counted?: CountedSplitSegment | null }>;
   /** Provenance tag. Defaults to `split_proposal` (a human confirmed it); the
    * automatic refill (audience-refill.ts) stamps `auto_refill`. */
   source?: string;
@@ -492,10 +497,15 @@ function splitAudienceValues(args: SplitArgs) {
       : { targetText: null, targetTextOrigin: null }),
     provider: "apollo",
     apolloAudienceId: null,
-    filters: null,
+    filters: s.counted ? s.counted.filters : null,
+    ...(s.counted ? { apolloCount: s.counted.people, countedAt: new Date() } : {}),
     status: "active",
     source: args.source ?? "split_proposal",
     createdByUserId: args.userId,
+    // Born unsourced: its provider is MEASURED (each provider's sample judged against
+    // the target, the most fitting companies per dollar wins) before its first
+    // preview / serve, never forced (AUDIENCE-SOURCE-BY-FIT-1126).
+    chooserTrace: pendingProviderChoice(),
   }));
 }
 

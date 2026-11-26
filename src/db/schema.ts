@@ -592,6 +592,9 @@ export const audiences = pgTable(
     // 'target' = THE audience of its offer (text only); 'search' = a list of the
     // brand walked by every target of it; NULL = an audience as before.
     role: text("role").$type<AudienceRole>(),
+    // OUTREACH-3WAYS-1121 (migration 0059, src/services/brand-relations.ts): who
+    // the audience is to the brand beyond "buyers of its offer". NULL = buyers.
+    relation: text("relation").$type<BrandRelation>(),
     // Neutral PeopleSearchFilters shape (maps to both providers).
     filters: jsonb("filters").$type<Record<string, unknown>>(),
     // Hosted avatar URL.
@@ -929,6 +932,8 @@ export interface TeaserSnapshot {
   organizationKeywords: string[] | null;
   /** The business's street address as its listing prints it (Google Maps lists only; absent elsewhere). */
   organizationAddress?: string | null;
+  /** The company's one-line description as its provider prints it (companies preview only; absent elsewhere). */
+  organizationDescription?: string | null;
 }
 
 // 🥉 BRONZE — append-only, EVERY verdict including the passes, each with the
@@ -1102,6 +1107,28 @@ export const audienceCandidates = pgTable(
 export type AudienceCandidate = typeof audienceCandidates.$inferSelect;
 
 export type AudienceRole = "target" | "search";
+
+export type BrandRelation = "investors" | "industry_peers";
+
+// Reversible ledger of brand relations (0059, src/services/brand-relations.ts):
+// `action` = 'target_assigned' | 'search_assigned' | 'target_created' | 'search_created'.
+export const brandRelationAssignments = pgTable(
+  "brand_relation_assignments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    reason: text("reason").notNull(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    audienceId: uuid("audience_id").notNull(),
+    relation: text("relation").notNull(),
+    action: text("action").notNull(),
+    previousRelation: text("previous_relation"),
+    previousRole: text("previous_role"),
+    previousOfferId: uuid("previous_offer_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("idx_brand_relation_assignments_unique").on(table.reason, table.audienceId)]
+);
 
 // Reversible ledger of the offer-audience realignment (0054,
 // src/services/offer-audiences.ts): `action` = 'target_created' | 'made_search'.
@@ -1652,4 +1679,77 @@ export const audienceSnapshotCache = pgTable(
     computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index("idx_audience_snapshot_cache_brand").on(table.brandId)]
+);
+
+// OUTREACH-3WAYS-1121 (0060, src/services/relation-fit.ts): one Jev verdict per brand x relation x subject
+// (industry peers: the company; investors: the person), judged once, read before anyone is offered.
+export const relationFitJudgments = pgTable(
+  "relation_fit_judgments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    relation: text("relation").notNull(),
+    subjectKey: text("subject_key").notNull(),
+    promptVersion: text("prompt_version").notNull(),
+    verdict: boolean("verdict").notNull(),
+    // The Jev choice (0061; NULL on v1 yes/no rows).
+    choice: text("choice"),
+    // v2: the choice's confidence; v1: P(yes).
+    yesProbability: doublePrecision("yes_probability").notNull(),
+    model: text("model").notNull(),
+    facts: jsonb("facts").$type<Record<string, unknown>>().notNull(),
+    population: text("population").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_relation_fit_judgments_subject").on(table.orgId, table.brandId, table.relation, table.subjectKey, table.promptVersion),
+  ]
+);
+
+// AUDIENCE-COUNT-MISMATCH-1122 (0062): the filters a split card was counted on
+// (src/services/audience-split-estimate.ts). The confirm of that segment builds
+// its audience on exactly these filters, so the card and the audience are the
+// same population.
+export const audienceSplitEstimates = pgTable(
+  "audience_split_estimates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    nameNorm: text("name_norm").notNull(),
+    description: text("description").notNull(),
+    filters: jsonb("filters").$type<Record<string, unknown>>().notNull(),
+    people: integer("people").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_audience_split_estimates_segment").on(table.orgId, table.brandId, table.nameNorm, table.createdAt),
+  ]
+);
+
+// AUDIENCE-SOURCE-BY-FIT-1126 (src/services/audience-fit.ts): one Jev judgment per (audience, provider,
+// subject, prompt version): is the company one of the target's companies, is the person one to write to.
+// Bronze, judged once. No org_id: the audience's (cascades with it).
+export const audienceFitJudgments = pgTable(
+  "audience_fit_judgments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    audienceId: uuid("audience_id")
+      .notNull()
+      .references(() => audiences.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    subjectKey: text("subject_key").notNull(),
+    promptVersion: text("prompt_version").notNull(),
+    targetText: text("target_text").notNull(),
+    subject: jsonb("subject").$type<Record<string, unknown>>().notNull(),
+    companyFit: text("company_fit").notNull(),
+    companyConfidence: doublePrecision("company_confidence").notNull(),
+    personFit: text("person_fit").notNull(),
+    personConfidence: doublePrecision("person_confidence").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_audience_fit_judgments_subject").on(table.audienceId, table.provider, table.subjectKey, table.promptVersion),
+  ]
 );

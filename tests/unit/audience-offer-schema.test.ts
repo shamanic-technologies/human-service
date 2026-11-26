@@ -116,6 +116,7 @@ describe("AudienceSchema — offerId is always present on a read", () => {
     source: null,
     profileAudienceId: null,
     role: null,
+    relation: null,
     canonicalAudienceId: null,
     filters: null,
     avatarUrl: null,

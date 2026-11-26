@@ -3,6 +3,7 @@ import { Router } from "express";
 import { requireApiKey } from "../middleware/auth.js";
 import { TransferBrandRequestSchema } from "../schemas.js";
 import { transferBrand } from "../services/transfer-brand.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 const router = Router();
 
@@ -12,7 +13,7 @@ const router = Router();
 router.post("/internal/transfer-brand", requireApiKey, async (req, res) => {
   const parsed = TransferBrandRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
 

@@ -34,7 +34,7 @@
 // transaction, recorded in `offer_audience_realignments` under a reason tag so
 // `/revert` undoes exactly that. Nothing archived or deleted.
 
-import { and, eq, inArray, ne } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne } from "drizzle-orm";
 import { providerCanReach, type Reach } from "../lib/reach.js";
 import { db, sql as pg } from "../db/index.js";
 import { audiences, offerAudienceRealignments, type AudienceSource } from "../db/schema.js";
@@ -80,7 +80,7 @@ function hasOwnList(row: AudienceRow): boolean {
 
 /**
  * The brand lists a target walks for a serve under `featureSlug`, in walk order:
- *   - every ACTIVE search of the target's (org, brand): its own list when on and
+ *   - every ACTIVE search of the target's (org, brand) and relation (NULL = buyers): its own list when on and
  *     built, plus each of its ON sources (CRM files excluded, see header);
  *   - an origin slug ⟹ only the lists of that kind; `lead-sourcing` ⟹ only the
  *     kinds the offer's stored choice picked (no choice ⟹ every list);
@@ -101,7 +101,10 @@ export async function brandListsOf(
         eq(audiences.brandId, target.brandId),
         eq(audiences.role, "search"),
         eq(audiences.status, "active"),
-        inArray(audiences.provider, ["apollo", "crm", "google_maps"])
+        inArray(audiences.provider, ["apollo", "crm", "google_maps"]),
+        // OUTREACH-3WAYS-1121 (brand-relations.ts): a relation's target walks only that relation's lists;
+        // an offer's target walks only buyer lists (relation NULL), never the brand's investors or peers.
+        target.relation ? eq(audiences.relation, target.relation) : isNull(audiences.relation)
       )
     );
   const sources = await sourcesOf(searches.map((s) => s.id));

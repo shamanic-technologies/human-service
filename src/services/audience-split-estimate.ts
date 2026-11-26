@@ -21,14 +21,21 @@
 // Title inflation: Apollo's `include_similar_titles` defaults to true and
 // inflates title-based counts ~10x, so it is FORCED false on every draft that
 // names titles. The number is "people with a verified email matching a quick
-// filter draft, exact titles": an order of magnitude, not the audience's final
-// count (the confirmed audience's own build measures that).
+// filter draft, exact titles".
+//
+// ONE population for the card and its audience (AUDIENCE-COUNT-MISMATCH-1122):
+// every counted draft is stored (`audience_split_estimates`, sanitized filters
+// + raw total), and the confirm of that segment (same org, brand, name and
+// description) builds its audience ON THOSE FILTERS (`splitEstimateFor`), never
+// a second independent draft. Before, the card counted one draft and the
+// confirm ran apollo-service's own build: saasdocs.online 2026-11-22, card 240
+// (a revenue_range filter) vs audience 2,922 (no revenue, similar titles on).
 //
 // Cost: chat-service owns the LLM cost and bills the caller's org (identity
 // headers forwarded; an `audience-split-estimate` run is opened when the caller
 // sent no x-run-id). Dry-runs are free. human-service declares none.
 //
-// Persists nothing.
+// Persists only the counted drafts (see above); creates no audience.
 
 import {
   ChatServiceError,
@@ -42,6 +49,9 @@ import {
   type Identity,
 } from "./people-providers.js";
 import { createRun, completeRun, TASK_SUPPORT } from "./runs.js";
+import { db } from "../db/index.js";
+import { audienceSplitEstimates } from "../db/schema.js";
+import { and, desc, eq, gt } from "drizzle-orm";
 
 const ESTIMATE_LLM_PROVIDER = "google" as const;
 const ESTIMATE_LLM_MODEL = "flash-pro";
@@ -113,6 +123,11 @@ export function buildEstimateSystemPrompt(filtersPrompt: string): string {
     "  - When you use person_titles, list the common exact titles for the role",
     "    (several spellings). Similar-title matching is switched off.",
     "  - Never put a product or what the seller sells into the filters.",
+    "  - Never use revenue_range or funding fields for companies under 50 employees.",
+    "    Apollo holds those figures for very few small companies, so the field keeps",
+    "    only the few it knows and drops every other one (one-person companies using",
+    "    named tools: 35,089 people, 118 with a revenue cap). A small business's",
+    "    revenue band is judged later, person by person, from the audience text.",
     "  - Never use buying_signal.",
     "",
     "Answer JSON only, shaped exactly:",
@@ -260,7 +275,9 @@ export async function estimateSplitSegments(
       );
 
     const all = segments.map((_, i) => i);
+    let phaseStart = Date.now();
     const filtersByIndex = await draft(segmentsMessage(segments, all));
+    const draftMs = Date.now() - phaseStart;
 
     const measure = async (indexes: number[]) =>
       Promise.all(
@@ -273,7 +290,10 @@ export async function estimateSplitSegments(
       );
 
     const results = new Map<number, Awaited<ReturnType<typeof measure>>[number]>();
+    phaseStart = Date.now();
     for (const r of await measure(all)) results.set(r.index, r);
+    const countMs = Date.now() - phaseStart;
+    let repairMs = 0;
 
     const failures = [...results.values()]
       .filter((r) => !r.outcome || r.outcome.kind === "rejected" || r.outcome.total === 0)
@@ -288,6 +308,7 @@ export async function estimateSplitSegments(
       }));
 
     if (failures.length > 0) {
+      phaseStart = Date.now();
       const repaired = await draft(repairMessage(segments, failures));
       for (const f of failures) {
         const raw = repaired.get(f.index);
@@ -298,6 +319,32 @@ export async function estimateSplitSegments(
         const before = results.get(r.index);
         if (r.outcome && (r.outcome.kind === "count" || !before?.outcome)) results.set(r.index, r);
       }
+      repairMs = Date.now() - phaseStart;
+    }
+    // Where the time goes (AGENT-SIGNUP-UX-1125, measured 2026-11-25 on 6 segments:
+    // the one filter draft 6-7.5 s, the parallel counts ~1.2 s, a repair round
+    // adds one more draft + count for the failed segments only).
+    console.log(
+      `[human-service] audience.split_estimate.phases segments=${segments.length} draft_ms=${draftMs} count_ms=${countMs} repaired=${failures.length} repair_ms=${repairMs}`
+    );
+
+    // The filters each card was counted on: the confirm of that segment builds
+    // its audience on exactly these (see file header).
+    const counted = [...results.values()].filter(
+      (r): r is typeof r & { filters: Record<string, unknown>; outcome: { kind: "count"; total: number } } =>
+        !!r.filters && r.outcome?.kind === "count"
+    );
+    if (counted.length > 0) {
+      await db.insert(audienceSplitEstimates).values(
+        counted.map((r) => ({
+          orgId: identity.orgId,
+          brandId,
+          nameNorm: normalizeSegmentName(segments[r.index].name),
+          description: segments[r.index].description,
+          filters: r.filters,
+          people: r.outcome.total,
+        }))
+      );
     }
 
     return segments.map((s, i): SegmentEstimate => {
@@ -315,4 +362,44 @@ export async function estimateSplitSegments(
       };
     });
   });
+}
+
+/** A segment estimated longer ago than this is no longer the card the visitor saw. */
+export const SPLIT_ESTIMATE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function normalizeSegmentName(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+export interface CountedSplitSegment {
+  filters: Record<string, unknown>;
+  people: number;
+}
+
+/**
+ * The filters (and raw count) the card of this segment was counted on: the
+ * latest estimate of the same org, brand, name and description in the last
+ * 24 h. null = never estimated (the confirm then runs apollo-service's build).
+ */
+export async function splitEstimateFor(args: {
+  orgId: string;
+  brandId: string;
+  name: string;
+  description: string;
+}): Promise<CountedSplitSegment | null> {
+  const [row] = await db
+    .select({ filters: audienceSplitEstimates.filters, people: audienceSplitEstimates.people })
+    .from(audienceSplitEstimates)
+    .where(
+      and(
+        eq(audienceSplitEstimates.orgId, args.orgId),
+        eq(audienceSplitEstimates.brandId, args.brandId),
+        eq(audienceSplitEstimates.nameNorm, normalizeSegmentName(args.name)),
+        eq(audienceSplitEstimates.description, args.description),
+        gt(audienceSplitEstimates.createdAt, new Date(Date.now() - SPLIT_ESTIMATE_TTL_MS))
+      )
+    )
+    .orderBy(desc(audienceSplitEstimates.createdAt))
+    .limit(1);
+  return row ?? null;
 }

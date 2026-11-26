@@ -77,6 +77,12 @@ export const TASK_SUPPORT: Record<string, RunSupport> = {
     reason: "audience split estimate: sizes onboarding segment cards, creates no list",
   },
   // The signed-out companies preview (apollo-service declares what it researched).
+  // Samples each provider able to source a proposed audience and judges the companies
+  // (AUDIENCE-SOURCE-BY-FIT-1126): picks the list's provider, builds no list of its own.
+  "audience-provider-choice": {
+    kind: "product_feature",
+    reason: "audience provider choice: samples each provider for a proposed audience, no list of its own",
+  },
   "audience-preview-companies": {
     kind: "product_feature",
     reason: "audience companies preview: signed-out onboarding sample, no list built",

@@ -89,6 +89,9 @@ const TABLES = [
   "lead_sourcing_choices",
   "lead_sourcing_choice_changes",
   "offer_audience_realignments",
+  "brand_relation_assignments",
+  "relation_fit_judgments",
+  "audience_split_estimates",
   "google_maps_queries",
   "google_maps_places",
   "google_maps_brand_claims",
@@ -157,6 +160,27 @@ export async function transferBrand(
       add(
         "offer_audience_realignments",
         (await tx`UPDATE offer_audience_realignments SET org_id = ${targetOrgId}, brand_id = ${targetBrandId}
+                  WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`).length
+      );
+      // The brand-relation ledger follows its audiences (OUTREACH-3WAYS-1121).
+      add(
+        "brand_relation_assignments",
+        (await tx`UPDATE brand_relation_assignments SET org_id = ${targetOrgId}, brand_id = ${targetBrandId}
+                  WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`).length
+      );
+      // The relation verdicts follow the brand (OUTREACH-3WAYS-1121); the target's own verdict on a subject wins.
+      await tx`DELETE FROM relation_fit_judgments s WHERE s.org_id = ${fromOrg} AND s.brand_id = ${fromBrand}
+                AND EXISTS (SELECT 1 FROM relation_fit_judgments t WHERE t.org_id = ${targetOrgId} AND t.brand_id = ${targetBrandId}
+                  AND t.relation = s.relation AND t.subject_key = s.subject_key AND t.prompt_version = s.prompt_version)`;
+      add(
+        "relation_fit_judgments",
+        (await tx`UPDATE relation_fit_judgments SET org_id = ${targetOrgId}, brand_id = ${targetBrandId}
+                  WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`).length
+      );
+      // The counted card drafts follow the brand (AUDIENCE-COUNT-MISMATCH-1122).
+      add(
+        "audience_split_estimates",
+        (await tx`UPDATE audience_split_estimates SET org_id = ${targetOrgId}, brand_id = ${targetBrandId}
                   WHERE org_id = ${fromOrg} AND brand_id = ${fromBrand} RETURNING id`).length
       );
       if (await tableExists(tx, "lists")) {

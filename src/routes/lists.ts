@@ -11,6 +11,7 @@ import {
   BulkAddMembersRequestSchema,
   BulkRemoveMembersRequestSchema,
 } from "../schemas.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 
 const router = Router();
 
@@ -21,7 +22,7 @@ const DEFAULT_MEMBERS_LIMIT = 100;
 router.post("/orgs/lists", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsed = CreateListRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
 
@@ -50,7 +51,7 @@ router.post("/orgs/lists", requireApiKey, requireOrgIdOnly, async (req, res) => 
 router.get("/orgs/lists", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsedQuery = ListListsQuerySchema.safeParse(req.query);
   if (!parsedQuery.success) {
-    res.status(400).json({ error: parsedQuery.error.message });
+    res.status(400).json(zodErrorBody(parsedQuery.error));
     return;
   }
 
@@ -104,7 +105,7 @@ router.get("/orgs/lists/:id", requireApiKey, requireOrgIdOnly, async (req, res) 
 router.patch("/orgs/lists/:id", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsed = UpdateListRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
 
@@ -154,7 +155,7 @@ router.get(
   async (req, res) => {
     const parsedQuery = ListMembersQuerySchema.safeParse(req.query);
     if (!parsedQuery.success) {
-      res.status(400).json({ error: parsedQuery.error.message });
+      res.status(400).json(zodErrorBody(parsedQuery.error));
       return;
     }
 
@@ -202,7 +203,7 @@ router.post(
   async (req, res) => {
     const parsed = BulkAddMembersRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
 
@@ -266,7 +267,7 @@ router.delete(
   async (req, res) => {
     const parsed = BulkRemoveMembersRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
 

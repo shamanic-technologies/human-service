@@ -90,7 +90,31 @@
         "type": "object",
         "properties": {
           "error": {
-            "type": "string"
+            "type": "string",
+            "description": "One line. On a validation 400 it names each offending field and what was expected, e.g. 'brandId: Invalid UUID; segments.0.name: Too small: expected string to have >=1 characters' (empty path = 'body')."
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "code": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "message",
+                "code"
+              ]
+            },
+            "description": "Validation 400s only: the same facts as `error`, one entry per offending field."
           }
         },
         "required": [
@@ -1895,6 +1919,16 @@
             ],
             "description": "AUDIENCE-PER-OFFER-1107. 'target' = THE audience of its offer: its text is who the offer targets, it has no list of its own and finds people through the brand's lists, each person judged against its text. 'search' = a list of the brand (Apollo search, signals, engagement) walked by every offer audience of it; hidden from GET /orgs/audiences unless role=search. null = an audience as before."
           },
+          "relation": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "investors",
+              "industry_peers",
+              null
+            ],
+            "description": "OUTREACH-3WAYS-1121. Who the audience is to the brand beyond buyers of an offer: 'investors' (its equity investors) or 'industry_peers' (founders and leaders of companies in its industry, competitors included). Such an audience has no offer; its lists carry the same relation and only it walks them. null = buyers of its offer. See GET /orgs/audiences/relations."
+          },
           "canonicalAudienceId": {
             "type": "string",
             "nullable": true,
@@ -1989,6 +2023,7 @@
           "source",
           "profileAudienceId",
           "role",
+          "relation",
           "canonicalAudienceId",
           "filters",
           "avatarUrl",
@@ -9323,6 +9358,490 @@
         "required": [
           "reason"
         ]
+      },
+      "BrandRelationsResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "relations": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "relation": {
+                  "$ref": "#/components/schemas/BrandRelation"
+                },
+                "audienceId": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "uuid",
+                  "description": "THE audience of this relation for the brand: serve it like any audience (POST /orgs/audiences/{audienceId}/candidates/next, then reveal / decline), each person judged against targetText. null = not built yet (POST /orgs/audiences/relations/ensure)."
+                },
+                "name": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "status": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "targetText": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "reachableCount": {
+                  "type": "integer",
+                  "nullable": true,
+                  "description": "People the relation's ACTIVE lists can still reach: the sum of each list's Remaining (free provider count minus people the brand contacted inside the re-contact window). null = no list measured yet (its Apollo filters are still being built)."
+                },
+                "lists": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "audienceId": {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string"
+                      },
+                      "provider": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "sizeCount": {
+                        "type": "integer",
+                        "nullable": true
+                      },
+                      "availableToContactCount": {
+                        "type": "integer",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "audienceId",
+                      "name",
+                      "status",
+                      "provider",
+                      "sizeCount",
+                      "availableToContactCount"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "relation",
+                "audienceId",
+                "name",
+                "status",
+                "targetText",
+                "reachableCount",
+                "lists"
+              ]
+            }
+          }
+        },
+        "required": [
+          "brandId",
+          "relations"
+        ]
+      },
+      "BrandRelation": {
+        "type": "string",
+        "enum": [
+          "investors",
+          "industry_peers"
+        ]
+      },
+      "EnsureBrandRelationsResponse": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "relation": {
+                  "$ref": "#/components/schemas/BrandRelation"
+                },
+                "target": {
+                  "type": "string",
+                  "enum": [
+                    "exists",
+                    "created",
+                    "skipped"
+                  ]
+                },
+                "list": {
+                  "type": "string",
+                  "enum": [
+                    "exists",
+                    "created",
+                    "skipped"
+                  ]
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "competitors_not_computed",
+                    "no_competitors"
+                  ]
+                },
+                "audienceId": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "uuid"
+                },
+                "listAudienceId": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "uuid"
+                }
+              },
+              "required": [
+                "relation",
+                "target",
+                "list",
+                "audienceId",
+                "listAudienceId"
+              ]
+            }
+          }
+        },
+        "required": [
+          "results"
+        ]
+      },
+      "EnsureBrandRelationsRequest": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "relations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BrandRelation"
+            },
+            "minItems": 1
+          }
+        },
+        "required": [
+          "brandId"
+        ],
+        "additionalProperties": false
+      },
+      "AssignBrandRelationResponse": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "assigned": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "role": {
+                  "type": "string",
+                  "enum": [
+                    "target",
+                    "search"
+                  ]
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "assigned",
+                    "would_assign",
+                    "already"
+                  ]
+                }
+              },
+              "required": [
+                "audienceId",
+                "role",
+                "outcome"
+              ]
+            }
+          }
+        },
+        "required": [
+          "dryRun",
+          "assigned"
+        ]
+      },
+      "AssignBrandRelationRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "orgId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "brandId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "relation": {
+            "$ref": "#/components/schemas/BrandRelation"
+          },
+          "targetAudienceId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "searchAudienceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            },
+            "maxItems": 500
+          }
+        },
+        "required": [
+          "reason",
+          "orgId",
+          "brandId",
+          "relation",
+          "searchAudienceIds"
+        ]
+      },
+      "RevertBrandRelationResponse": {
+        "type": "object",
+        "properties": {
+          "restored": {
+            "type": "integer"
+          },
+          "deprecated": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "restored",
+          "deprecated"
+        ]
+      },
+      "RevertBrandRelationRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      },
+      "ScreenBrandRelationResponse": {
+        "type": "object",
+        "properties": {
+          "relation": {
+            "type": "string",
+            "enum": [
+              "investors",
+              "industry_peers"
+            ]
+          },
+          "audienceId": {
+            "type": "string"
+          },
+          "dryRun": {
+            "type": "boolean"
+          },
+          "lists": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "pagesSearched": {
+                  "type": "integer"
+                },
+                "buffered": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "audienceId",
+                "name",
+                "pagesSearched",
+                "buffered"
+              ]
+            }
+          },
+          "people": {
+            "type": "integer"
+          },
+          "judged": {
+            "type": "integer"
+          },
+          "passed": {
+            "type": "integer"
+          },
+          "failed": {
+            "type": "integer"
+          },
+          "noFacts": {
+            "type": "integer"
+          },
+          "unjudged": {
+            "type": "integer"
+          },
+          "subjects": {
+            "type": "integer"
+          },
+          "passedSubjects": {
+            "type": "integer"
+          },
+          "passedSample": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "providerPersonId": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "company": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "domain": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "industry": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "confidence": {
+                  "type": "number",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "providerPersonId",
+                "title",
+                "company",
+                "domain",
+                "industry",
+                "confidence"
+              ]
+            }
+          },
+          "failedSample": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "providerPersonId": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "company": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "domain": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "industry": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "confidence": {
+                  "type": "number",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "providerPersonId",
+                "title",
+                "company",
+                "domain",
+                "industry",
+                "confidence"
+              ]
+            }
+          }
+        },
+        "required": [
+          "relation",
+          "audienceId",
+          "dryRun",
+          "lists",
+          "people",
+          "judged",
+          "passed",
+          "failed",
+          "noFacts",
+          "unjudged",
+          "subjects",
+          "passedSubjects",
+          "passedSample",
+          "failedSample"
+        ]
+      },
+      "ScreenBrandRelationRequest": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "brandId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "relation": {
+            "$ref": "#/components/schemas/BrandRelation"
+          },
+          "maxPages": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "campaignId": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          }
+        },
+        "required": [
+          "orgId",
+          "brandId",
+          "relation"
+        ],
+        "additionalProperties": false
       }
     },
     "parameters": {}
@@ -11230,6 +11749,18 @@
             },
             "required": false,
             "name": "role",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "investors",
+                "industry_peers"
+              ]
+            },
+            "required": false,
+            "name": "relation",
             "in": "query"
           },
           {
@@ -17740,6 +18271,321 @@
           },
           "401": {
             "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/orgs/audiences/relations": {
+      "get": {
+        "summary": "OUTREACH-3WAYS-1121: the brand's populations that are not buyers of an offer: its investors and its industry peers. Each relation: THE audience to serve (candidates/next on audienceId), its text, its lists and how many people they can still reach. Both relations are always listed; audienceId null = not built yet. Pure DB read, no cost.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The brand's relations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandRelationsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or invalid brandId",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/orgs/audiences/relations/ensure": {
+      "post": {
+        "summary": "OUTREACH-3WAYS-1121: build the relation audiences the brand lacks, done for you from what we know about it (name, domain, competitors from brand-service). Investors: one list of business angels and early-stage VCs. Industry peers: one list of leaders at companies selling what the brand's competitors sell (skipped with a reason while the competitors are not known). The lists' Apollo filters build in the background (~2-3 min, org-billed by apollo-service / chat-service); GET /orgs/audiences/relations shows them once counted. Idempotent. Needs x-user-id.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnsureBrandRelationsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "What exists / was created per relation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnsureBrandRelationsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "brand-service or runs-service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/brand-relations/assign": {
+      "post": {
+        "summary": "OUTREACH-3WAYS-1121: make existing audiences a brand relation (a target and/or brand lists): relation set, offer cleared, recorded under `reason` (`?dryRun=true` writes nothing; reversible via /revert). 409 when the brand already has another target for that relation.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "dryRun",
+            "in": "query"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignBrandRelationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Assignment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignBrandRelationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body, a deprecated row, a non-target as target or a non-list as list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "An audience not in this org and brand",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The brand already has its audience for that relation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/brand-relations/revert": {
+      "post": {
+        "summary": "Undo one assignment by `reason`: relation, role and offer restored verbatim; rows `ensure` created (reason 'ensure') are deprecated. Nothing deleted.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevertBrandRelationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Revert result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevertBrandRelationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/brand-relations/screen": {
+      "post": {
+        "summary": "OUTREACH-3WAYS-1121: page a brand relation's ACTIVE Apollo lists through the free teaser search into their buffer, then judge every buffered person with a Jev choice (industry peers: is their COMPANY's main business in the brand's industry, one question per company; investors: does the PERSON invest in companies), persisted once per subject. The walk of the relation's audience reads those verdicts and never offers a person judged outside. `?dryRun=true` searches and judges nothing (report from what is stored); `?async=true` answers 202 and runs in the background. Org-billed (Jev) on its own run.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "dryRun",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "async",
+            "in": "query"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScreenBrandRelationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Screen report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScreenBrandRelationResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Started in the background"
+          },
+          "400": {
+            "description": "Invalid body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "The brand has no audience for that relation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "brand-service / chat-service / apollo-service failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }

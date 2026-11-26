@@ -1,4 +1,5 @@
 import { messageOf } from "../lib/db-error.js";
+import { ensureNativeRecord, ensureProviderChoice, providerChoicePending } from "../services/audience-provider-choice.js";
 import { Router } from "express";
 import { randomUUID } from "node:crypto";
 import { personStatus } from "../services/audience-status-origin.js";
@@ -60,7 +61,7 @@ import {
   readSignalJobTitles,
 } from "../lib/apollo-audiences.js";
 import { launchAudiencePortfolio } from "../services/audience-portfolio.js";
-import { estimateSplitSegments } from "../services/audience-split-estimate.js";
+import { estimateSplitSegments, splitEstimateFor } from "../services/audience-split-estimate.js";
 import { serveListKind, sourcingOriginSlug, SourcingOriginError } from "../services/sourcing-origin.js";
 import {
   addProfileSignalSource,
@@ -120,7 +121,7 @@ import {
 
 import { crmListUploads, crmPeopleServeStats, type CrmServeStats } from "../lib/crm-contacts.js";
 import { getAudiencePreview } from "../services/audience-preview.js";
-import { applyPersonStatusChange } from "../services/profile-sources.js";
+import { applyPersonStatusChange, recordNativeFilters } from "../services/profile-sources.js";
 import { describeSourceChannels, pickSourcingList, sourcesOf, type AudienceSource } from "../services/audience-sources.js";
 import {
   checkNextPreviewPerson,
@@ -144,6 +145,7 @@ import { draftGoogleMapsFilters, readGoogleMapsFilters, GoogleMapsSourceError } 
 import { createRun, completeRun } from "../services/runs.js";
 import { TregInsufficientCreditError, TregMeterError } from "../lib/treg-meter.js";
 import { addRunOutputs } from "../services/run-outputs.js";
+import { zodErrorBody } from "../lib/zod-error.js";
 const router = Router();
 
 const DEFAULT_LIMIT = 50;
@@ -272,7 +274,7 @@ function sendProviderError(
 router.post("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsed = CreateAudienceRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
 
@@ -498,7 +500,7 @@ router.post(
   async (req, res) => {
     const parsed = SuggestAudiencesRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     try {
@@ -529,7 +531,7 @@ router.post(
   async (req, res) => {
     const parsed = SplitAudiencesRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const startedAt = Date.now();
@@ -560,7 +562,7 @@ router.post(
   async (req, res) => {
     const parsed = EstimateSplitSegmentsRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const startedAt = Date.now();
@@ -592,7 +594,7 @@ router.post(
   async (req, res) => {
     const parsed = ConfirmAudienceSplitRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const names = parsed.data.segments.map((s) => s.name.toLowerCase());
@@ -602,11 +604,26 @@ router.post(
     }
     const orgId = res.locals.orgId as string;
     const userId = (res.locals.userId as string | undefined) ?? null;
+    // A segment whose card was counted (POST /split/estimate) is born on the
+    // filters that count was taken on: the card and the audience are one
+    // population (AUDIENCE-COUNT-MISMATCH-1122). Never estimated = the build below.
+    const segments = await Promise.all(
+      parsed.data.segments.map(async (s) => ({
+        name: s.name,
+        description: s.description,
+        counted: await splitEstimateFor({
+          orgId,
+          brandId: parsed.data.brandId,
+          name: s.name,
+          description: s.description,
+        }),
+      }))
+    );
     const scope = {
       orgId,
       brandId: parsed.data.brandId,
       offerId: parsed.data.offerId,
-      segments: parsed.data.segments,
+      segments,
     };
     // A taken name is a 409 before anything is spent (the transaction checks
     // again, which is what makes it binding).
@@ -694,6 +711,18 @@ router.post(
     // The Apollo builds already run (above). serve-next builds inline if one
     // has not landed yet, so a confirmed segment is never active AND unservable.
     for (const row of created) {
+      // A row born on its card's filters gets its apollo-service record from
+      // them, verbatim (the pointer the previews read); no other build runs.
+      if (!row.apolloAudienceId && row.filters) {
+        const recordUserId = buildIdentityForSplit.userId ?? row.createdByUserId ?? undefined;
+        if (recordUserId) {
+          void ensureNativeRecord(row, { ...buildIdentityForSplit, userId: recordUserId }).catch((err) =>
+            console.error(`[human-service] audience.native_record_failed org=${orgId} audience=${row.id}`, err)
+          );
+        } else {
+          console.warn(`[human-service] audience.native_record_skipped org=${orgId} audience=${row.id}: no user`);
+        }
+      }
       // Each segment's own text (several segments share one nl_prompt), drafted
       // now in the background; serve-next drafts it inline if it has not landed.
       void ensureTargetText(row, buildIdentityForSplit).catch((err) =>
@@ -704,6 +733,12 @@ router.post(
       );
       void ensureProfileAvatar(row, buildIdentityForSplit).catch((err) =>
         console.error(`[human-service] audience.avatar_failed org=${orgId} audience=${row.id}`, err)
+      );
+      // Its provider is measured now (each provider's sample judged against its
+      // target), so the visitor's first preview finds it decided; the preview and
+      // the first serve await the same in-flight measurement if it has not landed.
+      void ensureProviderChoice(row, buildIdentityForSplit).catch((err) =>
+        console.error(`[human-service] audience.provider_choice_failed org=${orgId} audience=${row.id}`, err)
       );
     }
     res.status(201).json({ audiences: await serializeAudiences(created) });
@@ -723,7 +758,7 @@ router.post(
   async (req, res) => {
     const parsed = LaunchAudiencePortfolioRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const orgId = res.locals.orgId as string;
@@ -780,7 +815,7 @@ router.post(
   async (req, res) => {
     const parsed = CreateLinkedinEngagementAudienceRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const orgId = res.locals.orgId as string;
@@ -832,7 +867,7 @@ router.post(
 router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsedQuery = ListAudiencesQuerySchema.safeParse(req.query);
   if (!parsedQuery.success) {
-    res.status(400).json({ error: parsedQuery.error.message });
+    res.status(400).json(zodErrorBody(parsedQuery.error));
     return;
   }
 
@@ -867,6 +902,7 @@ router.get("/orgs/audiences", requireApiKey, requireOrgIdOnly, async (req, res) 
   // AUDIENCE-PER-OFFER-1107: a brand list is not an audience, hidden unless asked.
   if (parsedQuery.data.role) conditions.push(eq(audiences.role, parsedQuery.data.role));
   else conditions.push(or(isNull(audiences.role), ne(audiences.role, "search"))!);
+  if (parsedQuery.data.relation) conditions.push(eq(audiences.relation, parsedQuery.data.relation));
   const whereClause = and(...conditions);
 
   const [rows, totalRows] = await Promise.all([
@@ -918,7 +954,7 @@ router.post(
   async (req, res) => {
     const parsed = AudienceStatsRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
 
@@ -946,7 +982,7 @@ router.get("/orgs/audiences/:id", requireApiKey, requireOrgIdOnly, async (req, r
 router.patch("/orgs/audiences/:id", requireApiKey, requireOrgIdOnly, async (req, res) => {
   const parsed = UpdateAudienceRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
 
@@ -1002,7 +1038,7 @@ router.patch(
   async (req, res) => {
     const parsed = ChangeAudienceStatusRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
 
@@ -1077,7 +1113,7 @@ router.patch(
   async (req, res) => {
     const parsed = ChangeAudienceServeSourceRequestSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const orgId = res.locals.orgId as string;
@@ -1194,7 +1230,7 @@ function sendSignalSourceError(res: import("express").Response, err: unknown): v
 router.post("/orgs/audiences/:id/sources", requireApiKey, requireOrgAndUser, async (req, res) => {
   const parsed = AddAudienceSignalSourceRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   const orgId = res.locals.orgId as string;
@@ -1217,7 +1253,7 @@ router.post("/orgs/audiences/:id/sources", requireApiKey, requireOrgAndUser, asy
 router.patch("/orgs/audiences/:id/sources/:sourceId", requireApiKey, requireOrgAndUser, async (req, res) => {
   const parsed = SetSourceJobTitlesRequestSchema.safeParse(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
+    res.status(400).json(zodErrorBody(parsed.error));
     return;
   }
   const orgId = res.locals.orgId as string;
@@ -1383,10 +1419,19 @@ router.get(
       return;
     }
     const orgId = res.locals.orgId as string;
-    const audience = await getAudienceInOrg(orgId, req.params.id);
+    let audience = await getAudienceInOrg(orgId, req.params.id);
     if (!audience) {
       res.status(404).json({ error: "Audience not found" });
       return;
+    }
+    // A proposed audience's provider is measured before its first use (AUDIENCE-SOURCE-BY-FIT-1126).
+    if (providerChoicePending(audience)) {
+      try {
+        audience = await ensureProviderChoice(audience, buildIdentity(res));
+      } catch (err) {
+        sendProviderError(res, err);
+        return;
+      }
     }
     try {
       res.json(
@@ -1510,10 +1555,19 @@ router.post(
   requireOrgAndUser,
   async (req, res) => {
     const orgId = res.locals.orgId as string;
-    const audience = await getAudienceInOrg(orgId, req.params.id);
+    let audience = await getAudienceInOrg(orgId, req.params.id);
     if (!audience) {
       res.status(404).json({ error: "Audience not found" });
       return;
+    }
+    // A proposed audience's provider is measured before its first use (AUDIENCE-SOURCE-BY-FIT-1126).
+    if (providerChoicePending(audience)) {
+      try {
+        audience = await ensureProviderChoice(audience, buildIdentity(res));
+      } catch (err) {
+        sendProviderError(res, err);
+        return;
+      }
     }
 
     // Suppression is scoped to the audience's brand, taken from the stored row —
@@ -1583,10 +1637,19 @@ router.post(
   requireOrgAndUser,
   async (req, res) => {
     const orgId = res.locals.orgId as string;
-    const audience = await getAudienceInOrg(orgId, req.params.id);
+    let audience = await getAudienceInOrg(orgId, req.params.id);
     if (!audience) {
       res.status(404).json({ error: "Audience not found" });
       return;
+    }
+    // A proposed audience's provider is measured before its first use (AUDIENCE-SOURCE-BY-FIT-1126).
+    if (providerChoicePending(audience)) {
+      try {
+        audience = await ensureProviderChoice(audience, buildIdentity(res));
+      } catch (err) {
+        sendProviderError(res, err);
+        return;
+      }
     }
     const identity: Identity = { ...buildIdentity(res), brandIds: [audience.brandId] };
     if (!needsApolloPointerBuild(audience)) void refreshAudienceCountIfStale(audience, identity).catch((err) =>
@@ -1633,7 +1696,7 @@ router.post(
   async (req, res) => {
     const parsed = RevealCandidateRequestSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const orgId = res.locals.orgId as string;
@@ -1681,7 +1744,7 @@ router.post(
   async (req, res) => {
     const parsed = DeclineCandidateRequestSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const orgId = res.locals.orgId as string;
@@ -1724,7 +1787,7 @@ router.get(
   async (req, res) => {
     const parsed = ListScreeningsQuerySchema.safeParse(req.query);
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
     const orgId = res.locals.orgId as string;
@@ -1801,7 +1864,7 @@ router.post(
   async (req, res) => {
     const parsed = GenerateAudienceAvatarRequestSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
-      res.status(400).json({ error: parsed.error.message });
+      res.status(400).json(zodErrorBody(parsed.error));
       return;
     }
 
@@ -1838,7 +1901,7 @@ router.get(
   async (req, res) => {
     const parsedQuery = AudienceMembersQuerySchema.safeParse(req.query);
     if (!parsedQuery.success) {
-      res.status(400).json({ error: parsedQuery.error.message });
+      res.status(400).json(zodErrorBody(parsedQuery.error));
       return;
     }
 
@@ -2035,6 +2098,7 @@ function serializeAudience(
     source: row.source,
     profileAudienceId: row.profileAudienceId,
     role: row.role ?? null,
+    relation: row.relation ?? null,
     canonicalAudienceId: row.canonicalAudienceId,
     filters: row.filters,
     avatarUrl: row.avatarUrl,

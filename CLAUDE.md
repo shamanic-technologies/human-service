@@ -66,6 +66,10 @@ section — the port binds first).
 | Internal | `POST /internal/backfill-audience-offers` | apiKey | One-time data fix: attribute every pre-existing offer-less audience to the offer its `(org, brand)` holds, read from brand-service. A pair with no offer — or with several — stays NULL and is reported, never guessed (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/recover-suppressions` | apiKey | One-time data repair: for a caller-supplied set of `{orgId, brandId, email}`, archive the `brand_suppressions` row into the reversible `suppression_recoveries` ledger (tagged with a `reason`) and DELETE it, so people who were served but never actually contacted become emittable again for their brand. Idempotent (unique `(reason, org, brand, email_norm)`), `?dryRun=true`, reversible. NOT a sweep — the set is supplied, never inferred |
 | Internal | `POST /internal/offer-audiences/realign` (+ `/revert`) | apiKey | AUDIENCE-PER-OFFER-1107: one audience per offer (`role='target'`, the offer's text), the given rows become lists of the brand (`role='search'`) walked by every offer audience (`?dryRun`, reversible). See "ONE audience per offer" |
+| Org-scoped (Audiences v1) | `GET /orgs/audiences/relations` | apiKey + `x-org-id` | The brand's investors / industry peers: THE audience to serve each, its text, lists, reachable count. See "Brand relations" |
+| Org-scoped (Audiences v1) | `POST /orgs/audiences/relations/ensure` | apiKey + `x-org-id` + `x-user-id` | Build the relation audiences the brand lacks, from brand-service facts (done for you) |
+| Internal | `POST /internal/brand-relations/assign` (+ `/revert`) | apiKey | Make existing audiences a brand relation (offer cleared), reversible by reason |
+| Internal | `POST /internal/brand-relations/screen` (`?dryRun&async`) | apiKey | Judge a relation's lists ahead of the walk (Jev per company / per investor), report how many pass. See "Brand relations" |
 | Internal | `POST /internal/merge-source-audiences` (+ `/revert`) | apiKey | One-time data fix (AUDIENCE-SOURCES-1016): each per-source audience row becomes a SOURCE of its profile, the row deprecated -> canonical = profile. `?dryRun&orgId&brandId`, reversible, nothing archived. See "Audience x source" |
 | Internal | `POST /internal/rejudge-blank-candidates` (+ `/revert`) | apiKey | One-time repair (BLANK-CANDIDATES-1101): re-offer candidates declined with no facts about the person, with the person's stored teaser (`?dryRun`, reversible). See "Never a blank candidate" |
 | Internal | `POST /internal/recover-suppressions/revert` | apiKey | Undo a recovery: restore every archived suppression row carrying `reason` verbatim + drop the ledger rows. A person re-suppressed by a fresh serve keeps the newer row |
@@ -1274,6 +1278,38 @@ audience reaches, with firmographics, and the ONE person to write to at each.
   (`preview` | `companies`, unique `(audience_id, sample, person_index)`).
 - Tests: `tests/integration/audiences-preview-companies.test.ts`.
 
+### Source by fit — the provider is MEASURED, every shown company + person is JUDGED (AUDIENCE-SOURCE-BY-FIT-1126)
+
+Prod 2026-11-25: "Brazilian restaurants" (born `apollo`, as every split audience was) previewed a caterer, an HR
+tech firm and a brewery, with "Human Resources Manager" as the person, while its text said HR is out. Owner
+2026-11-26: no special case (never "local business -> Google Maps"), measured beats default.
+- **One shared fit judgment** (`src/services/audience-fit.ts`): ONE Jev call per subject, two `choice` questions
+  on `{targetAudience: <the audience's text>, candidate: <teaser snapshot>}`: company `in_target | out_of_target |
+  unknown`, person `in_target | out_of_target | no_person`. Passes = company `in_target` AND person not
+  `out_of_target` (`no_person` = the business itself). Judged once per (audience, provider, subject, prompt
+  version), bronze `audience_fit_judgments` (migration `0063`, no org_id: cascades with the audience), fail loud.
+- **Preview companies** shows only rows that pass: Apollo chunks are judged before they are stored (rejected rows
+  are never stored, the cursor walks past them; a walk pauses after 10 chunks, the next page walks on); rows
+  stored before this are judged once on read and hidden if out. A Google Maps audience's preview = its own
+  businesses (`google_maps_places`, judged, person fields null), next search when they run out.
+- **Provider choice** (`src/services/audience-provider-choice.ts`): every split birth (`audience-split.ts`)
+  carries `chooser_trace.providerChoice.status = "pending"` (`src/lib/provider-choice-marker.ts`). Each provider
+  able to sample a target (`SAMPLERS`: apollo = the first 10 companies of its list; google_maps = the searches its
+  target expands to, first search(es) until 10 businesses) is sampled, every company judged. Cost per company =
+  costs-service price (`COSTS_SERVICE_URL`, public `/v1/platform-prices`): 1 `apollo-credit`; Google Maps = the
+  `treg-micro-usd` its searches charged / businesses found. Lowest cost per FITTING company wins; none fits = the
+  audience keeps its provider. Trace = per provider sampled / fits / fitRate / unitCostUsd / costPerFitUsd /
+  samples with verdicts + winner + reason. Google Maps wins ⟹ the row becomes `provider='google_maps'` with its
+  searches (Apollo pointer kept for audit, Apollo sample rows deleted); the sample's businesses and verdicts are
+  reused by preview and serve (never searched / judged twice). Apollo wins ⟹ its fitting sample rows are the
+  preview's first rows.
+- **When**: background right after split confirm (own `audience-provider-choice` run, support
+  `product_feature`, when the caller sent none); awaited by preview/companies, serve-next and candidates/next
+  while pending (deduped in flight). No provider sampled ⟹ 502, stays pending. Audiences born before never move.
+- **Serve**: Google Maps serve-next judges each business (company question) before serving; out ⟹ place status
+  `not_in_target`. Apollo serve-next keeps its teaser screen; candidates keep lead-service's screen.
+- Tests: `tests/integration/audience-source-by-fit.test.ts`.
+
 ### Serve-next (lead primitive) — `POST /orgs/audiences/{id}/serve-next`
 
 The per-iteration lead primitive the new runtime calls: lead-service asks
@@ -2262,6 +2298,43 @@ to an offer. `audiences.role` (migration `0054`):
 - The text is edited like any audience's (`PATCH /orgs/audiences/{id}` `nlPrompt` carries `target_text`).
 - Tests: `tests/integration/offer-audiences.test.ts`.
 
+### Brand relations — investors and industry peers (`src/services/brand-relations.ts`, OUTREACH-3WAYS-1121)
+
+Owner 2026-11-21: a brand reaches people who are NOT buyers of one of its offers: its equity INVESTORS and its
+INDUSTRY PEERS (founders / leaders of companies in its industry, competitors included). `audiences.relation`
+(migration `0059`) = `investors` | `industry_peers` (`src/lib/brand-relations.ts`), NULL = buyers of the offer.
+- **Shape = an offer audience without an offer**: ONE `role='target'` per (org, brand, relation) (partial unique
+  index), `offer_id` NULL, text = who the population is; served by the shared candidate path
+  (`candidates/next`, reveal, decline). Its lists = `role='search'` rows with the same relation. `brandListsOf`
+  keys on it: a relation target walks ONLY its relation's lists, an offer target ONLY `relation IS NULL` lists.
+- **Read** `GET /orgs/audiences/relations?brandId=` (x-org-id): both relations always listed, `{relation,
+  audienceId (null = not built), name, status, targetText, reachableCount (sum of the ACTIVE lists' Remaining,
+  null = none measured yet), lists[{audienceId, name, status, provider, sizeCount, availableToContactCount}]}`.
+  Pure DB read. `GET /orgs/audiences?relation=` narrows; every audience read carries `relation`.
+- **Done for you** `POST /orgs/audiences/relations/ensure {brandId, relations?}` (x-user-id): builds what is
+  missing from brand-service facts only (name, domain, discovered competitors), never a client form. Target text
+  + one Apollo list per relation (investors: angels / early-stage VCs; peers: leaders at companies selling what
+  the competitors sell); the list's filters = the shared pointer build in the background (own run, org-billed).
+  Peers with competitors not computed / none ⟹ `skipped` + reason, nothing invented. Idempotent; ledger reason
+  `ensure`.
+- **Adoption** `POST /internal/brand-relations/assign?dryRun {reason, orgId, brandId, relation, targetAudienceId?,
+  searchAudienceIds}` (+ `/revert {reason}`): sets relation, clears the offer; ledger `brand_relation_assignments`
+  (in the brand transfer) keeps previous relation / role / offer. 409 if the brand has another target for it.
+- The offer-attribution sweep never gives an offer to a relation row. Tests: `tests/integration/brand-relations.test.ts`.
+- **Only people IN the relation are offered** (`src/services/relation-fit.ts`, owner 2026-11-21: distribute.you's peer list
+  matched the Apollo tag "sales engagement" and held NextGen Healthcare staff). The target's walk asks ONE Jev `choice`
+  after the free gates, before the offer: industry peers = per COMPANY (domain, else name) `brand_industry | other_market
+  | unknown`, seeing the company facts, the list's search tags (`foundBySearchFor`, a hint), what the brand sells
+  (brand-service `whatTheySell`, else its described offers) and the target text; investors = per PERSON `investor |
+  not_investor | unknown`. Only `brand_industry` / `investor` pass. v1 (yes/no, P > 0.5) squashed to 0.3-0.6 on
+  name-only teasers (Apollo.io, ZoomInfo out): never a yes/no on thin facts. Persisted once in `relation_fit_judgments`
+  (unique org x brand x relation x subject x prompt version, migrations `0060`/`0061`, in the brand transfer); a person
+  judged out leaves the list's buffer. `POST /internal/brand-relations/screen?dryRun&async {orgId, brandId, relation,
+  campaignId}` pages the relation's Apollo lists into their buffer under the walking campaign (Apollo's cursor key) and
+  judges everyone ahead of the walk, reporting people / passed / failed / companies.
+- **A campaign serves a relation only when its serve STATES the population** (lead-service `population`): a serve without
+  it walks the buyers (the brand's due follow-ups first). distribute.you's first peer email (2026-11-21, NextGen) came that way.
+
 ### Audience x source — a SOURCE is not an AUDIENCE (`src/services/audience-sources.ts`, AUDIENCE-SOURCES-1016)
 
 Owner 2026-10-16: « the SOURCES should be a concept separate from TARGETING ». An audience = WHO, one
@@ -2690,7 +2763,7 @@ them as OpenAPI enums).
   duplicate name, or an icon outside the vocabulary ⟹ 502. Dropping a segment
   would silently lose part of the partition.
 - **Confirm = one transaction**: rows at `status='active'`, `provider='apollo'`,
-  `apollo_audience_id` + `filters` NULL, `description` = the segment sentence,
+  `apollo_audience_id` + `filters` NULL (a segment whose card was counted: the card's filters, see "Split estimate"), `description` = the segment sentence,
   `nl_prompt` = the person-level target drafted from the customer's words (see
 "Audience target"), `source='split_proposal'`, `offer_id` required.
   The Apollo filters are built by the existing pointer build
@@ -2738,8 +2811,27 @@ whole list without creating anything. `src/services/audience-split-estimate.ts`.
 - `estimatedPeople: null` only with `unavailableReason`
   (`no_filters_drafted` / `filters_rejected`), never an invented number. A
   provider or chat failure is a 502.
+- **The card and the audience it creates are ONE population**
+  (AUDIENCE-COUNT-MISMATCH-1122): every counted draft is stored
+  (`audience_split_estimates`, migration `0062`: org, brand, lowered name,
+  description, sanitized filters, raw count; in the brand transfer). `split/confirm`
+  of a segment with the same org + brand + name + description estimated in the
+  last 24 h (`splitEstimateFor`) is born on THOSE filters + count (no pointer
+  build, no chooser); its apollo-service record is created from them verbatim
+  after commit (`recordNativeFilters`). Not estimated = the pointer build as
+  before. Why: saasdocs.online 2026-11-22, card 240 vs audience 2,922. Replayed:
+  the card's draft carried `revenue_range` (one-person firms + tools: 35,089
+  people, 118 with a revenue cap) and the build dropped it; similar titles were
+  only 1.25x (2,922 vs 2,335). So the draft prompt forbids revenue / funding
+  fields under 50 employees. Its `degraded` was the chooser saying revenue and
+  migration intent cannot be filtered (correct, information only).
+- **Speed** (measured in prod 2026-11-25, 6 segments, cold): 7.3-11.7 s total; the ONE filter draft
+  is 6-7.5 s (Gemini flash-pro, ~1,000-1,400 thinking tokens even at minimal), the parallel counts
+  ~1.2 s, a repair round adds a draft + count. One draft per segment in parallel was 4.2 s / 8.4 s
+  wall (max-of-6 tail) for 6x the input tokens: not shipped. Each call logs
+  `audience.split_estimate.phases` (draft / count / repair ms).
 - Cost: chat-service bills the caller's org (opens an `audience-split-estimate`
-  run when no `x-run-id`). Persists nothing. Tests:
+  run when no `x-run-id`). Creates no audience. Tests:
   `tests/integration/audiences-split-estimate.test.ts`.
 
 ### Audience suggestion (onboarding) — `POST /orgs/audiences/suggest`
@@ -3383,6 +3475,14 @@ key-service, `scraping.ts` → scraping-service, `chat-client.ts` → chat-servi
 - Note: `lead_serves.audience_id` (bronze, provenance) is the audience a serve
   was recorded UNDER (membership tagging) — distinct from the `x-audience-id`
   cost-attribution header, though in the serve-next campaign flow they coincide.
+
+## A validation 400 names the field (`src/lib/zod-error.ts`, AGENT-SIGNUP-UX-1125)
+
+Every Zod 400 of every route answers `zodErrorBody(parsed.error)`: `error` = one line naming each
+offending field + what was expected (`"brandId: Invalid UUID; segments.0.name: Too small: ..."`, empty
+path = `body`), never Zod's JSON dump; `issues[] {path, message, code}` beside it (additive). An outside
+AI agent reads the top line. A new route uses the helper, never `parsed.error.message`. Tests:
+`tests/integration/split-validation-errors.test.ts`.
 
 ## Async route errors always answer (`src/lib/async-route-errors.ts`)
 

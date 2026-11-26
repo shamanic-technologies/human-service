@@ -1,4 +1,13 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
+
+// The shared fit judgment (audience-fit.ts) has its own suite (audience-source-by-fit.test.ts):
+// here every business is one of the target's.
+vi.mock("../../src/services/audience-fit.js", async (orig) => ({
+  ...(await orig<typeof import("../../src/services/audience-fit.js")>()),
+  judgeAudienceFit: vi.fn(async (args: { subjects: Array<{ key: string }> }) =>
+    args.subjects.map((s) => ({ key: s.key, companyFit: "in_target", companyConfidence: 1, personFit: "no_person", personConfidence: 1, companyPasses: true, passes: true }))
+  ),
+}));
 import request from "supertest";
 import { eq } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";

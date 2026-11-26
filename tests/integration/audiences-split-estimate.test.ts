@@ -8,6 +8,7 @@ import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { db } from "../../src/db/index.js";
 import { audiences } from "../../src/db/schema.js";
 import { resetFiltersPromptCache } from "../../src/services/audience-split-estimate.js";
+import { eq } from "drizzle-orm";
 
 const app = createTestApp();
 const BRAND = "00000000-0000-4000-8000-0000000000b1";
@@ -87,7 +88,7 @@ describe("POST /orgs/audiences/split/estimate", () => {
     expect(titled.include_similar_titles).toBe(false);
     expect(titled.buying_signal).toBeUndefined();
     expect(dryRunBodies.find((b) => !b.person_titles)!.include_similar_titles).toBeUndefined();
-    // Nothing persisted.
+    // No audience created.
     expect(await db.select().from(audiences)).toHaveLength(0);
   });
 
@@ -151,5 +152,94 @@ describe("POST /orgs/audiences/split/estimate", () => {
     const many = Array.from({ length: 9 }, (_, i) => ({ name: `S${i}`, description: `Segment ${i}` }));
     const res = await estimate({ brandId: BRAND, segments: many });
     expect(res.status).toBe(400);
+  });
+});
+
+// AUDIENCE-COUNT-MISMATCH-1122: saasdocs.online's card said 240 (one draft) and
+// the audience its confirm created held 2,922 (apollo-service's own build, similar
+// titles on, no revenue cap). The confirm of a counted segment is now born on the
+// very filters the card was counted on: same title rule, same count, no 2nd build.
+describe("a picked card creates the audience it counted", () => {
+  const OFFER = "00000000-0000-4000-8000-0000000000f1";
+  const SEGMENT = { name: "Cost-Cutting Solo Creators", description: "Solo creators and coaches using ClickFunnels, Kajabi or Mailchimp." };
+
+  it("confirm stores the card's exact filters (similar titles off) and count, and runs no other build", async () => {
+    const dryRunBodies: Array<Record<string, unknown>> = [];
+    const recordBodies: Array<Record<string, unknown>> = [];
+    const calls: string[] = [];
+    fetchSpy.mockImplementation(async (url: string, init: { body?: string; method?: string }) => {
+      const u = String(url);
+      calls.push(u);
+      if (u.endsWith("/search/filters-prompt")) return ok({ prompt: "ref", schemaVersion: "abc" });
+      if (u.endsWith("/complete")) {
+        return ok({
+          json: {
+            segments: [
+              {
+                index: 1,
+                filters: {
+                  person_titles: ["Coach", "Content Creator"],
+                  include_similar_titles: true,
+                  organization_num_employees_ranges: ["1,1"],
+                  currently_using_any_of_technology_uids: ["clickfunnels", "kajabi", "mailchimp"],
+                },
+              },
+            ],
+          },
+        });
+      }
+      if (u.endsWith("/search/dry-run")) {
+        dryRunBodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({ totalEntries: 2335, validationErrors: [] });
+      }
+      if (u === "http://apollo:8080/audiences") {
+        recordBodies.push(JSON.parse(init.body ?? "{}"));
+        return ok({ apolloAudienceId: "ap-1", count: 2335, serveSource: "apollo", quickenrich: { expressible: false, reasons: [] } });
+      }
+      return bad(503, { error: "not mocked in this test" });
+    });
+
+    const est = await estimate({ brandId: BRAND, segments: [SEGMENT] });
+    expect(est.status).toBe(200);
+    expect(est.body.estimates[0].estimatedPeople).toBe(2300);
+
+    const res = await request(app)
+      .post("/orgs/audiences/split/confirm")
+      .set(getAuthHeaders())
+      .send({ brandId: BRAND, offerId: OFFER, segments: [SEGMENT] });
+    expect(res.status).toBe(201);
+
+    const [row] = await db.select().from(audiences).where(eq(audiences.id, res.body.audiences[0].id));
+    // The SAME title rule and filters the card was counted on.
+    expect(row.filters).toEqual(dryRunBodies[0]);
+    expect((row.filters as Record<string, unknown>).include_similar_titles).toBe(false);
+    expect(row.apolloCount).toBe(2335);
+    // apollo-service's agentic build never ran; the record is the card's filters, verbatim.
+    await vi.waitFor(() => expect(recordBodies).toHaveLength(1));
+    expect(recordBodies[0].filters).toEqual(dryRunBodies[0]);
+    expect(calls.some((u) => u.includes("suggest-from-segment"))).toBe(false);
+    await vi.waitFor(async () => {
+      const [after] = await db.select().from(audiences).where(eq(audiences.id, row.id));
+      expect(after.apolloAudienceId).toBe("ap-1");
+    });
+  });
+
+  it("a segment never estimated (or with another description) keeps the build", async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.endsWith("/search/filters-prompt")) return ok({ prompt: "ref", schemaVersion: "abc" });
+      if (u.endsWith("/complete")) return ok({ json: { segments: [{ index: 1, filters: { person_seniorities: ["founder"] } }] } });
+      if (u.endsWith("/search/dry-run")) return ok({ totalEntries: 500, validationErrors: [] });
+      return bad(503, { error: "not mocked in this test" });
+    });
+    expect((await estimate({ brandId: BRAND, segments: [SEGMENT] })).status).toBe(200);
+    const res = await request(app)
+      .post("/orgs/audiences/split/confirm")
+      .set(getAuthHeaders())
+      .send({ brandId: BRAND, offerId: OFFER, segments: [{ ...SEGMENT, description: "Another sentence." }] });
+    expect(res.status).toBe(201);
+    const [row] = await db.select().from(audiences).where(eq(audiences.id, res.body.audiences[0].id));
+    expect(row.filters).toBeNull();
+    expect(row.apolloCount).toBeNull();
   });
 });
