@@ -33,6 +33,7 @@ import brandRelationRoutes from "./routes/brand-relations.js";
 import suppressionBackfillRoutes from "./routes/suppression-backfill.js";
 import { register as runInstrumentation } from "./instrumentation.js";
 import { startOfferAttributionSweep } from "./services/offer-attribution-sweep.js";
+import { startOfferAudienceAlignSweep } from "./services/offer-audience-align-sweep.js";
 import { startAudienceRefillSweep } from "./services/audience-refill.js";
 import { startCompetitorEngagementSweep } from "./services/competitor-engagement-audience.js";
 import { startListPerformerCompletion } from "./services/list-performer-completion.js";
@@ -129,6 +130,8 @@ if (process.env.NODE_ENV !== "test") {
   // Arming it only SCHEDULES timers (first tick is delayed, every tick is
   // fire-and-forget), so it never touches the network on the boot path.
   startOfferAttributionSweep();
+  // Every offer on ONE audience (ONBOARDING-ONE-AUDIENCE-1126). Timers only.
+  startOfferAudienceAlignSweep();
 
   // Audience refill (human-service#285): a paying brand running low on people
   // left to contact gets new audiences matching its target. Timers only.

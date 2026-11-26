@@ -197,10 +197,16 @@ describe("POST /orgs/audiences/split/confirm", () => {
         offerId: OFFER,
       })
     );
+    // ONE audience per offer (ONBOARDING-ONE-AUDIENCE-1126): the customer's list shows the offer's
+    // audience; the segments are the brand's lists behind it.
     const listed = await request(app)
       .get(`/orgs/audiences?offerId=${OFFER}&status=active`)
       .set(getAuthHeaders());
-    expect(listed.body.audiences.map((a: { name: string }) => a.name).sort()).toEqual(
+    expect(listed.body.audiences.map((a: { name: string; role: string }) => [a.name, a.role])).toEqual([["Test offer", "target"]]);
+    const lists = await request(app)
+      .get(`/orgs/audiences?offerId=${OFFER}&status=active&role=search`)
+      .set(getAuthHeaders());
+    expect(lists.body.audiences.map((a: { name: string }) => a.name).sort()).toEqual(
       TWO.map((s) => s.name).sort()
     );
   });
@@ -336,7 +342,7 @@ describe("POST /orgs/audiences/split/confirm — the Apollo build does not wait 
     const ids = res.body.audiences.map((a: { id: string }) => a.id).sort();
     let rows: Array<typeof audiences.$inferSelect> = [];
     for (let i = 0; i < 50; i++) {
-      rows = await db.select().from(audiences);
+      rows = (await db.select().from(audiences)).filter((r) => r.role !== "target");
       if (rows.length === 2 && rows.every((r) => r.apolloAudienceId)) break;
       await new Promise((r) => setTimeout(r, 20));
     }

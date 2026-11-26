@@ -42,6 +42,8 @@ import {
 } from "../lib/audience-split-vocab.js";
 import { audienceTargetFields } from "./audience-target-text.js";
 import { noteListBuilt } from "./run-outputs.js";
+import { readOfferName } from "../lib/offer-name.js";
+import { alignOfferInTx, OFFER_AUDIENCE_BORN_REASON } from "./offer-audiences.js";
 import { completeRun, createRun } from "./runs.js";
 import {
   doorCall,
@@ -444,7 +446,9 @@ export async function confirmAudienceSplit(args: {
    * target draft runs); omitted ⟹ the database picks them. */
   ids?: string[];
 }): Promise<Array<typeof audiences.$inferSelect>> {
-  const rows = await db.transaction((tx) => insertSplitAudiences(tx, args));
+  // ONBOARDING-ONE-AUDIENCE-1126: read before any write, so a brand-service failure writes nothing.
+  const offerName = await offerNameForAlign(args);
+  const rows = await db.transaction((tx) => insertSplitAudiences(tx, { ...args, offerName }));
   for (const r of rows) noteListBuilt(r.id);
   return rows;
 }
@@ -528,12 +532,40 @@ export function prospectiveSplitRows(
  * (accepting a widening proposal locks the proposal row in the same one). */
 export async function insertSplitAudiences(
   tx: Tx,
-  args: SplitArgs
+  args: SplitArgs & { offerName?: string | null }
 ): Promise<Array<typeof audiences.$inferSelect>> {
   const taken = await takenSplitNames(tx, args);
   if (taken.length > 0) {
     throw new SplitNameConflictError(taken);
   }
-  return tx.insert(audiences).values(splitAudienceValues(args)).returning();
+  const inserted = await tx.insert(audiences).values(splitAudienceValues(args)).returning();
+  // ONE audience per offer (AUDIENCE-PER-OFFER-1107, ONBOARDING-ONE-AUDIENCE-1126): the new rows are lists of the
+  // brand (role 'search'), walked by the offer's ONE target, created here when the offer has none (its text = the
+  // confirmed target). No target text or no offer name ⟹ rows stay as before; the align sweep retries later.
+  const text = args.targetAudience?.trim();
+  if (!text || !args.offerName) return inserted;
+  const aligned = await alignOfferInTx(tx, {
+    orgId: args.orgId,
+    brandId: args.brandId,
+    offerId: args.offerId,
+    offerName: args.offerName,
+    text,
+    reason: OFFER_AUDIENCE_BORN_REASON,
+    newRowIds: inserted.map((r) => r.id),
+  });
+  const searches = new Set(aligned.madeSearch);
+  return inserted.map((r) => (searches.has(r.id) ? { ...r, role: "search" as const } : r));
+}
+
+/** The offer's name for its target, read only when a target text exists (else nothing is aligned). */
+export async function offerNameForAlign(args: Pick<SplitArgs, "orgId" | "brandId" | "offerId" | "targetAudience">): Promise<string | null> {
+  if (!args.targetAudience?.trim()) return null;
+  const name = await readOfferName(args.orgId, args.brandId, args.offerId);
+  if (!name) {
+    console.warn(
+      `[human-service] offer_audiences.offer_not_found org=${args.orgId} brand=${args.brandId} offer=${args.offerId}: rows born without a target, the align sweep retries`
+    );
+  }
+  return name;
 }
 

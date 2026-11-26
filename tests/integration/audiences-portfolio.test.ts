@@ -197,7 +197,10 @@ describe("POST /orgs/audiences/portfolio", () => {
     expect(a.body.portfolioId).toBe(b.body.portfolioId);
     await settlePortfolioBackground();
     expect(proposeAudienceSplit).toHaveBeenCalledTimes(1);
-    expect(await db.select().from(audiences)).toHaveLength(2);
+    // Two cold lists of the brand + the offer's ONE audience (ONBOARDING-ONE-AUDIENCE-1126).
+    const all = await db.select().from(audiences);
+    expect(all.filter((r) => r.role === "search")).toHaveLength(2);
+    expect(all.filter((r) => r.role === "target")).toHaveLength(1);
     expect(await db.select().from(audienceSources)).toHaveLength(4);
   });
 
@@ -323,7 +326,7 @@ describe("POST /orgs/audiences/portfolio", () => {
       .select()
       .from(audiences)
       .where(and(eq(audiences.brandId, BRAND), eq(audiences.status, "active")));
-    expect(rows).toHaveLength(2);
+    expect(rows.filter((r) => r.role !== "target")).toHaveLength(2);
   });
 
   it("400 on a missing ICP text", async () => {

@@ -66,6 +66,7 @@ section — the port binds first).
 | Internal | `POST /internal/backfill-audience-offers` | apiKey | One-time data fix: attribute every pre-existing offer-less audience to the offer its `(org, brand)` holds, read from brand-service. A pair with no offer — or with several — stays NULL and is reported, never guessed (idempotent, `?dryRun=true`, reversible) |
 | Internal | `POST /internal/recover-suppressions` | apiKey | One-time data repair: for a caller-supplied set of `{orgId, brandId, email}`, archive the `brand_suppressions` row into the reversible `suppression_recoveries` ledger (tagged with a `reason`) and DELETE it, so people who were served but never actually contacted become emittable again for their brand. Idempotent (unique `(reason, org, brand, email_norm)`), `?dryRun=true`, reversible. NOT a sweep — the set is supplied, never inferred |
 | Internal | `POST /internal/offer-audiences/realign` (+ `/revert`) | apiKey | AUDIENCE-PER-OFFER-1107: one audience per offer (`role='target'`, the offer's text), the given rows become lists of the brand (`role='search'`) walked by every offer audience (`?dryRun`, reversible). See "ONE audience per offer" |
+| Internal | `POST /internal/offer-audiences/align` (`?dryRun&brandId`) | apiKey | Align now every offer still holding live role-NULL rows (also every 5 min). See "ONE audience per offer" |
 | Org-scoped (Audiences v1) | `GET /orgs/audiences/relations` | apiKey + `x-org-id` | The brand's investors / industry peers: THE audience to serve each, its text, lists, reachable count. See "Brand relations" |
 | Org-scoped (Audiences v1) | `POST /orgs/audiences/relations/ensure` | apiKey + `x-org-id` + `x-user-id` | Build the relation audiences the brand lacks, from brand-service facts (done for you) |
 | Internal | `POST /internal/brand-relations/assign` (+ `/revert`) | apiKey | Make existing audiences a brand relation (offer cleared), reversible by reason |
@@ -2296,6 +2297,17 @@ to an offer. `audiences.role` (migration `0054`):
   searches; one transaction, ledger `offer_audience_realignments` (in the brand transfer); `/realign/revert
   {reason}` gives each row its previous role back and deprecates the targets it created. Nothing deleted.
 - The text is edited like any audience's (`PATCH /orgs/audiences/{id}` `nlPrompt` carries `target_text`).
+- **Every offer is BORN on it** (ONBOARDING-ONE-AUDIENCE-1126; until then only staff-realigned brands were, 12 old-model
+  rows a week in prod): `insertSplitAudiences` (split confirm, portfolio, refill, source campaign ON, widening accept)
+  writes the rows as `search` and creates the offer's target in the SAME transaction when it has none (text = the
+  confirmed target, name = the offer's, brand-service read BEFORE the transaction, `src/lib/offer-name.ts`; ledger
+  reason `offer-audience-born`). No target text / offer unknown ⟹ rows as before. **Align sweep**
+  (`offer-audience-align-sweep.ts`, every 5 min, first tick 10 min after boot, `OFFER_AUDIENCE_ALIGN_INTERVAL_MS=0`
+  off; `POST /internal/offer-audiences/align?dryRun&brandId`): every (org, brand, offer) holding a live (active /
+  paused) buyer row on role NULL ⟹ target created if missing (text `pickValidatedTarget`, offer's name) and those rows
+  made searches (suggested / archived untouched; no text / unknown offer ⟹ `skipped`). Ledger reason
+  `offer-audience-align-1126`; undo = interval 0, then `/realign/revert {reason}`. Tests:
+  `tests/integration/offer-audience-born.test.ts`.
 - Tests: `tests/integration/offer-audiences.test.ts`.
 
 ### Brand relations — investors and industry peers (`src/services/brand-relations.ts`, OUTREACH-3WAYS-1121)

@@ -311,6 +311,108 @@ export async function revertOfferAudienceRealignment(reason: string): Promise<{ 
   });
 }
 
+// ─── Every offer born (and kept) on ONE audience (ONBOARDING-ONE-AUDIENCE-1126) ──
+
+/** Ledger reason of the alignment done at creation (split confirm, portfolio, refill, source campaign ON, widening). */
+export const OFFER_AUDIENCE_BORN_REASON = "offer-audience-born";
+/** Ledger reason of the sweep that aligns every offer still holding live role-NULL rows. */
+export const OFFER_AUDIENCE_ALIGN_REASON = "offer-audience-align-1126";
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+export interface AlignOfferArgs {
+  orgId: string;
+  brandId: string;
+  offerId: string;
+  /** The offer's name (brand-service), the target's name when one is created. */
+  offerName: string;
+  /** Who the offer targets: the target's text when one is created. */
+  text: string;
+  reason: string;
+  /** Rows just written by the caller: made searches whatever their status. */
+  newRowIds?: string[];
+  dryRun?: boolean;
+}
+
+export interface AlignOfferResult {
+  targetId: string | null;
+  target: "created" | "would_create" | "exists";
+  madeSearch: string[];
+}
+
+/**
+ * Put ONE offer on the one-audience model, inside the caller's transaction:
+ *   - its target (role 'target', text = `text`, named after the offer) is created when it has none;
+ *   - every live (active / paused) buyer row of the offer still on role NULL, plus `newRowIds`, becomes a
+ *     search of the brand (its filters, pointer, cursor, buffer, sources and offer_id untouched);
+ *   - each write is in `offer_audience_realignments` under `reason` (reversible by /realign/revert).
+ * Suggested / archived / deprecated rows are left as they are (never chosen, or retired).
+ */
+export async function alignOfferInTx(tx: Tx, args: AlignOfferArgs): Promise<AlignOfferResult> {
+  const { orgId, brandId, offerId } = args;
+  const offerRows = await tx
+    .select()
+    .from(audiences)
+    .where(and(eq(audiences.orgId, orgId), eq(audiences.brandId, brandId), eq(audiences.offerId, offerId)));
+  const newIds = new Set(args.newRowIds ?? []);
+  const existing = offerRows.find((r) => isOfferTarget(r) && r.status !== "deprecated" && !r.relation);
+  const toSearch = offerRows.filter(
+    (r) =>
+      r.role === null &&
+      !r.relation &&
+      r.status !== "deprecated" &&
+      (newIds.has(r.id) || r.status === "active" || r.status === "paused")
+  );
+  if (args.dryRun) {
+    return { targetId: existing?.id ?? null, target: existing ? "exists" : "would_create", madeSearch: toSearch.map((r) => r.id) };
+  }
+
+  let targetId = existing?.id ?? null;
+  if (!existing) {
+    const taken = new Set(offerRows.map((r) => r.name.toLowerCase()));
+    let name = args.offerName.trim();
+    for (let i = 2; taken.has(name.toLowerCase()); i++) name = i === 2 ? `${args.offerName.trim()} audience` : `${args.offerName.trim()} audience ${i}`;
+    const [created] = await tx
+      .insert(audiences)
+      .values({
+        orgId,
+        brandId,
+        offerId,
+        name,
+        nlPrompt: args.text,
+        targetText: args.text,
+        targetTextOrigin: "audience_target",
+        provider: "apollo",
+        role: "target",
+        status: "active",
+        source: OFFER_AUDIENCE_SOURCE_TAG,
+        ...systemStatus("offer_audience"),
+      })
+      .returning();
+    targetId = created.id;
+    await tx
+      .insert(offerAudienceRealignments)
+      .values({ reason: args.reason, orgId, brandId, audienceId: created.id, action: "target_created", previousRole: null })
+      .onConflictDoNothing();
+  }
+  if (toSearch.length) {
+    await tx
+      .update(audiences)
+      .set({ role: "search", updatedAt: new Date() })
+      .where(inArray(audiences.id, toSearch.map((r) => r.id)));
+    await tx
+      .insert(offerAudienceRealignments)
+      .values(
+        toSearch.map((r) => ({ reason: args.reason, orgId, brandId, audienceId: r.id, action: "made_search", previousRole: null }))
+      )
+      .onConflictDoNothing();
+  }
+  console.log(
+    `[human-service] offer_audiences.align org=${orgId} brand=${brandId} offer=${offerId} reason=${args.reason} target=${existing ? "exists" : "created"}:${targetId} searches=${toSearch.length}`
+  );
+  return { targetId, target: existing ? "exists" : "created", madeSearch: toSearch.map((r) => r.id) };
+}
+
 // ─── The shared buffer ───────────────────────────────────────────────────────
 
 /**
