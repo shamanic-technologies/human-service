@@ -118,8 +118,9 @@ export function contactPageLinks(homepage: string, links: readonly string[], max
     }
     if (u.protocol !== "http:" && u.protocol !== "https:") continue;
     if (registrableDomain(u.href) !== site) continue;
-    const path = decodeURIComponent(u.pathname);
-    if (!CONTACT_PATH.test(path)) continue;
+    const path = safeDecode(u.pathname);
+    // A link with a malformed % sequence (GMAPS-SET-ASIDE-1127): skipped, the read goes on.
+    if (path === null || !CONTACT_PATH.test(path)) continue;
     const key = normalizeUrl(u.href);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -134,6 +135,16 @@ export function contactPageLinks(homepage: string, links: readonly string[], max
     .sort((a, b) => rank(a.url) - rank(b.url) || a.i - b.i)
     .slice(0, max)
     .map((x) => x.url);
+}
+
+/** decodeURIComponent, or null when the text carries a malformed % sequence ("URI malformed"). */
+export function safeDecode(text: string): string | null {
+  try {
+    return decodeURIComponent(text);
+  } catch (err) {
+    if (err instanceof URIError) return null;
+    throw err;
+  }
 }
 
 function normalizeUrl(url: string): string {
@@ -164,7 +175,11 @@ export function publishedEmails(pages: ReadonlyArray<Pick<SitePage, "text" | "li
       .replace(/\s*[([{]\s*at\s*[)\]}]\s*/gi, "@")
       .replace(/\s*[([{]\s*(dot|punkt|point)\s*[)\]}]\s*/gi, ".");
     for (const m of text.match(EMAIL_RE) ?? []) add(m);
-    for (const l of p.links) if (/^mailto:/i.test(l)) add(decodeURIComponent(l));
+    for (const l of p.links) {
+      if (!/^mailto:/i.test(l)) continue;
+      const decoded = safeDecode(l);
+      if (decoded !== null) add(decoded);
+    }
   }
   return out;
 }

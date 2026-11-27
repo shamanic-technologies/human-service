@@ -30,4 +30,10 @@ describe("readExtractRow", () => {
   it("a row with no words reads text null, never invented", () => {
     expect(readExtractRow({ final_url: "https://a.ch/", ok: true, text_len: 0 })).toEqual({ text: null, links: [], finalUrl: "https://a.ch/" });
   });
+
+  it("a link with a malformed % sequence is skipped, never a crash (GMAPS-SET-ASIDE-1127)", () => {
+    const links = ["https://a.ch/kontakt%E0%A4%A", "mailto:info%ZZ@a.ch", "https://a.ch/impressum", "mailto:hallo@a.ch"];
+    expect(contactPageLinks("https://a.ch/", links)).toEqual(["https://a.ch/impressum"]);
+    expect(publishedEmails([{ text: null, links }])).toEqual(["hallo@a.ch"]);
+  });
 });

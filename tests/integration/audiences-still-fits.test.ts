@@ -5,7 +5,8 @@ import { cleanTestData, closeDb } from "../helpers/test-db.js";
 import { tagAudienceServe } from "../../src/services/audiences.js";
 import type { ServedContact } from "../../src/services/suppression.js";
 import { db } from "../../src/db/index.js";
-import { audiences, audienceScreenedOut, leadServes, brandSuppressions, audienceMembers } from "../../src/db/schema.js";
+import { audiences, audienceScreenedOut, leadServes, brandSuppressions, audienceMembers, audienceCandidates, people, googleMapsBrandClaims } from "../../src/db/schema.js";
+import { and, eq } from "drizzle-orm";
 
 // POST /internal/audiences/still-fits (STILL-FITS-1012): does this person STILL
 // belong to this audience, right now? CRM audiences ask crm-service; search
@@ -145,6 +146,67 @@ describe("POST /internal/audiences/still-fits", () => {
 
   it("400 on a bad body", async () => {
     expect((await ask({ orgId: ORG, audienceId: CRM_PEOPLE, brandId: BRAND })).status).toBe(400);
+  });
+
+  it("offer audience: a business it found through the brand's Google Maps list fits it (GMAPS-SET-ASIDE-1127)", async () => {
+    const LIST = "00000000-0000-4000-8000-0000000000e1";
+    const TARGET = "00000000-0000-4000-8000-0000000000e2";
+    await db.insert(audiences).values([
+      { id: LIST, orgId: ORG, brandId: BRAND, name: "Swiss shops (Google Maps)", provider: "google_maps", role: "search", status: "active" },
+      { id: TARGET, orgId: ORG, brandId: BRAND, name: "Independent drugstores", provider: "apollo", role: "target", status: "active" },
+    ] as never);
+    // The reveal tags the business as a member of the LIST it walked, never of the target.
+    await tagAudienceServe(ORG, LIST, [contact({ email: "apotheke@shop.test", provider: "google_maps" as never, providerPersonId: "ChIJplace1" })]);
+    const [person] = await db.select({ id: people.id }).from(people).where(and(eq(people.orgId, ORG), eq(people.emailNorm, "apotheke@shop.test")));
+    await db.insert(googleMapsBrandClaims).values({ orgId: ORG, brandId: BRAND, placeId: "ChIJplace1", audienceId: LIST, personId: person.id } as never);
+    const ask1 = () => ask({ orgId: ORG, audienceId: TARGET, brandId: BRAND, email: "apotheke@shop.test", personId: person.id });
+
+    // Before the target's candidate is served: it never found them.
+    const before = await ask1();
+    expect(before.status).toBe(422);
+    expect(before.body.code).toBe("not_found_by_audience");
+
+    await db.insert(audienceCandidates).values({
+      orgId: ORG, audienceId: TARGET, providerPersonId: "ChIJplace1", status: "revealed", searchAudienceId: LIST,
+      revealResult: { status: "served", personId: person.id, person: null },
+    } as never);
+    const r = await ask1();
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual({ fits: true, basis: "found_by_search" });
+  });
+
+  it("offer audience: a candidate it did NOT serve is not a find", async () => {
+    const LIST = "00000000-0000-4000-8000-0000000000e3";
+    const TARGET = "00000000-0000-4000-8000-0000000000e4";
+    await db.insert(audiences).values([
+      { id: LIST, orgId: ORG, brandId: BRAND, name: "Swiss shops (Google Maps)", provider: "google_maps", role: "search", status: "active" },
+      { id: TARGET, orgId: ORG, brandId: BRAND, name: "Independent drugstores", provider: "apollo", role: "target", status: "active" },
+    ] as never);
+    await tagAudienceServe(ORG, LIST, [contact({ email: "other@shop.test", provider: "google_maps" as never, providerPersonId: "ChIJplace2" })]);
+    const [person] = await db.select({ id: people.id }).from(people).where(and(eq(people.orgId, ORG), eq(people.emailNorm, "other@shop.test")));
+    await db.insert(googleMapsBrandClaims).values({ orgId: ORG, brandId: BRAND, placeId: "ChIJplace2", audienceId: LIST, personId: person.id } as never);
+    await db.insert(audienceCandidates).values({
+      orgId: ORG, audienceId: TARGET, providerPersonId: "ChIJplace2", status: "revealed", searchAudienceId: LIST,
+      revealResult: { status: "not_served", reason: "already_served", person: null },
+    } as never);
+    const r = await ask({ orgId: ORG, audienceId: TARGET, brandId: BRAND, email: "other@shop.test", personId: person.id });
+    expect(r.status).toBe(422);
+    expect(r.body.code).toBe("not_found_by_audience");
+  });
+
+  it("offer audience: a Google Maps find the brand handed back (claim released) no longer fits, with its reason", async () => {
+    const LIST = "00000000-0000-4000-8000-0000000000e5";
+    const TARGET = "00000000-0000-4000-8000-0000000000e6";
+    await db.insert(audiences).values([
+      { id: LIST, orgId: ORG, brandId: BRAND, name: "Swiss shops (Google Maps)", provider: "google_maps", role: "search", status: "active" },
+      { id: TARGET, orgId: ORG, brandId: BRAND, name: "Independent drugstores", provider: "apollo", role: "target", status: "active" },
+    ] as never);
+    await tagAudienceServe(ORG, LIST, [contact({ email: "released@shop.test", provider: "google_maps" as never, providerPersonId: "ChIJplace3" })]);
+    const [person] = await db.select({ id: people.id }).from(people).where(and(eq(people.orgId, ORG), eq(people.emailNorm, "released@shop.test")));
+    const r = await ask({ orgId: ORG, audienceId: TARGET, brandId: BRAND, email: "released@shop.test", personId: person.id });
+    expect(r.status).toBe(200);
+    expect(r.body.fits).toBe(false);
+    expect(r.body.failed).toEqual([{ code: "find_released", reason: expect.any(String) }]);
   });
 
   it("search audience: a member it found fits; nothing written, nothing fetched", async () => {
