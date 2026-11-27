@@ -2480,6 +2480,11 @@ writes them from the offer's validated target).
   `already_served`, `no_website` ⟹ `no_email`, `not_on_whatsapp` ⟹ `no_person`; the brand unable to send on WhatsApp
   ⟹ `provider_skipped` / `whatsapp_unavailable`, candidate handed back). One offer declining leaves the business to
   the others. Tests: the "offer audience" block of `google-maps-email.test.ts`.
+  **still-fits** (GMAPS-SET-ASIDE-1127): the reveal tags the business a member of the LIST, so an offer audience
+  answers "fits" from its own served candidate naming the person (`reveal_result.personId`), whatever list it
+  walked; a Google Maps find whose brand claim is gone (released) answers `fits:false` `find_released`, never
+  "never found". Before: every Living Vital find was set aside at handover, 0 emails. A link with a malformed `%`
+  sequence is skipped by the site read (`safeDecode`), never a 500 on candidates/next.
 
 - **Coverage: "exhausted" only once the region is covered** (GMAPS-COVERAGE-1126, `src/services/google-maps-coverage.ts`).
   Living Vital 2026-11-24: 40 drafted searches (4 kinds x 10 cities) all ran, the walk said exhausted, while the canton of

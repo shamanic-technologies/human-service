@@ -18,14 +18,18 @@
 //     company (and, for apollo, the pre-pay screen). Re-deciding it would mean a
 //     paid re-search / re-enrich, which this read must never buy. So it answers
 //     from what it holds: the person is a member this audience FOUND (any
-//     provenance) and has not been screened out of it since. Not a member = we
-//     cannot judge (fail loud), never a silent "fits".
+//     provenance) and has not been screened out of it since. An OFFER audience
+//     (role 'target') finds through the brand's lists: its reveal tags the
+//     person as a member of the LIST it walked (Apollo search, Google Maps...),
+//     so a candidate of the audience SERVED as that person is a find of the
+//     audience too (GMAPS-SET-ASIDE-1127). Neither = we cannot judge (fail
+//     loud), never a silent "fits".
 //
 // A QUESTION, not a serve: nothing is marked served or suppressed, nothing is
 // bought, no membership is written.
 import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { audienceMembers, audiences, audienceScreenedOut, people } from "../db/schema.js";
+import { audienceCandidates, audienceMembers, audiences, audienceScreenedOut, googleMapsBrandClaims, people } from "../db/schema.js";
 import { crmStillFits } from "../lib/crm-contacts.js";
 import type { StepFilter } from "../lib/step-filter.js";
 import { normalizeEmail } from "./suppression.js";
@@ -178,7 +182,11 @@ async function searchFit(q: StillFitsQuestion, audienceId: string): Promise<Stil
     .from(audienceMembers)
     .where(and(eq(audienceMembers.personId, personId), inArray(audienceMembers.audienceId, ids)))
     .limit(1);
-  if (!member) {
+  if (!member && !(await servedAsCandidate(ids, personId))) {
+    if (await releasedGoogleMapsFind(q.orgId, personId)) {
+      const reason = "The brand no longer holds this business: its Google Maps find was handed back";
+      return { fits: false, basis: "found_by_search", reason, failed: [{ code: "find_released", reason }] };
+    }
     throw new CannotJudgeError("not_found_by_audience", "This audience never found this person, so it cannot say whether they still fit");
   }
   // Screened out of this audience since (a candidate declined, a screen verdict):
@@ -199,4 +207,39 @@ async function searchFit(q: StillFitsQuestion, audienceId: string): Promise<Stil
     return { fits: false, basis: "found_by_search", reason, failed: [{ code: "screened_out", reason }] };
   }
   return { fits: true, basis: "found_by_search" };
+}
+
+// The audience (or its lineage) revealed this person as one of its own
+// candidates, whichever list the walk read them from (GMAPS-SET-ASIDE-1127:
+// an offer audience walking the brand's Google Maps list; the membership row
+// sits on the list, the candidate on the audience).
+async function servedAsCandidate(audienceIds: string[], personId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: audienceCandidates.id })
+    .from(audienceCandidates)
+    .where(
+      and(
+        inArray(audienceCandidates.audienceId, audienceIds),
+        eq(audienceCandidates.status, "revealed"),
+        sql`${audienceCandidates.revealResult}->>'status' = 'served'`,
+        sql`${audienceCandidates.revealResult}->>'personId' = ${personId}`
+      )
+    )
+    .limit(1);
+  return !!row;
+}
+
+// A Google Maps business is HELD by the brand's claim on it (google_maps_brand_claims,
+// the same truth googleMapsFit reads). A person a Google Maps list served whose claim
+// is gone was handed back (GMAPS-LIVE-1117 released 266 phone-only finds served to a
+// cold-email campaign; the same shops were found again later as new people): a real
+// "no longer fits", never "cannot judge".
+async function releasedGoogleMapsFind(orgId: string, personId: string): Promise<boolean> {
+  const rows = await db.execute(sql`
+    select 1 from ${audienceMembers} m
+    join ${audiences} a on a.id = m.audience_id
+    where m.person_id = ${personId} and m.org_id = ${orgId} and a.provider = 'google_maps' and m.provenance = 'served'
+      and not exists (select 1 from ${googleMapsBrandClaims} g where g.person_id = ${personId})
+    limit 1`);
+  return (rows as unknown as unknown[]).length > 0;
 }
