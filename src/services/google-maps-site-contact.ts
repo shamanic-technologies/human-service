@@ -118,8 +118,9 @@ export function contactPageLinks(homepage: string, links: readonly string[], max
     }
     if (u.protocol !== "http:" && u.protocol !== "https:") continue;
     if (registrableDomain(u.href) !== site) continue;
-    const path = decodeURIComponent(u.pathname);
-    if (!CONTACT_PATH.test(path)) continue;
+    const path = safeDecode(u.pathname);
+    // A link with a malformed % sequence (GMAPS-SET-ASIDE-1127): skipped, the read goes on.
+    if (path === null || !CONTACT_PATH.test(path)) continue;
     const key = normalizeUrl(u.href);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -134,6 +135,16 @@ export function contactPageLinks(homepage: string, links: readonly string[], max
     .sort((a, b) => rank(a.url) - rank(b.url) || a.i - b.i)
     .slice(0, max)
     .map((x) => x.url);
+}
+
+/** decodeURIComponent, or null when the text carries a malformed % sequence ("URI malformed"). */
+export function safeDecode(text: string): string | null {
+  try {
+    return decodeURIComponent(text);
+  } catch (err) {
+    if (err instanceof URIError) return null;
+    throw err;
+  }
 }
 
 function normalizeUrl(url: string): string {
@@ -164,7 +175,11 @@ export function publishedEmails(pages: ReadonlyArray<Pick<SitePage, "text" | "li
       .replace(/\s*[([{]\s*at\s*[)\]}]\s*/gi, "@")
       .replace(/\s*[([{]\s*(dot|punkt|point)\s*[)\]}]\s*/gi, ".");
     for (const m of text.match(EMAIL_RE) ?? []) add(m);
-    for (const l of p.links) if (/^mailto:/i.test(l)) add(decodeURIComponent(l));
+    for (const l of p.links) {
+      if (!/^mailto:/i.test(l)) continue;
+      const decoded = safeDecode(l);
+      if (decoded !== null) add(decoded);
+    }
   }
   return out;
 }
@@ -183,17 +198,79 @@ async function readPage(meter: TregMeter, url: string, placeId: string): Promise
     if (err instanceof TregUnreachableError) throw new SiteUnreadableError(placeId, url, err.message);
     throw err;
   }
-  const page = (answer.body?.output as { pages?: Array<Record<string, unknown>> } | undefined)?.pages?.[0];
-  const ok = answer.status >= 200 && answer.status < 300 && !!page;
+  const row = (answer.body?.output as { pages?: unknown[] } | undefined)?.pages?.[0];
+  const ok = answer.status >= 200 && answer.status < 300 && !!row && typeof row === "object";
+  const read = ok ? readExtractRow(row as Record<string, unknown>) : { text: null, links: [], finalUrl: null };
   return {
     url,
-    finalUrl: ok && typeof page!.final_url === "string" ? (page!.final_url as string) : null,
+    finalUrl: read.finalUrl,
     status: answer.status,
     servedBy: answer.servedBy,
     chargedMicro: answer.chargedMicro,
-    text: ok && typeof page!.text === "string" ? (page!.text as string).slice(0, PAGE_TEXT_KEPT) : null,
-    links: ok && Array.isArray(page!.links) ? (page!.links as unknown[]).filter((l): l is string => typeof l === "string") : [],
+    text: read.text ? read.text.slice(0, PAGE_TEXT_KEPT) : null,
+    links: read.links,
   };
+}
+
+// Where each provider puts the page's words. treg.web.extract hands back each
+// provider's OWN row (GMAPS-SITE-READ-EMPTY-1126): tinyfish `text` + `links`,
+// crawl4ai `markdown`, search1api `content`, parallel `full_content` / `excerpts`,
+// tavily `raw_content`... Reading `text` alone made every page served by another
+// provider read as empty (every read since 2026-11-24, 1,445 shops on 11-26).
+const TEXT_FIELDS = ["text", "markdown", "content", "full_content", "raw_content", "page_content", "extracted_content", "html"] as const;
+const FINAL_URL_FIELDS = ["final_url", "finalUrl", "url", "link"] as const;
+// Links written inside the page's words: markdown `[x](url)`, html `href="url"`, bare URLs.
+const MD_LINK_RE = /\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)/g;
+const HREF_RE = /href\s*=\s*["']([^"']+)["']/gi;
+const BARE_URL_RE = /\bhttps?:\/\/[^\s<>()"'\]]+/gi;
+
+/**
+ * The words, links and final address of one provider-native extract row, whoever
+ * served it. Text = the first non-empty text field (else the row's excerpts
+ * joined); links = the row's own list when it has one, else every link written
+ * in the text. Nothing is invented: a row carrying no words reads `text: null`.
+ */
+export function readExtractRow(row: Record<string, unknown>): { text: string | null; links: string[]; finalUrl: string | null } {
+  let text: string | null = null;
+  for (const f of TEXT_FIELDS) {
+    const v = row[f];
+    if (typeof v === "string" && v.trim()) {
+      text = v;
+      break;
+    }
+  }
+  if (!text && Array.isArray(row.excerpts)) {
+    const joined = row.excerpts.filter((e): e is string => typeof e === "string" && !!e.trim()).join("\n\n");
+    if (joined.trim()) text = joined;
+  }
+  let finalUrl: string | null = null;
+  for (const f of FINAL_URL_FIELDS) {
+    const v = row[f];
+    if (typeof v === "string" && /^https?:\/\//i.test(v)) {
+      finalUrl = v;
+      break;
+    }
+  }
+  const links: string[] = [];
+  const add = (l: string) => {
+    const t = l.trim();
+    if (t && !links.includes(t)) links.push(t);
+  };
+  if (Array.isArray(row.links)) {
+    for (const l of row.links) {
+      if (typeof l === "string") add(l);
+      else if (l && typeof l === "object") {
+        const href = (l as Record<string, unknown>).href ?? (l as Record<string, unknown>).url;
+        if (typeof href === "string") add(href);
+      }
+    }
+  }
+  if (links.length === 0 && text) {
+    for (const m of text.matchAll(MD_LINK_RE)) add(m[1]);
+    for (const m of text.matchAll(HREF_RE)) add(m[1]);
+    for (const m of text.matchAll(BARE_URL_RE)) add(m[0].replace(/[.,;:]+$/, ""));
+  }
+  return { text, links, finalUrl };
 }
 
 const PICK_SYSTEM_PROMPT = [
@@ -271,6 +348,10 @@ export async function siteContactOf(ctx: SiteReadContext): Promise<SiteContact> 
   } else {
     const meter = ctx.meter();
     const home = await readPage(meter, homepage, ctx.placeId);
+    // A homepage answered with no words at all is a read that FAILED (charged or
+    // not), never "this site publishes no email": nothing stored, the business is
+    // read again later like a site that timed out (GMAPS-SITE-READ-EMPTY-1126).
+    if (!home.text) throw new SiteUnreadableError(ctx.placeId, homepage, `no page text (status ${home.status}, served by ${home.servedBy ?? "-"})`);
     pages = [home];
     for (const url of contactPageLinks(home.finalUrl ?? homepage, home.links)) pages.push(await readPage(meter, url, ctx.placeId));
     runId = await meter.openedRunId();

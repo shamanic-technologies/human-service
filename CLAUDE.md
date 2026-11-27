@@ -2459,6 +2459,15 @@ writes them from the offer's validated target).
   `email_status = site_unreadable` (nothing stored in bronze), the walk goes on to the next one, and the business is
   read again 3 days later (`SITE_UNREADABLE_RETRY`). Before: the throw failed the whole serve / candidates/next and the
   next call took the same oldest business again: Living Vital served ~0 for 2 days on one site that always timed out.
+- **Every provider's page is read** (GMAPS-SITE-READ-EMPTY-1126): `treg.web.extract` returns each provider's OWN row,
+  so `readExtractRow` takes the words from `text` / `markdown` (crawl4ai) / `content` (search1api) / `full_content` /
+  `raw_content`... else `excerpts` (parallel), links from the row's list else from the words (markdown / href / bare
+  URLs). Reading `text` alone (tinyfish only) made every read empty once treg routed crawl4ai first (2026-11-24 on,
+  1,445 shops "no email" on 11-26, each charged). A homepage answered with NO words is a failed read
+  (`site_unreadable`, read again after 3 days), never stored as `no_email`. Migration `0065` archived (in
+  `google_maps_live_repairs`, reason `gmaps-site-read-empty-1126`) and deleted the 1,836 empty `no_email` reads and
+  put their waiting businesses back in the email walk. Tests: `tests/unit/site-extract-row.test.ts`, the "whoever
+  serves it" / "no words" cases of `google-maps-email.test.ts`.
 - **Walked by offer audiences** (GMAPS-TARGET-WALK-1117): a brand Google Maps list (`POST /orgs/audiences {provider:
   "google_maps", role: "search", nlPrompt | filters}`, no offerId; or an existing one turned into a search by
   `/internal/offer-audiences/realign`) is in `brandListsOf` (list `google_maps_search`) for every target of the brand.
@@ -2471,6 +2480,11 @@ writes them from the offer's validated target).
   `already_served`, `no_website` ⟹ `no_email`, `not_on_whatsapp` ⟹ `no_person`; the brand unable to send on WhatsApp
   ⟹ `provider_skipped` / `whatsapp_unavailable`, candidate handed back). One offer declining leaves the business to
   the others. Tests: the "offer audience" block of `google-maps-email.test.ts`.
+  **still-fits** (GMAPS-SET-ASIDE-1127): the reveal tags the business a member of the LIST, so an offer audience
+  answers "fits" from its own served candidate naming the person (`reveal_result.personId`), whatever list it
+  walked; a Google Maps find whose brand claim is gone (released) answers `fits:false` `find_released`, never
+  "never found". Before: every Living Vital find was set aside at handover, 0 emails. A link with a malformed `%`
+  sequence is skipped by the site read (`safeDecode`), never a 500 on candidates/next.
 
 - **Coverage: "exhausted" only once the region is covered** (GMAPS-COVERAGE-1126, `src/services/google-maps-coverage.ts`).
   Living Vital 2026-11-24: 40 drafted searches (4 kinds x 10 cities) all ran, the walk said exhausted, while the canton of
