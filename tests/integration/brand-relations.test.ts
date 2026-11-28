@@ -88,7 +88,7 @@ vi.mock("../../src/services/audiences.js", async (importOriginal) => {
 
 import request from "supertest";
 
-vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+vi.setConfig({ testTimeout: 120_000, hookTimeout: 120_000 }) // x4 for the box runners (GITHUB-PRIVATE-1128);
 import { eq } from "drizzle-orm";
 import { createTestApp, getAuthHeaders } from "../helpers/test-app.js";
 import { cleanTestData, closeDb } from "../helpers/test-db.js";
